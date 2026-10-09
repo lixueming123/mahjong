@@ -8,6 +8,7 @@
 #include <stdexec/execution.hpp>
 
 #include "ex_actor/api.h"
+#include "ex_actor/internal/scheduler.h"
 
 namespace ex = stdexec;
 namespace logging = ex_actor::internal::logging;
@@ -80,10 +81,12 @@ exec::task<uint64_t> SkynetActor::Process(int level, bool verbose) {
 }
 
 TEST(SkynetTest, ActorRegistryCanBeInvokeInsideActorMethods) {
-  ex_actor::Init(/*thread_pool_size=*/2);
+  auto pool = std::make_shared<ex_actor::WorkSharingThreadPool>(10);
+  ex_actor::Init(/*thread_pool_size=*/pool->GetScheduler());
+
   auto [root] = stdexec::sync_wait(ex_actor::Spawn<SkynetActor>()).value();
 
-  int depth = 4;
+  int depth = 5;
 
   logging::Info("Starting Skynet (Depth {}, Width 10)...", depth);
   auto start = std::chrono::high_resolution_clock::now();

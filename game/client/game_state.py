@@ -1,0 +1,462 @@
+"""客户端唯一状态源（UI_UX_SPEC §11「game_state」）。
+
+设计约束（冻结文档逐条落实）：
+
+- 只有本模块能改状态；渲染层**只读**（`render/*` 只接收快照对象）。
+- `state_sync` 为权威整体覆盖；`discard_event` / `draw` / `action_event` 为即时增量。
+- 私有信息隔离（§7.2/§7.3）：`SeatView` 的字段被固定为
+  `seat, name, is_bot, hand_count, discards, melds, disconnected`，
+  **不存在**任何可存放他家牌面的字段；即便服务端缺陷下发 `seats[].hand`，
+  客户端也 **不消费**、不写入状态，只记一条 WARN。
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+from .tiles import is_valid_tile, remove_leftmost, sort_tiles
+
+log = logging.getLogger("mahjong.client.state")
+
+SCREEN_LOGIN = "SCREEN_LOGIN"
+# 大厅（UI_UX_SPEC §12）：登录成功后先到这里。新建/加入只到 `room_joined`，
+# 「开始对局」才发 `ready`。
+SCREEN_LOBBY = "SCREEN_LOBBY"
+SCREEN_TABLE = "SCREEN_TABLE"
+SCREEN_RESULT = "SCREEN_RESULT"
+
+REL_LABELS = ("自家", "下家", "对家", "上家")
+
+WINDOW_DISCARD = "discard"
+WINDOW_CLAIM = "claim"
+
+MELD_TYPES = ("pong", "chow", "kong")
+
+
+@dataclass
+class Meld:
+    type: str
+    tiles: list[str] = field(default_factory=list)
+
+    @property
+    def label(self) -> str:
+        return {"pong": "碰", "chow": "吃", "kong": "杠"}.get(self.type, str(self.type))
+
+
+def parse_meld(obj: Any) -> Meld | None:
+    if not isinstance(obj, dict):
+        log.warning("副露元素不是对象，已忽略：%r", type(obj).__name__)
+        return None
+    mtype = obj.get("type")
+    tiles = obj.get("tiles")
+    if mtype not in MELD_TYPES or not isinstance(tiles, list):
+        log.warning("副露元素形状非法，已忽略：type=%r", mtype)
+        return None
+    clean = [t for t in tiles if is_valid_tile(t)]
+    if len(clean) != len(tiles):
+        log.warning("副露含非法牌面，已过滤：%r", tiles)
+    return Meld(type=mtype, tiles=clean)
+
+
+@dataclass
+class SeatView:
+    """单个座位的**公开**视图（§7.2 数据层保证：无他家牌面字段）。"""
+
+    seat: int
+    name: str = ""
+    is_bot: bool = False
+    hand_count: int = 0
+    discards: list[str] = field(default_factory=list)
+    melds: list[Meld] = field(default_factory=list)
+    disconnected: bool = False
+
+
+@dataclass
+class ActionWindow:
+    seq: int
+    deadline_ms: int
+    window: str
+    options: list[dict]
+    recv_monotonic: float
+    recv_epoch_ms: float
+    window_ms: int
+
+    def has(self, action: str, tiles: list[str] | None = None) -> bool:
+        for opt in self.options:
+            if opt.get("action") != action:
+                continue
+            if tiles is None:
+                return True
+            if list(opt.get("tiles") or []) == list(tiles):
+                return True
+        return False
+
+    def option_list(self, action: str) -> list[list[str]]:
+        out: list[list[str]] = []
+        for opt in self.options:
+            if opt.get("action") == action:
+                out.append(list(opt.get("tiles") or []))
+        return out
+
+
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+class GameState:
+    """所有牌桌数据的唯一持有者。"""
+
+    def __init__(self) -> None:
+        self.reset_all()
+
+    # ------------------------------------------------------------ 生命周期
+
+    def reset_all(self) -> None:
+        self.screen = SCREEN_LOGIN
+        self.phase = "登录"          # HUD 中段文案：登录 / 对局中 / 结算
+        self.reset_table()
+
+    def enter_lobby(self) -> None:
+        """进入大厅（§12）：清掉上一局的对局状态，但不碰连接与会话身份。"""
+        self.reset_table()
+        self.phase = "大厅"
+        self.screen = SCREEN_LOBBY
+
+    def reset_table(self) -> None:
+        self.room_id: str | None = None
+        self.my_seat: int | None = None
+        self.dealer: int | None = None
+        self.hand: list[str] = []
+        self.melds: list[Meld] = []
+        self.seats: list[SeatView] = [SeatView(seat=i) for i in range(4)]
+        self.remaining: int | None = None
+        self.current_seat: int | None = None
+        self.seq: int | None = None
+        self.last_seq: int | None = None
+        self.window: ActionWindow | None = None
+        self.pending: bool = False
+        self.pending_label: str | None = None
+        self.pending_index: int | None = None
+        self.selected_index: int | None = None
+        self.drawn_index: int | None = None
+        self.frozen: bool = False           # 收到 action_event{win} 后冻结牌桌输入
+        self.result: dict | None = None     # game_end 原始载荷
+        self.win_seat: int | None = None
+        self.hand_warning: bool = False
+        self.protocol_warning: bool = False  # 收到 seats[].hand（服务端缺陷）时置位
+        self.game_started: bool = False
+        self.error_count: int = 0
+        self.last_error: dict | None = None
+        self.recv_ms: dict[str, float] = {}
+
+    # ------------------------------------------------------------ 派生查询
+
+    def seat_view(self, seat: int) -> SeatView:
+        for view in self.seats:
+            if view.seat == seat:
+                return view
+        return SeatView(seat=seat)
+
+    def rel_index(self, seat: int) -> int:
+        """座位 → 相对方位下标：0 自家 / 1 下家 / 2 对家 / 3 上家（§4.2）。"""
+        if self.my_seat is None:
+            return seat
+        return (seat - self.my_seat) % 4
+
+    def rel_label(self, seat: int) -> str:
+        return REL_LABELS[self.rel_index(seat)]
+
+    def name_of(self, seat: int) -> str:
+        view = self.seat_view(seat)
+        return view.name or f"座位{seat}"
+
+    def remaining_ms(self, now_mono: float, now_epoch_ms: float) -> float | None:
+        """§6.2：显示用剩余 = max(0, min(服务端剩余, 本地兜底剩余))。"""
+        win = self.window
+        if win is None:
+            return None
+        remaining_server = win.deadline_ms - now_epoch_ms
+        remaining_guard = (win.recv_monotonic + win.window_ms / 1000.0 - now_mono) * 1000.0
+        return max(0.0, min(remaining_server, remaining_guard))
+
+    def clock_skew_ms(self, now_mono: float, now_epoch_ms: float) -> float | None:
+        win = self.window
+        if win is None:
+            return None
+        remaining_server = win.deadline_ms - now_epoch_ms
+        remaining_guard = (win.recv_monotonic + win.window_ms / 1000.0 - now_mono) * 1000.0
+        return abs(remaining_server - remaining_guard)
+
+    def check_hand_count(self) -> None:
+        """§4.5 张数交叉校验：`len(hand) + 3*len(melds) ∈ {13,14}`。"""
+        if not self.game_started:
+            self.hand_warning = False
+            return
+        total = len(self.hand) + 3 * len(self.melds)
+        self.hand_warning = total not in (13, 14)
+
+    # ------------------------------------------------------------ 帧分发
+
+    def apply(self, frame: dict) -> None:
+        ftype = frame.get("type")
+        handler = {
+            "game_start": self._apply_game_start,
+            "draw": self._apply_draw,
+            "discard_event": self._apply_discard_event,
+            "action_request": self._apply_action_request,
+            "action_event": self._apply_action_event,
+            "state_sync": self._apply_state_sync,
+            "game_end": self._apply_game_end,
+        }.get(ftype)
+        if handler is None:
+            log.debug("忽略未消费的帧类型：%r", ftype)
+            return
+        handler(frame)
+
+    # ------------------------------------------------------------ 各帧处理
+
+    def _apply_game_start(self, frame: dict) -> None:
+        hand = frame.get("hand")
+        if not isinstance(hand, list):
+            log.warning("game_start.hand 非法，按空手牌处理")
+            hand = []
+        self.hand = [t for t in hand if is_valid_tile(t)]
+        if len(self.hand) != len(hand):
+            log.warning("game_start.hand 含非法牌面，已过滤")
+        seat = frame.get("seat")
+        if isinstance(seat, int):
+            self.my_seat = seat
+        dealer = frame.get("dealer")
+        if isinstance(dealer, int):
+            self.dealer = dealer
+        self.melds = []
+        self.remaining = None
+        self.seq = None
+        self.last_seq = None
+        self.window = None
+        self.pending = False
+        self.pending_label = None
+        self.selected_index = None
+        self.drawn_index = None
+        self.frozen = False
+        self.result = None
+        self.win_seat = None
+        self.game_started = True
+        self.screen = SCREEN_TABLE
+        self.phase = "对局中"
+        self.check_hand_count()
+
+        # 保留 room_joined 缓存的昵称 / is_bot，清空对局数据
+        for view in self.seats:
+            view.hand_count = 0
+            view.discards = []
+            view.melds = []
+            view.disconnected = False
+        log.info("开局：seat=%s dealer=%s hand=%d 张", self.my_seat, self.dealer, len(self.hand))
+
+    def _apply_draw(self, frame: dict) -> None:
+        seat = frame.get("seat")
+        tile = frame.get("tile")
+        self._note_seq(frame)
+        if seat != self.my_seat:
+            # PROTOCOL §5.5：draw 只发给摸牌者本人；他家 draw 属服务端缺陷，绝不消费。
+            log.warning("收到他家 draw（协议异常），已忽略")
+            return
+        if not is_valid_tile(tile):
+            log.warning("draw.tile 非法：%r，已忽略", tile)
+            return
+        self.hand.append(tile)
+        self.hand = sort_tiles(self.hand)
+        # §4.5：标记同牌面中最左的一张为 drawn
+        self.drawn_index = self.hand.index(tile) if tile in self.hand else None
+        self.check_hand_count()
+
+    def _apply_discard_event(self, frame: dict) -> None:
+        seat = frame.get("seat")
+        tile = frame.get("tile")
+        self._note_seq(frame)
+        if not isinstance(seat, int):
+            log.warning("discard_event.seat 非法，已忽略")
+            return
+        if not is_valid_tile(tile):
+            log.warning("discard_event.tile 非法：%r，已忽略", tile)
+            return
+        self.seat_view(seat).discards.append(tile)
+        if seat == self.my_seat:
+            if not remove_leftmost(self.hand, tile):
+                log.warning("本家 discard_event 的牌不在手牌中：%s", tile)
+            self.drawn_index = None
+            self.check_hand_count()
+            # §5.1 兜底规则：本家打牌已生效 → 立即清除 PENDING 与选中
+            self.clear_pending()
+
+    def _apply_action_request(self, frame: dict) -> None:
+        seq = frame.get("seq")
+        if not isinstance(seq, int):
+            log.warning("action_request.seq 非法，已忽略")
+            return
+        if self.last_seq is not None and seq < self.last_seq:
+            log.warning("收到过期 action_request(seq=%s < %s)，已忽略", seq, self.last_seq)
+            return
+        window = frame.get("window")
+        if window not in (WINDOW_DISCARD, WINDOW_CLAIM):
+            log.warning("action_request.window 非法：%r，已忽略", window)
+            return
+        options = frame.get("options")
+        if not isinstance(options, list):
+            log.warning("action_request.options 非法，按空处理")
+            options = []
+        clean_options: list[dict] = []
+        for opt in options:
+            if not isinstance(opt, dict):
+                continue
+            action = opt.get("action")
+            tiles = opt.get("tiles")
+            if not isinstance(action, str):
+                continue
+            clean_options.append({"action": action, "tiles": list(tiles) if isinstance(tiles, list) else []})
+
+        now_mono = time.monotonic()
+        now_epoch = time.time() * 1000.0
+        deadline = frame.get("deadline_ms")
+        if not isinstance(deadline, (int, float)):
+            deadline = now_epoch
+        window_ms = int(clamp(float(deadline) - now_epoch, 1000.0, 60000.0))
+
+        self.last_seq = seq
+        self.seq = seq
+        self.window = ActionWindow(
+            seq=seq,
+            deadline_ms=int(deadline),
+            window=window,
+            options=clean_options,
+            recv_monotonic=now_mono,
+            recv_epoch_ms=now_epoch,
+            window_ms=window_ms,
+        )
+        self.pending = False
+        self.pending_label = None
+        self.selected_index = None
+        self.recv_ms[window] = now_mono
+        log.debug("窗口开启 seq=%s window=%s options=%s", seq, window, [o["action"] for o in clean_options])
+
+    def _apply_action_event(self, frame: dict) -> None:
+        seat = frame.get("seat")
+        action = frame.get("action")
+        tiles = frame.get("tiles")
+        from_seat = frame.get("from_seat")
+        self._note_seq(frame)
+        if not isinstance(tiles, list):
+            tiles = []
+        if action in ("pong", "chow", "kong"):
+            # §4.7/§5.8：被鸣牌恒为 from_seat 座位最近一次打出的那张 → 从 from_seat 的牌河移除最后一张
+            if isinstance(from_seat, int):
+                river = self.seat_view(from_seat).discards
+                if river:
+                    river.pop()
+                else:
+                    log.warning("action_event 的 from_seat 牌河为空：%s", from_seat)
+            else:
+                log.warning("action_event 缺少 from_seat（协议异常）")
+        elif action == "win":
+            self.frozen = True
+            if isinstance(seat, int):
+                self.win_seat = seat
+        # §5.1 兜底规则：任一 action_event → 本窗口已结算 → 立即清除 PENDING
+        self.clear_pending()
+
+    def _apply_state_sync(self, frame: dict) -> None:
+        self._note_seq(frame)
+        hand = frame.get("hand")
+        if isinstance(hand, list):
+            self.hand = [t for t in hand if is_valid_tile(t)]
+        melds = frame.get("melds")
+        if isinstance(melds, list):
+            self.melds = [m for m in (parse_meld(x) for x in melds) if m is not None]
+        seats = frame.get("seats")
+        if isinstance(seats, list):
+            for raw in seats:
+                if not isinstance(raw, dict):
+                    continue
+                seat = raw.get("seat")
+                if not isinstance(seat, int) or not 0 <= seat <= 3:
+                    continue
+                if "hand" in raw:
+                    # §8.2 第 2 条：即便服务端缺陷下发，也不渲染、不写入本地状态，只记 WARN。
+                    log.warning("state_sync.seats[%s] 含 hand 字段（协议异常），已脱敏忽略", seat)
+                    self.protocol_warning = True
+                view = self.seats[seat]
+                view.name = raw.get("name", view.name) if isinstance(raw.get("name"), str) else view.name
+                view.is_bot = bool(raw.get("is_bot", view.is_bot))
+                count = raw.get("hand_count")
+                if isinstance(count, int) and count >= 0:
+                    view.hand_count = count
+                discards = raw.get("discards")
+                if isinstance(discards, list):
+                    view.discards = [t for t in discards if is_valid_tile(t)]
+                view_melds = raw.get("melds")
+                if isinstance(view_melds, list):
+                    view.melds = [m for m in (parse_meld(x) for x in view_melds) if m is not None]
+                view.disconnected = bool(raw.get("disconnected", False))
+        remaining = frame.get("remaining")
+        if isinstance(remaining, int):
+            self.remaining = remaining
+        current = frame.get("current_seat")
+        if isinstance(current, int):
+            self.current_seat = current
+        self.check_hand_count()
+
+    def _apply_game_end(self, frame: dict) -> None:
+        # §5.10 / H5：game_end 不携带 seq，不参与 seq 比较。
+        self.result = frame
+        self.window = None
+        self.pending = False
+        self.pending_label = None
+        self.selected_index = None
+        self.drawn_index = None
+        self.frozen = True
+        self.screen = SCREEN_RESULT
+        self.phase = "结算"
+        win = frame.get("win")
+        if isinstance(win, dict) and isinstance(win.get("seat"), int):
+            self.win_seat = win["seat"]
+        else:
+            self.win_seat = None
+
+    # ------------------------------------------------------------ seq / 窗口推进
+
+    def _note_seq(self, frame: dict) -> None:
+        """§5.1/§10.3：比较**携带 seq 的帧**；出现更新的 seq 即视为旧窗口已结束。
+
+        只认「严格更大」的 `seq`：乱序到达的陈旧帧（`seq` 小于已见最大值）不得关窗，
+        否则 `state_sync` 与 `action_request` 的到达顺序不保证（H9）会误关窗口。
+        """
+        seq = frame.get("seq")
+        if not isinstance(seq, int):
+            return
+        if self.last_seq is None or seq > self.last_seq:
+            self.last_seq = seq
+        self.seq = self.last_seq
+        if self.window is not None and self.last_seq > self.window.seq:
+            self.window = None
+            self.clear_pending()
+
+    def clear_pending(self) -> None:
+        self.pending = False
+        self.pending_label = None
+        self.pending_index = None
+        self.selected_index = None
+        self.drawn_index = None
+
+    def mark_pending(self, label: str, index: int | None = None) -> None:
+        self.pending = True
+        self.pending_label = label
+        self.pending_index = index
+        self.selected_index = None
+
+    def hide_window(self) -> None:
+        self.window = None
+        self.clear_pending()

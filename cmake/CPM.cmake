@@ -16,9 +16,30 @@ endif()
 # Expand relative path. This is important if the provided path contains a tilde (~)
 get_filename_component(CPM_DOWNLOAD_LOCATION ${CPM_DOWNLOAD_LOCATION} ABSOLUTE)
 
-file(DOWNLOAD
-     https://github.com/cpm-cmake/CPM.cmake/releases/download/v${CPM_DOWNLOAD_VERSION}/CPM.cmake
-     ${CPM_DOWNLOAD_LOCATION} EXPECTED_HASH SHA256=${CPM_HASH_SUM}
-)
+# Try to download with curl if available
+find_program(CURL_COMMAND curl)
+if(CURL_COMMAND)
+  execute_process(
+    COMMAND ${CURL_COMMAND} -fL -o "${CPM_DOWNLOAD_LOCATION}" "https://github.com/cpm-cmake/CPM.cmake/releases/download/v${CPM_DOWNLOAD_VERSION}/CPM.cmake"
+    RESULT_VARIABLE CURL_RESULT
+    OUTPUT_QUIET
+    ERROR_QUIET
+  )
+  if(CURL_RESULT EQUAL 0)
+    message(STATUS "CPM: Downloaded successfully with curl")
+  else()
+    message(WARNING "CPM: Failed to download with curl, trying built-in download")
+    file(DOWNLOAD
+         https://github.com/cpm-cmake/CPM.cmake/releases/download/v${CPM_DOWNLOAD_VERSION}/CPM.cmake
+         ${CPM_DOWNLOAD_LOCATION} EXPECTED_HASH SHA256=${CPM_HASH_SUM}
+    )
+  endif()
+else()
+  # Fall back to built-in download
+  file(DOWNLOAD
+       https://github.com/cpm-cmake/CPM.cmake/releases/download/v${CPM_DOWNLOAD_VERSION}/CPM.cmake
+       ${CPM_DOWNLOAD_LOCATION} EXPECTED_HASH SHA256=${CPM_HASH_SUM}
+  )
+endif()
 
 include(${CPM_DOWNLOAD_LOCATION})

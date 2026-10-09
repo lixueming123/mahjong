@@ -1,0 +1,140 @@
+add_executable(game_probe server/probe_main.cc)
+target_link_libraries(game_probe PRIVATE ex_actor)
+add_test(NAME game_probe COMMAND game_probe)
+
+# 麻将规则库：纯函数，不依赖 actor 运行时（规格 game/docs/RULESET.md）
+add_library(mahjong_rules STATIC server/mahjong_rules.cc)
+target_include_directories(mahjong_rules PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(mahjong_rules PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+
+add_executable(mahjong_rules_test server/mahjong_rules_test.cc)
+target_link_libraries(mahjong_rules_test PRIVATE mahjong_rules GTest::gtest_main
+                                                GTest::gmock)
+add_test(NAME mahjong_rules_test COMMAND mahjong_rules_test)
+set_tests_properties(mahjong_rules_test PROPERTIES TIMEOUT 60)
+
+# 账号存储（ACCOUNT_DESIGN.md §2）：用系统装的 libmysqlclient，不走 CPM
+# （CPM 在配置期要联网拉源码，而 MySQL 客户端本来就是本机的一个库）。
+# 找不到库时不报错，只退化成 db_stub.cc —— 与服务端「MySQL 连不上」是同一种降级行为（§2.3）。
+option(MAHJONG_WITH_MYSQL "Build account storage against libmysqlclient" ON)
+set(MAHJONG_DB_SOURCES server/db_stub.cc)
+set(MAHJONG_MYSQL_FOUND OFF)
+if(MAHJONG_WITH_MYSQL)
+  find_program(MYSQL_CONFIG mysql_config HINTS /usr/local/mysql/bin /opt/homebrew/bin /usr/bin)
+  find_path(
+    MYSQL_INCLUDE_DIR mysql.h
+    HINTS /usr/local/mysql/include /opt/homebrew/include /usr/local/include/mysql
+          /usr/include/mysql)
+  find_library(MYSQL_LIBRARY NAMES mysqlclient HINTS /usr/local/mysql/lib /opt/homebrew/lib /usr/lib)
+  if(MYSQL_INCLUDE_DIR AND MYSQL_LIBRARY)
+    set(MAHJONG_DB_SOURCES server/db_mysql.cc)
+    set(MAHJONG_MYSQL_FOUND ON)
+    get_filename_component(MYSQL_LIBRARY_DIR "${MYSQL_LIBRARY}" DIRECTORY)
+    message(STATUS "mahjong: account storage enabled (${MYSQL_LIBRARY})")
+  else()
+    message(
+      STATUS
+        "mahjong: libmysqlclient not found (hint: -DMYSQL_INCLUDE_DIR=... -DMYSQL_LIBRARY=...); "
+        "building without account storage")
+  endif()
+endif()
+
+add_library(mahjong_db STATIC ${MAHJONG_DB_SOURCES})
+target_include_directories(mahjong_db PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# The storage layer needs logging and nothing else — no ex_actor: it holds no actor and never
+# touches one (its callbacks only call ActorRef::SendLocal from the caller's own code).
+target_link_libraries(mahjong_db PRIVATE spdlog::spdlog)
+if(MAHJONG_MYSQL_FOUND)
+  target_include_directories(mahjong_db PUBLIC ${MYSQL_INCLUDE_DIR})
+  target_link_libraries(mahjong_db PUBLIC ${MYSQL_LIBRARY})
+endif()
+
+# 麻将服务端（t3：TCP JSON 网关 + 服务器骨架；t4：RoomActor 状态机 / 回合驱动 / 超时 / 结算；
+# 账号与战绩：注册/登录 + 战绩存档，见 game/docs/ACCOUNT_DESIGN.md）
+add_executable(
+  mahjong_server
+  server/main.cc
+  server/json.cc
+  server/protocol.cc
+  server/net.cc
+  server/connection.cc
+  server/connection_actor.cc
+  server/lobby.cc
+  server/room.cc
+  server/timer.cc
+  server/gateway.cc)
+target_link_libraries(mahjong_server PRIVATE ex_actor mahjong_rules mahjong_db)
+if(MAHJONG_MYSQL_FOUND)
+  # libmysqlclient's install name is @rpath/libmysqlclient.<n>.dylib, so without this the
+  # binary links but fails to launch with "Library not loaded". Its own OpenSSL is resolved
+  # through @loader_path next to it, so no -lssl/-lcrypto is needed (that is only for the
+  # static archive).
+  set_target_properties(mahjong_server PROPERTIES BUILD_RPATH "${MYSQL_LIBRARY_DIR}"
+                                                     INSTALL_RPATH "${MYSQL_LIBRARY_DIR}")
+endif()
+
+# NDJSON 网关的 JSON 解析/序列化单测
+add_executable(mahjong_json_test server/mahjong_json_test.cc server/json.cc)
+target_link_libraries(mahjong_json_test PRIVATE GTest::gtest_main GTest::gmock)
+add_test(NAME mahjong_json_test COMMAND mahjong_json_test)
+set_tests_properties(mahjong_json_test PROPERTIES TIMEOUT 60)
+
+# 账号功能的纯逻辑单测（校验规则 / player_id 派生 / stats 帧形状）。
+# 刻意不链接 mahjong_db：这样它在有没有 MySQL 的机器上都恒常可跑。
+add_executable(mahjong_account_test server/account_test.cc server/protocol.cc server/json.cc)
+target_include_directories(mahjong_account_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_link_libraries(mahjong_account_test PRIVATE mahjong_rules GTest::gtest_main GTest::gmock)
+add_test(NAME mahjong_account_test COMMAND mahjong_account_test)
+set_tests_properties(mahjong_account_test PROPERTIES TIMEOUT 60)
+
+# TCP JSON 网关协议冒烟测试（Python 标准库 socket，无第三方依赖）
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  add_test(
+    NAME gateway_smoke_test
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/gateway_smoke_test.py
+            --server-bin $<TARGET_FILE:mahjong_server>)
+  set_tests_properties(gateway_smoke_test PROPERTIES TIMEOUT 120)
+endif()
+
+# t4：RoomActor 状态机单测（回合驱动 / seq 作废 / 非法操作 / AI / 结算零和）
+add_executable(mahjong_room_test server/mahjong_room_test.cc server/room.cc server/timer.cc
+                                server/json.cc server/protocol.cc)
+target_link_libraries(mahjong_room_test PRIVATE ex_actor mahjong_rules GTest::gmock)
+add_test(NAME mahjong_room_test COMMAND mahjong_room_test)
+set_tests_properties(mahjong_room_test PROPERTIES TIMEOUT 120)
+
+# t3：LobbyActor 的房间登记与 game_end 后回收（PROTOCOL.md §1.4.5）
+add_executable(mahjong_lobby_test server/lobby_test.cc server/lobby.cc server/room.cc server/connection.cc
+                                  server/connection_actor.cc server/net.cc server/timer.cc server/json.cc
+                                  server/protocol.cc)
+target_link_libraries(mahjong_lobby_test PRIVATE ex_actor mahjong_rules GTest::gtest_main GTest::gmock)
+add_test(NAME mahjong_lobby_test COMMAND mahjong_lobby_test)
+set_tests_properties(mahjong_lobby_test PROPERTIES TIMEOUT 60)
+
+# AsyncGate：协程互斥锁 + 临界区重叠检测。它是"让 handler 能按协程写、又保持单 actor 一次只跑
+# 一个 handler"的外部扩展原型（不改框架代码）；见 async_gate.h 顶部说明。
+add_executable(mahjong_async_gate_test server/async_gate_test.cc)
+target_link_libraries(mahjong_async_gate_test PRIVATE ex_actor GTest::gtest_main GTest::gmock)
+add_test(NAME mahjong_async_gate_test COMMAND mahjong_async_gate_test)
+set_tests_properties(mahjong_async_gate_test PROPERTIES TIMEOUT 60)
+
+# t4：一局完整对局的端到端验证（真服务端 + 标准库 socket 客户端，t6 可直接复用）
+if(Python3_Interpreter_FOUND)
+  add_test(
+    NAME room_full_game_test
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/room_full_game_test.py
+            --server-bin $<TARGET_FILE:mahjong_server>)
+  set_tests_properties(room_full_game_test PROPERTIES TIMEOUT 180)
+endif()
+
+# 账号与战绩的端到端验证（真服务端 + 真 MySQL，用独立测试库 mahjong_test）。
+# MySQL 不可用（或服务端编译时就没带账号存储）时以 77 退出 = ctest 显示为 SKIP：
+# 宁可让人看见「没跑」，也不要静默变绿。
+if(Python3_Interpreter_FOUND)
+  add_test(
+    NAME account_e2e_test
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/account_e2e_test.py
+            --server-bin $<TARGET_FILE:mahjong_server>)
+  set_tests_properties(account_e2e_test PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
+endif()

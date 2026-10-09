@@ -98,7 +98,7 @@ target_link_libraries(
   spdlog::spdlog
 )
 # Link libatomic for 128-bit atomic operations (required by MPSC_queue's Tagged_ptr)
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
   target_link_libraries(ex_actor PUBLIC atomic)
 endif()
 # to suppress subobject linkage warnings in stdexec
@@ -120,6 +120,7 @@ if(EX_ACTOR_BUILD_TESTS)
   )
   enable_testing()
   add_subdirectory(test)
+  add_subdirectory(game)
 endif()
 
 # ------------------- install -------------------

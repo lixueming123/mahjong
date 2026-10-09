@@ -21,7 +21,7 @@ TEST(NetworkTest, MessageBrokerTest) {
       ex_actor::internal::network::MessageBroker message_broker(
           node_list,
           /*this_node_id=*/node_id, [&message_broker](uint64_t received_request_id, ByteBufferType data) {
-            message_broker.ReplyRequest(received_request_id, std::move(data));
+            message_broker.ReplyRequest(received_request_id, std::move(ByteBufferType("reply_" + std::string(static_cast<char*>(data.data()), data.size()))));
           });
       uint32_t to_node_id = (node_id + 1) % node_list.size();
       exec::async_scope scope;
@@ -30,7 +30,7 @@ TEST(NetworkTest, MessageBrokerTest) {
                     stdexec::then([node_id](ByteBufferType data) {
                       std::string data_str(static_cast<char*>(data.data()), data.size());
                       logging::Info("got response data, node id: {}, data: {}", node_id, data_str);
-                      ASSERT_EQ(data_str, std::to_string(node_id));
+                      ASSERT_EQ(data_str, "reply_" + std::to_string(node_id));
                     }));
       }
       stdexec::sync_wait(scope.on_empty());
