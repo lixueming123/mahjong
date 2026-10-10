@@ -11,6 +11,12 @@ namespace {
 
 constexpr int kMaxDepth = 64;
 
+// Starter capacity for Dump()'s output string. DumpTo appends without reserving (it recurses
+// per node, so a hint there would re-reserve at every level), and the protocol frames span
+// roughly 60 bytes (error/draw) to 1 KB (game_end/state_sync), which from an empty string is
+// several growths. Capacity only: the emitted bytes are unchanged.
+constexpr size_t kDumpReserveHint = 256;
+
 bool IsDigit(char c) { return c >= '0' && c <= '9'; }
 
 bool IsWhitespace(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
@@ -421,15 +427,28 @@ Value Value::Str(std::string value) {
   return out;
 }
 
-Value Value::Arr() {
+Value Value::Arr() { return Arr(0); }
+
+Value Value::Arr(size_t reserve) {
   Value out;
   out.type_ = Type::kArray;
+  out.array_.reserve(reserve);
   return out;
 }
 
-Value Value::Obj() {
+Value Value::Obj() { return Obj(0); }
+
+Value Value::Obj(size_t reserve) {
   Value out;
   out.type_ = Type::kObject;
+  out.object_.reserve(reserve);
+  return out;
+}
+
+Value Value::RawJson(std::string rendered) {
+  Value out;
+  out.type_ = Type::kRawJson;
+  out.string_ = std::move(rendered);  // reuses the string member, so sizeof(Value) is unchanged
   return out;
 }
 
@@ -479,7 +498,15 @@ void Value::Append(Value value) {
   }
 }
 
-void Value::Set(std::string key, Value value) {
+void Value::Reserve(size_t count) {
+  if (type_ == Type::kArray) {
+    array_.reserve(count);
+  } else if (type_ == Type::kObject) {
+    object_.reserve(count);
+  }
+}
+
+void Value::Set(std::string_view key, Value value) {
   if (type_ != Type::kObject) {
     return;
   }
@@ -489,11 +516,12 @@ void Value::Set(std::string key, Value value) {
       return;
     }
   }
-  object_.emplace_back(std::move(key), std::move(value));
+  object_.emplace_back(std::string(key), std::move(value));
 }
 
 std::string Value::Dump() const {
   std::string out;
+  out.reserve(kDumpReserveHint);
   DumpTo(&out);
   return out;
 }
@@ -512,6 +540,10 @@ void Value::DumpTo(std::string* out) const {
       }
       break;
     case Type::kString: AppendEscapedString(string_, out); break;
+    // Verbatim by design (see RawJson). This case has to exist: the switch has no default and
+    // the build turns on no -Wswitch, so leaving it out would silently emit an empty string and
+    // corrupt every frame that carries a spliced block.
+    case Type::kRawJson: out->append(string_); break;
     case Type::kArray: {
       out->push_back('[');
       for (size_t i = 0; i < array_.size(); ++i) {

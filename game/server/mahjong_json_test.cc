@@ -158,4 +158,59 @@ TEST(JsonTest, RoundTripsGeneratedFrames) {
   EXPECT_EQ(reparsed->Find("options")->AsArray()[0].Find("action")->AsString(), "pass");
 }
 
+// RawJson is the escape hatch that lets one rendered subtree be reused across frames (the room
+// splices one `seats[]` block into four state_sync frames). Its whole point is that the splice
+// is byte-identical to having built the subtree in place.
+TEST(JsonTest, RawJsonDumpsVerbatim) {
+  Value seats = Value::Arr(1);
+  Value entry = Value::Obj(2);
+  entry.Set("seat", Value::Int(2));
+  entry.Set("name", Value::Str("玩\"家"));  // escaping happens once, in this render
+  seats.Append(std::move(entry));
+  const std::string rendered = seats.Dump();
+
+  Value frame = Value::Obj(2);
+  frame.Set("type", Value::Str("state_sync"));
+  frame.Set("seats", Value::RawJson(rendered));
+  EXPECT_EQ(frame.Dump(), "{\"type\":\"state_sync\",\"seats\":" + rendered + "}");
+
+  // It is neither a string nor a container: nothing reads through to the fragment's text.
+  const Value& member = *frame.Find("seats");
+  EXPECT_FALSE(member.IsString());
+  EXPECT_FALSE(member.IsObject());
+  EXPECT_FALSE(member.IsArray());
+  EXPECT_TRUE(member.AsString().empty());
+  EXPECT_TRUE(member.AsObject().empty());
+  EXPECT_EQ(member.Find("seat"), nullptr);
+
+  // The parser never produces one, so a re-parse of the spliced frame yields the real subtree.
+  std::optional<Value> reparsed = ParseOk(frame.Dump());
+  ASSERT_TRUE(reparsed.has_value());
+  ASSERT_TRUE(reparsed->Find("seats")->IsArray());
+  ASSERT_EQ(reparsed->Find("seats")->AsArray().size(), 1u);
+  EXPECT_EQ(reparsed->Find("seats")->AsArray()[0].Find("seat")->AsInt(), 2);
+  EXPECT_EQ(reparsed->Find("seats")->AsArray()[0].Find("name")->AsString(), "玩\"家");
+}
+
+// Reserve/Arr(n)/Obj(n) are capacity hints: they must not change a single emitted byte.
+TEST(JsonTest, ReserveOnlyAffectsCapacity) {
+  Value plain = Value::Obj();
+  plain.Set("a", Value::Int(1));
+  plain.Set("b", Value::Arr());
+  Value hinted = Value::Obj(8);
+  hinted.Set("a", Value::Int(1));
+  hinted.Set("b", Value::Arr(4));
+  EXPECT_EQ(hinted.Dump(), plain.Dump());
+
+  Value array = Value::Arr(4);
+  array.Reserve(64);  // a no-op once the capacity is already there
+  array.Append(Value::Int(7));
+  EXPECT_EQ(array.Dump(), "[7]");
+
+  Value scalar = Value::Int(3);
+  scalar.Reserve(8);  // ignored on any type that is not an array or object
+  scalar.Append(Value::Int(4));
+  EXPECT_EQ(scalar.Dump(), "3");
+}
+
 }  // namespace
