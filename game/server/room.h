@@ -329,6 +329,13 @@ class RoomActor {
   exec::task<void> DeliverSeat(int seat, std::string frame);
   exec::task<void> Deliver(std::array<std::string, kSeatCount> frames);
   std::array<std::string, kSeatCount> StateSyncFrames() const;
+  // The `seats[]` block of state_sync. It depends on no recipient (§5.9), so a broadcast renders
+  // it once and splices it into all four frames instead of rebuilding it per seat — it is ~80%
+  // of one frame's build cost. A single recipient (the client `sync`) goes through the one-arg
+  // BuildStateSync, which renders the block itself.
+  json::Value BuildSeatsArray() const;
+  // Only `hand`/`melds` come from |for_seat|; |seats_json| must be BuildSeatsArray().Dump().
+  std::string BuildStateSync(int for_seat, const std::string& seats_json) const;
   std::string BuildStateSync(int for_seat) const;
   std::string BuildGameStart(int for_seat) const;
   std::string BuildGameEnd(const Settlement& settlement) const;

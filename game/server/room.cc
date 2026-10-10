@@ -20,7 +20,7 @@ namespace {
 // ---------------------------------------------------------------------------------------
 
 json::Value TilesToJson(const std::vector<Tile>& tiles) {
-  json::Value array = json::Value::Arr();
+  json::Value array = json::Value::Arr(tiles.size());
   for (Tile tile : tiles) {
     array.Append(json::Value::Str(FormatTile(tile)));
   }
@@ -28,9 +28,9 @@ json::Value TilesToJson(const std::vector<Tile>& tiles) {
 }
 
 json::Value MeldsToJson(const std::vector<Meld>& melds) {
-  json::Value array = json::Value::Arr();
+  json::Value array = json::Value::Arr(melds.size());
   for (const Meld& meld : melds) {
-    json::Value entry = json::Value::Obj();
+    json::Value entry = json::Value::Obj(2);  // type, tiles
     entry.Set("type", json::Value::Str(MeldTypeName(meld.type)));
     entry.Set("tiles", TilesToJson(meld.tiles));
     array.Append(std::move(entry));
@@ -39,9 +39,9 @@ json::Value MeldsToJson(const std::vector<Meld>& melds) {
 }
 
 json::Value OptionsToJson(const std::vector<Option>& options) {
-  json::Value array = json::Value::Arr();
+  json::Value array = json::Value::Arr(options.size());
   for (const Option& option : options) {
-    json::Value entry = json::Value::Obj();
+    json::Value entry = json::Value::Obj(2);  // action, tiles
     entry.Set("action", json::Value::Str(option.action));
     entry.Set("tiles", TilesToJson(option.tiles));
     array.Append(std::move(entry));
@@ -50,7 +50,7 @@ json::Value OptionsToJson(const std::vector<Option>& options) {
 }
 
 std::string BuildGameStartFrame(int for_seat, int dealer, const std::vector<Tile>& hand) {
-  json::Value frame = json::Value::Obj();
+  json::Value frame = json::Value::Obj(4);  // type, seat, dealer, hand
   frame.Set("type", json::Value::Str("game_start"));
   frame.Set("seat", json::Value::Int(for_seat));
   frame.Set("dealer", json::Value::Int(dealer));
@@ -59,7 +59,7 @@ std::string BuildGameStartFrame(int for_seat, int dealer, const std::vector<Tile
 }
 
 std::string BuildDrawFrame(Tile tile, int seat, uint64_t seq) {
-  json::Value frame = json::Value::Obj();
+  json::Value frame = json::Value::Obj(4);  // type, tile, seat, seq
   frame.Set("type", json::Value::Str("draw"));
   frame.Set("tile", json::Value::Str(FormatTile(tile)));
   frame.Set("seat", json::Value::Int(seat));
@@ -68,7 +68,7 @@ std::string BuildDrawFrame(Tile tile, int seat, uint64_t seq) {
 }
 
 std::string BuildDiscardEventFrame(int seat, Tile tile, uint64_t seq) {
-  json::Value frame = json::Value::Obj();
+  json::Value frame = json::Value::Obj(4);  // type, seat, tile, seq
   frame.Set("type", json::Value::Str("discard_event"));
   frame.Set("seat", json::Value::Int(seat));
   frame.Set("tile", json::Value::Str(FormatTile(tile)));
@@ -78,7 +78,7 @@ std::string BuildDiscardEventFrame(int seat, Tile tile, uint64_t seq) {
 
 std::string BuildActionRequestFrame(uint64_t seq, int64_t deadline_ms, std::string_view window,
                                     const std::vector<Option>& options) {
-  json::Value frame = json::Value::Obj();
+  json::Value frame = json::Value::Obj(5);  // type, seq, deadline_ms, window, options
   frame.Set("type", json::Value::Str("action_request"));
   frame.Set("seq", json::Value::Int(static_cast<int64_t>(seq)));
   frame.Set("deadline_ms", json::Value::Int(deadline_ms));
@@ -89,7 +89,7 @@ std::string BuildActionRequestFrame(uint64_t seq, int64_t deadline_ms, std::stri
 
 std::string BuildActionEventFrame(int seat, std::string_view action, const std::vector<Tile>& tiles, int from_seat,
                                   uint64_t seq) {
-  json::Value frame = json::Value::Obj();
+  json::Value frame = json::Value::Obj(6);  // type, seat, action, tiles, seq (+ from_seat)
   frame.Set("type", json::Value::Str("action_event"));
   frame.Set("seat", json::Value::Int(seat));
   frame.Set("action", json::Value::Str(std::string(action)));
@@ -435,27 +435,29 @@ exec::task<void> RoomActor::ReplyError(int seat, std::string_view code, std::str
 
 std::array<std::string, kSeatCount> RoomActor::StateSyncFrames() const {
   std::array<std::string, kSeatCount> frames;
+  // `seats[]` is the same for every recipient and is most of a frame's build cost, so it is
+  // rendered once here and spliced into each frame instead of being rebuilt per seat. The hoist
+  // is sound because BuildStateSync reads no mutable state and this loop never suspends: the
+  // block cannot change while the four frames are being built. Add an await to this loop and
+  // that stops being true. It stays lazy so a room with no wire at all (all bots) still does no
+  // JSON work, exactly as before.
+  std::string seats_json;
   for (int seat = 0; seat < kSeatCount; ++seat) {
     if (seats_[static_cast<size_t>(seat)].endpoint.IsEmpty()) {
       continue;  // bots have no wire
     }
-    frames[static_cast<size_t>(seat)] = BuildStateSync(seat);
+    if (seats_json.empty()) {
+      seats_json = BuildSeatsArray().Dump();  // a rendered 4-entry array is never empty
+    }
+    frames[static_cast<size_t>(seat)] = BuildStateSync(seat, seats_json);
   }
   return frames;
 }
 
-std::string RoomActor::BuildStateSync(int for_seat) const {
-  json::Value frame = json::Value::Obj();
-  frame.Set("type", json::Value::Str("state_sync"));
-  frame.Set("seq", json::Value::Int(static_cast<int64_t>(seq_)));
-  frame.Set("remaining", json::Value::Int(remaining_));
-  frame.Set("current_seat", json::Value::Int(current_seat_));
-  frame.Set("hand", TilesToJson(hands_[static_cast<size_t>(for_seat)]));
-  frame.Set("melds", MeldsToJson(melds_[static_cast<size_t>(for_seat)]));
-
-  json::Value seat_array = json::Value::Arr();
+json::Value RoomActor::BuildSeatsArray() const {
+  json::Value seat_array = json::Value::Arr(kSeatCount);
   for (const RoomSeat& room_seat : seats_) {
-    json::Value entry = json::Value::Obj();
+    json::Value entry = json::Value::Obj(7);  // seat, name, is_bot, hand_count, discards, melds, disconnected
     entry.Set("seat", json::Value::Int(room_seat.seat));
     entry.Set("name", json::Value::Str(room_seat.player.name));
     entry.Set("is_bot", json::Value::Bool(room_seat.is_bot));
@@ -466,7 +468,22 @@ std::string RoomActor::BuildStateSync(int for_seat) const {
     entry.Set("disconnected", json::Value::Bool(room_seat.disconnected));
     seat_array.Append(std::move(entry));
   }
-  frame.Set("seats", std::move(seat_array));
+  return seat_array;
+}
+
+std::string RoomActor::BuildStateSync(int for_seat) const { return BuildStateSync(for_seat, BuildSeatsArray().Dump()); }
+
+std::string RoomActor::BuildStateSync(int for_seat, const std::string& seats_json) const {
+  json::Value frame = json::Value::Obj(7);  // type, seq, remaining, current_seat, hand, melds, seats
+  frame.Set("type", json::Value::Str("state_sync"));
+  frame.Set("seq", json::Value::Int(static_cast<int64_t>(seq_)));
+  frame.Set("remaining", json::Value::Int(remaining_));
+  frame.Set("current_seat", json::Value::Int(current_seat_));
+  frame.Set("hand", TilesToJson(hands_[static_cast<size_t>(for_seat)]));
+  frame.Set("melds", MeldsToJson(melds_[static_cast<size_t>(for_seat)]));
+  // Spliced verbatim; |seats_json| is exactly what building the array in here would have written
+  // (BuildSeatsArray().Dump()), which is why the frame bytes are unchanged (§5.9).
+  frame.Set("seats", json::Value::RawJson(seats_json));
   return frame.Dump();
 }
 
@@ -475,18 +492,18 @@ std::string RoomActor::BuildGameStart(int for_seat) const {
 }
 
 std::string RoomActor::BuildGameEnd(const Settlement& settlement) const {
-  json::Value frame = json::Value::Obj();
+  json::Value frame = json::Value::Obj(4);  // type, reason, results (+ win)
   frame.Set("type", json::Value::Str("game_end"));
   frame.Set("reason", json::Value::Str(settlement.reason));
 
-  json::Value results = json::Value::Arr();
+  json::Value results = json::Value::Arr(kSeatCount);
   for (int seat = 0; seat < kSeatCount; ++seat) {
-    json::Value entry = json::Value::Obj();
+    json::Value entry = json::Value::Obj(4);  // seat, delta_score, hand, win_type
     entry.Set("seat", json::Value::Int(seat));
     entry.Set("delta_score", json::Value::Int(settlement.delta[static_cast<size_t>(seat)]));
     if (seat == settlement.winner_seat) {
       entry.Set("hand", TilesToJson(settlement.winner_flat_hand));
-      json::Value types = json::Value::Arr();
+      json::Value types = json::Value::Arr(settlement.winner_types.size());
       for (const std::string& type : settlement.winner_types) {
         types.Append(json::Value::Str(type));
       }
@@ -502,7 +519,7 @@ std::string RoomActor::BuildGameEnd(const Settlement& settlement) const {
   if (settlement.winner_seat < 0) {
     frame.Set("win", json::Value::Null());
   } else {
-    json::Value win = json::Value::Obj();
+    json::Value win = json::Value::Obj(8);  // seat, tile, from_seat, tsumo, tags, multiplier, per_payer, total
     win.Set("seat", json::Value::Int(settlement.winner_seat));
     win.Set("tile", json::Value::Str(FormatTile(settlement.winning_tile)));
     if (settlement.tsumo) {
@@ -511,7 +528,7 @@ std::string RoomActor::BuildGameEnd(const Settlement& settlement) const {
       win.Set("from_seat", json::Value::Int(settlement.from_seat));
     }
     win.Set("tsumo", json::Value::Bool(settlement.tsumo));
-    json::Value tags = json::Value::Arr();
+    json::Value tags = json::Value::Arr(settlement.tags.size());
     for (const std::string& tag : settlement.tags) {
       tags.Append(json::Value::Str(tag));
     }
@@ -688,10 +705,14 @@ exec::task<void> RoomActor::ApplyDiscard(int seat, Tile tile) {
 
   Transition();  // close the discard window; a claim window (if any) takes the new seq
 
+  // One frame for the whole table (PROTOCOL.md §5.6: `discard_event` is broadcast and carries
+  // nothing seat-specific), so it is built once and handed to every wired seat — the same shape
+  // BroadcastSettlement already uses.
   std::array<std::string, kSeatCount> events;
+  const std::string event = BuildDiscardEventFrame(seat, tile, old_seq);
   for (int target = 0; target < kSeatCount; ++target) {
     if (!seats_[static_cast<size_t>(target)].endpoint.IsEmpty()) {
-      events[static_cast<size_t>(target)] = BuildDiscardEventFrame(seat, tile, old_seq);
+      events[static_cast<size_t>(target)] = event;
     }
   }
   co_await Deliver(std::move(events));
@@ -890,8 +911,8 @@ exec::task<void> RoomActor::ResolveClaimWindow() {
   co_await ApplyMeld(best_seat, best_action, best_tiles, from_seat, tile);
 }
 
-exec::task<void> RoomActor::ApplyMeld(int seat, const std::string& action, const std::vector<Tile>& client_tiles, int from_seat,
-                          Tile claimed_tile) {
+exec::task<void> RoomActor::ApplyMeld(int seat, const std::string& action, const std::vector<Tile>& client_tiles,
+                                      int from_seat, Tile claimed_tile) {
   const Face claimed_face = FaceOf(claimed_tile);
   Meld meld;
   meld.type = MeldTypeForAction(action);
@@ -919,10 +940,12 @@ exec::task<void> RoomActor::ApplyMeld(int seat, const std::string& action, const
   Transition();  // close the claim window and open the melder's discard window (§4.3)
   phase_ = Phase::kDiscardWindow;
 
+  // Broadcast to all four seats (§5.8) with no seat-specific field, so one build serves them all.
   std::array<std::string, kSeatCount> events;
+  const std::string event = BuildActionEventFrame(seat, action, client_tiles, from_seat, old_seq);
   for (int target = 0; target < kSeatCount; ++target) {
     if (!seats_[static_cast<size_t>(target)].endpoint.IsEmpty()) {
-      events[static_cast<size_t>(target)] = BuildActionEventFrame(seat, action, client_tiles, from_seat, old_seq);
+      events[static_cast<size_t>(target)] = event;
     }
   }
   co_await Deliver(std::move(events));
@@ -1002,11 +1025,12 @@ exec::task<void> RoomActor::EndWithWin(int winner_seat, int from_seat, Tile winn
   settlement.per_payer = score.per_payer;
   settlement.total = score.total;
 
+  // Broadcast to all four seats (§5.8) with no seat-specific field, so one build serves them all.
   std::array<std::string, kSeatCount> events;
+  const std::string event = BuildActionEventFrame(winner_seat, "win", {winning_tile}, tsumo ? -1 : from_seat, old_seq);
   for (int target = 0; target < kSeatCount; ++target) {
     if (!seats_[static_cast<size_t>(target)].endpoint.IsEmpty()) {
-      events[static_cast<size_t>(target)] =
-          BuildActionEventFrame(winner_seat, "win", {winning_tile}, tsumo ? -1 : from_seat, old_seq);
+      events[static_cast<size_t>(target)] = event;
     }
   }
   co_await Deliver(std::move(events));

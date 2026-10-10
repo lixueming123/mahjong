@@ -164,6 +164,28 @@ std::vector<Tile> FlattenMelds(const std::vector<Meld>& melds) {
 
 int KongCount(const std::vector<Meld>& melds) { return KanCountOf(melds); }
 
+// A frame's tiles come back through ParseTile, which keeps the face only — the physical copy
+// index is deliberately not on the wire (PROTOCOL.md §4.6 / RULESET §1.2) — while the room's own
+// vectors hold real tiles. Comparing them therefore has to go through faces, not Tile::operator==.
+bool SameFaces(const std::vector<Tile>& lhs, const std::vector<Tile>& rhs) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  std::vector<Face> left;
+  std::vector<Face> right;
+  left.reserve(lhs.size());
+  right.reserve(rhs.size());
+  for (Tile tile : lhs) {
+    left.push_back(FaceOf(tile));
+  }
+  for (Tile tile : rhs) {
+    right.push_back(FaceOf(tile));
+  }
+  std::sort(left.begin(), left.end());
+  std::sort(right.begin(), right.end());
+  return left == right;
+}
+
 // A room with one human seat (seat 0, captured by a sink) and three AI seats.
 // The room's seat endpoint is a real spawned actor, so these tests need the ex_actor runtime.
 class RoomActorTest : public ::testing::Test {
@@ -184,30 +206,46 @@ class TestRoom {
   // which tile the human seat played.
   // |install_scheduler| = false models a room whose timeout scheduler was never installed
   // (impossible in production, where lobby.cc installs it before the room is reachable).
+  // |all_human| wires a human on every seat instead of one human and three bots. This is the
+  // only shape that exercises the multi-recipient broadcast path — four state_sync frames per
+  // broadcast, four-way fan-out of discard_event/action_event. With a single wired human those
+  // loops build exactly one frame, so whatever they share is invisible to the rest of this file.
   explicit TestRoom(uint64_t seed, int action_timeout_ms = kDefaultTimeoutMs, int ai_delay_ms = 0,
-                    bool smart_discard = false, bool install_scheduler = true) {
+                    bool smart_discard = false, bool install_scheduler = true, bool all_human = false) {
     smart_discard_ = smart_discard;
-    human_.player_id = "p-human";
-    human_.name = "Human";
     human_sink_ = std::make_shared<CapturingSink>();
     std::vector<RoomSeat> seats;
-    RoomSeat human;
-    human.seat = kSeat0;
-    human.player = human_;
-    human.is_bot = false;
-    seats.push_back(std::move(human));
-    for (int seat = 1; seat < kSeatCount; ++seat) {
-      RoomSeat bot;
-      bot.seat = seat;
-      bot.player.player_id = "bot-" + std::to_string(seat);
-      bot.player.name = "AI-" + std::to_string(seat);
-      bot.is_bot = true;
-      seats.push_back(std::move(bot));
+    for (int seat = 0; seat < kSeatCount; ++seat) {
+      RoomSeat slot;
+      slot.seat = seat;
+      slot.is_bot = seat != kSeat0 && !all_human;
+      if (slot.is_bot) {
+        slot.player.player_id = "bot-" + std::to_string(seat);
+        slot.player.name = "AI-" + std::to_string(seat);
+      } else {
+        // Seat 0 keeps the frozen "p-human"/"Human" identity: the one-human shape and the
+        // histories the rest of this file asserts on stay byte-identical.
+        slot.player.player_id = seat == kSeat0 ? "p-human" : "p-human-" + std::to_string(seat);
+        slot.player.name = seat == kSeat0 ? "Human" : "Human-" + std::to_string(seat);
+      }
+      seats.push_back(std::move(slot));
     }
-    // A real seat endpoint: the room only reaches a seat by messaging one of these.
-    ex_actor::ActorRef<CapturingSeatActor> endpoint =
-        std::get<0>(stdexec::sync_wait(ex_actor::Spawn<CapturingSeatActor>(human_sink_)).value());
-    seats.front().endpoint = endpoint;
+    if (all_human) {
+      for (int seat = 0; seat < kSeatCount; ++seat) {
+        sinks_[static_cast<size_t>(seat)] = std::make_shared<CapturingSink>();
+        seats[static_cast<size_t>(seat)].endpoint =
+            std::get<0>(stdexec::sync_wait(ex_actor::Spawn<CapturingSeatActor>(sinks_[static_cast<size_t>(seat)]))
+                            .value());
+      }
+      human_sink_ = sinks_[kSeat0];
+    } else {
+      // A real seat endpoint: the room only reaches a seat by messaging one of these.
+      ex_actor::ActorRef<CapturingSeatActor> endpoint =
+          std::get<0>(stdexec::sync_wait(ex_actor::Spawn<CapturingSeatActor>(human_sink_)).value());
+      seats.front().endpoint = endpoint;
+      sinks_[kSeat0] = human_sink_;
+    }
+    human_ = seats.front().player;
     room_ = std::make_unique<RoomActor>("r-0001", seed, action_timeout_ms, std::move(seats), nullptr, ai_delay_ms);
     if (install_scheduler) {
       Send(RoomEnvelope::InstallTimeoutScheduler([this](int64_t delay_ms, uint64_t window_seq) {
@@ -218,6 +256,8 @@ class TestRoom {
 
   RoomActor* room() { return room_.get(); }
   CapturingSink* sink() { return human_sink_.get(); }
+  // Per-seat sink; only the |all_human| shape wires more than seat 0.
+  CapturingSink* sink_of(int seat) { return sinks_[static_cast<size_t>(seat)].get(); }
 
   // RoomActor::Dispatch is a coroutine (it takes the actor's gate), so a direct caller has to
   // drive it: the fixture never has anything else in flight, so sync_wait runs it to completion
@@ -405,6 +445,7 @@ class TestRoom {
   bool smart_discard_ = false;
   PlayerInfo human_;
   std::shared_ptr<CapturingSink> human_sink_;
+  std::array<std::shared_ptr<CapturingSink>, kSeatCount> sinks_;
   std::unique_ptr<RoomActor> room_;
   std::vector<std::pair<int64_t, uint64_t>> scheduled_;
   std::optional<Tile> drawn_;
@@ -1437,6 +1478,106 @@ TEST_F(RoomActorTest, RoomLevelErrorsCountTowardTheQuota) {
   test_room.sink()->Drain();
   EXPECT_EQ(test_room.sink()->illegal_ops(), 2);
   EXPECT_EQ(test_room.sink()->bad_frames(), 0);
+}
+
+// t4: with several wired humans, one broadcast has to reach every seat carrying that seat's own
+// private fields and one shared public block. This is the only shape in this file that exercises
+// the multi-recipient path — four state_sync frames per broadcast, four-way fan-out of
+// discard_event/action_event; every other test wires a single human, where those loops build
+// exactly one frame and the sharing is unobservable. The `seats[]` hoist in StateSyncFrames and
+// the single-build event broadcasts are meant to be behavior-preserving: what this test pins is
+// that they stay so (the speedup itself is measured by the microbenchmark, not here).
+TEST_F(RoomActorTest, MultiHumanBroadcastCarriesPrivateHandsAndOneSharedSeatsBlock) {
+  TestRoom test_room(20251005, kDefaultTimeoutMs, /*ai_delay_ms=*/0, /*smart_discard=*/false,
+                     /*install_scheduler=*/true, /*all_human=*/true);
+  test_room.Ready();
+
+  // Nobody answers anything: the frozen §6.4 default actions (default discard / pass) carry the
+  // table to the first draw, and a draw is what broadcasts state_sync (§5.12).
+  std::array<std::vector<json::Value>, kSeatCount> received;
+  for (int step = 0; step < 8; ++step) {
+    bool every_seat_has_one = true;
+    for (int seat = 0; seat < kSeatCount; ++seat) {
+      if (FramesOfType(received[static_cast<size_t>(seat)], "state_sync").empty()) {
+        every_seat_has_one = false;
+      }
+    }
+    if (every_seat_has_one) {
+      break;
+    }
+    ASSERT_TRUE(test_room.AdvanceOpenWindow()) << "the room must keep moving while nobody answers";
+    for (int seat = 0; seat < kSeatCount; ++seat) {
+      std::vector<json::Value> frames = test_room.sink_of(seat)->Drain();
+      for (json::Value& frame : frames) {
+        received[static_cast<size_t>(seat)].push_back(std::move(frame));
+      }
+    }
+  }
+
+  // The melds shape of §5.9, rebuilt locally so the wire form is checked alongside the sharing.
+  const auto expected_melds = [](const std::vector<Meld>& melds) {
+    json::Value array = json::Value::Arr(melds.size());
+    for (const Meld& meld : melds) {
+      json::Value entry = json::Value::Obj(2);
+      entry.Set("type", json::Value::Str(MeldTypeName(meld.type)));
+      json::Value tiles = json::Value::Arr(meld.tiles.size());
+      for (Tile tile : meld.tiles) {
+        tiles.Append(json::Value::Str(FormatTile(tile)));
+      }
+      entry.Set("tiles", std::move(tiles));
+      array.Append(std::move(entry));
+    }
+    return array;
+  };
+
+  std::string shared_seats;
+  int64_t broadcast_seq = -1;
+  for (int seat = 0; seat < kSeatCount; ++seat) {
+    const std::vector<const json::Value*> syncs = FramesOfType(received[static_cast<size_t>(seat)], "state_sync");
+    ASSERT_FALSE(syncs.empty()) << "seat " << seat << " never received a state_sync";
+    const json::Value& sync = *syncs.back();
+
+    // Same broadcast for all four: one seq and one public block (the recipient-independent part
+    // of §5.9, which the room renders once and splices into every frame).
+    if (broadcast_seq < 0) {
+      broadcast_seq = IntOf(sync, "seq");
+    } else {
+      EXPECT_EQ(IntOf(sync, "seq"), broadcast_seq) << "seat " << seat << " saw a different broadcast";
+    }
+    const json::Value* seats = sync.Find("seats");
+    ASSERT_NE(seats, nullptr) << "seat " << seat;
+    const std::string seats_dump = seats->Dump();
+    if (shared_seats.empty()) {
+      shared_seats = seats_dump;
+    } else {
+      EXPECT_EQ(seats_dump, shared_seats) << "seat " << seat << ": the public block must be one render";
+    }
+
+    // ...while hand/melds are this seat's own, not a neighbour's.
+    EXPECT_TRUE(SameFaces(TilesOf(sync, "hand"), test_room.room()->hand_of(seat))) << "seat " << seat;
+    const json::Value* melds = sync.Find("melds");
+    ASSERT_NE(melds, nullptr) << "seat " << seat;
+    EXPECT_EQ(melds->Dump(), expected_melds(test_room.room()->melds_of(seat)).Dump()) << "seat " << seat;
+
+    // H6: the public per-seat view never carries a hand, only the count.
+    ASSERT_EQ(seats->AsArray().size(), static_cast<size_t>(kSeatCount)) << "seat " << seat;
+    for (const json::Value& entry : seats->AsArray()) {
+      EXPECT_EQ(entry.Find("hand"), nullptr) << "seat " << seat << ": seats[] leaked a hand (H6)";
+      EXPECT_NE(entry.Find("hand_count"), nullptr) << "seat " << seat;
+    }
+  }
+
+  // The discard_event broadcast (§5.6) is one frame for the whole table too: same content at
+  // every seat, delivered exactly once per seat.
+  const std::vector<const json::Value*> reference = FramesOfType(received[0], "discard_event");
+  ASSERT_FALSE(reference.empty());
+  for (int seat = 0; seat < kSeatCount; ++seat) {
+    const std::vector<const json::Value*> events = FramesOfType(received[static_cast<size_t>(seat)], "discard_event");
+    ASSERT_EQ(events.size(), reference.size()) << "seat " << seat;
+    for (size_t i = 0; i < events.size(); ++i) {
+      EXPECT_EQ(events[i]->Dump(), reference[i]->Dump()) << "seat " << seat << " frame " << i;
+    }
+  }
 }
 
 }  // namespace
