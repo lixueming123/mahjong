@@ -222,21 +222,35 @@ std::vector<Tile> BuildWall(uint64_t seed) {
   return wall;
 }
 
-Deal DealTiles(const std::vector<Tile>& wall) {
+Deal DealTiles(const std::vector<Tile>& wall, int dealer) {
   Deal deal;
   deal.wall = wall;
+  if (dealer < 0 || dealer >= 4) dealer = 0;  // 越界按 0 处理（不抛错：规则库不制造异常路径）
   size_t index = 0;
   for (int seat = 0; seat < 4; ++seat) {
     for (int i = 0; i < kInitialHandSize && index < wall.size(); ++i) {
       deal.hands[static_cast<size_t>(seat)].push_back(wall[index++]);
     }
   }
-  // 庄家（seat 0）第 14 张
-  if (index < wall.size()) deal.hands[0].push_back(wall[index++]);
+  // 庄家第 14 张（B1：庄家由参数指定，不再硬编码 hands[0]）
+  if (index < wall.size()) deal.hands[static_cast<size_t>(dealer)].push_back(wall[index++]);
   for (auto& hand : deal.hands) SortTiles(hand);
   deal.next_index = static_cast<int>(index);
   deal.remaining = static_cast<int>(wall.size()) - static_cast<int>(index);
   return deal;
+}
+
+int NextDealer(int dealer, RoundResult result) {
+  if (result == RoundResult::kDealerWin || result == RoundResult::kDrawExhausted) {
+    return dealer;  // 连庄：庄家不变，hand_no 也不动（GAME_DESIGN_V2 §3.3 判据 A/B）
+  }
+  return (dealer + 1) % 4;  // 轮庄（判据 C）
+}
+
+RoundResult ClassifyRound(std::string_view reason, int winner_seat, int dealer) {
+  // 荒庄没有和牌者，一律视为庄家荒庄 ⇒ 连庄（GAME_DESIGN_V2 §3.3 关键点 4 的显式消歧）
+  if (reason == "draw_exhausted") return RoundResult::kDrawExhausted;
+  return winner_seat == dealer ? RoundResult::kDealerWin : RoundResult::kNonDealerWin;
 }
 
 // ---------------------------------------------------------------------------
@@ -248,9 +262,34 @@ std::string MeldTypeName(MeldType type) {
       return "pong";
     case MeldType::kChow:
       return "chow";
-    default:
+    case MeldType::kKong:
       return "kong";
+    case MeldType::kAnkan:
+      return "ankan";
+    case MeldType::kKakan:
+      return "kakan";
   }
+  return "kong";
+}
+
+// 三种杠都是「1 组、账面 3 张、第 4 张由 kans 补」—— 张数公式对三者完全一致（见头文件注释）
+bool IsKanType(MeldType type) {
+  return type == MeldType::kKong || type == MeldType::kAnkan || type == MeldType::kKakan;
+}
+
+// 门清 = melds 中不含 pong/chow/kong/kakan。**ankan 不破门清**（GAME_DESIGN_V2 §1.2 #1）。
+// kakan 必然起于 pong，故「kakan 破门清」是结构结论，这里只是把它写死一次。
+bool BreaksMenzen(MeldType type) {
+  switch (type) {
+    case MeldType::kAnkan:
+      return false;
+    case MeldType::kPong:
+    case MeldType::kChow:
+    case MeldType::kKong:
+    case MeldType::kKakan:
+      return true;
+  }
+  return true;
 }
 
 int MeldCountOf(const std::vector<Meld>& melds) { return static_cast<int>(melds.size()); }
@@ -258,7 +297,7 @@ int MeldCountOf(const std::vector<Meld>& melds) { return static_cast<int>(melds.
 int KanCountOf(const std::vector<Meld>& melds) {
   int kans = 0;
   for (const Meld& meld : melds) {
-    if (meld.type == MeldType::kKong) ++kans;
+    if (IsKanType(meld.type)) ++kans;  // 明杠 + 暗杠 + 加杠（旧「仅明杠」口径作废）
   }
   return kans;
 }
@@ -268,7 +307,9 @@ bool IsValidMeld(const Meld& meld) {
   const FaceCounts counts = CountFaces(meld.tiles);
   switch (meld.type) {
     case MeldType::kPong:
-    case MeldType::kKong: {
+    case MeldType::kKong:
+    case MeldType::kAnkan:
+    case MeldType::kKakan: {
       const size_t expected = (meld.type == MeldType::kPong) ? 3u : 4u;
       if (meld.tiles.size() != expected) return false;
       for (uint8_t c : counts) {
@@ -286,6 +327,91 @@ bool IsValidMeld(const Meld& meld) {
     }
   }
   return false;
+}
+
+std::vector<Face> AnkanFaces(const std::vector<Tile>& hand) {
+  const FaceCounts counts = CountFaces(hand);
+  std::vector<Face> faces;
+  for (int f = 0; f < kFaceCount; ++f) {
+    if (counts[f] == 4) faces.push_back(static_cast<Face>(f));
+  }
+  return faces;
+}
+
+bool CanAnkan(const std::vector<Tile>& hand) { return !AnkanFaces(hand).empty(); }
+
+std::vector<int> KakanMeldIndices(const std::vector<Tile>& hand, const std::vector<Meld>& melds) {
+  const FaceCounts counts = CountFaces(hand);
+  std::vector<int> indices;
+  for (size_t i = 0; i < melds.size(); ++i) {
+    const Meld& meld = melds[i];
+    if (meld.type != MeldType::kPong || meld.tiles.empty()) continue;
+    const Face face = FaceOf(meld.tiles.front());
+    if (counts[face] >= 1) indices.push_back(static_cast<int>(i));
+  }
+  return indices;
+}
+
+bool CanKakan(const std::vector<Tile>& hand, const std::vector<Meld>& melds) {
+  return !KakanMeldIndices(hand, melds).empty();
+}
+
+namespace {
+
+// 从手牌中移除 `count` 张 `face`（副本不可区分，取前 count 张即可）
+std::vector<Tile> RemoveFace(const std::vector<Tile>& hand, Face face, int count) {
+  std::vector<Tile> out;
+  out.reserve(hand.size());
+  int remaining = count;
+  for (Tile t : hand) {
+    if (remaining > 0 && FaceOf(t) == face) {
+      --remaining;
+      continue;
+    }
+    out.push_back(t);
+  }
+  return out;
+}
+
+}  // namespace
+
+std::optional<KongResult> ApplyAnkan(const std::vector<Tile>& hand,
+                                     const std::vector<Meld>& melds, Face face) {
+  std::vector<Tile> tiles;
+  for (Tile t : hand) {
+    if (FaceOf(t) == face) tiles.push_back(t);
+  }
+  if (tiles.size() != 4) return std::nullopt;  // 必须恰 4 张（5 张已由 IsVerifiedHand 排除）
+  KongResult result;
+  result.hand = RemoveFace(hand, face, 4);
+  result.melds = melds;
+  result.melds.push_back(Meld{.type = MeldType::kAnkan, .tiles = SortedTiles(tiles)});
+  return result;
+}
+
+std::optional<KongResult> ApplyKakan(const std::vector<Tile>& hand,
+                                     const std::vector<Meld>& melds, int meld_index) {
+  if (meld_index < 0 || meld_index >= MeldCountOf(melds)) return std::nullopt;
+  const Meld& target = melds[static_cast<size_t>(meld_index)];
+  if (target.type != MeldType::kPong || target.tiles.empty()) return std::nullopt;
+  const Face face = FaceOf(target.tiles.front());
+  std::optional<Tile> fourth;
+  for (Tile t : hand) {
+    if (FaceOf(t) == face) {
+      fourth = t;
+      break;
+    }
+  }
+  if (!fourth.has_value()) return std::nullopt;
+
+  KongResult result;
+  result.hand = RemoveFace(hand, face, 1);
+  result.melds = melds;
+  Meld& upgraded = result.melds[static_cast<size_t>(meld_index)];
+  upgraded.type = MeldType::kKakan;        // 就地升级：组序不变、MeldCountOf 不变
+  upgraded.tiles.push_back(*fourth);       // 第 4 张追加在末尾
+  SortTiles(upgraded.tiles);
+  return result;
 }
 
 bool CanPong(const std::vector<Tile>& hand, Tile discarded) {
@@ -398,13 +524,380 @@ bool IsPureOneSuit(const std::vector<Tile>& concealed_with_winning_tile,
   return suit != 0xff;
 }
 
+// ---------------------------------------------------------------------------
+// 全拆法枚举（GAME_DESIGN_V2 §1.1 口径 2）
+// ---------------------------------------------------------------------------
+namespace {
+
+// 副露组 → Group。chow 是顺子；pong / kong / ankan / kakan 都是「刻子类」的一组。
+Group GroupOfMeld(const Meld& meld, int meld_index) {
+  Group group;
+  group.from_meld = true;
+  group.meld_index = meld_index;
+  if (meld.type == MeldType::kChow && !meld.tiles.empty()) {
+    group.is_run = true;
+    Face lowest = FaceOf(meld.tiles.front());
+    for (Tile t : meld.tiles) lowest = std::min(lowest, FaceOf(t));
+    group.face = lowest;
+  } else {
+    group.is_run = false;
+    group.face = meld.tiles.empty() ? Face{} : FaceOf(meld.tiles.front());
+  }
+  return group;
+}
+
+// 回溯序 = §1.3.4：最小未用牌面锚定，刻子分支先于顺子分支
+void CollectDecompositions(FaceCounts& counts, int need_groups, std::vector<Group>& pending,
+                           const std::array<Group, 4>& meld_groups, int meld_count,
+                           std::vector<Decomposition>& out) {
+  if (need_groups == 0) {
+    for (uint8_t c : counts) {
+      if (c != 0) return;
+    }
+    Decomposition decomposition;
+    int index = 0;
+    for (int i = 0; i < meld_count; ++i) {
+      decomposition.groups[static_cast<size_t>(index++)] = meld_groups[static_cast<size_t>(i)];
+    }
+    for (const Group& group : pending) {
+      decomposition.groups[static_cast<size_t>(index++)] = group;
+    }
+    out.push_back(decomposition);
+    return;
+  }
+  int first = -1;
+  for (int f = 0; f < kFaceCount; ++f) {
+    if (counts[static_cast<size_t>(f)] != 0) {
+      first = f;
+      break;
+    }
+  }
+  if (first < 0) return;
+
+  // A. 刻子（先于顺子：与既有 Decompose 的 A/B 分支次序逐字一致）
+  if (counts[static_cast<size_t>(first)] >= 3) {
+    counts[static_cast<size_t>(first)] -= 3;
+    pending.push_back(Group{false, -1, false, static_cast<Face>(first)});
+    CollectDecompositions(counts, need_groups - 1, pending, meld_groups, meld_count, out);
+    pending.pop_back();
+    counts[static_cast<size_t>(first)] += 3;
+  }
+  // B. 顺子（字牌编号连续但绝不成顺，故用 IsNumberFace 兜住，理由同 Decompose）
+  const int rank = first % kRankCount;  // 0-based
+  if (IsNumberFace(static_cast<Face>(first)) && rank <= kRankCount - 3 &&
+      counts[static_cast<size_t>(first + 1)] != 0 &&
+      counts[static_cast<size_t>(first + 2)] != 0) {
+    counts[static_cast<size_t>(first)] -= 1;
+    counts[static_cast<size_t>(first + 1)] -= 1;
+    counts[static_cast<size_t>(first + 2)] -= 1;
+    pending.push_back(Group{false, -1, true, static_cast<Face>(first)});
+    CollectDecompositions(counts, need_groups - 1, pending, meld_groups, meld_count, out);
+    pending.pop_back();
+    counts[static_cast<size_t>(first)] += 1;
+    counts[static_cast<size_t>(first + 1)] += 1;
+    counts[static_cast<size_t>(first + 2)] += 1;
+  }
+}
+
+}  // namespace
+
+std::vector<Decomposition> EnumerateDecompositions(
+    const std::vector<Tile>& concealed_with_winning_tile, const std::vector<Meld>& melds) {
+  std::vector<Decomposition> out;
+  const int meld_count = MeldCountOf(melds);
+  const int need_groups = 4 - meld_count;
+  if (need_groups < 0) return out;
+  if (concealed_with_winning_tile.size() != static_cast<size_t>(need_groups * 3 + 2)) return out;
+  if (!IsVerifiedHand(concealed_with_winning_tile)) return out;
+
+  std::array<Group, 4> meld_groups{};
+  for (int i = 0; i < meld_count; ++i) {
+    meld_groups[static_cast<size_t>(i)] = GroupOfMeld(melds[static_cast<size_t>(i)], i);
+  }
+  FaceCounts work = CountFaces(concealed_with_winning_tile);
+  std::vector<Group> pending;
+  pending.reserve(static_cast<size_t>(need_groups));
+  // ① 将牌牌面按面编号升序逐个尝试
+  for (int f = 0; f < kFaceCount; ++f) {
+    if (work[static_cast<size_t>(f)] < 2) continue;
+    work[static_cast<size_t>(f)] -= 2;
+    const size_t before = out.size();
+    CollectDecompositions(work, need_groups, pending, meld_groups, meld_count, out);
+    for (size_t i = before; i < out.size(); ++i) {
+      out[i].pair = static_cast<Face>(f);
+    }
+    work[static_cast<size_t>(f)] += 2;
+  }
+  return out;
+}
+
+namespace {
+
+bool GroupContainsFace(const Group& group, Face face) {
+  if (!group.is_run) return group.face == face;
+  const int offset = static_cast<int>(face) - static_cast<int>(group.face);
+  return offset >= 0 && offset < 3;
+}
+
+}  // namespace
+
+int WinGroupIndex(const Decomposition& decomposition, Face winning_face) {
+  // 顺子组优先：荣和时「能和成顺子就按顺子算」，即三暗刻取对玩家最有利的落组
+  for (int i = 0; i < 4; ++i) {
+    const Group& group = decomposition.groups[static_cast<size_t>(i)];
+    if (group.is_run && GroupContainsFace(group, winning_face)) return i;
+  }
+  for (int i = 0; i < 4; ++i) {
+    const Group& group = decomposition.groups[static_cast<size_t>(i)];
+    if (!group.is_run && group.face == winning_face) return i;
+  }
+  if (decomposition.pair == winning_face) return kWinInPair;
+  return -1;
+}
+
+// ---------------------------------------------------------------------------
+// 判番（GAME_DESIGN_V2 §1.2）
+// ---------------------------------------------------------------------------
+namespace {
+
+// 5z(白) / 6z(发) / 7z(中) —— 面 31..33
+bool IsDragonFace(Face face) {
+  return face >= kNumericFaceCount + 4 && face < kFaceCount;
+}
+
+struct HandFacts {
+  bool menzen = false;
+  bool tanyao = false;
+  bool honitsu = false;
+  bool pure = false;
+  bool rinshan = false;
+};
+
+HandFacts ComputeFacts(const std::vector<Tile>& concealed_with_winning_tile,
+                       const std::vector<Meld>& melds, const ScoreContext& ctx) {
+  HandFacts facts;
+  facts.menzen = true;
+  for (const Meld& meld : melds) {
+    if (BreaksMenzen(meld.type)) facts.menzen = false;
+  }
+  std::vector<Tile> all = concealed_with_winning_tile;
+  for (const Meld& meld : melds) all.insert(all.end(), meld.tiles.begin(), meld.tiles.end());
+
+  bool tanyao = true;
+  int suit = -1;
+  bool single_suit = true;
+  bool any_honor = false;
+  for (Tile tile : all) {
+    const Face face = FaceOf(tile);
+    if (IsHonorFace(face)) {
+      any_honor = true;
+      tanyao = false;
+      continue;  // 字牌不参与「数牌门数」的统计
+    }
+    const uint8_t tile_suit = SuitOf(face);
+    if (suit < 0) {
+      suit = tile_suit;
+    } else if (suit != tile_suit) {
+      single_suit = false;
+    }
+    const uint8_t rank = RankOf(face);
+    if (rank == 1 || rank == kRankCount) tanyao = false;
+  }
+  facts.tanyao = tanyao;
+  // 混一色：**恰含一门数牌** 且 至少 1 张字牌（全字牌不算，§1.4）
+  facts.honitsu = single_suit && suit >= 0 && any_honor;
+  // 清一色：沿用既有 IsPureOneSuit（零字牌 + 单门数牌），与 honitsu 结构互斥
+  facts.pure = IsPureOneSuit(concealed_with_winning_tile, melds);
+  facts.rinshan = ctx.Tsumo() && ctx.is_rinshan;
+  return facts;
+}
+
+struct GroupView {
+  bool is_run = false;
+  bool concealed = true;  // 暗：门前组 + ankan。pong / chow / kong / kakan 都是明
+  Face face = 0;
+};
+
+GroupView ViewOfGroup(const Group& group, const std::vector<Meld>& melds) {
+  GroupView view;
+  view.is_run = group.is_run;
+  view.face = group.face;
+  if (group.from_meld && group.meld_index >= 0 &&
+      group.meld_index < static_cast<int>(melds.size())) {
+    view.concealed = (melds[static_cast<size_t>(group.meld_index)].type == MeldType::kAnkan);
+  } else {
+    view.concealed = true;
+  }
+  return view;
+}
+
+void PushYaku(std::vector<Yaku>& yaku, std::string id, int han) {
+  if (han <= 0) return;
+  yaku.push_back(Yaku{std::move(id), han});
+}
+
+// 单个拆法的番种列表（**按 §1.2 表序**，同一 id 至多一条）
+std::vector<Yaku> YakuOfDecomposition(const Decomposition& decomposition,
+                                      const std::vector<Meld>& melds, const HandFacts& facts,
+                                      const ScoreContext& ctx, Face winning_face) {
+  std::array<GroupView, 4> groups{};
+  for (int i = 0; i < 4; ++i) {
+    groups[static_cast<size_t>(i)] = ViewOfGroup(decomposition.groups[static_cast<size_t>(i)], melds);
+  }
+
+  bool all_runs = true;
+  bool all_triplets = true;
+  int yakuhai = 0;
+  int ankou = 0;
+  std::array<uint8_t, kFaceCount> run_starts{};
+  run_starts.fill(0);
+  for (const GroupView& group : groups) {
+    if (group.is_run) {
+      all_triplets = false;
+      run_starts[static_cast<size_t>(group.face)]++;
+    } else {
+      all_runs = false;
+      if (IsDragonFace(group.face)) ++yakuhai;
+      if (group.concealed) ++ankou;  // 暗刻 = ankan + 门前刻子（排除 pong/kong/kakan）
+    }
+  }
+
+  // 三暗刻：荣和时，由和牌张补成的那一组若是刻子**不计**暗刻（落组口径见 WinGroupIndex）
+  if (!ctx.Tsumo() && ankou > 0) {
+    const int win_group = WinGroupIndex(decomposition, winning_face);
+    if (win_group >= 0 && win_group < 4) {
+      const GroupView& group = groups[static_cast<size_t>(win_group)];
+      if (!group.is_run && group.concealed) --ankou;
+    }
+  }
+
+  // 三色同顺：m/p/s 各一组、起点 rank 相同的顺子
+  bool sanshoku = false;
+  for (int rank0 = 0; rank0 <= kRankCount - 3 && !sanshoku; ++rank0) {
+    bool all_suits = true;
+    for (int suit = 0; suit < kSuitCount; ++suit) {
+      if (run_starts[static_cast<size_t>(suit * kRankCount + rank0)] == 0) all_suits = false;
+    }
+    sanshoku = all_suits;
+  }
+  // 一气通贯：同一门的 123 + 456 + 789
+  bool ittsuu = false;
+  for (int suit = 0; suit < kSuitCount && !ittsuu; ++suit) {
+    const size_t base = static_cast<size_t>(suit * kRankCount);
+    ittsuu = run_starts[base] != 0 && run_starts[base + 3] != 0 && run_starts[base + 6] != 0;
+  }
+  // 一杯口：门清且两组同花色同起点的顺子（no ryanpeikou：多条也只计 1 番）
+  bool iipeikou = false;
+  if (facts.menzen) {
+    for (uint8_t count : run_starts) {
+      if (count >= 2) iipeikou = true;
+    }
+  }
+  // 小三元：白发中两组为刻子/杠、第三组为将牌
+  int dragon_triplets = 0;
+  for (const GroupView& group : groups) {
+    if (!group.is_run && IsDragonFace(group.face)) ++dragon_triplets;
+  }
+  const bool shousangen = dragon_triplets == 2 && IsDragonFace(decomposition.pair);
+
+  std::vector<Yaku> yaku;
+  // ---- 以下 push 次序 = §1.2 表序，不得调整 ----
+  PushYaku(yaku, "menzen", facts.menzen ? 1 : 0);
+  PushYaku(yaku, "tanyao", facts.tanyao ? 1 : 0);
+  PushYaku(yaku, "pinfu",
+           (facts.menzen && all_runs && IsNumberFace(decomposition.pair)) ? 1 : 0);
+  PushYaku(yaku, "iipeikou", iipeikou ? 1 : 0);
+  PushYaku(yaku, "yakuhai", yakuhai);  // 多条合并为一条，han = 组数（§1.3.3）
+  PushYaku(yaku, "rinshan", facts.rinshan ? 1 : 0);
+  PushYaku(yaku, "sanshoku_doujun", sanshoku ? 2 : 0);
+  PushYaku(yaku, "ittsuu", ittsuu ? 2 : 0);
+  PushYaku(yaku, "toitoi", all_triplets ? 2 : 0);
+  PushYaku(yaku, "sanankou", ankou >= 3 ? 2 : 0);
+  PushYaku(yaku, "honitsu", facts.honitsu ? 2 : 0);
+  PushYaku(yaku, "shousangen", shousangen ? 2 : 0);
+  // 一色组：两边都判，绝不双命中（结构上互斥，§1.3.2 —— 不写互斥分支）
+  PushYaku(yaku, "pure_one_suit", facts.pure ? 5 : 0);
+  return yaku;
+}
+
+// 七对子形态的番种（与顺子类/刻子类天然互斥，只可能与 #1/#2/#6/#11/#14 叠加）
+std::vector<Yaku> YakuOfSevenPairs(const HandFacts& facts) {
+  std::vector<Yaku> yaku;
+  PushYaku(yaku, "menzen", facts.menzen ? 1 : 0);
+  PushYaku(yaku, "tanyao", facts.tanyao ? 1 : 0);
+  PushYaku(yaku, "rinshan", facts.rinshan ? 1 : 0);
+  PushYaku(yaku, "honitsu", facts.honitsu ? 2 : 0);
+  PushYaku(yaku, "seven_pairs", 2);
+  PushYaku(yaku, "pure_one_suit", facts.pure ? 5 : 0);
+  return yaku;
+}
+
+}  // namespace
+
+int YakuHan(std::string_view id) {
+  // 冻结番数表（GAME_DESIGN_V2 §1.2）；yakuhai 返回**单组**的 1 番
+  if (id == "menzen" || id == "tanyao" || id == "pinfu" || id == "iipeikou" ||
+      id == "yakuhai" || id == "rinshan") {
+    return 1;
+  }
+  if (id == "sanshoku_doujun" || id == "ittsuu" || id == "toitoi" || id == "sanankou" ||
+      id == "honitsu" || id == "shousangen" || id == "seven_pairs") {
+    return 2;
+  }
+  if (id == "pure_one_suit") return 5;
+  return 0;
+}
+
+int YakuHanTotal(const std::vector<Yaku>& yaku) {
+  int total = 0;
+  for (const Yaku& item : yaku) total += item.han;
+  return total;
+}
+
+std::vector<Yaku> DetectYaku(const std::vector<Tile>& concealed_with_winning_tile,
+                             const std::vector<Meld>& melds, Tile winning_tile,
+                             const ScoreContext& ctx) {
+  const HandFacts facts = ComputeFacts(concealed_with_winning_tile, melds, ctx);
+  const Face winning_face = FaceOf(winning_tile);
+
+  // 口径 3：han(手牌) = max over 拆法 Σ番种(D)，禁止跨拆法拼凑；同分取枚举序第一个
+  std::vector<Yaku> best;
+  int best_han = 0;  // 无起和番：0 番合法
+  for (const Decomposition& decomposition :
+       EnumerateDecompositions(concealed_with_winning_tile, melds)) {
+    std::vector<Yaku> yaku = YakuOfDecomposition(decomposition, melds, facts, ctx, winning_face);
+    const int han = YakuHanTotal(yaku);
+    if (han > best_han) {
+      best_han = han;
+      best = std::move(yaku);
+    }
+  }
+  if (melds.empty() && IsSevenPairs(concealed_with_winning_tile)) {
+    std::vector<Yaku> yaku = YakuOfSevenPairs(facts);
+    const int han = YakuHanTotal(yaku);
+    if (han > best_han) {
+      best_han = han;
+      best = std::move(yaku);
+    }
+  }
+  return best;
+}
+
 std::vector<std::string> WinTags(const std::vector<Tile>& concealed_with_winning_tile,
-                                 const std::vector<Meld>& melds) {
+                                 const std::vector<Meld>& melds,
+                                 std::optional<Tile> winning_tile,
+                                 std::optional<ScoreContext> ctx) {
+  ScoreContext effective = ctx.value_or(ScoreContext{});
+  Tile tile = Tile{};
+  if (winning_tile.has_value()) {
+    tile = *winning_tile;
+  } else if (!concealed_with_winning_tile.empty()) {
+    tile = concealed_with_winning_tile.front();
+  }
   std::vector<std::string> tags;
-  const bool seven_pairs =
-      melds.empty() && KanCountOf(melds) == 0 && IsSevenPairs(concealed_with_winning_tile);
-  if (seven_pairs) tags.emplace_back("seven_pairs");
-  if (IsPureOneSuit(concealed_with_winning_tile, melds)) tags.emplace_back("pure_one_suit");
+  for (const Yaku& yaku : DetectYaku(concealed_with_winning_tile, melds, tile, effective)) {
+    tags.push_back(yaku.id);
+  }
   return tags;
 }
 
@@ -427,10 +920,33 @@ std::vector<Option> ClaimOptions(const std::vector<Tile>& hand, const std::vecto
 }
 
 std::vector<Option> DiscardOptions(const std::vector<Tile>& concealed_with_winning_tile,
-                                   const std::vector<Meld>& melds) {
+                                   const std::vector<Meld>& melds, int remaining) {
   std::vector<Option> options;
   if (CanWinExact(concealed_with_winning_tile, melds)) {
     options.push_back(Option{"win", {}});
+  }
+  // 暗杠 / 加杠只在**本家行动态**（逻辑 14 张）提供，且需要 ≥ 1 张补牌
+  // （`remaining < 1` 时不提供，与 CanKong 的守卫同源，GAME_DESIGN_V2 §4.2/§4.3）。
+  const size_t logical = concealed_with_winning_tile.size() + 3u * static_cast<size_t>(MeldCountOf(melds));
+  // 顺序固定 win → ankan → kakan（R6）；组内按牌面升序 / meld 下标升序，保持确定性。
+  // B1.1 裁决 G：ankan/kakan 的选项 tiles 均为**恰好 1 个牌面元素**（与 kong 同形，
+  // PROTOCOL v1.6 §4.6 冻结：元素多于 1 个 ⇒ ILLEGAL_ACTION）。
+  if (logical == 14u && remaining >= 1) {
+    for (Face face : AnkanFaces(concealed_with_winning_tile)) {
+      options.push_back(Option{"ankan", {MakeTileFromFace(face)}});
+    }
+    for (int meld_index : KakanMeldIndices(concealed_with_winning_tile, melds)) {
+      const Meld& meld = melds[static_cast<size_t>(meld_index)];
+      const Face face = FaceOf(meld.tiles.front());
+      Tile fourth{};
+      for (Tile tile : concealed_with_winning_tile) {
+        if (FaceOf(tile) == face) {
+          fourth = tile;
+          break;
+        }
+      }
+      options.push_back(Option{"kakan", {fourth}});
+    }
   }
   return options;
 }
@@ -759,6 +1275,11 @@ std::optional<int> ShantenAfterMeld(const std::vector<Tile>& hand, const std::ve
       meld_tiles = {consume[0], consume[1], claimed};
       break;
     }
+    case MeldType::kAnkan:
+    case MeldType::kKakan:
+      // 暗杠/加杠不是「鸣他人打出的牌」的路径（它们是本家行动态的自主动作），
+      // 本函数只建模鸣牌门槛；暗杠/加杠后的最优向听不在本批范围内。
+      return std::nullopt;
   }
 
   // ---- 2) 从手牌扣除 consume（按牌面计数）----
@@ -775,7 +1296,7 @@ std::optional<int> ShantenAfterMeld(const std::vector<Tile>& hand, const std::ve
   }
 
   std::vector<Meld> melds_after = melds;
-  melds_after.push_back(Meld{type, SortedTiles(meld_tiles)});
+  melds_after.push_back(Meld{.type = type, .tiles = SortedTiles(meld_tiles)});
 
   // ---- 3) 鸣牌后必须打一张；明杠还要补摸一张（取最优补牌，乐观口径）----
   if (type == MeldType::kKong) {
@@ -794,41 +1315,77 @@ std::optional<int> ShantenAfterMeld(const std::vector<Tile>& hand, const std::ve
 }
 
 // ---------------------------------------------------------------------------
-// 算分（RULESET §6）
+// 算分（GAME_DESIGN_V2 §2）
 // ---------------------------------------------------------------------------
-int MultiplierForTags(const std::vector<std::string>& tags) {
-  int multiplier = 1;  // 底分 base = 1
-  for (const std::string& tag : tags) {
-    if (tag == "seven_pairs" || tag == "pure_one_suit") multiplier *= 4;
+namespace {
+
+constexpr int kHanCap = 6;  // 封顶 6 番（庄家加成受同一封顶，§2.5）
+
+bool HasYaku(const std::vector<Yaku>& yaku, std::string_view id) {
+  for (const Yaku& item : yaku) {
+    if (item.id == id) return true;
   }
-  return multiplier;
+  return false;
+}
+
+}  // namespace
+
+int MultiplierForHan(int han) {
+  if (han > kHanCap) han = kHanCap;
+  if (han < 0) han = 0;
+  return 1 << han;  // R = 2^han ∈ {1, 2, 4, 8, 16, 32, 64}
+}
+
+ScoreResult ScoreHand(const std::vector<Tile>& concealed_with_winning_tile,
+                      const std::vector<Meld>& melds, Tile winning_tile,
+                      const ScoreContext& ctx) {
+  ScoreResult result;
+  if (ctx.winner_seat < 0 || ctx.winner_seat >= 4) return result;  // 非法座位 ⇒ 全 0（不制造异常）
+
+  result.yaku = DetectYaku(concealed_with_winning_tile, melds, winning_tile, ctx);
+  result.dealer_bonus = ctx.winner_is_dealer ? 1 : 0;
+  result.rinshan = HasYaku(result.yaku, "rinshan");
+
+  // han = 番种合计 + 庄家(1)，受**同一**封顶（B1.1 裁决：自摸不是番种，不计入合计；
+  // "自摸 ×2" 已并入下方支付公式的 2R/6R）
+  int han = YakuHanTotal(result.yaku) + result.dealer_bonus;
+  if (han > kHanCap) han = kHanCap;
+  if (han < 0) han = 0;
+  result.han = han;
+  result.multiplier = MultiplierForHan(han);
+
+  if (ctx.Tsumo()) {
+    // 自摸：三家各付 2R，和牌者 +6R（3×(−2R) + 6R = 0）
+    result.per_payer = result.multiplier * 2;
+    result.total = result.multiplier * 6;
+    for (int seat = 0; seat < 4; ++seat) {
+      if (seat == ctx.winner_seat) continue;
+      result.delta[static_cast<size_t>(seat)] -= result.per_payer;
+    }
+    result.delta[static_cast<size_t>(ctx.winner_seat)] += result.total;
+  } else {
+    if (ctx.from_seat < 0 || ctx.from_seat >= 4) return result;  // 荣和必须给出合法放炮者
+    // 荣和：放炮者 −R、和牌者 +R（−R + R = 0）
+    result.per_payer = result.multiplier;
+    result.total = result.multiplier;
+    result.delta[static_cast<size_t>(ctx.from_seat)] -= result.multiplier;
+    result.delta[static_cast<size_t>(ctx.winner_seat)] += result.multiplier;
+  }
+  return result;
 }
 
 ScoreResult ScoreWin(int winner_seat, int from_seat,
                      const std::vector<Tile>& concealed_with_winning_tile,
-                     const std::vector<Meld>& melds) {
-  ScoreResult result;
-  const std::vector<std::string> tags =
-      WinTags(concealed_with_winning_tile, melds);
-  result.multiplier = MultiplierForTags(tags);
-
-  if (from_seat < 0) {
-    // 自摸：三家各付 2M，和牌者 +6M
-    result.per_payer = result.multiplier * 2;
-    result.total = result.multiplier * 6;
-    for (int seat = 0; seat < 4; ++seat) {
-      if (seat == winner_seat) continue;
-      result.delta[static_cast<size_t>(seat)] -= result.per_payer;
-    }
-    result.delta[static_cast<size_t>(winner_seat)] += result.total;
-  } else {
-    // 荣和：放炮者付 M
-    result.per_payer = result.multiplier;
-    result.total = result.multiplier;
-    result.delta[static_cast<size_t>(from_seat)] -= result.multiplier;
-    result.delta[static_cast<size_t>(winner_seat)] += result.multiplier;
-  }
-  return result;
+                     const std::vector<Meld>& melds, std::optional<Tile> winning_tile) {
+  ScoreContext ctx;
+  ctx.winner_seat = winner_seat;
+  ctx.from_seat = from_seat;
+  ctx.winner_is_dealer = false;  // 旧 4 参签名无庄家信息；B2 用 ScoreHand 传 ScoreContext
+  ctx.is_rinshan = false;
+  const Tile tile = winning_tile.value_or(concealed_with_winning_tile.empty()
+                                              ? Tile{}
+                                              : concealed_with_winning_tile.front());
+  return ScoreHand(concealed_with_winning_tile, melds, tile, ctx);
 }
 
 ScoreResult ScoreDraw() { return ScoreResult{}; }

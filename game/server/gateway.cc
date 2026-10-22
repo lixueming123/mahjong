@@ -1,9 +1,6 @@
 #include "gateway.h"
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
 #include <signal.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -14,7 +11,10 @@
 #include <tuple>
 #include <utility>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <spdlog/spdlog.h>
+#include <sys/socket.h>
 
 #include "actor_scope.h"
 #include "clock.h"
@@ -51,9 +51,7 @@ constexpr int kSendFlags = 0;  // macOS/BSD use SO_NOSIGPIPE instead.
 
 }  // namespace
 
-void RequestGatewayStop() {
-  g_stop_requested = 1;
-}
+void RequestGatewayStop() { g_stop_requested = 1; }
 
 void InstallGatewaySignalHandlers(int wake_write_fd) {
   g_wake_write_fd = wake_write_fd;
@@ -70,11 +68,11 @@ void InstallGatewaySignalHandlers(int wake_write_fd) {
   ::signal(SIGPIPE, SIG_IGN);
 }
 
-Gateway::Gateway(uint16_t port, std::shared_ptr<PlayerIdAllocator> player_ids, std::shared_ptr<AccountStore> accounts,
+Gateway::Gateway(uint16_t port, std::shared_ptr<PlayerIdAllocator> player_ids, DbService db,
                  std::shared_ptr<SessionRegistry> sessions, ex_actor::ActorRef<LobbyActor> lobby)
     : port_(port),
       player_ids_(std::move(player_ids)),
-      accounts_(std::move(accounts)),
+      db_(std::move(db)),
       sessions_(std::move(sessions)),
       lobby_(std::move(lobby)) {}
 
@@ -219,24 +217,23 @@ void Gateway::AcceptClients() {
 
     int connection_id = next_client_id_++;
     auto conn = std::make_shared<Connection>(fd, connection_id, wake_fds_[1]);
-    ex_actor::ActorRef<ConnectionActor> actor;
+    ex_actor::ActorRef<PlayerActor> actor;
     try {
-      std::optional<std::tuple<ex_actor::ActorRef<ConnectionActor>>> spawned = stdexec::sync_wait(
-          ex_actor::Spawn<ConnectionActor>(conn, player_ids_, accounts_, sessions_, lobby_));
+      std::optional<std::tuple<ex_actor::ActorRef<PlayerActor>>> spawned =
+          stdexec::sync_wait(ex_actor::Spawn<PlayerActor>(conn, player_ids_, db_, sessions_, lobby_));
       if (!spawned.has_value()) {
         conn->MarkClosed();
         continue;
       }
       actor = std::get<0>(*spawned);
     } catch (const std::exception& e) {
-      spdlog::error("gateway: failed to spawn ConnectionActor: {}", e.what());
+      spdlog::error("gateway: failed to spawn PlayerActor: {}", e.what());
       conn->MarkClosed();
       continue;
     }
     // The address the actor needs for the asynchronous account results. The fd is not in the
     // poll set yet (poll_fds is built before accept), so no frame can overtake this message.
-    ActorSendScope().spawn(
-        actor.SendLocal<&ConnectionActor::Dispatch>(ConnectionEnvelope::SetSelfRef(actor)));
+    ActorSendScope().spawn(actor.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::SetSelfRef(actor)));
 
     Client client;
     client.conn = std::move(conn);
@@ -325,16 +322,18 @@ void Gateway::ProcessInboundFrames(Client& client) {
 
     if (line.size() > protocol::kMaxFrameBytes) {
       CompactInbound(client);
-      client.conn->SendFrameThenClose(
-          protocol::ErrorFrame(protocol::kCodeFrameTooLarge, "frame exceeds 65536 bytes"), "frame too large");
+      client.conn->SendFrameThenClose(protocol::ErrorFrame(protocol::kCodeFrameTooLarge, "frame exceeds 65536 bytes"),
+                                      "frame too large");
       return;
     }
     switch (CheckRateLimit(client)) {
       case RateLimitDecision::kClose:
         CompactInbound(client);
         return;
-      case RateLimitDecision::kDrop: continue;
-      case RateLimitDecision::kAccept: break;
+      case RateLimitDecision::kDrop:
+        continue;
+      case RateLimitDecision::kAccept:
+        break;
     }
     if (!utf8::IsValid(line)) {
       // Read-side and parse-side failures share one bad-frame budget (§7.2), so the counter
@@ -432,7 +431,7 @@ RateLimitDecision Gateway::CheckRateLimit(Client& client) {
 void Gateway::DispatchFrame(Client& client, std::string frame) {
   try {
     ActorSendScope().spawn(
-        client.actor.SendLocal<&ConnectionActor::Dispatch>(ConnectionEnvelope::OnFrame(std::move(frame))));
+        client.actor.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::OnFrame(std::move(frame))));
     ++dispatched_frames_;
   } catch (const std::exception& e) {
     spdlog::error("gateway: failed to dispatch a frame to conn#{}: {}", client.conn->id(), e.what());
@@ -473,7 +472,7 @@ void Gateway::CheckTimers() {
       try {
         // PROTOCOL.md §1.6: the lobby drops idle lobby connections, rooms keep the seat
         // entrusted instead.
-        ActorSendScope().spawn(client.actor.SendLocal<&ConnectionActor::Dispatch>(ConnectionEnvelope::OnIdleTimeout()));
+        ActorSendScope().spawn(client.actor.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::OnIdleTimeout()));
       } catch (const std::exception& e) {
         spdlog::error("gateway: failed to dispatch the idle timeout for conn#{}: {}", client.conn->id(), e.what());
       }
@@ -488,7 +487,7 @@ void Gateway::CloseClient(Client& client, const std::string& reason) {
   client.dead = true;
   client.conn->MarkClosed();
   try {
-    ActorSendScope().spawn(client.actor.SendLocal<&ConnectionActor::Dispatch>(ConnectionEnvelope::OnClosed(reason)));
+    ActorSendScope().spawn(client.actor.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::OnClosed(reason)));
   } catch (const std::exception& e) {
     spdlog::error("gateway: failed to notify conn#{} about the close: {}", client.conn->id(), e.what());
   }

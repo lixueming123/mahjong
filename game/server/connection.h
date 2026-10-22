@@ -3,7 +3,7 @@
 // Ownership split (keeps the I/O loop single-threaded, see PROTOCOL.md §0.5):
 //   * the gateway poll loop owns the socket fd, the read path and the close path; it is
 //     the only thread calling read()/write()/close();
-//   * actors (ConnectionActor / LobbyActor / RoomActor) push outbound frames with
+//   * actors (PlayerActor / LobbyActor / RoomActor) push outbound frames with
 //     SendFrame(); frames land in an outbox that the loop flushes, and a self-pipe wakes
 //     the loop when new data arrives.
 

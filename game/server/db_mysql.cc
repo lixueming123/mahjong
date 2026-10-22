@@ -1,37 +1,58 @@
-// The MySQL-backed AccountStore (ACCOUNT_DESIGN.md §2).
+// The MySQL-backed DbActor (ACCOUNT_DESIGN.md §2).
 //
-// Shape: copied from WindowTimer (timer.cc) on purpose. The actor world must never block, so
-// one worker thread owns the MySQL connection and runs the blocking calls; the caller's
-// callback executes on that worker and does nothing but post a message back into its actor.
-// Nothing in this file touches actor state, and nothing here is called from a handler while
-// the handler holds state it cannot afford to lose.
+// Shape: the actor owns one MySQL connection and every query runs inside a handler, so it
+// blocks db_pool's only thread for that query's duration and nothing else. That is the whole
+// point of main() pinning this actor to a dedicated single-thread pool: the blocking calls
+// never reach a thread the game pools schedule on, and because the pool has exactly one
+// thread the mailbox is drained in order — the FIFO property §4.1 depends on (a match record
+// is always ahead of the stats request that must include it) comes for free.
 //
 // Password storage (§2.2, demo-grade by explicit decision): a per-account 16-byte random salt
 // plus a single SHA-256, computed by MySQL's SHA2() so the server needs no crypto library.
 // Swapping both SQL expressions for libcrypto's PBKDF2 is the documented upgrade path.
 
 #include <mysql.h>
-#include <spdlog/spdlog.h>
 
-#include <atomic>
-#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <deque>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <random>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
+#include <spdlog/spdlog.h>
+
+#include "actor_scope.h"
+#include "player_actor.h"
 #include "db.h"
+#include "seat_endpoint.h"
 
 namespace mahjong {
+namespace {
+
+// mysql_library_init/end are process-wide and not thread safe, so they are done exactly once by
+// whoever gets here first (main() at startup, or the first DbActor::Initialize as a backstop).
+std::once_flag g_library_once;
+bool g_library_ready = false;
+
+}  // namespace
+
+bool DbLibraryInit() {
+  std::call_once(g_library_once, [] { g_library_ready = (mysql_library_init(0, nullptr, nullptr) == 0); });
+  return g_library_ready;
+}
+
+void DbLibraryShutdown() {
+  if (g_library_ready) {
+    mysql_library_end();
+    g_library_ready = false;
+  }
+}
+
 namespace {
 
 // MySQL error numbers we react to by name instead of by chance.
@@ -42,11 +63,6 @@ constexpr unsigned int kErrServerLost = 2013;
 // A connect must not outlast the server's own startup path (§2.3). 3s is far longer than a
 // local socket needs and short enough that a dead host does not stall the process.
 constexpr unsigned int kConnectTimeoutSeconds = 3;
-
-// A backstop against unbounded growth if MySQL is far slower than the clients (§2.3). Each
-// connection has at most one account operation in flight, so reaching this takes a lot of
-// connections; past it the operation is refused and answered as unavailable rather than queued.
-constexpr size_t kMaxPendingJobs = 256;
 
 // 16 random bytes as 32 hex characters (§2.2).
 std::string RandomSalt() {
@@ -92,139 +108,52 @@ int ParseInt(const char* text) {
   return static_cast<int>(std::strtol(text, nullptr, 10));
 }
 
-class MysqlAccountStore : public AccountStore {
- public:
-  explicit MysqlAccountStore(DbConfig config);
-  ~MysqlAccountStore() override;
-
-  bool available() const override { return available_.load(std::memory_order_relaxed); }
-
-  void LoginAsync(std::string username, std::string password, std::function<void(AuthOutcome)> done) override;
-  void RegisterAsync(std::string username, std::string password, std::string nickname,
-                     std::function<void(AuthOutcome)> done) override;
-  void FetchStatsAsync(uint64_t account_id, std::function<void(StatsOutcome)> done) override;
-  void RecordMatchAsync(MatchRecord record) override;
-  void Stop() override;
-
- private:
-  using Job = std::function<void()>;
-
-  // Returns false when the job was refused (shutting down, or the queue is full); the caller
-  // must then answer its own callback instead of waiting for a result that will never come.
-  bool Enqueue(Job job);
-  void Run();
-  // All of the following run on the worker thread only.
-  void Initialize();
-  bool EnsureConnected();
-  bool EnsureSchema();
-  void Disconnect();
-  void LoginJob(const std::string& username, const std::string& password, const std::function<void(AuthOutcome)>& done);
-  void RegisterJob(const std::string& username, const std::string& password, const std::string& nickname,
-                   const std::function<void(AuthOutcome)>& done);
-  void StatsJob(uint64_t account_id, const std::function<void(StatsOutcome)>& done);
-  void RecordJob(const MatchRecord& record);
-
-  // Escapes a value for the single-quoted literal it will sit in (§2.2). The inputs are
-  // already charset-validated, so this is the second line of defence, not the first.
-  std::string Escape(const std::string& value);
-
-  DbConfig config_;
-  std::mutex mutex_;
-  std::condition_variable wakeup_;
-  std::condition_variable init_done_cv_;
-  std::deque<Job> queue_;
-  bool stopping_ = false;
-  bool init_done_ = false;
-  std::thread worker_;
-  MYSQL* mysql_ = nullptr;  // owned by the worker thread
-  std::atomic<bool> available_ {false};
-};
-
-MysqlAccountStore::MysqlAccountStore(DbConfig config) : config_(std::move(config)) {
-  worker_ = std::thread([this] { Run(); });
-
-  // Probe synchronously: the caller wants to know at startup whether accounts work, and the
-  // worker has to run the connect anyway (the connection belongs to its thread). The probe is
-  // bounded by MYSQL_OPT_CONNECT_TIMEOUT, so this cannot hang the process. The job is pushed
-  // directly — Enqueue would take the mutex this scope already holds.
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    queue_.push_back([this] { Initialize(); });
+// Posts an account outcome into the requesting PlayerActor's mailbox. The result must
+// arrive as a message, not as a return value: PlayerActor's handlers never suspend
+// (player_actor.h), so there is nothing there to await.
+void ReplyAuth(const ex_actor::ActorRef<PlayerActor>& reply, AuthOutcome outcome) {
+  if (reply.IsEmpty()) {
+    return;  // the connection went away while the query ran; nobody is left to answer
   }
-  wakeup_.notify_one();
-  std::unique_lock<std::mutex> lock(mutex_);
-  init_done_cv_.wait(lock, [this] { return init_done_; });
+  ActorSendScope().spawn(
+      reply.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::OnLoginResult(std::move(outcome))));
 }
 
-MysqlAccountStore::~MysqlAccountStore() { Stop(); }
-
-bool MysqlAccountStore::Enqueue(Job job) {
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    // The queue is a plain deque drained front-to-back, so jobs run in submission order. That
-    // FIFO property is load-bearing: a match record is submitted before the client can ask for
-    // the stats that must include it (the game_end frame reaches the client only after
-    // NotifyFinished has run).
-    if (stopping_) {
-      spdlog::warn("db: dropping an account operation submitted during shutdown");
-      return false;
-    }
-    if (queue_.size() >= kMaxPendingJobs) {
-      spdlog::error("db: {} account operations are already queued; refusing another one", queue_.size());
-      return false;
-    }
-    queue_.push_back(std::move(job));
-  }
-  wakeup_.notify_one();
-  return true;
-}
-
-void MysqlAccountStore::Run() {
-  // The client library is initialized and torn down on this one thread, so no other thread
-  // ever touches a half-initialized library (mysql_library_init is not thread safe).
-  if (mysql_library_init(0, nullptr, nullptr) != 0) {
-    spdlog::error("db: mysql_library_init failed; account features are disabled");
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      stopping_ = true;  // Enqueue must not accumulate jobs nobody will ever run
-      init_done_ = true;
-    }
-    init_done_cv_.notify_all();
+void ReplyRegister(const ex_actor::ActorRef<PlayerActor>& reply, AuthOutcome outcome) {
+  if (reply.IsEmpty()) {
     return;
   }
-  mysql_thread_init();
-  while (true) {
-    Job job;
-    {
-      std::unique_lock<std::mutex> lock(mutex_);
-      wakeup_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
-      if (queue_.empty()) {
-        break;  // stopping_ and drained
-      }
-      job = std::move(queue_.front());
-      queue_.pop_front();
-    }
-    // Outside the lock: a job posts into an actor mailbox and must not hold it (timer.cc
-    // makes the same promise about its actions). A throwing job must never kill the worker.
-    try {
-      job();
-    } catch (const std::exception& e) {
-      spdlog::error("db: account operation failed: {}", e.what());
-    }
-  }
-  Disconnect();  // the connection is this thread's, so it is closed on this thread
-  mysql_thread_end();
-  mysql_library_end();
+  ActorSendScope().spawn(
+      reply.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::OnRegisterResult(std::move(outcome))));
 }
 
-void MysqlAccountStore::Initialize() {
-  bool ok = EnsureConnected() && EnsureSchema();
-  available_.store(ok, std::memory_order_relaxed);
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    init_done_ = true;
+void ReplyStats(const ex_actor::ActorRef<PlayerActor>& reply, StatsOutcome outcome) {
+  if (reply.IsEmpty()) {
+    return;
   }
-  init_done_cv_.notify_all();
+  ActorSendScope().spawn(
+      reply.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::OnStatsResult(std::move(outcome))));
+}
+
+}  // namespace
+
+DbActor::DbActor(DbConfig config) : config_(std::move(config)) {
+  // Deliberately empty: the connection belongs to db_pool's thread, and this constructor runs
+  // on the thread that called Spawn. Initialize() does the opening, on the right thread.
+}
+
+exec::task<bool> DbActor::Initialize() {
+  // The library is initialised once for the whole process (DbLibraryInit); this call only
+  // registers the current thread with it, which is what makes the client usable here at all.
+  // Every db_pool thread runs this for itself.
+  if (!DbLibraryInit()) {
+    spdlog::error("db: mysql_library_init failed; account features are disabled");
+    co_return false;
+  }
+  mysql_thread_init();
+
+  bool ok = EnsureConnected() && EnsureSchema();
+  available_ = ok;
   if (ok) {
     spdlog::info("db: account storage ready (database '{}' on {}:{})", config_.db, config_.host, config_.port);
   } else {
@@ -232,9 +161,10 @@ void MysqlAccountStore::Initialize() {
     spdlog::error("db: account storage unavailable ({}:{}); accounts are disabled, the game itself is unaffected",
                   config_.host, config_.port);
   }
+  co_return ok;
 }
 
-bool MysqlAccountStore::EnsureConnected() {
+bool DbActor::EnsureConnected() {
   if (mysql_ != nullptr) {
     return true;
   }
@@ -263,25 +193,26 @@ bool MysqlAccountStore::EnsureConnected() {
                          static_cast<unsigned int>(config_.port), nullptr, 0) == nullptr) {
     spdlog::error("db: cannot connect to MySQL at {}:{}: {}", config_.host, config_.port, mysql_error(handle));
     mysql_close(handle);
-    available_.store(false, std::memory_order_relaxed);
+    available_ = false;
     return false;
   }
   mysql_ = handle;
   return true;
 }
 
-bool MysqlAccountStore::EnsureSchema() {
+bool DbActor::EnsureSchema() {
   if (!IsValidDatabaseName(config_.db)) {
     spdlog::error("db: '{}' is not a usable database name", config_.db);
     return false;
   }
+  MYSQL* mysql = static_cast<MYSQL*>(mysql_);
   const std::string create_database = "CREATE DATABASE IF NOT EXISTS `" + config_.db + "` CHARACTER SET utf8mb4";
-  if (mysql_query(mysql_, create_database.c_str()) != 0) {
-    spdlog::error("db: CREATE DATABASE failed: {}", mysql_error(mysql_));
+  if (mysql_query(mysql, create_database.c_str()) != 0) {
+    spdlog::error("db: CREATE DATABASE failed: {}", mysql_error(mysql));
     return false;
   }
-  if (mysql_select_db(mysql_, config_.db.c_str()) != 0) {
-    spdlog::error("db: cannot select database '{}': {}", config_.db, mysql_error(mysql_));
+  if (mysql_select_db(mysql, config_.db.c_str()) != 0) {
+    spdlog::error("db: cannot select database '{}': {}", config_.db, mysql_error(mysql));
     return false;
   }
 
@@ -309,99 +240,108 @@ bool MysqlAccountStore::EnsureSchema() {
       "  PRIMARY KEY (id),"
       "  KEY idx_matches_account (account_id, id)"
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+      // v1.3 新增：场次汇总（一场每账号一行），与 ACCOUNT_DESIGN.md §2.1 逐字段一致。
+      "CREATE TABLE IF NOT EXISTS match_results ("
+      "  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,"
+      "  account_id BIGINT UNSIGNED NOT NULL,"
+      "  room_id VARCHAR(16) NOT NULL,"
+      "  hands_played INT NOT NULL,"
+      "  dealer_hands INT NOT NULL,"
+      "  final_score INT NOT NULL,"
+      "  final_rank TINYINT NOT NULL,"
+      "  ended_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+      "  PRIMARY KEY (id),"
+      "  KEY idx_match_results_account (account_id, id),"
+      "  UNIQUE KEY uk_match_results_room_account (room_id, account_id)"
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
   };
   for (const char* statement : kSchema) {
-    if (mysql_query(mysql_, statement) != 0) {
-      spdlog::error("db: schema creation failed: {}", mysql_error(mysql_));
+    if (mysql_query(mysql, statement) != 0) {
+      spdlog::error("db: schema creation failed: {}", mysql_error(mysql));
       return false;
     }
   }
   return true;
 }
 
-void MysqlAccountStore::Disconnect() {
+void DbActor::Disconnect() {
   if (mysql_ != nullptr) {
-    mysql_close(mysql_);
+    mysql_close(static_cast<MYSQL*>(mysql_));
     mysql_ = nullptr;
   }
-  available_.store(false, std::memory_order_relaxed);
+  available_ = false;
 }
 
-std::string MysqlAccountStore::Escape(const std::string& value) {
-  if (mysql_ == nullptr) {
+std::string DbActor::Escape(const std::string& value) {
+  MYSQL* mysql = static_cast<MYSQL*>(mysql_);
+  if (mysql == nullptr) {
     return {};
   }
   std::vector<char> buffer(value.size() * 2 + 1);
   unsigned long length =
-      mysql_real_escape_string(mysql_, buffer.data(), value.c_str(), static_cast<unsigned long>(value.size()));
+      mysql_real_escape_string(mysql, buffer.data(), value.c_str(), static_cast<unsigned long>(value.size()));
   return std::string(buffer.data(), length);
 }
 
-void MysqlAccountStore::LoginAsync(std::string username, std::string password, std::function<void(AuthOutcome)> done) {
-  if (!Enqueue([this, username = std::move(username), password = std::move(password), done = std::move(done)] {
-        LoginJob(username, password, done);
-      })) {
-    done(AuthOutcome {});  // kUnavailable: the caller answers INTERNAL
-  }
+// ---- handlers (db_pool thread) -----------------------------------------------------------
+
+exec::task<void> DbActor::Login(std::string username, std::string password, ex_actor::ActorRef<PlayerActor> reply) {
+  ReplyAuth(reply, LoginJob(username, password));
+  co_return;
 }
 
-void MysqlAccountStore::RegisterAsync(std::string username, std::string password, std::string nickname,
-                                      std::function<void(AuthOutcome)> done) {
-  if (!Enqueue([this, username = std::move(username), password = std::move(password), nickname = std::move(nickname),
-                done = std::move(done)] { RegisterJob(username, password, nickname, done); })) {
-    done(AuthOutcome {});
-  }
+exec::task<void> DbActor::Register(std::string username, std::string password, std::string nickname,
+                                   ex_actor::ActorRef<PlayerActor> reply) {
+  ReplyRegister(reply, RegisterJob(username, password, nickname));
+  co_return;
 }
 
-void MysqlAccountStore::FetchStatsAsync(uint64_t account_id, std::function<void(StatsOutcome)> done) {
-  if (!Enqueue([this, account_id, done = std::move(done)] { StatsJob(account_id, done); })) {
-    done(StatsOutcome {});
-  }
+exec::task<void> DbActor::FetchStats(uint64_t account_id, ex_actor::ActorRef<PlayerActor> reply) {
+  ReplyStats(reply, StatsJob(account_id));
+  co_return;
 }
 
-void MysqlAccountStore::RecordMatchAsync(MatchRecord record) {
-  // Fire and forget: a refused record is a logged loss (§2.3), never a change in game behaviour.
-  Enqueue([this, record = std::move(record)] { RecordJob(record); });
+exec::task<void> DbActor::RecordMatch(MatchRecord record) {
+  // Fire and forget: a failed write is logged and never propagates to the game (§2.3, §4.6).
+  RecordJob(record);
+  co_return;
 }
 
-void MysqlAccountStore::Stop() {
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (stopping_) {
-      return;
-    }
-    stopping_ = true;
-  }
-  wakeup_.notify_all();
-  if (worker_.joinable()) {
-    worker_.join();
-  }
+exec::task<void> DbActor::RecordMatchResult(MatchResultRecord record) {
+  // Fire and forget (§4 item 7)：场终一次性写入；失败只记日志，绝不影响 match_end 的广播。
+  RecordMatchResultJob(record);
+  co_return;
 }
 
-// ---- job bodies (worker thread) ---------------------------------------------------------
+exec::task<void> DbActor::Stop() {
+  Disconnect();
+  // Only this thread unregisters itself; the library itself is torn down once by main() after
+  // every db thread has stopped (DbLibraryShutdown).
+  mysql_thread_end();
+  co_return;
+}
 
-void MysqlAccountStore::LoginJob(const std::string& username, const std::string& password,
-                                 const std::function<void(AuthOutcome)>& done) {
+// ---- query bodies (db_pool thread) -------------------------------------------------------
+
+AuthOutcome DbActor::LoginJob(const std::string& username, const std::string& password) {
   AuthOutcome outcome;
   if (!EnsureConnected()) {
-    done(outcome);
-    return;
+    return outcome;
   }
+  MYSQL* mysql = static_cast<MYSQL*>(mysql_);
   // §3.1: an unknown account and a wrong password must be indistinguishable, so one query
   // answers both and the row's absence is simply a failure.
   const std::string sql = "SELECT id, nickname, (password_hash = SHA2(CONCAT(password_salt, '" + Escape(password) +
                           "'), 256)) AS ok FROM accounts WHERE username = '" + Escape(username) + "'";
-  if (mysql_query(mysql_, sql.c_str()) != 0) {
-    spdlog::error("db: login query failed: {}", mysql_error(mysql_));
+  if (mysql_query(mysql, sql.c_str()) != 0) {
+    spdlog::error("db: login query failed: {}", mysql_error(mysql));
     Disconnect();
-    done(outcome);
-    return;
+    return outcome;
   }
-  MYSQL_RES* result = mysql_store_result(mysql_);
+  MYSQL_RES* result = mysql_store_result(mysql);
   if (result == nullptr) {
-    spdlog::error("db: login query returned no result: {}", mysql_error(mysql_));
-    done(outcome);
-    return;
+    spdlog::error("db: login query returned no result: {}", mysql_error(mysql));
+    return outcome;
   }
   MYSQL_ROW row = mysql_fetch_row(result);
   if (row != nullptr && row[0] != nullptr && row[1] != nullptr && row[2] != nullptr && std::strcmp(row[2], "1") == 0) {
@@ -418,68 +358,66 @@ void MysqlAccountStore::LoginJob(const std::string& username, const std::string&
     // Best effort: a failed timestamp update must not fail a successful login.
     const std::string touch =
         "UPDATE accounts SET last_login_at = NOW() WHERE id = " + std::to_string(outcome.account.id);
-    if (mysql_query(mysql_, touch.c_str()) != 0) {
-      spdlog::warn("db: could not update last_login_at: {}", mysql_error(mysql_));
+    if (mysql_query(mysql, touch.c_str()) != 0) {
+      spdlog::warn("db: could not update last_login_at: {}", mysql_error(mysql));
     }
   }
-  done(outcome);
+  return outcome;
 }
 
-void MysqlAccountStore::RegisterJob(const std::string& username, const std::string& password,
-                                    const std::string& nickname, const std::function<void(AuthOutcome)>& done) {
+AuthOutcome DbActor::RegisterJob(const std::string& username, const std::string& password,
+                                 const std::string& nickname) {
   AuthOutcome outcome;
   if (!EnsureConnected()) {
-    done(outcome);
-    return;
+    return outcome;
   }
+  MYSQL* mysql = static_cast<MYSQL*>(mysql_);
   const std::string salt = RandomSalt();
   const std::string stored_nickname = nickname.empty() ? username : nickname;
   const std::string sql =
       "INSERT INTO accounts (username, password_salt, password_hash, nickname, last_login_at) VALUES ('" +
       Escape(username) + "', '" + salt + "', SHA2(CONCAT('" + salt + "', '" + Escape(password) + "'), 256), '" +
       Escape(stored_nickname) + "', NOW())";
-  if (mysql_query(mysql_, sql.c_str()) != 0) {
-    const unsigned int error = mysql_errno(mysql_);
+  if (mysql_query(mysql, sql.c_str()) != 0) {
+    const unsigned int error = mysql_errno(mysql);
     if (error == kErrDupEntry) {
       outcome.status = AuthStatus::kUsernameTaken;  // the UNIQUE key is the arbiter of races
     } else {
-      spdlog::error("db: register failed: {}", mysql_error(mysql_));
+      spdlog::error("db: register failed: {}", mysql_error(mysql));
       if (error == kErrServerGone || error == kErrServerLost) {
         Disconnect();
       }
     }
-    done(outcome);
-    return;
+    return outcome;
   }
   outcome.status = AuthStatus::kOk;
-  outcome.account.id = static_cast<uint64_t>(mysql_insert_id(mysql_));
+  outcome.account.id = static_cast<uint64_t>(mysql_insert_id(mysql));
   outcome.account.username = username;
   outcome.account.nickname = stored_nickname;
-  done(outcome);
+  return outcome;
 }
 
-void MysqlAccountStore::StatsJob(uint64_t account_id, const std::function<void(StatsOutcome)>& done) {
+StatsOutcome DbActor::StatsJob(uint64_t account_id) {
   StatsOutcome outcome;
   if (!EnsureConnected()) {
-    done(outcome);
-    return;
+    return outcome;
   }
+  MYSQL* mysql = static_cast<MYSQL*>(mysql_);
   const std::string id = std::to_string(account_id);
   // COALESCE: an account with no finished game has SUM(x) = NULL, not 0.
   const std::string totals =
       "SELECT COUNT(*), COALESCE(SUM(delta_score), 0), COALESCE(SUM(win), 0),"
-      " COALESCE(SUM(reason = 'draw_exhausted'), 0) FROM matches WHERE account_id = " + id;
-  if (mysql_query(mysql_, totals.c_str()) != 0) {
-    spdlog::error("db: stats query failed: {}", mysql_error(mysql_));
+      " COALESCE(SUM(reason = 'draw_exhausted'), 0) FROM matches WHERE account_id = " +
+      id;
+  if (mysql_query(mysql, totals.c_str()) != 0) {
+    spdlog::error("db: stats query failed: {}", mysql_error(mysql));
     Disconnect();
-    done(outcome);
-    return;
+    return outcome;
   }
-  MYSQL_RES* result = mysql_store_result(mysql_);
+  MYSQL_RES* result = mysql_store_result(mysql);
   if (result == nullptr) {
-    spdlog::error("db: stats query returned no result: {}", mysql_error(mysql_));
-    done(outcome);
-    return;
+    spdlog::error("db: stats query returned no result: {}", mysql_error(mysql));
+    return outcome;
   }
   MYSQL_ROW row = mysql_fetch_row(result);
   if (row != nullptr) {
@@ -491,20 +429,19 @@ void MysqlAccountStore::StatsJob(uint64_t account_id, const std::function<void(S
   mysql_free_result(result);
 
   // §3.4: the recent list is newest first and capped at kMaxRecentMatches.
-  const std::string recent = "SELECT room_id, reason, delta_score, win, UNIX_TIMESTAMP(ended_at) FROM matches"
-                             " WHERE account_id = " +
-                             id + " ORDER BY id DESC LIMIT " + std::to_string(protocol::kMaxRecentMatches);
-  if (mysql_query(mysql_, recent.c_str()) != 0) {
-    spdlog::error("db: recent matches query failed: {}", mysql_error(mysql_));
+  const std::string recent =
+      "SELECT room_id, reason, delta_score, win, UNIX_TIMESTAMP(ended_at) FROM matches"
+      " WHERE account_id = " +
+      id + " ORDER BY id DESC LIMIT " + std::to_string(protocol::kMaxRecentMatches);
+  if (mysql_query(mysql, recent.c_str()) != 0) {
+    spdlog::error("db: recent matches query failed: {}", mysql_error(mysql));
     Disconnect();
-    done(outcome);
-    return;
+    return outcome;
   }
-  result = mysql_store_result(mysql_);
+  result = mysql_store_result(mysql);
   if (result == nullptr) {
-    spdlog::error("db: recent matches query returned no result: {}", mysql_error(mysql_));
-    done(outcome);
-    return;
+    spdlog::error("db: recent matches query returned no result: {}", mysql_error(mysql));
+    return outcome;
   }
   while (MYSQL_ROW entry = mysql_fetch_row(result)) {
     if (entry[0] == nullptr || entry[1] == nullptr) {
@@ -520,31 +457,52 @@ void MysqlAccountStore::StatsJob(uint64_t account_id, const std::function<void(S
   }
   mysql_free_result(result);
   outcome.ok = true;
-  done(outcome);
+  return outcome;
 }
 
-void MysqlAccountStore::RecordJob(const MatchRecord& record) {
+void DbActor::RecordJob(const MatchRecord& record) {
   if (!EnsureConnected()) {
     spdlog::warn("db: dropping the match record of room {} (account storage unavailable)", record.room_id);
     return;
   }
+  MYSQL* mysql = static_cast<MYSQL*>(mysql_);
   const std::string sql = "INSERT INTO matches (account_id, room_id, reason, delta_score, win) VALUES (" +
                           std::to_string(record.account_id) + ", '" + Escape(record.room_id) + "', '" +
                           Escape(record.reason) + "', " + std::to_string(record.delta_score) + ", " +
                           (record.win ? "1" : "0") + ")";
-  if (mysql_query(mysql_, sql.c_str()) != 0) {
-    spdlog::error("db: recording the match of room {} failed: {}", record.room_id, mysql_error(mysql_));
-    const unsigned int error = mysql_errno(mysql_);
+  if (mysql_query(mysql, sql.c_str()) != 0) {
+    spdlog::error("db: recording the match of room {} failed: {}", record.room_id, mysql_error(mysql));
+    const unsigned int error = mysql_errno(mysql);
     if (error == kErrServerGone || error == kErrServerLost) {
       Disconnect();
     }
   }
 }
 
-}  // namespace
-
-std::shared_ptr<AccountStore> AccountStore::Create(DbConfig config) {
-  return std::make_shared<MysqlAccountStore>(std::move(config));
+void DbActor::RecordMatchResultJob(const MatchResultRecord& record) {
+  if (!EnsureConnected()) {
+    spdlog::warn("db: dropping the match result of room {} (account storage unavailable)", record.room_id);
+    return;
+  }
+  MYSQL* mysql = static_cast<MYSQL*>(mysql_);
+  const std::string sql =
+      "INSERT INTO match_results (account_id, room_id, hands_played, dealer_hands, final_score, final_rank) VALUES (" +
+      std::to_string(record.account_id) + ", '" + Escape(record.room_id) + "', " +
+      std::to_string(record.hands_played) + ", " + std::to_string(record.dealer_hands) + ", " +
+      std::to_string(record.final_score) + ", " + std::to_string(record.final_rank) + ")";
+  if (mysql_query(mysql, sql.c_str()) != 0) {
+    const unsigned int error = mysql_errno(mysql);
+    // v1.3 §4 第 1 条：重复写入（同 room_id + account_id 命中 UNIQUE 键）记 WARN 并忽略，绝不重试。
+    if (error == 1062 /* ER_DUP_ENTRY */) {
+      spdlog::warn("db: match result of room {} for account {} already recorded; ignoring the duplicate",
+                   record.room_id, record.account_id);
+      return;
+    }
+    spdlog::error("db: recording the match result of room {} failed: {}", record.room_id, mysql_error(mysql));
+    if (error == kErrServerGone || error == kErrServerLost) {
+      Disconnect();
+    }
+  }
 }
 
 }  // namespace mahjong

@@ -48,6 +48,31 @@ inline constexpr int kDefaultActionTimeoutMs = 15000;
 inline constexpr int kMinActionTimeoutMs = 1000;
 inline constexpr int kMaxActionTimeoutMs = 60000;
 
+// ---- §4 client frame types ------------------------------------------------------------
+// The "type" field of every client frame. Declared here because the routing table
+// (player_actor.cc) plus its tests are the two places that must agree on them: a typo in a
+// string literal there would silently become an unknown frame type at runtime.
+inline constexpr char kFrameLogin[] = "login";
+inline constexpr char kFrameRegister[] = "register";
+inline constexpr char kFramePing[] = "ping";
+inline constexpr char kFrameStatsRequest[] = "stats_request";
+inline constexpr char kFrameListRooms[] = "list_rooms";
+inline constexpr char kFrameCreateRoom[] = "create_room";
+inline constexpr char kFrameJoinRoom[] = "join_room";
+inline constexpr char kFrameReady[] = "ready";
+inline constexpr char kFrameSync[] = "sync";
+inline constexpr char kFrameDiscard[] = "discard";
+inline constexpr char kFrameAction[] = "action";
+
+// The same list as a range, so the routing table can assert its own completeness at compile
+// time: adding a frame type here without a row in the routing table (kFrameRoutes in
+// player_agent.h, asserted by the static_assert in player_actor.cc) is a build error rather
+// than a frame that silently answers "unknown frame type" in production.
+inline constexpr std::string_view kClientFrameTypes[] = {
+    kFrameLogin,   kFrameRegister,  kFramePing,   kFrameStatsRequest, kFrameListRooms, kFrameCreateRoom,
+    kFrameJoinRoom, kFrameReady,    kFrameSync,   kFrameDiscard,      kFrameAction,
+};
+
 // ---- §7.1 error codes (exactly these 14; STALE_SEQ is deliberately absent) -------------
 // The last three come from ACCOUNT_DESIGN.md §3.5 (PROTOCOL.md §7.1 was amended from 11 to
 // 14 codes); the semantics and thresholds of the original 11 are unchanged.
@@ -113,6 +138,16 @@ inline bool IsValidNickname(std::string_view name) {
 // it instead of hard-coding m/p/s: a future tile-set change (e.g. adding the honour tiles)
 // then propagates here automatically and can never leave the gateway rejecting legal tiles.
 inline bool IsValidTileCode(std::string_view tile) { return ParseTile(tile).has_value(); }
+
+// ---- §4.6 action names ----------------------------------------------------------------
+// The seven names are frozen by §4.6 (v1.6: 5 → 7, +ankan/kakan), so the vocabulary lives here
+// next to the tile alphabet. Whether an action is legal *in the current window* is a game-level
+// question that stays in room.cc (ILLEGAL_ACTION); this only says the client spelled a real
+// action.
+inline bool IsKnownActionName(std::string_view action) {
+  return action == "pass" || action == "pong" || action == "chow" || action == "kong" ||
+         action == "ankan" || action == "kakan" || action == "win";
+}
 
 // ---- §5.2 error frame -----------------------------------------------------------------
 std::string ErrorFrame(std::string_view code, std::string_view message);

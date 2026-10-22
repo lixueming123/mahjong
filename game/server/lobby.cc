@@ -1,11 +1,10 @@
 #include "lobby.h"
 
-#include <spdlog/spdlog.h>
-
-
 #include <exception>
 #include <string>
 #include <utility>
+
+#include <spdlog/spdlog.h>
 
 #include "actor_scope.h"
 #include "protocol.h"
@@ -57,22 +56,22 @@ std::string BuildRoomJoinedFrame(const std::string& room_id, int seat, const std
 }
 
 LobbyActor::LobbyActor(uint64_t seed, int action_timeout_ms, std::shared_ptr<WindowTimer> timer,
-                       int game_end_reclaim_ms, std::shared_ptr<AccountStore> accounts)
+                       int game_end_reclaim_ms, DbService db)
     : seed_(seed),
       action_timeout_ms_(action_timeout_ms),
       game_end_reclaim_ms_(game_end_reclaim_ms),
       timer_(std::move(timer)),
-      accounts_(std::move(accounts)) {}
+      db_(std::move(db)) {}
 
 // Seat-facing replies. The lobby never touches a Connection any more: it messages the seat's
-// ConnectionActor and the frame lands in that connection's outbox (PROTOCOL §7.2's quota is
+// PlayerActor and the frame lands in that connection's outbox (PROTOCOL §7.2's quota is
 // charged by the same message when the error is a BAD_REQUEST). Awaiting them keeps the old
 // synchronous behaviour: when a lobby handler returns, its frames are already queued.
 exec::task<void> LobbyActor::ReplyFrame(const ex_actor::ActorRef<SeatEndpoint>& conn, std::string frame) {
   if (conn.IsEmpty()) {
     co_return;  // no wire (the unit test's seatless players)
   }
-  co_await conn.SendLocal<&SeatEndpoint::Dispatch>(ConnectionEnvelope::SeatFrame(std::move(frame)));
+  co_await conn.SendLocal<&SeatEndpoint::Dispatch>(PlayerEnvelope::SeatFrame(std::move(frame)));
 }
 
 exec::task<void> LobbyActor::ReplyError(const ex_actor::ActorRef<SeatEndpoint>& conn, std::string_view code,
@@ -82,7 +81,7 @@ exec::task<void> LobbyActor::ReplyError(const ex_actor::ActorRef<SeatEndpoint>& 
   }
   const QuotaKind quota = code == protocol::kCodeBadRequest ? QuotaKind::kBadFrame : QuotaKind::kNone;
   co_await conn.SendLocal<&SeatEndpoint::Dispatch>(
-      ConnectionEnvelope::SeatError(protocol::ErrorFrame(code, message), quota));
+      PlayerEnvelope::SeatError(protocol::ErrorFrame(code, message), quota));
 }
 
 exec::task<void> LobbyActor::SetSelfRef(ex_actor::ActorRef<LobbyActor> self) {
@@ -114,7 +113,7 @@ exec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn, P
   uint64_t room_seed = 0;
   std::vector<RoomSeat> seats;
   std::shared_ptr<WindowTimer> timer;
-  std::shared_ptr<AccountStore> accounts;
+  DbService db;
   ex_actor::ActorRef<LobbyActor> self;
   int reclaim_ms = 0;
   enum class Reject { kNone, kAlready, kNoSelf };
@@ -139,7 +138,7 @@ exec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn, P
       seats = BuildInitialSeats(player, conn);
       creating_[player.player_id] = room_id;
       timer = timer_;
-      accounts = accounts_;
+      db = db_;
       self = self_ref_;
       reclaim_ms = game_end_reclaim_ms_;
     }
@@ -172,7 +171,7 @@ exec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn, P
       creating_.erase(pending);
     }
     if (owned && spawn_error.empty()) {
-      players_[player.player_id] = PlayerState {player.name, room_id, conn};
+      players_[player.player_id] = PlayerState {room_id, conn};
       rooms_[room_id] = room;
       room_seats_[room_id] = seats;
       room_started_[room_id] = false;
@@ -195,8 +194,8 @@ exec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn, P
   // Install the window timeout scheduler: the delayed message carries the window seq and is
   // posted back into the room (PROTOCOL.md §0.5). Enqueued before any client frame can reach
   // the room, because room_joined is only sent below.
-  ActorSendScope().spawn(room.SendLocal<&RoomActor::Dispatch>(RoomEnvelope::InstallTimeoutScheduler(
-      TimeoutScheduler([room, timer](int64_t delay_ms, uint64_t window_seq) {
+  ActorSendScope().spawn(room.SendLocal<&RoomActor::Dispatch>(
+      RoomEnvelope::InstallTimeoutScheduler(TimeoutScheduler([room, timer](int64_t delay_ms, uint64_t window_seq) {
         if (timer == nullptr) {
           return;
         }
@@ -205,24 +204,44 @@ exec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn, P
         });
       }))));
 
-  // PROTOCOL.md §1.4.5: game_end is followed by a reclaim of the room and its connection
-  // unless the client goes away first. The delayed message comes back to this actor, which
-  // owns the registry.
+  // PROTOCOL.md §1.4.5 (v1.6): the callback fires once per ROUND; the per-round match records
+  // are written every time, but the reclaim is armed only when the match is over (game_end no
+  // longer ends the room — the room survives across the rounds of one match, §0.4).
   ActorSendScope().spawn(room.SendLocal<&RoomActor::Dispatch>(RoomEnvelope::InstallFinishedCallback(
-      RoomFinishedCallback([self, timer, room_id, reclaim_ms, accounts](const GameSettlement& settlement) {
-        // ACCOUNT_DESIGN.md §4.1: one row per account-backed human seat, submitted to the
-        // storage thread and then forgotten. The room promises this runs exactly once per
-        // game, and it never retries, so a lost write can only cost a row, not a duplicate.
-        if (accounts != nullptr) {
+      RoomFinishedCallback([self, timer, room_id, reclaim_ms, db](const GameSettlement& settlement) {
+        // ACCOUNT_DESIGN.md §4.1: one row per account-backed human seat, posted to DbActor and
+        // then forgotten. The room promises this runs exactly once per round, and it never
+        // retries, so a lost write can only cost a row, not a duplicate.
+        if (!db.IsEmpty()) {
           for (const SettledSeat& seat : settlement.seats) {
             if (seat.is_bot || seat.player.account_id == 0) {
               continue;  // guests and bots have no history to keep (§4.2)
             }
-            accounts->RecordMatchAsync(MatchRecord {seat.player.account_id, settlement.room_id, settlement.reason,
-                                                    seat.delta_score, seat.winner});
+            ActorSendScope().spawn(db.RecordMatch(MatchRecord {
+                seat.player.account_id, settlement.room_id, settlement.reason, seat.delta_score, seat.winner}));
           }
         }
-        if (timer == nullptr) {
+        // ACCOUNT_DESIGN.md v1.3 §4 item 7: the match summary is written ONCE per match (at
+        // match_over), one row per account-backed seat — bots and guests have no history to
+        // keep (§4.2). Fire-and-forget; a lost row is never a game error.
+        if (settlement.match_over && !db.IsEmpty()) {
+          for (const SettledSeat& seat : settlement.seats) {
+            if (seat.is_bot || seat.player.account_id == 0) {
+              continue;
+            }
+            const int seat_index = static_cast<int>(&seat - settlement.seats.data());
+            MatchResultRecord result;
+            result.account_id = seat.player.account_id;
+            result.room_id = settlement.room_id;
+            result.hands_played = settlement.hands_played;
+            result.dealer_hands = settlement.dealer_hands[static_cast<size_t>(seat_index)];
+            result.final_score = settlement.totals[static_cast<size_t>(seat_index)];
+            result.final_rank = settlement.final_rank[static_cast<size_t>(seat_index)];
+            ActorSendScope().spawn(db.RecordMatchResult(std::move(result)));
+          }
+        }
+        // C10：局终（game_end）不回收；match_over（match_end 已下发）才 arm 30s 回收。
+        if (!settlement.match_over || timer == nullptr) {
           return;
         }
         timer->Schedule(reclaim_ms,
@@ -233,8 +252,8 @@ exec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn, P
                player.name);
   if (!conn.IsEmpty()) {
     // Hand the connection its room first: from here gameplay frames go straight to the room
-    // instead of back through this actor (connection_actor.cc RouteGameFrame).
-    co_await conn.SendLocal<&SeatEndpoint::Dispatch>(ConnectionEnvelope::SetRoom(room));
+    // instead of back through this actor (player_actor.cc RouteGameFrame).
+    co_await conn.SendLocal<&SeatEndpoint::Dispatch>(PlayerEnvelope::SetRoom(room));
     co_await ReplyFrame(conn, BuildRoomJoinedFrame(room_id, 0, seats));
   }
 }
@@ -242,7 +261,6 @@ exec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn, P
 exec::task<void> LobbyActor::ListRooms(ex_actor::ActorRef<SeatEndpoint> conn) {
   json::Value rooms = json::Value::Arr();
   {
-    AsyncGate::Guard guard = co_await gate_.Acquire();
     for (const auto& [room_id, seats] : room_seats_) {
       const auto started = room_started_.find(room_id);
       if (started != room_started_.end() && started->second) {
@@ -316,7 +334,7 @@ exec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, Pla
         claimed.disconnected = false;
         claimed.endpoint = conn;
         seats[static_cast<size_t>(free)] = claimed;
-        players_[player.player_id] = PlayerState {player.name, room_id, conn};
+        players_[player.player_id] = PlayerState {room_id, conn};
         snapshot = seats;
         room = rooms_[room_id];
       }
@@ -356,7 +374,7 @@ exec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, Pla
     co_await ReplyError(conn, protocol::kCodeRoomNotFound, "room already started");
     co_return;
   }
-  co_await conn.SendLocal<&SeatEndpoint::Dispatch>(ConnectionEnvelope::SetRoom(room));
+  co_await conn.SendLocal<&SeatEndpoint::Dispatch>(PlayerEnvelope::SetRoom(room));
   co_await ReplyFrame(conn, BuildRoomJoinedFrame(room_id, claimed.seat, snapshot));
 }
 
@@ -496,7 +514,7 @@ exec::task<void> LobbyActor::ReapRoom(std::string room_id) {
   // holding is of any use. Dropping the last ActorRef also destroys the RoomActor and its
   // state; the connections are asked to close so the gateway frees the sockets.
   for (const ex_actor::ActorRef<SeatEndpoint>& conn : closing) {
-    co_await conn.SendLocal<&SeatEndpoint::Dispatch>(ConnectionEnvelope::Close("room reclaimed after game_end"));
+    co_await conn.SendLocal<&SeatEndpoint::Dispatch>(PlayerEnvelope::Close("room reclaimed after game_end"));
   }
   spdlog::info("lobby: reclaimed room {} after game_end ({} connection(s) closed)", room_id, closing.size());
 }
@@ -516,7 +534,7 @@ exec::task<void> LobbyActor::OnIdleTimeout(ex_actor::ActorRef<SeatEndpoint> conn
     }
   }
   if (drop_connection) {
-    co_await conn.SendLocal<&SeatEndpoint::Dispatch>(ConnectionEnvelope::Close("idle timeout in lobby"));
+    co_await conn.SendLocal<&SeatEndpoint::Dispatch>(PlayerEnvelope::Close("idle timeout in lobby"));
     co_return;
   }
   if (!room.IsEmpty()) {

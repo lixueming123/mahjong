@@ -39,10 +39,10 @@ inline constexpr int kGameEndReclaimMs = 30000;
 
 class LobbyActor {
  public:
-  // |accounts| may be null (unit tests, or a server without account support): the game then
-  // simply records no match history (ACCOUNT_DESIGN.md §4).
+  // |db| may be empty (unit tests, or a server without account support): the game then simply
+  // records no match history (ACCOUNT_DESIGN.md §4).
   LobbyActor(uint64_t seed, int action_timeout_ms, std::shared_ptr<WindowTimer> timer,
-             int game_end_reclaim_ms = kGameEndReclaimMs, std::shared_ptr<AccountStore> accounts = nullptr);
+             int game_end_reclaim_ms = kGameEndReclaimMs, DbService db = {});
 
   // Each handler locks `gate_` only around the registry access it actually does (async_gate.h).
   // Callers send straight to the method; there is no envelope switch in front of them.
@@ -82,8 +82,10 @@ class LobbyActor {
   exec::task<void> ReplyError(const ex_actor::ActorRef<SeatEndpoint>& conn, std::string_view code,
                               std::string_view message);
 
+  // Deliberately no `name`: the lobby never reads it. The nickname a client sees comes from
+  // RoomSeat::player (the room's copy) and from PlayerInfo on the wire, both owned elsewhere.
+  // Keeping a third copy here could only rot — nothing would notice if it diverged.
   struct PlayerState {
-    std::string name;
     std::string room_id;  // empty while the player is only in the lobby
     // Kept so the post-game reclaim can close the connection (§1.4.5).
     ex_actor::ActorRef<SeatEndpoint> conn;
@@ -109,8 +111,8 @@ class LobbyActor {
   // entrusted and the game keeps running (PROTOCOL.md §8.5).
   std::unordered_map<std::string, bool> room_started_;
   std::shared_ptr<WindowTimer> timer_;
-  // Match history (ACCOUNT_DESIGN.md §4). Null when the server runs without accounts.
-  std::shared_ptr<AccountStore> accounts_;
+  // Match history (ACCOUNT_DESIGN.md §4). Empty when the server runs without accounts.
+  DbService db_;
   ex_actor::ActorRef<LobbyActor> self_ref_;
   // Serializes registry access only (async_gate.h). Not held across Spawn or a seat send.
   AsyncGate gate_;

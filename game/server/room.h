@@ -24,6 +24,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 #include "async_gate.h"
@@ -43,7 +44,7 @@ inline constexpr int kSeatCount = 4;
 // (WindowTimer + the room's own ActorRef); tests inject a capturing one.
 using TimeoutScheduler = std::function<void(int64_t delay_ms, uint64_t window_seq)>;
 
-// One seat's outcome of a finished game. It carries the whole identity (not just the seat) so
+// One seat's outcome of a finished round. It carries the whole identity (not just the seat) so
 // the owner can record the result without asking the room anything (ACCOUNT_DESIGN.md §4).
 struct SettledSeat {
   PlayerInfo player;  // account_id == 0 for a guest or a bot
@@ -52,19 +53,27 @@ struct SettledSeat {
   int delta_score = 0;
 };
 
-// Everything the owner of a finished room needs: the §1.4.5 reclaim (room_id) and the match
-// records (ACCOUNT_DESIGN.md §2.1, §4), which is exactly what game_end already carries.
+// Everything the owner of a finished round needs. v1.6（一场四局）: the callback fires once per
+// ROUND (4..8 times per match), and `match_over` says whether the match just ended — only then
+// does the owner start the §1.4.5 reclaim; the per-round match records are written every time.
 struct GameSettlement {
   std::string room_id;
   std::string reason;              // win_ron / win_tsumo / draw_exhausted
   std::vector<SettledSeat> seats;  // always kSeatCount entries, in seat order
+  bool match_over = false;         // true = the match_end has been/will be broadcast (§5.15)
+  // ---- v1.3 场终快照（match_over 时有效；lobby 据此写 match_results，B3）----
+  int hands_played = 0;                         // 实际计入局数（D2 口径）
+  std::array<int, kSeatCount> dealer_hands {};  // 各座位坐庄手数（含连庄）
+  std::array<int, kSeatCount> totals {};        // final_score = 本场累计得失分（零和）
+  std::array<int, kSeatCount> final_rank {};    // 1..4，并列跳号
 };
 
-// Called exactly once, when the room's game reaches game_end, so its owner (LobbyActor) can
-// start the post-game reclaim of PROTOCOL §1.4.5 and store the match. Installed by the lobby
-// right after Spawn; a room created without one (unit tests) simply never notifies. The
-// callback must not re-enter this actor (the lobby's implementation only arms a delayed
-// message and hands the result to the storage thread).
+// Called once per finished round (v1.6: 4..8 times per match), so its owner (LobbyActor) can
+// store the per-round match record; the §1.4.5 reclaim is armed only when
+// `settlement.match_over` is true. Installed by the lobby right after Spawn; a room created
+// without one (unit tests) simply never notifies. The callback must not re-enter this actor
+// (the lobby's implementation only arms a delayed message and hands the result to the storage
+// thread).
 using RoomFinishedCallback = std::function<void(const GameSettlement& settlement)>;
 
 // Derives one room's wall seed from the server-level seed and the room's 0-based creation
@@ -96,20 +105,39 @@ inline uint64_t DeriveRoomSeed(uint64_t base_seed, uint32_t room_index) {
 constexpr int kDefaultAiDelayMs = 900;
 constexpr int kMaxAiDelayMs = 5000;
 
+// v1.6（一场四局）: the pause between two rounds of one match (game_end -> next game_start).
+constexpr int kDefaultInterHandDelayMs = 5000;
+constexpr int kMaxInterHandDelayMs = 60000;
+
 // Encoding of a scheduled-message token. A window deadline carries the plain envelope seq; an
 // AI pacing deadline carries the same seq with kAiPacingTokenBit set, so one handler can serve
 // both while the seq stays the invalidation key (PROTOCOL.md §0.5). Envelope seqs are small,
-// so the top bit can never appear naturally.
+// so the top bits can never appear naturally.
 constexpr uint64_t kAiPacingTokenBit = 1ull << 63;
 inline uint64_t MakeAiPacingToken(uint64_t window_seq) { return window_seq | kAiPacingTokenBit; }
 inline bool IsAiPacingToken(uint64_t token) { return (token & kAiPacingTokenBit) != 0; }
-inline uint64_t WindowSeqOfToken(uint64_t token) { return token & ~kAiPacingTokenBit; }
 
-// Process-wide pacing value, set once by main() from --ai-delay-ms. RoomActor reads it when
-// the value is not passed explicitly (LobbyActor spawns rooms without carrying it, and
-// lobby.* is outside this change); tests pass the delay to the constructor instead.
+// v1.6（C6 局间推进令牌）: the round-to-round advance deadline carries the seq the round ended
+// on, tagged with its own bit. It MUST be armed AFTER the round-end Transition(), so the token
+// holds the brand-new seq: the last window's timeout (armed pre-transition, plain tag) fails
+// the first criterion, the advance token passes it — the two never collide, and that is only
+// true because of the arm-after-transition ordering.
+constexpr uint64_t kRoundAdvanceTokenBit = 1ull << 62;
+inline uint64_t MakeRoundAdvanceToken(uint64_t window_seq) {
+  return window_seq | kRoundAdvanceTokenBit;
+}
+inline bool IsRoundAdvanceToken(uint64_t token) { return (token & kRoundAdvanceTokenBit) != 0; }
+inline uint64_t WindowSeqOfToken(uint64_t token) {
+  return token & ~(kAiPacingTokenBit | kRoundAdvanceTokenBit);
+}
+
+// Process-wide pacing values, set once by main() from --ai-delay-ms / --inter-hand-delay-ms.
+// RoomActor reads them when the value is not passed explicitly (LobbyActor spawns rooms without
+// carrying them, and lobby.* is outside this change); tests pass the delay to the constructor.
 void SetAiActionDelayMs(int delay_ms);
 int AiActionDelayMs();
+void SetInterHandDelayMs(int delay_ms);
+int InterHandDelayMs();
 
 struct RoomSeat {
   int seat = 0;
@@ -124,63 +152,76 @@ struct RoomSeat {
 // One message into RoomActor. `Dispatch` is the room's only entry point, so every caller —
 // LobbyActor's sends, the timeout scheduler, the game-end notification and the unit tests —
 // builds one of these instead of naming a handler.
+//
+// As in PlayerEnvelope (seat_endpoint.h), the kind is the variant alternative, so a message
+// carries exactly its own fields. The flat version was 360 bytes for every message: the window
+// timeout — the most frequent one — paid for a PlayerInfo, a json::Value, two std::functions
+// and a RoomSeat on each of the ~5 by-value moves into the mailbox. The variant is 160 bytes,
+// and its floor is GameFrameMsg, which really does carry a player and a frame.
 struct RoomEnvelope {
-  enum class Kind {
-    kReady,
-    kSync,
-    kGameFrame,
-    kWindowTimeout,
-    kPlayerDisconnected,
-    kIdleTimeout,
-    kInstallTimeoutScheduler,
-    kInstallFinishedCallback,
-    kTakeSeat,
+  struct ReadyMsg {  // lobby -> room: this player is ready; deals when the seats are full
+    PlayerInfo player;
   };
-
-  static RoomEnvelope Ready(PlayerInfo player) { return {.kind = Kind::kReady, .player = std::move(player)}; }
-  static RoomEnvelope Sync(PlayerInfo player) { return {.kind = Kind::kSync, .player = std::move(player)}; }
-  static RoomEnvelope GameFrame(PlayerInfo player, json::Value frame) {
-    return {.kind = Kind::kGameFrame, .player = std::move(player), .frame = std::move(frame)};
-  }
+  struct SyncMsg {  // lobby -> room: resend this player's current view
+    PlayerInfo player;
+  };
+  struct GameFrameMsg {  // a seat's gameplay frame (discard / action)
+    PlayerInfo player;
+    json::Value frame;
+  };
   // The frozen timeout scheme: |token| is a window seq, or the same seq with the AI pacing bit
   // set (PROTOCOL.md §0.5).
-  static RoomEnvelope WindowTimeout(uint64_t token) { return {.kind = Kind::kWindowTimeout, .token = token}; }
-  static RoomEnvelope PlayerDisconnected(PlayerInfo player) {
-    return {.kind = Kind::kPlayerDisconnected, .player = std::move(player)};
+  struct WindowTimeoutMsg {
+    uint64_t token;
+  };
+  struct PlayerDisconnectedMsg {
+    PlayerInfo player;
+  };
+  struct IdleTimeoutMsg {
+    PlayerInfo player;
+  };
+  struct InstallTimeoutSchedulerMsg {
+    TimeoutScheduler scheduler;
+  };
+  struct InstallFinishedCallbackMsg {
+    RoomFinishedCallback finished;
+  };
+  // Replace one seat before the deal. |accepted| is set on the room's thread.
+  struct TakeSeatMsg {
+    RoomSeat seat_slot;
+    std::shared_ptr<bool> accepted;
+  };
+
+  static RoomEnvelope Ready(PlayerInfo player) { return {ReadyMsg {std::move(player)}}; }
+  static RoomEnvelope Sync(PlayerInfo player) { return {SyncMsg {std::move(player)}}; }
+  static RoomEnvelope GameFrame(PlayerInfo player, json::Value frame) {
+    return {GameFrameMsg {std::move(player), std::move(frame)}};
   }
-  static RoomEnvelope IdleTimeout(PlayerInfo player) {
-    return {.kind = Kind::kIdleTimeout, .player = std::move(player)};
-  }
+  static RoomEnvelope WindowTimeout(uint64_t token) { return {WindowTimeoutMsg {token}}; }
+  static RoomEnvelope PlayerDisconnected(PlayerInfo player) { return {PlayerDisconnectedMsg {std::move(player)}}; }
+  static RoomEnvelope IdleTimeout(PlayerInfo player) { return {IdleTimeoutMsg {std::move(player)}}; }
   static RoomEnvelope InstallTimeoutScheduler(TimeoutScheduler scheduler) {
-    return {.kind = Kind::kInstallTimeoutScheduler, .scheduler = std::move(scheduler)};
+    return {InstallTimeoutSchedulerMsg {std::move(scheduler)}};
   }
   static RoomEnvelope InstallFinishedCallback(RoomFinishedCallback callback) {
-    return {.kind = Kind::kInstallFinishedCallback, .finished = std::move(callback)};
+    return {InstallFinishedCallbackMsg {std::move(callback)}};
   }
-  // Replace one seat before the deal. |accepted| is set on the room's thread.
   static RoomEnvelope TakeSeat(RoomSeat seat, std::shared_ptr<bool> accepted) {
-    RoomEnvelope envelope;
-    envelope.kind = Kind::kTakeSeat;
-    envelope.seat_slot = std::move(seat);
-    envelope.accepted = std::move(accepted);
-    return envelope;
+    return {TakeSeatMsg {.seat_slot = std::move(seat), .accepted = std::move(accepted)}};
   }
 
-  Kind kind = Kind::kReady;
-  PlayerInfo player;              // kReady / kSync / kGameFrame / kPlayerDisconnected / kIdleTimeout
-  json::Value frame;              // kGameFrame
-  uint64_t token = 0;             // kWindowTimeout
-  TimeoutScheduler scheduler;     // kInstallTimeoutScheduler
-  RoomFinishedCallback finished;  // kInstallFinishedCallback
-  RoomSeat seat_slot;             // kTakeSeat
-  std::shared_ptr<bool> accepted;  // kTakeSeat
+  std::variant<ReadyMsg, SyncMsg, GameFrameMsg, WindowTimeoutMsg, PlayerDisconnectedMsg, IdleTimeoutMsg,
+               InstallTimeoutSchedulerMsg, InstallFinishedCallbackMsg, TakeSeatMsg>
+      msg;
 };
 
 class RoomActor {
  public:
-  // |ai_delay_ms| < 0 means "use the process-wide value" (AiActionDelayMs()).
+  // |ai_delay_ms| < 0 means "use the process-wide value" (AiActionDelayMs()); the same applies
+  // to |inter_hand_delay_ms| (InterHandDelayMs()).
   RoomActor(std::string room_id, uint64_t seed, int action_timeout_ms, std::vector<RoomSeat> seats,
-            std::shared_ptr<WindowTimer> timer, int ai_delay_ms = -1);
+            std::shared_ptr<WindowTimer> timer, int ai_delay_ms = -1,
+            int inter_hand_delay_ms = -1);
 
   // The room's only entry point, and the only place the gate is taken. Every handler below is
   // private, so no caller can reach room state without passing the gate (async_gate.h explains
@@ -199,19 +240,29 @@ class RoomActor {
   //                                     the order the caller provided (frozen ClaimOptions
   //                                     order), and a pong wins a tie against a chow
   //   nothing acceptable             -> pass
-  // An automated seat never claims a kong.
+  // An automated seat never claims a kong (and ankan/kakan never appear in a claim window).
   static Option ChooseClaimAnswer(const std::vector<Tile>& hand, const std::vector<Meld>& melds,
                                   const std::vector<Option>& options, Tile claimed);
 
   // Introspection (logs and tests).
   const std::string& room_id() const { return room_id_; }
   bool game_started() const { return game_started_; }
-  bool game_finished() const { return phase_ == Phase::kFinished; }
+  // v1.6（C13）: `game_finished` is the MATCH end (the room is done for good); a round that has
+  // settled but is waiting for the next game_start is `round_finished`, not `game_finished`.
+  bool game_finished() const { return phase_ == Phase::kMatchEnd; }
+  bool match_finished() const { return phase_ == Phase::kMatchEnd; }
+  bool round_finished() const { return phase_ == Phase::kRoundEnd || phase_ == Phase::kMatchEnd; }
   uint64_t seq() const { return seq_; }
   int remaining() const { return remaining_; }
   int current_seat() const { return current_seat_; }
   int dealer() const { return dealer_; }
   int next_wall_index() const { return next_index_; }
+  // v1.6（C1 场次状态）
+  int round_index() const { return round_index_; }        // 0-based, 0..round_count-1（连庄不动）
+  int round_count() const { return round_count_; }        // 恒 4
+  int renchan_count() const { return renchan_count_; }    // 本场累计连庄次数
+  int hands_played() const { return hands_played_; }      // 已下发的 game_end 次数（含连庄）
+  int match_total_of(int seat) const { return match_totals_[static_cast<size_t>(seat)]; }
   // "" when no window is open, otherwise "discard" or "claim" (PROTOCOL.md §5.7).
   std::string CurrentWindow() const {
     if (discard_window_open_) return "discard";
@@ -232,7 +283,7 @@ class RoomActor {
   // Before the deal: take a bot seat, or put a bot back. No-op once the game has started.
   void TakeSeat(RoomSeat seat, const std::shared_ptr<bool>& accepted);
 
-  // Client intents, already shape-checked by ConnectionActor and room-checked by LobbyActor.
+  // Client intents, already shape-checked by PlayerActor and room-checked by LobbyActor.
   exec::task<void> Ready(PlayerInfo player);
   exec::task<void> Sync(PlayerInfo player);
   exec::task<void> HandleGameFrame(PlayerInfo player, json::Value frame);
@@ -243,11 +294,14 @@ class RoomActor {
   exec::task<void> OnIdleTimeout(PlayerInfo player);
 
   enum class Phase {
-    kIdle,           // created, no game yet
-    kTurnStart,      // the current seat must draw (or the wall is exhausted -> drawn game)
+    kIdle,           // created, no match yet
+    kTurnStart,      // the current seat must draw (or the wall is exhausted -> drawn round)
     kDiscardWindow,  // a discard window is open for current_seat_
     kClaimWindow,    // a claim window is open for the seats holding claim options
-    kFinished,       // game_end has been broadcast
+    kRoundEnd,       // v1.6: the round settled (game_end broadcast), waiting for the next
+                     // game_start; every game frame is answered BAD_REQUEST (C4)
+    kMatchEnd,       // v1.6: the match is over (match_end broadcast); nothing but the reclaim
+                     // remains (the narrowed kFinished of C4)
   };
 
   struct ClaimAnswer {
@@ -256,24 +310,39 @@ class RoomActor {
     std::vector<Tile> tiles;
   };
 
-  // Everything game_end needs (PROTOCOL.md §5.10).
+  // Everything game_end needs (PROTOCOL.md §5.10, v1.6 fields included).
   struct Settlement {
     std::string reason;
     std::array<int, kSeatCount> delta {};
-    int winner_seat = -1;  // -1: drawn game
+    int winner_seat = -1;  // -1: drawn round
     std::vector<Tile> winner_flat_hand;
     std::vector<std::string> winner_types;  // tags + "ron"/"tsumo"
     bool tsumo = false;
     Tile winning_tile {};
     int from_seat = -1;
-    std::vector<std::string> tags;
-    int multiplier = 0;
+    std::vector<std::string> tags;  // = yaku[].id（tags ⊆ yaku id，单一出口）
+    int multiplier = 0;             // R = 2^han
     int per_payer = 0;
     int total = 0;
+    // ---- v1.6（C8 场次扩展）----
+    int round_index = 0;                   // 本局序号（0 基）
+    int dealer = 0;                        // 本局庄家
+    int renchan_count = 0;                 // 截至本局结束的连庄次数（B2 决策：含本局触发的连庄）
+    bool match_will_continue = false;
+    std::array<int, kSeatCount> totals {};  // match_totals（含本局）
+    std::vector<Yaku> yaku;                // 判番结果（B1 单一出口）
+    int han = 0;                           // 封顶后番数（= han_breakdown.total）
+    int dealer_bonus = 0;                  // 0/1
+    bool rinshan = false;
+    // ---- v1.3 场终快照（仅 match_over == true 时有意义；B3 落库用，与 match_end 同源）----
+    int hands_played = 0;                  // 实际计入局数（D2 口径：含截断）
+    std::array<int, kSeatCount> dealer_hands {};  // 各座位本场坐庄手数（含连庄）
+    std::array<int, kSeatCount> final_rank {};    // 1..4，并列跳号（与 match_end.rankings 同源）
   };
 
   // ---- turn driving ----------------------------------------------------------------
-  exec::task<void> StartGame();
+  exec::task<void> StartMatch();   // v1.6（C2）：ready 后一次；reset 场次状态
+  exec::task<void> StartRound();   // v1.6（C3）：每局一次；reset 全部局内状态
   exec::task<void> Pump();
   exec::task<void> DrawForCurrentSeat();
   exec::task<void> OpenDiscardWindow(bool win_check, std::optional<Tile> drawn_tile);
@@ -283,8 +352,17 @@ class RoomActor {
   exec::task<void> ResolveClaimWindow();
   exec::task<void> ApplyMeld(int seat, const std::string& action, const std::vector<Tile>& client_tiles, int from_seat,
                              Tile claimed_tile);
-  exec::task<void> EndWithWin(int winner_seat, int from_seat, Tile winning_tile, bool tsumo);
-  exec::task<void> EndWithDraw();
+  // v1.6（自理杠）：ankan / kakan 只在本家打牌窗口；补摸 1 张后重开打牌窗口
+  exec::task<void> ApplySelfKan(int seat, const std::string& action, const std::vector<Tile>& client_tiles);
+  exec::task<void> EndRoundWithWin(int winner_seat, int from_seat, Tile winning_tile, bool tsumo);
+  exec::task<void> EndRoundWithDraw();
+  // v1.6（C7 局终 → 场终）：totals 累加 → 连庄/轮庄 → game_end → RecordMatch（C10）→
+  // 场终 match_end，否则 kRoundEnd + 武装 C6 推进令牌（C5：co_return，推进走定时消息）。
+  exec::task<void> AdvanceAfterRound(Settlement& settlement, const ScoreResult& score);
+  // v1.6（C7）：match_end + kMatchEnd；只在场终调用
+  exec::task<void> FinishMatch();
+  // B3：match_end.rankings 的 rank（并列跳号），场终快照与 match_end 同源。
+  std::array<int, kSeatCount> ComputeFinalRanks() const;
 
   // ---- client frame handlers --------------------------------------------------------
   exec::task<void> HandleDiscard(int seat, json::Value frame);
@@ -328,17 +406,25 @@ class RoomActor {
   // awaits exactly four of these in parallel, so the arity is fixed rather than looped.
   exec::task<void> DeliverSeat(int seat, std::string frame);
   exec::task<void> Deliver(std::array<std::string, kSeatCount> frames);
+  // v1.6（N1 两版缓存）：普通广播用打码版（他家 ankan.tiles = []，仅暗杠持有者额外渲染一份
+  // 替换自身项，次数 = 持有者数）；局终前最后一份 state_sync 用揭示版（所有 ankan 补全 4 张）。
   std::array<std::string, kSeatCount> StateSyncFrames() const;
-  // The `seats[]` block of state_sync. It depends on no recipient (§5.9), so a broadcast renders
-  // it once and splices it into all four frames instead of rebuilding it per seat — it is ~80%
-  // of one frame's build cost. A single recipient (the client `sync`) goes through the one-arg
-  // BuildStateSync, which renders the block itself.
-  json::Value BuildSeatsArray() const;
-  // Only `hand`/`melds` come from |for_seat|; |seats_json| must be BuildSeatsArray().Dump().
+  std::array<std::string, kSeatCount> StateSyncFramesRevealed() const;
+  bool SeatHoldsAnkan(int seat) const;
+  // The `seats[]` block of state_sync. |viewer|: -2 = 局终揭示（所有 ankan 4 张）、
+  // -1 = 全部打码（共享版）、0..3 = 该座位视角（自家 ankan 可见）。它不再与收件人完全无关，
+  // 但仍与「同一个 viewer 的多次渲染」无关——共享打码版 + 逐持有者替换的渲染次数上界见上。
+  // A single recipient (the client `sync`) goes through the one-arg BuildStateSync, which
+  // renders the block itself.
+  json::Value BuildSeatsArray(int viewer) const;
+  static constexpr int kSeatsMaskAll = -1;
+  static constexpr int kSeatsRevealAll = -2;
+  // Only `hand`/`melds` come from |for_seat|; |seats_json| must be BuildSeatsArray(viewer).Dump().
   std::string BuildStateSync(int for_seat, const std::string& seats_json) const;
   std::string BuildStateSync(int for_seat) const;
   std::string BuildGameStart(int for_seat) const;
   std::string BuildGameEnd(const Settlement& settlement) const;
+  std::string BuildMatchEnd() const;
   exec::task<void> BroadcastSettlement(const Settlement& settlement);
 
   // ---- state ------------------------------------------------------------------------
@@ -357,6 +443,21 @@ class RoomActor {
   uint64_t seq_ = 0;
   Phase phase_ = Phase::kIdle;
   bool game_started_ = false;
+
+  // v1.6（C1 场次状态）。跨局存活、绝不在 StartRound 里重置：room_id_/seats_/seq_/match_totals_。
+  int round_index_ = 0;   // 0-based；连庄不推进，轮庄 +1（GAME_DESIGN v1.10 §3.3）
+  int round_count_ = 4;   // 恒 4（C15 max_rounds）
+  int hands_played_ = 0;  // 已下发的 game_end 次数（含连庄），上界 8
+  int renchan_count_ = 0; // 本场累计连庄次数；> kMaxRenchan 强制场终（C15）
+  std::array<int, kSeatCount> match_totals_ {};
+  std::array<int, kSeatCount> dealer_hands_ {};  // B3：各座位本场坐庄手数（每局 +1，含连庄）
+  // C15 双闸：单场上界 = 4 局 + 4 连庄 = 8 次 game_end
+  static constexpr int kMaxRenchan = 4;
+
+  // v1.6（C6 局间推进令牌）：true = 本局的推进消息已武装，等定时到达
+  bool round_advance_pending_ = false;
+  // v1.6（自理杠补牌记录）：杠后打开的打牌窗口里自摸且和牌张 == 它 ⇒ 杠上开花（B1 ScoreContext 接线）
+  std::optional<Tile> kong_draw_tile_;
 
   // discard window
   bool discard_window_open_ = false;
@@ -383,6 +484,8 @@ class RoomActor {
   int ai_delay_ms_ = 0;
   bool ai_discard_pending_ = false;
   bool ai_claim_pending_ = false;
+  // v1.6（C6）：局间停顿长度
+  int inter_hand_delay_ms_ = 0;
   // Serializes the room's handlers (async_gate.h). Held for the whole of Dispatch, so the state
   // machine keeps its single-transition semantics even once a handler suspends mid-message.
   AsyncGate gate_;

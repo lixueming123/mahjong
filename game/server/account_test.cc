@@ -133,6 +133,40 @@ TEST(StatsFrameTest, CarriesTheFrozenFields) {
   EXPECT_TRUE(parsed->Find("recent")->AsArray().empty());
 }
 
+// v1.3（B3）回归断言：match_results 落库对 `stats` 帧**零改动**（ACCOUNT_DESIGN §4 第 4 条：
+// 本期不展示，StatsSummary 与 StatsFrame 一律不动）。字段集合与既有形状逐字节冻结。
+TEST(StatsFrameTest, UnaffectedByMatchResultsPersistence) {
+  protocol::StatsSummary summary;
+  summary.games = 4;  // 一场四局（matches 仍按局一行，语义未变）
+  summary.wins = 1;
+  summary.draws = 1;
+  summary.net_score = 6;
+  summary.recent.push_back(protocol::StatsEntry {"r-0001", "win_tsumo", 24, true, 1759900100});
+  summary.recent.push_back(protocol::StatsEntry {"r-0001", "draw_exhausted", 0, false, 1759900200});
+
+  const std::string text = protocol::StatsFrame(summary);
+  std::string error;
+  std::optional<json::Value> parsed = json::Value::Parse(text, &error);
+  ASSERT_TRUE(parsed.has_value()) << error;
+  // 字段集合冻结：既有 6 个键（type + 四项汇总 + recent），不得因 match_results 增删任何键
+  const auto& object = parsed->AsObject();
+  ASSERT_EQ(object.size(), 6u);
+  EXPECT_NE(parsed->Find("type"), nullptr);
+  EXPECT_NE(parsed->Find("games"), nullptr);
+  EXPECT_NE(parsed->Find("wins"), nullptr);
+  EXPECT_NE(parsed->Find("draws"), nullptr);
+  EXPECT_NE(parsed->Find("net_score"), nullptr);
+  EXPECT_NE(parsed->Find("recent"), nullptr);
+  // recent 的行形状冻结：5 个键
+  const json::Value& entry = parsed->Find("recent")->AsArray().front();
+  EXPECT_EQ(entry.AsObject().size(), 5u);
+  EXPECT_NE(entry.Find("room_id"), nullptr);
+  EXPECT_NE(entry.Find("reason"), nullptr);
+  EXPECT_NE(entry.Find("delta_score"), nullptr);
+  EXPECT_NE(entry.Find("win"), nullptr);
+  EXPECT_NE(entry.Find("ended_at"), nullptr);
+}
+
 // The three codes ACCOUNT_DESIGN.md §3.5 adds must not disturb the frozen eleven.
 TEST(ErrorCodes, NewCodesAreTheOnlyAdditions) {
   EXPECT_EQ(std::string(protocol::kCodeAuthFailed), "AUTH_FAILED");

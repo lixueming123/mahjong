@@ -11,13 +11,13 @@
 //
 //     gateway.Stop();          // stop dispatching
 //     window_timer->Stop();    // stop the timer thread's sends (joins)
-//     account_store->Stop();   // stop the account worker's sends (joins)
+//     sync_wait(db.Send<&DbActor::Stop>());     // DB results/records already posted
 //     sync_wait(ActorSendScope().on_empty());   // every handler chain has returned
 //     ex_actor::Shutdown();
 //
-// `spawn` is mutex-guarded inside exec::async_scope, so producers on the timer/account threads
-// may use it too. `on_empty()` returns a fresh sender each call, so tests can await it in every
-// TearDown.
+// `spawn` is mutex-guarded inside exec::async_scope, so producers on the timer thread (and
+// DbActor's pool thread) may use it too. `on_empty()` returns a fresh sender each call, so
+// tests can await it in every TearDown.
 
 #pragma once
 

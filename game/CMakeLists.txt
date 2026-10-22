@@ -41,9 +41,9 @@ endif()
 
 add_library(mahjong_db STATIC ${MAHJONG_DB_SOURCES})
 target_include_directories(mahjong_db PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-# The storage layer needs logging and nothing else — no ex_actor: it holds no actor and never
-# touches one (its callbacks only call ActorRef::SendLocal from the caller's own code).
-target_link_libraries(mahjong_db PRIVATE spdlog::spdlog)
+# The storage layer is an actor (DbActor): it needs ex_actor for ActorRef/SendLocal and for
+# actor_scope.h, which every reply goes through.
+target_link_libraries(mahjong_db PRIVATE spdlog::spdlog ex_actor)
 if(MAHJONG_MYSQL_FOUND)
   target_include_directories(mahjong_db PUBLIC ${MYSQL_INCLUDE_DIR})
   target_link_libraries(mahjong_db PUBLIC ${MYSQL_LIBRARY})
@@ -58,7 +58,11 @@ add_executable(
   server/protocol.cc
   server/net.cc
   server/connection.cc
-  server/connection_actor.cc
+  server/player_actor.cc
+  server/player_session_agent.cc
+  server/player_lobby_agent.cc
+  server/player_room_agent.cc
+  server/frame_parser.cc
   server/lobby.cc
   server/room.cc
   server/timer.cc
@@ -87,6 +91,22 @@ target_link_libraries(mahjong_account_test PRIVATE mahjong_rules GTest::gtest_ma
 add_test(NAME mahjong_account_test COMMAND mahjong_account_test)
 set_tests_properties(mahjong_account_test PROPERTIES TIMEOUT 60)
 
+# 帧解码层的纯逻辑单测（PROTOCOL §4 的字段规则 / 错误码 / §7.2 计量归属）。
+# 与 mahjong_account_test 同理：不链接 actor、不链接 socket，任何机器上恒常可跑。
+add_executable(mahjong_frame_parser_test server/frame_parser_test.cc server/frame_parser.cc
+                                          server/protocol.cc server/json.cc)
+target_include_directories(mahjong_frame_parser_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_link_libraries(mahjong_frame_parser_test PRIVATE mahjong_rules GTest::gtest_main GTest::gmock)
+add_test(NAME mahjong_frame_parser_test COMMAND mahjong_frame_parser_test)
+set_tests_properties(mahjong_frame_parser_test PROPERTIES TIMEOUT 60)
+
+# 会话身份状态机单测（session.h，纯头文件）：五种状态的合法转移与 Closed 吸收。
+add_executable(mahjong_session_test server/session_test.cc)
+target_include_directories(mahjong_session_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_link_libraries(mahjong_session_test PRIVATE GTest::gtest_main GTest::gmock)
+add_test(NAME mahjong_session_test COMMAND mahjong_session_test)
+set_tests_properties(mahjong_session_test PROPERTIES TIMEOUT 60)
+
 # TCP JSON 网关协议冒烟测试（Python 标准库 socket，无第三方依赖）
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
@@ -104,11 +124,22 @@ target_link_libraries(mahjong_room_test PRIVATE ex_actor mahjong_rules GTest::gm
 add_test(NAME mahjong_room_test COMMAND mahjong_room_test)
 set_tests_properties(mahjong_room_test PROPERTIES TIMEOUT 120)
 
+# RoomActor 压测：真 actor 运行时、真实座位投递（每个座位是一个真实端点 actor），无 socket。
+# 量的是「一局游戏要多少 CPU」和「一个核能带几张桌」，不是通过/失败，所以不注册成 ctest。
+add_executable(mahjong_room_bench server/room_bench.cc server/room.cc server/timer.cc server/json.cc
+                                 server/protocol.cc)
+target_link_libraries(mahjong_room_bench PRIVATE ex_actor mahjong_rules)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  # The tree is configured Debug; a load test at -O0 measures the build type, not the room. This
+  # optimizes only this target's own sources (the framework's static lib stays as configured).
+  target_compile_options(mahjong_room_bench PRIVATE -O2)
+endif()
+
 # t3：LobbyActor 的房间登记与 game_end 后回收（PROTOCOL.md §1.4.5）
 add_executable(mahjong_lobby_test server/lobby_test.cc server/lobby.cc server/room.cc server/connection.cc
-                                  server/connection_actor.cc server/net.cc server/timer.cc server/json.cc
-                                  server/protocol.cc)
-target_link_libraries(mahjong_lobby_test PRIVATE ex_actor mahjong_rules GTest::gtest_main GTest::gmock)
+                                  server/player_actor.cc server/player_session_agent.cc server/player_lobby_agent.cc server/player_room_agent.cc server/frame_parser.cc server/net.cc server/timer.cc
+                                  server/json.cc server/protocol.cc)
+target_link_libraries(mahjong_lobby_test PRIVATE ex_actor mahjong_rules mahjong_db GTest::gtest_main GTest::gmock)
 add_test(NAME mahjong_lobby_test COMMAND mahjong_lobby_test)
 set_tests_properties(mahjong_lobby_test PROPERTIES TIMEOUT 60)
 

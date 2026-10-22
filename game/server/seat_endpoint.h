@@ -4,7 +4,7 @@
 // through a polymorphic SeatSink, which meant the room thread wrote another actor's state and
 // `Connection` ended up with four producers on three different threads. Now the room only knows
 // `ex_actor::ActorRef<SeatEndpoint>` and delivers by message, so no actor ever writes another
-// actor's state. In production the endpoint is the seat's ConnectionActor; in the room's unit
+// actor's state. In production the endpoint is the seat's PlayerActor; in the room's unit
 // test it is a capturing actor, which is what keeps that test deterministic (see
 // mahjong_room_test.cc).
 //
@@ -12,18 +12,26 @@
 // must derive *directly* from SeatEndpoint (single, non-virtual inheritance) so the base
 // subobject sits at offset 0 — the framework casts the actor's instance pointer to the method
 // pointer's class (include/ex_actor/internal/actor.h), and it does not check that. The
-// ConnectionActor constructor asserts it.
+// PlayerActor constructor asserts it.
 //
 // There is deliberately ONE envelope type and ONE entry name: `Dispatch`. Two `Dispatch`
-// overloads would make `&ConnectionActor::Dispatch` ambiguous the moment someone takes its
+// overloads would make `&PlayerActor::Dispatch` ambiguous the moment someone takes its
 // address for SendLocal, so the room's narrow view (frame / error+quota / close) and the
 // connection's own messages share this envelope.
+//
+// Inside that one envelope the kind IS the type: each message has its own struct and they live
+// in `msg` as a `std::variant`, so a message carries exactly the fields it uses. The flat
+// version was 232 bytes for *every* message — a seat frame (the room's broadcast, four of them
+// per state change) paid for both ActorRefs and the auth/stats payloads on each of the ~5
+// by-value moves a message makes on its way into the mailbox (`ActorRef::SendLocal`). The
+// variant is 72 bytes and the seat frame inside it is one std::string.
 
 #pragma once
 
 #include <cstdint>
 #include <string>
 #include <utility>
+#include <variant>
 
 #include "ex_actor/api.h"
 
@@ -32,7 +40,7 @@
 
 namespace mahjong {
 
-class ConnectionActor;  // only referenced through ActorRef below
+class PlayerActor;  // only referenced through ActorRef below
 class RoomActor;        // ditto: the connection caches its room's ref (see kSetRoom)
 
 // PROTOCOL.md §7.2's two client-fault counters a *room* error can be charged to. The nickname
@@ -43,101 +51,71 @@ enum class QuotaKind {
   kIllegalOp,   // NOT_YOUR_TURN / NO_PENDING_ACTION / ILLEGAL_ACTION / UNKNOWN_TILE
 };
 
-struct ConnectionEnvelope {
-  enum class Kind {
-    // gateway -> connection
-    kSetSelfRef,
-    kOnFrame,
-    kOnClosed,
-    kOnIdleTimeout,
-    // account worker -> connection (ACCOUNT_DESIGN.md §6.1)
-    kOnLoginResult,
-    kOnRegisterResult,
-    kOnStatsResult,
-    // lobby -> connection: this connection's room, so gameplay frames skip the lobby
-    kSetRoom,
-    // room/lobby -> connection (the SeatEndpoint view)
-    kSeatFrame,
-    kSeatError,
-    kClose,
+struct PlayerEnvelope {
+  // One struct per kind; whichever one is engaged in `msg` is the kind, so there is no separate
+  // tag to keep in sync with the payload (and none to fall out of step with it).
+  struct SetSelfRefMsg {  // gateway -> connection
+    ex_actor::ActorRef<PlayerActor> self;
+  };
+  struct OnFrameMsg {
+    std::string line;
+  };
+  struct OnClosedMsg {
+    std::string reason;
+  };
+  struct OnIdleTimeoutMsg {};
+  struct OnLoginResultMsg {  // account worker -> connection (ACCOUNT_DESIGN.md §6.1)
+    AuthOutcome outcome;
+  };
+  struct OnRegisterResultMsg {
+    AuthOutcome outcome;
+  };
+  struct OnStatsResultMsg {
+    StatsOutcome outcome;
+  };
+  // lobby -> connection: this connection's room, so gameplay frames skip the lobby
+  struct SetRoomMsg {
+    ex_actor::ActorRef<RoomActor> room;
+  };
+  // room/lobby -> connection (the SeatEndpoint view): one frame for this seat (room broadcast
+  // or lobby answer).
+  struct SeatFrameMsg {
+    std::string frame;
+  };
+  // An error frame AND its §7.2 quota in one message, in that order: the frame must be in the
+  // outbox before the quota can ask for a close, and one message leaves no room for a reorder.
+  struct SeatErrorMsg {
+    std::string frame;
+    QuotaKind quota;
+  };
+  struct CloseMsg {
+    std::string reason;
   };
 
-  static ConnectionEnvelope SetSelfRef(ex_actor::ActorRef<ConnectionActor> self) {
-    ConnectionEnvelope envelope;
-    envelope.kind = Kind::kSetSelfRef;
-    envelope.self = std::move(self);
-    return envelope;
+  static PlayerEnvelope SetSelfRef(ex_actor::ActorRef<PlayerActor> self) {
+    return {SetSelfRefMsg {std::move(self)}};
   }
-  static ConnectionEnvelope OnFrame(std::string line) {
-    ConnectionEnvelope envelope;
-    envelope.kind = Kind::kOnFrame;
-    envelope.text = std::move(line);
-    return envelope;
+  static PlayerEnvelope OnFrame(std::string line) { return {OnFrameMsg {std::move(line)}}; }
+  static PlayerEnvelope OnClosed(std::string reason) { return {OnClosedMsg {std::move(reason)}}; }
+  static PlayerEnvelope OnIdleTimeout() { return {OnIdleTimeoutMsg {}}; }
+  static PlayerEnvelope OnLoginResult(AuthOutcome outcome) { return {OnLoginResultMsg {std::move(outcome)}}; }
+  static PlayerEnvelope OnRegisterResult(AuthOutcome outcome) {
+    return {OnRegisterResultMsg {std::move(outcome)}};
   }
-  static ConnectionEnvelope OnClosed(std::string reason) {
-    ConnectionEnvelope envelope;
-    envelope.kind = Kind::kOnClosed;
-    envelope.text = std::move(reason);
-    return envelope;
-  }
-  static ConnectionEnvelope OnIdleTimeout() { return ConnectionEnvelope {Kind::kOnIdleTimeout}; }
-  static ConnectionEnvelope OnLoginResult(AuthOutcome outcome) {
-    ConnectionEnvelope envelope;
-    envelope.kind = Kind::kOnLoginResult;
-    envelope.auth = std::move(outcome);
-    return envelope;
-  }
-  static ConnectionEnvelope OnRegisterResult(AuthOutcome outcome) {
-    ConnectionEnvelope envelope;
-    envelope.kind = Kind::kOnRegisterResult;
-    envelope.auth = std::move(outcome);
-    return envelope;
-  }
-  static ConnectionEnvelope OnStatsResult(StatsOutcome outcome) {
-    ConnectionEnvelope envelope;
-    envelope.kind = Kind::kOnStatsResult;
-    envelope.stats = std::move(outcome);
-    return envelope;
-  }
+  static PlayerEnvelope OnStatsResult(StatsOutcome outcome) { return {OnStatsResultMsg {std::move(outcome)}}; }
   // The room this connection plays in (an empty ref never happens: the lobby sets it when it
   // registers the room). Gameplay frames go straight to it, so a busy lobby — e.g. one that is
   // suspended inside another player's create_room — cannot delay this connection's frames.
-  static ConnectionEnvelope SetRoom(ex_actor::ActorRef<RoomActor> room) {
-    ConnectionEnvelope envelope;
-    envelope.kind = Kind::kSetRoom;
-    envelope.room = std::move(room);
-    return envelope;
+  static PlayerEnvelope SetRoom(ex_actor::ActorRef<RoomActor> room) { return {SetRoomMsg {std::move(room)}}; }
+  static PlayerEnvelope SeatFrame(std::string frame) { return {SeatFrameMsg {std::move(frame)}}; }
+  static PlayerEnvelope SeatError(std::string frame, QuotaKind quota) {
+    return {SeatErrorMsg {.frame = std::move(frame), .quota = quota}};
   }
-  // One frame for this seat (room broadcast or lobby answer).
-  static ConnectionEnvelope SeatFrame(std::string frame) {
-    ConnectionEnvelope envelope;
-    envelope.kind = Kind::kSeatFrame;
-    envelope.text = std::move(frame);
-    return envelope;
-  }
-  // An error frame AND its §7.2 quota in one message, in that order: the frame must be in the
-  // outbox before the quota can ask for a close, and one message leaves no room for a reorder.
-  static ConnectionEnvelope SeatError(std::string frame, QuotaKind quota) {
-    ConnectionEnvelope envelope;
-    envelope.kind = Kind::kSeatError;
-    envelope.text = std::move(frame);
-    envelope.quota = quota;
-    return envelope;
-  }
-  static ConnectionEnvelope Close(std::string reason) {
-    ConnectionEnvelope envelope;
-    envelope.kind = Kind::kClose;
-    envelope.text = std::move(reason);
-    return envelope;
-  }
+  static PlayerEnvelope Close(std::string reason) { return {CloseMsg {std::move(reason)}}; }
 
-  Kind kind = Kind::kSeatFrame;
-  ex_actor::ActorRef<ConnectionActor> self;  // kSetSelfRef
-  ex_actor::ActorRef<RoomActor> room;        // kSetRoom
-  std::string text;                          // kOnFrame / kOnClosed / kSeatFrame / kSeatError / kClose
-  AuthOutcome auth;                          // kOnLoginResult / kOnRegisterResult
-  StatsOutcome stats;                        // kOnStatsResult
-  QuotaKind quota = QuotaKind::kNone;        // kSeatError
+  std::variant<SetSelfRefMsg, OnFrameMsg, OnClosedMsg, OnIdleTimeoutMsg, OnLoginResultMsg, OnRegisterResultMsg,
+               OnStatsResultMsg, SetRoomMsg, SeatFrameMsg, SeatErrorMsg, CloseMsg>
+      msg;
 };
 
 class SeatEndpoint {
@@ -148,8 +126,8 @@ class SeatEndpoint {
   virtual ~SeatEndpoint() = default;
 
   // The single door (see the file comment). Implementations take their own AsyncGate first when
-  // they can suspend; ConnectionActor's arms never suspend, so it takes the gate and runs.
-  virtual exec::task<void> Dispatch(ConnectionEnvelope envelope) = 0;
+  // they can suspend; PlayerActor's arms never suspend, so it takes the gate and runs.
+  virtual exec::task<void> Dispatch(PlayerEnvelope envelope) = 0;
 };
 
 }  // namespace mahjong

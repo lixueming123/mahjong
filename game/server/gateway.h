@@ -1,10 +1,10 @@
 // Gateway: single-threaded POSIX poll event loop that fronts the actor world.
 //
 // Responsibilities (PROTOCOL.md §1): accept, NDJSON framing, UTF-8 validation, the 64 KB
-// frame limit, inbound rate limiting, heartbeat/idle handling and dispatching complete
-// frames into the per-connection ConnectionActor. The loop is the only thread that touches
-// a socket; actors reply through Connection::SendFrame, which queues into an outbox that
-// the loop flushes.
+// frame limit, inbound rate limiting, heartbeat/idle handling — and nothing else. It knows no
+// frame *type*: it hands each complete line to that client's PlayerActor, which is the entry
+// point for client protocol. The loop is the only thread that touches a socket; players reply
+// through Connection::SendFrame, which queues into an outbox that the loop flushes.
 
 #pragma once
 
@@ -16,10 +16,9 @@
 #include <string>
 #include <vector>
 
-#include "ex_actor/api.h"
-
 #include "connection.h"
-#include "connection_actor.h"
+#include "player_actor.h"
+#include "ex_actor/api.h"
 #include "lobby.h"
 #include "player.h"
 
@@ -36,10 +35,10 @@ void InstallGatewaySignalHandlers(int wake_write_fd);
 
 class Gateway {
  public:
-  // |accounts| and |sessions| are handed to every ConnectionActor: the first answers login,
+  // |db| and |sessions| are handed to every PlayerActor: the first answers login,
   // register and stats (ACCOUNT_DESIGN.md), the second enforces "one account, one live
-  // connection" (§1.3). Both may be null in a build without account support.
-  Gateway(uint16_t port, std::shared_ptr<PlayerIdAllocator> player_ids, std::shared_ptr<AccountStore> accounts,
+  // connection" (§1.3). |db| may be empty in a build without account support.
+  Gateway(uint16_t port, std::shared_ptr<PlayerIdAllocator> player_ids, DbService db,
           std::shared_ptr<SessionRegistry> sessions, ex_actor::ActorRef<LobbyActor> lobby);
   Gateway(const Gateway&) = delete;
   Gateway& operator=(const Gateway&) = delete;
@@ -60,7 +59,7 @@ class Gateway {
  private:
   struct Client {
     std::shared_ptr<Connection> conn;
-    ex_actor::ActorRef<ConnectionActor> actor;
+    ex_actor::ActorRef<PlayerActor> actor;
     std::string inbound;
     // Read cursor into |inbound|: everything before it has been consumed. Frames are taken from
     // the cursor instead of erasing each one from the front, so one buffered burst costs a
@@ -99,7 +98,7 @@ class Gateway {
 
   uint16_t port_;
   std::shared_ptr<PlayerIdAllocator> player_ids_;
-  std::shared_ptr<AccountStore> accounts_;
+  DbService db_;
   std::shared_ptr<SessionRegistry> sessions_;
   ex_actor::ActorRef<LobbyActor> lobby_;
   int listen_fd_ = -1;

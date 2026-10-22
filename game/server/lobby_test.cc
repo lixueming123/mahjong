@@ -9,7 +9,7 @@
 #include "actor_scope.h"
 #include "lobby.h"
 
-#include "connection_actor.h"
+#include "player_actor.h"
 
 #include <chrono>
 #include <iostream>
@@ -62,6 +62,8 @@ class LobbyTest : public ::testing::Test {
   void SetUp() override {
     // Bots must decide inline: this test never sleeps for AI pacing.
     SetAiActionDelayMs(0);
+    // v1.6（C7）：局间停顿同样压到 1ms，一场 4..8 局在亚秒内跑完；回收时序单独控制。
+    SetInterHandDelayMs(1);
     ex_actor::Init(/*thread_pool_size=*/2);
     timer_ = std::make_shared<WindowTimer>();
   }
@@ -88,13 +90,13 @@ class LobbyTest : public ::testing::Test {
   }
 
   // The lobby only ever talks to a seat endpoint, so every test connection gets a real
-  // ConnectionActor wired to it — exactly what the gateway does, minus the socket. The
+  // PlayerActor wired to it — exactly what the gateway does, minus the socket. The
   // connector's own actor ref is what the lobby answers on.
   ex_actor::ActorRef<SeatEndpoint> SpawnConnector(const std::shared_ptr<Connection>& conn,
                                                   ex_actor::ActorRef<LobbyActor> lobby) {
-    ex_actor::ActorRef<ConnectionActor> connector = WaitValue(
-        ex_actor::Spawn<ConnectionActor>(conn, player_ids_, /*accounts=*/nullptr, sessions_, lobby));
-    stdexec::sync_wait(connector.SendLocal<&ConnectionActor::Dispatch>(ConnectionEnvelope::SetSelfRef(connector)));
+    ex_actor::ActorRef<PlayerActor> connector = WaitValue(
+        ex_actor::Spawn<PlayerActor>(conn, player_ids_, /*db=*/DbService {}, sessions_, lobby));
+    stdexec::sync_wait(connector.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::SetSelfRef(connector)));
     return connector;
   }
 
@@ -103,9 +105,10 @@ class LobbyTest : public ::testing::Test {
   std::shared_ptr<SessionRegistry> sessions_ = std::make_shared<SessionRegistry>();
 };
 
-// §1.4.5: game_end + the reclaim delay is followed by the room leaving the registry and its
-// connection being closed — even though the client never disconnected.
-TEST_F(LobbyTest, ReclaimsARoomAndItsConnectionAfterGameEnd) {
+// §1.4.5 (v1.6): the room survives every game_end of one match — the reclaim is armed only by
+// the match_over settlement (C10) — and after match_end + the reclaim delay the room and its
+// connection are gone, even though the client never disconnected.
+TEST_F(LobbyTest, ReclaimsARoomAndItsConnectionAfterMatchEnd) {
   ex_actor::ActorRef<LobbyActor> lobby =
       WaitValue(ex_actor::Spawn<LobbyActor>(/*seed=*/20251005, kFastWindowMs, timer_, kFastReclaimMs));
   stdexec::sync_wait(lobby.SendLocal<&LobbyActor::SetSelfRef>(lobby));
@@ -117,12 +120,17 @@ TEST_F(LobbyTest, ReclaimsARoomAndItsConnectionAfterGameEnd) {
   stdexec::sync_wait(lobby.SendLocal<&LobbyActor::CreateRoom>(SpawnConnector(conn, lobby), MakePlayer()));
   ASSERT_EQ(WaitValue(lobby.SendLocal<&LobbyActor::room_count>()), 1u);
 
-  // Ready starts the game; with a 1ms window every human window times out, so the round plays
-  // itself to game_end through the real scheduler.
+  // Ready starts the match; with a 1ms window every human window times out, so the whole match
+  // (4..8 rounds) plays itself through the real scheduler.
   stdexec::sync_wait(
       lobby.SendLocal<&LobbyActor::Ready>(SpawnConnector(conn, lobby), MakePlayer()));
 
   const auto room_count = [&lobby]() { return WaitValue(lobby.SendLocal<&LobbyActor::room_count>()); };
+  // C10 专项：局终（game_end）不回收 —— 房间必须跨局存活足够久（这里等前 3 局的时间量级，
+  // 房间仍在注册表里）。
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  EXPECT_EQ(room_count(), 1u) << "game_end must not reclaim the room (v1.6)";
+  // 场终 + 回收延迟之后归零。
   ASSERT_TRUE(WaitFor([&room_count]() { return room_count() == 0; })) << "the finished room was never reclaimed";
   EXPECT_TRUE(conn->close_requested()) << "the reclaim must close the room's connection";
 }
@@ -214,9 +222,9 @@ TEST(LobbyPerf, RegistryLock) {
 
   auto spawn_connector = [&](int id, ex_actor::ActorRef<LobbyActor> lobby) {
     auto conn = std::make_shared<Connection>(/*fd=*/-1, id, /*wake_write_fd=*/-1);
-    ex_actor::ActorRef<ConnectionActor> connector =
-        WaitValue(ex_actor::Spawn<ConnectionActor>(conn, player_ids, /*accounts=*/nullptr, sessions, lobby));
-    stdexec::sync_wait(connector.SendLocal<&ConnectionActor::Dispatch>(ConnectionEnvelope::SetSelfRef(connector)));
+    ex_actor::ActorRef<PlayerActor> connector =
+        WaitValue(ex_actor::Spawn<PlayerActor>(conn, player_ids, /*db=*/DbService {}, sessions, lobby));
+    stdexec::sync_wait(connector.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::SetSelfRef(connector)));
     return connector;
   };
   auto make_player = [](int id) {
@@ -320,8 +328,8 @@ TEST(RoomPerf, ConcurrentRooms) {
       actors.push_back(WaitValue(ex_actor::Spawn<RoomActor>("r-" + std::to_string(i), static_cast<uint64_t>(i + 1),
                                                            /*action_timeout_ms=*/15000, make_seats(i), nullptr,
                                                            /*ai_delay_ms=*/0)));
-      stdexec::sync_wait(actors.back().SendLocal<&RoomActor::Dispatch>(
-          RoomEnvelope::InstallTimeoutScheduler([](int64_t, uint64_t) {})));
+      // v1.6：**不装**调度器 —— 本基准的座位全部自动化，局间推进走"无调度器即 inline"回退
+      // （B2 C6），一场 4..8 局在同一消息内打完；装了丢弃型调度器反而会让推进令牌石沉大海。
       PlayerInfo player;
       player.player_id = "p-" + std::to_string(i);
       player.name = "n";

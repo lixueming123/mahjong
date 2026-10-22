@@ -33,6 +33,8 @@
 
 #include "ex_actor/api.h"
 
+#include "actor_scope.h"
+
 namespace ex = stdexec;
 
 namespace mahjong {
