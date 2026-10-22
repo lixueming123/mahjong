@@ -1,8 +1,9 @@
 # 账号与战绩设计（ACCOUNT_DESIGN）
 
 - 文档 ID：ACCOUNT_DESIGN
-- 版本：**v1.2**
-- 修订：v1.2 依用户需求（本轮 actor 化重构）更正 §6.1 第 1 条的**论据**：DB 不放进 actor 的 handler，理由只有「会阻塞」——原文另举的「handler 一旦挂起就不再持有 mailbox」自 `GAME_DESIGN.md` §0.3 v1.8 起已不成立（每 actor 的 handler 由 `AsyncGate` 保证互斥，挂起不再破坏原子性）。**实现形状与 §1–§5 口径一律未动**
+- 版本：**v1.3**
+- 修订：v1.3 依 captain 裁决（A 批需求评审）**新增场次汇总表 `match_results`**（一场每账号一行：`hands_played` / `dealer_hands` / `final_score` / `final_rank`），**`matches` 表一个字段都不加**（保持"一行 = 一局"语义，零回归），`stats` 帧本期**不动**（`match_results` 先只落库不展示）。既有账号模型、口令口径、身份映射、错误码、降级语义、`matches` 的写入时机与字段**一律未动**（见 §8 修订记录）
+  v1.2 依用户需求（本轮 actor 化重构）更正 §6.1 第 1 条的**论据**：DB 不放进 actor 的 handler，理由只有「会阻塞」——原文另举的「handler 一旦挂起就不再持有 mailbox」自 `GAME_DESIGN.md` §0.3 v1.8 起已不成立（每 actor 的 handler 由 `AsyncGate` 保证互斥，挂起不再破坏原子性）。**实现形状与 §1–§5 口径一律未动**
   v1.1 依 captain 裁决（用户需求「客户端登陆后不要立马进对局，进入大厅界面」）把战绩的主界面从结算页扩到**大厅界面**（`UI_UX_SPEC.md` §12，v1.8）：登录成功后先进大厅，那里常驻显示身份与战绩；结算页战绩块与牌桌弹窗保持不变。协议与本文件 §1–§4 的口径**一律未动**
 - 状态：**本次需求评审产物**——本文是账号功能的规格源头；`PROTOCOL.md` / `GAME_DESIGN.md` / `UI_UX_SPEC.md` 依本文做**增补式**修订（各加一行修订记录），既有冻结数值与流程一律不动
 - 依据：captain 裁决（用户需求「做账号功能，存储用 MySQL」）。按三份冻结文档的既有规则（「不得自行发明字段、消息类型或错误码；确有必要时先提需求评审」），先有本次评审再有实现
@@ -17,7 +18,8 @@
 | `PROTOCOL.md` §3.2 服务端帧 12 条 | 12 → **13**（+`stats`） |
 | `PROTOCOL.md` §7.1 错误码 11 条 | 11 → **14**（+`AUTH_FAILED`、+`USERNAME_TAKEN`、+`ALREADY_ONLINE`） |
 | §0.4「不做状态持久化恢复」 | 收窄为「不做**对局状态**的持久化恢复」；账号与战绩的持久化自本版起**在范围内** |
-| 其它已冻结数值（15 s 窗口、底分 1、×4/×4/×2、M∈{1,4,16}、136/83/84/21、零和口径、`seq` 作废、私有信息规则） | **全部未动** |
+| 其它已冻结数值（15 s 窗口、底分 1、×4/×4/×2、M∈{1,4,16}、136/83/84/21、零和口径、`seq` 作废、私有信息规则） | **全部未动**。注：其中**算分数值**（底分/乘子/`M`）由 A 批 `RULESET.md` 修订版改由番数表承载，**本文不涉及算分数值**——`matches.delta_score` 写的始终是"该局该座位的最终得失分"，字段与含义不变（v1.3） |
+| **局制（v1.3）** | 由「一房间一局」改为「一场 4 局 + 连庄」（`PROTOCOL.md` v1.6 §0.4）。对本文的影响**仅限新增一张汇总表**：`matches` 仍按**局**一行（4 局 ⇒ 4 行），场次维度另记 `match_results`（一场一行） |
 
 ## 1. 账号模型
 
@@ -60,7 +62,30 @@ CREATE TABLE IF NOT EXISTS matches (
   PRIMARY KEY (id),
   KEY idx_matches_account (account_id, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- v1.3 新增：场次汇总（一场每账号一行）。matches 的字段与语义一个都没改。
+CREATE TABLE IF NOT EXISTS match_results (
+  id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  account_id   BIGINT UNSIGNED NOT NULL,
+  room_id      VARCHAR(16)     NOT NULL,   -- 一场 = 一个 room_id
+  hands_played INT             NOT NULL,   -- 本场计入局数的局数（= round_count，恒 4；不含连庄的额外手）
+  dealer_hands INT             NOT NULL,   -- 本场该账号作庄的「手数」（含连庄的额外手；非局数）
+  final_score  INT             NOT NULL,   -- 本场累计得失分（零和：同 room_id 四行之和 = 0）
+  final_rank   TINYINT         NOT NULL,   -- 1..4；并列时同名次并跳号（PROTOCOL.md §5.15）
+  ended_at     TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_match_results_account (account_id, id),
+  UNIQUE KEY uk_match_results_room_account (room_id, account_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
+
+**`match_results` 的四条约定（v1.3）**
+
+1. **键**：`(room_id, account_id)` 唯一。这是本文**唯一**对"重复写入"做结构性防御的表——`matches` 仍沿用 §4 第 6 条「依赖通知的恰好一次、不做去重键」，而场终通知与局终通知同源但走两条不同路径（`PROTOCOL.md` §5.10 / §5.15），加一个唯一键比事后查错便宜。重复写入时按「记一条 WARN 并忽略」处理，绝不重试。
+2. **建表方式**：与既有两表完全一致——服务端启动时 `CREATE TABLE IF NOT EXISTS` 自建。**本文没有 SCHEMA_VERSION、没有迁移框架**，因此这一版刻意选择"**加表不改表**"：既不写 `ALTER TABLE`，也不碰 `matches` 的 `INSERT` / `SELECT`（`db_mysql.cc` 的 `StatsJob` 与 `RecordJob` 无需改动）。旧库升级只需重启服务端。
+3. **写入时机**：`RoomActor` 判定**场终**（`PROTOCOL.md` §5.15 `match_end`）后，随场终通知一次性发出；fire-and-forget，不阻塞、不影响 `match_end` 的广播。**局终不写这张表**（局终只写 `matches`）。
+4. **展示**：本期**不展示**。`stats` 帧与 `StatsSummary` 一律不动；将来要在战绩页显示"最高番/胜率/场次总数"时，再给 `stats` **增补**字段（增补式，不破坏既有形状）。
+5. **实现落点（三处，缺一不可）**：① `db.h` —— `DbActor` 增一个 `RecordMatchSummary` 方法并**加进 `kActorMethods` 反射元组**、`DbService` 增对应门面路由（`PickByAccount` 复用）；② `db_mysql.cc` —— `kSchema[]` 增第三条 DDL + 新 job；③ `db_stub.cc` —— 增空实现（否则 `-DMAHJONG_WITH_MYSQL=OFF` 构建失败）。**`StatsJob` 与 `RecordJob` 不改**。
 
 ### 2.2 口令口径（**演示级**，此处明写取舍）
 
@@ -190,6 +215,12 @@ C→S stats_request → S→C stats{...}
 4. **荒庄**：照记（`reason = "draw_exhausted"`，四家 `delta_score = 0`，`win = 0`），并计入 `games` 与 `draws`。
 5. **中途断线托管后跑完的局**：照记（局终事件与断线无关）。
 6. 写入失败只记日志；同一局重复通知不会重复入库（依赖既有的「恰好一次」保证，不做去重键）。
+7. **场次汇总（v1.3 新增，写 `match_results`）**：**一场一个账号一行**（不是一局一行）。写入时机是**场终**（`PROTOCOL.md` §5.15 `match_end`）之后，与 §4 第 1 条的局终写入**是两条独立路径**，互不替代：
+   - `hands_played` = 本场计入局数的局数（= `round_count`，恒 4）；
+   - `dealer_hands` = 本场该账号作庄的**手数**（含连庄的额外手，故可能 > `hands_played / 4`）；
+   - `final_score` = 该账号本场累计得失分 = 该 `room_id` 下其 `matches.delta_score` 之和（MUST 与该和在整数上相等）；
+   - `final_rank` = 服务端在 `match_end.rankings[]` 里给出的 `rank`（并列跳号口径见 `PROTOCOL.md` §5.15）。
+   - **一致性约束**：同 `room_id` 的四行 `final_score` 之和 MUST 为 0；`matches` 的每局行与 `match_results` 的场次行 MUST 同时存在（不允许"有局无场"写成半套）。
 
 ## 5. 客户端表现（对 `UI_UX_SPEC.md` §3 的增补）
 
@@ -205,7 +236,7 @@ C→S stats_request → S→C stats{...}
 
 ## 6. 服务端实现约束（不可协商）
 
-1. **DB 访问绝不发生在 actor 的 handler 里**：理由是**阻塞**——handler 内不得阻塞，会占住调度线程。因此所有查询走**独立的后台线程池**，结果以**消息**投回 actor（与 `WindowTimer` 同一模式）；`ConnectionActor` 的登录/注册/战绩 handler 只负责「校验 → 提交 → 立即返回」。
+1. **DB 访问绝不发生在 actor 的 handler 里**：理由是**阻塞**——handler 内不得阻塞，会占住调度线程。因此所有查询走**独立的后台线程池**，结果以**消息**投回 actor（与 `WindowTimer` 同一模式）；`PlayerActor` 的登录/注册/战绩 handler 只负责「校验 → 提交 → 立即返回」。
    （v1.2 更正论据：原文另举「handler 一旦挂起就不再持有 mailbox」为理由。自 v1.2 起每个 actor 的 handler 在 `AsyncGate` 保护下互斥（见 `GAME_DESIGN.md` §0.3），**挂起本身已不再破坏原子性**；DB 仍留在 actor 之外，只因为它会阻塞。实现形状不变。）
 2. **状态变更只发生在消息 handler 里**：`logged_in_` / `player_id_` / `name_` / 在线表登记只在 `OnLoginResult` / `OnRegisterResult` 这类消息中修改。
 3. **迟到结果**：若结果到达时连接已关闭，**不登记在线表、不发帧**（`SendFrame` 在关闭后本就是 no-op，但在线表必须显式释放）。
@@ -215,7 +246,8 @@ C→S stats_request → S→C stats{...}
 ## 7. 验收
 
 1. **游客链路零回归**：`gateway_smoke_test.py`、`room_full_game_test.py`、`client_headless_test.py` **一行不改**且全绿（其中 `login_ok` 字段形状的严格断言不变）。
-2. **账号链路**：注册 → 自动登录 → 建桌 → 打完一局 → `stats_request` 与刚打完那局一致；重复注册 `USERNAME_TAKEN`；错口令 `AUTH_FAILED` 且累计 10 次断开；同账号二次登录 `ALREADY_ONLINE`。
+2. **账号链路**：注册 → 自动登录 → 建桌 → **打完一场（4 局；v1.3 前为"一局"）** → `stats_request` 与刚打完那几局一致（`games` 增加 4、`net_score` 等于四局之和；v1.3 前为"增加 1"）；重复注册 `USERNAME_TAKEN`；错口令 `AUTH_FAILED` 且累计 10 次断开；同账号二次登录 `ALREADY_ONLINE`。
+   - **v1.3 补充**：`match_results` 的验收 = 同一 `room_id` 恰好 4 行、各行 `final_score` 之和为 0、`final_rank` 与最后一份 `match_end.rankings[]` 逐座位一致、同账号重跑一场后该表行数 +4。
 3. **持久性**：重启服务端后同一账号 `player_id` 不变、战绩仍在。
 4. **降级**：`--mysql-port 1` 起动 → 游客登录与整局照常，账号帧回 `INTERNAL`，服务端不崩。
 5. `./scripts/format.sh` 无新增格式问题。
@@ -224,6 +256,7 @@ C→S stats_request → S→C stats{...}
 
 | 版本 | 修订内容 | 来源 | 是否改动冻结数值 |
 | --- | --- | --- | --- |
+| **v1.3** | **新增场次汇总**：① §2.1 增第三张表 `match_results`（一场每账号一行：`hands_played` / `dealer_hands` / `final_score` / `final_rank`，`(room_id, account_id)` 唯一），附四条约定（键/建表方式/**加表不改表**/本期不展示）；② §0 增"局制（v1.3）"一行，说明 `matches` 仍按局一行、场次维度另表承载；③ §4 增第 7 条"场次汇总"口径与一致性约束；④ §0 数值行注明**算分数值由 `RULESET` 的 A 批修订版承载**，本文不涉及。**`matches` 表零字段变更、`StatsJob`/`RecordJob` 零改动、`stats` 帧零改动** | captain 裁决（A 批需求评审；线协议侧见 `PROTOCOL.md` v1.6 §5.15 `match_end`） | **否**（账号模型、口令口径、身份映射、错误码与配额、降级语义、`matches` 的字段与写入时机、`stats` 帧形状**全部未动**；仅新增一张表与一段口径） |
 | v1.2 | §6.1 第 1 条的**论据**更正：原文以「handler 一旦挂起就不再持有 mailbox」为理由之一；自 v1.2 起每个 actor 的 handler 由 `AsyncGate` 保证互斥（`GAME_DESIGN.md` §0.3 v1.8），挂起本身不再破坏原子性，DB 留在 actor 之外的理由收窄为「它会阻塞」。**实现形状（submit → 结果以消息回投）与 §1–§5、§6 其余约束不变** | 用户需求（本轮 actor 化重构） | **否**（账号模型、口令口径、身份映射、错误码、降级语义、战绩写入时机与字段**全部未动**；仅一处论据表述更新） |
 | v1.1 | 依 captain 裁决（用户需求）把战绩的主界面扩到**客户端大厅界面**（`UI_UX_SPEC.md` §12，v1.8）：登录成功后先进大厅、那里常驻战绩；结算页战绩块与牌桌弹窗维持 v1.0 口径 | captain 裁决（用户需求） | **否**（账号模型、口令口径、身份映射、错误码、降级语义、战绩写入时机与字段**全部未动**；仅客户端多了一个展示位） |
 | v1.0 | 首次制定：账号注册/登录、MySQL 持久化、战绩存档与查询、降级语义；对 `PROTOCOL.md`（帧 8→10、12→13，错误码 11→14）、`GAME_DESIGN.md`（§9/§11/§12/附录A 增补）、`UI_UX_SPEC.md`（§3 登录界面扩展、§10 映射）做增补式修订 | captain 裁决（用户需求） | **否**（既有 15 s / 底分 1 / ×4/×4/×2 / M∈{1,4,16} / 136·83·84·21 / 零和口径 / `seq` 作废 / 既有 11 条错误码语义与阈值全部不变） |
