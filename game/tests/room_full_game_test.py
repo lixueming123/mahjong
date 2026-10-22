@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""t4 end-to-end test: play one complete game against the real server.
+"""t4 end-to-end test: play one complete game against the real server (v1.6: + whole-match mode).
 
 Standard library only. It starts the compiled server, logs in, creates a room, readies up
 and then plays the human seat (seat 0) to the end of the round, cross-checking every frame
@@ -14,15 +14,20 @@ against the frozen protocol:
     seat must match it exactly before it is adopted (§5.9, H9);
   * H6: `seats[]` never leaks a hand, and hand_count + 3*melds stays within {13,14};
   * game_end: 4 distinct seats, Σ delta_score == 0, win details match the ruleset arithmetic
-    (RULESET §6), the winner's flat hand has 14 + kong tiles and contains the winning tile;
+    (RULESET §6, v1.6 番数制), the winner's flat hand has 14 + kong tiles and contains the
+    winning tile; v1.6 fields (round_index/renchan_count/match_total/yaku/han_breakdown) are
+    cross-checked per round;
   * the whole run produces zero `error` frames.
 
-`--timeout-scenario` additionally starts the server with --action-timeout-ms 1000 and never
-answers the first window: the server must play the default action (§5.6.2) while a late reply
-with the stale seq stays silent.
+`--match` (E4, A1_ACCEPTANCE §七) upgrades the run to a WHOLE match: 4..8 rounds -> match_end,
+with the match-level assertions (M1/M2/M3/N8/M10/N1/N11/P5/P9/P11/P12 + M7 局间拒帧 +
+M8 局间隔) on top. `--timeout-scenario` additionally starts the server with
+--action-timeout-ms 1000 and never answers the first window: the server must play the default
+action (§5.6.2) while a late reply with the stale seq stays silent.
 
 Usage:
   python3 game/tests/room_full_game_test.py --server-bin build/game/mahjong_server
+  python3 game/tests/room_full_game_test.py --match          # E4: whole match + match_end
 """
 
 from __future__ import annotations
@@ -140,6 +145,18 @@ class TableModel:
         self.current_seat: int | None = None
         self.drawn: str | None = None
         self.total_tiles: int | None = None  # calibrated on the first state_sync
+        self.ron_seen = False
+
+    def reset_for_new_round(self, seat: int, hand: list[str], dealer: int) -> None:
+        """v1.6 整场：game_start = 牌桌整体重置（§10.1），校验基线随之重来。"""
+        self.seat = seat
+        self.dealer = dealer
+        self.hand = list(hand)
+        self.melds = []
+        self.rivers = {s: [] for s in range(SEAT_COUNT)}
+        self.remaining = None
+        self.drawn = None
+        self.total_tiles = None  # 物理守恒在每局重新标定
         self.ron_seen = False
 
     # ---- incremental events ---------------------------------------------------------
@@ -291,6 +308,14 @@ def play_game(client: Client, model: TableModel, verbose: bool,
         if kind == "error":
             stats["errors"].append(frame)
             continue
+        if kind == "game_start":
+            # v1.6 整场模式：新一局的 game_start = 牌桌整体重置（§10.1）。
+            model.reset_for_new_round(frame["seat"], frame["hand"], frame["dealer"])
+            stats["starts"] = stats.get("starts", 0) + 1
+            continue
+        if kind == "match_end":
+            stats["match_end"] = frame
+            return frame, stats
         if kind == "game_end":
             return frame, stats
         if kind == "draw":
@@ -358,9 +383,35 @@ def verify_game_end(end: dict, stats: dict, model: TableModel) -> str:
     tsumo = win["tsumo"]
     check(tsumo == (end["reason"] == "win_tsumo"), "reason and win.tsumo disagree")
     multiplier = win["multiplier"]
-    check(multiplier in (1, 4, 16), f"multiplier must be 1/4/16, got {multiplier}")
+    # v1.6 番数制：multiplier = 2^han ∈ {1..64}（旧倍率制 M ∈ {1,4,16} 作废）。
+    check(multiplier >= 1 and multiplier <= 64 and (multiplier & (multiplier - 1)) == 0,
+          f"multiplier must be a power of two in [1,64], got {multiplier}")
     check(win["per_payer"] == (2 * multiplier if tsumo else multiplier), "per_payer mismatch (RULESET §6)")
     check(win["total"] == (6 * multiplier if tsumo else multiplier), "total mismatch (RULESET §6)")
+    # v1.6 新增字段（§5.10）：round_index/dealer/renchan_count/match_will_continue + 番数组。
+    check(isinstance(end.get("round_index"), int) and 0 <= end["round_index"] <= 3,
+          f"game_end.round_index must be 0..3, got {end.get('round_index')}")
+    check(isinstance(end.get("dealer"), int) and 0 <= end["dealer"] <= 3, "game_end.dealer missing")
+    check(isinstance(end.get("renchan_count"), int) and end["renchan_count"] >= 0,
+          "game_end.renchan_count missing")
+    check(isinstance(end.get("match_will_continue"), bool), "game_end.match_will_continue missing")
+    for entry in results:
+        check(isinstance(entry.get("match_total"), int),
+              f"results[].match_total missing (v1.6): {entry}")
+    check(win["han"] == win["han_breakdown"]["total"],
+          "win.han must equal han_breakdown.total (§5.10)")
+    check(win["han_breakdown"]["tsumo"] == 0,
+          "han_breakdown.tsumo must be 0 (自摸不是番种, B1.1)")
+    base = sum(item["han"] for item in win["yaku"])
+    check(win["han_breakdown"]["base"] == base, "Σ yaku.han must equal han_breakdown.base (N11)")
+    expected_total = min(base + win["han_breakdown"]["dealer"], 6)
+    check(win["han_breakdown"]["total"] == expected_total,
+          f"han_breakdown.total must be min(base+dealer,6)={expected_total}: {win['han_breakdown']}")
+    check(multiplier == (1 << expected_total), "multiplier must equal 2^total")
+    ids = [item["id"] for item in win["yaku"]]
+    check(len(ids) == len(set(ids)), f"yaku id must not repeat: {ids}")
+    check(set(win["tags"]) <= set(ids), f"tags must be a subset of yaku ids: {win['tags']} vs {ids}")
+    check(win["dealer_bonus"] == (win["han_breakdown"]["dealer"] == 1), "dealer_bonus mismatch")
     check(results[winner]["delta_score"] == win["total"], "the winner must receive `total`")
     if tsumo:
         check(win["from_seat"] is None, "a tsumo win must report from_seat = null (§5.10)")
@@ -377,7 +428,7 @@ def verify_game_end(end: dict, stats: dict, model: TableModel) -> str:
     kongs = 0
     if stats["last_state_sync"] is not None:
         for meld in stats["last_state_sync"]["seats"][winner]["melds"]:
-            if meld["type"] == "kong":
+            if meld["type"] in ("kong", "ankan", "kakan"):  # v2.0：三种杠都 +1 张账面
                 kongs += 1
     check(len(flat) == 14 + kongs, f"the winner's flat hand must hold 14+kong tiles, got {len(flat)}")
     check(Counter(flat).most_common(1)[0][1] <= 4, "the flat hand cannot hold more than 4 copies of a face")
@@ -414,6 +465,134 @@ def run_full_game(binary: str, seed: int, name: str, verbose: bool, port: int | 
                   f"discards={stats['discard_events']} action_events={len(stats['action_events'])} "
                   f"state_syncs={stats['state_syncs']} max_seq={stats['max_seq']}")
             return {"reason": reason, "stats": stats, "end": end}
+        finally:
+            client.close()
+    finally:
+        process.send_signal(2)  # SIGINT: the server must shut down gracefully
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        log.close()
+        if process.returncode != 0:
+            with open(log.name, "r", encoding="utf-8", errors="replace") as handle:
+                print(handle.read()[-4000:], file=sys.stderr)
+            raise TestFailure(f"the server exited with code {process.returncode} (SIGINT must be graceful)")
+        os.unlink(log.name)
+
+
+def run_full_match(binary: str, seed: int, name: str, verbose: bool, port: int | None = None,
+                   inter_hand_delay_ms: int = 300) -> dict:
+    """E4（A1_ACCEPTANCE §七）：打完整场（4..8 局 → match_end）并做场次级断言。
+
+    M 组：M1/M2（帧计数）、M3/N8/M10（rankings）、M7（局间拒帧 BAD_REQUEST，逐局间探针，
+    至多 5 次以远离断线配额）、M8（局间 ≥ --inter-hand-delay-ms）；
+    N 组：N1/N11（番数自洽，在 verify_game_end 内逐局断言）；
+    P 组：P5（seq 整场递增，play_game 已查）、P9（game_start 一一对应 + dealer 推导）、
+    P11（tags ⊆ yaku，verify_game_end 内）、P12（物理守恒，TableModel 逐快照已查）。
+    """
+    port = port or free_port()
+    log = tempfile.NamedTemporaryFile(prefix="mahjong_match_", suffix=".log", delete=False)
+    process = subprocess.Popen([binary, "--port", str(port), "--seed", str(seed),
+                                "--inter-hand-delay-ms", str(inter_hand_delay_ms)],
+                               stdout=log, stderr=subprocess.STDOUT)
+    try:
+        wait_for_server(port, process)
+        client = Client(port, name)
+        try:
+            start = pass_handshake(client, name)
+            check(start.get("round_index") == 0 and start.get("round_count") == 4,
+                  f"game_start must carry round_index/round_count (v1.6): {start}")
+            model = TableModel(start["seat"], start["hand"], start["dealer"])
+            ends: list[dict] = []
+            starts: list[dict] = [start]
+            gaps_ms: list[float] = []
+            bad_request_probes = 0
+            expected_round, expected_dealer = 0, start["dealer"]
+            match_end = None
+            while match_end is None:
+                end, stats = play_game(client, model, verbose)
+                ends.append(end)
+                # 局终校验：round_index/dealer 与连庄/轮庄推导一致。
+                check(end["round_index"] == expected_round,
+                      f"round_index {end['round_index']} != expected {expected_round}")
+                check(end["dealer"] == expected_dealer,
+                      f"dealer {end['dealer']} != expected {expected_dealer}")
+                reason = end["reason"]
+                winner = end["win"]["seat"] if isinstance(end.get("win"), dict) else None
+                if reason != "draw_exhausted" and winner != expected_dealer:
+                    expected_round += 1
+                    expected_dealer = (expected_dealer + 1) % SEAT_COUNT
+
+                if not end.get("match_will_continue", False):
+                    # 场终：match_end 紧随本局 game_end（中间不应有别的对局帧）。
+                    frame = client.recv_frame(timeout=10.0)
+                    check(frame["type"] == "match_end", f"expected match_end, got {frame}")
+                    match_end = frame
+                    break
+
+                # M7：局间探针 ×2 —— game_end 刚到、下一局未开 ⇒ 服务端必处局间态，
+                # 任意对局帧必须回 BAD_REQUEST。**预算 ≤4 次**：BAD_REQUEST 计入断线配额
+                # （10 条断连），整场最多 7 个局间，探针超配额会把我们自己踢下线。
+                for _ in range(2):
+                    if bad_request_probes >= 4:
+                        break
+                    client.send({"type": "discard", "tile": "1m", "seq": 1})
+                    frame = client.recv_frame(timeout=inter_hand_delay_ms / 1000.0 + 2.0)
+                    check(frame["type"] == "error" and frame["code"] == "BAD_REQUEST",
+                          f"局间对局帧必须回 BAD_REQUEST，got {frame}")
+                    bad_request_probes += 1
+
+                # M8：局间 game_end -> game_start 的间隔 ≥ 配置值（容差 50ms）；
+                # 局间不得有 state_sync；match_end 已被 match_will_continue=False 排除。
+                gap_started = time.monotonic()
+                frame = client.recv_frame(timeout=inter_hand_delay_ms / 1000.0 + 5.0)
+                while frame["type"] != "game_start":
+                    check(frame["type"] != "state_sync",
+                          f"局间不得下发 state_sync：{frame.get('type')}")
+                    frame = client.recv_frame(timeout=inter_hand_delay_ms / 1000.0 + 5.0)
+                gap_ms = (time.monotonic() - gap_started) * 1000.0
+                gaps_ms.append(gap_ms)
+                check(gap_ms >= inter_hand_delay_ms - 50,
+                      f"M8: 局间隔 {gap_ms:.0f}ms < {inter_hand_delay_ms}ms")
+                starts.append(frame)
+                check(frame.get("round_index") == expected_round,
+                      f"下一局 round_index 推导错误: {frame.get('round_index')} != {expected_round}")
+                check(frame.get("dealer") == expected_dealer,
+                      f"下一局 dealer 推导错误: {frame.get('dealer')} != {expected_dealer}")
+                # game_start = 牌桌整体重置（§10.1）——本地模型同步重建，否则下一局的
+                # state_sync 权威比对会用上一局的旧手牌。
+                model.reset_for_new_round(frame["seat"], frame["hand"], frame["dealer"])
+            check(match_end is not None, "the match never reached match_end")
+            check(match_end is not None, "the match never reached match_end")
+            # M1/M2：帧计数（D2 终裁口径：hands_played = game_end 下发次数）。
+            check(len(ends) == match_end["hands_played"],
+                  f"M1/M2: game_end 次数 {len(ends)} != hands_played {match_end['hands_played']}")
+            check(4 <= match_end["hands_played"] <= 8,
+                  f"M2: hands_played 必须 ∈ [4,8]: {match_end['hands_played']}")
+            check(match_end["renchan_count"] == ends[-1]["renchan_count"],
+                  "M2: renchan_count 必须与最后一次 game_end 同值")
+            # M3/N8/M10：rankings。
+            rankings = match_end["rankings"]
+            check(len(rankings) == SEAT_COUNT, "match_end.rankings must hold 4 entries")
+            scores = {entry["seat"]: entry["final_score"] for entry in rankings}
+            check(sum(scores.values()) == 0, f"M3: Σ final_score must be 0: {scores}")
+            for entry in rankings:
+                strictly_greater = sum(1 for s in scores.values() if s > entry["final_score"])
+                check(entry["rank"] == 1 + strictly_greater,
+                      f"N8: rank 并列跳号 broken: {entry}")
+            for prev, cur in zip(rankings, rankings[1:]):
+                check(prev["final_score"] > cur["final_score"]
+                      or (prev["final_score"] == cur["final_score"] and prev["seat"] < cur["seat"]),
+                      f"N8: rankings 未按分数降序/同分 seat 升序: {rankings}")
+            totals = {entry["seat"]: entry["match_total"] for entry in ends[-1]["results"]}
+            check(scores == totals,
+                  f"M10: final_score 必须与最后一次 match_total 逐座位相等: {scores} vs {totals}")
+            print(f"[e2e] match finished: rounds={len(ends)} hands_played={match_end['hands_played']} "
+                  f"renchan={match_end['renchan_count']} m7_probes={bad_request_probes} "
+                  f"gaps_ms={[round(g) for g in gaps_ms]}")
+            return {"rounds": len(ends), "match_end": match_end}
         finally:
             client.close()
     finally:
@@ -650,6 +829,12 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=None,
                         help="fixed listen port (default: an ephemeral free port per scenario)")
     parser.add_argument("--games", type=int, default=1, help="play this many rounds with consecutive seeds")
+    parser.add_argument("--match", action="store_true",
+                        help="E4: play a WHOLE match (4..8 rounds -> match_end) with the match-level "
+                             "assertions (M1/M2/M3/N8/M10/N1/N11/P9/P11/P12 + M7/M8)")
+    parser.add_argument("--inter-hand-delay-ms", type=int, default=300,
+                        help="server --inter-hand-delay-ms for --match; M8 asserts the game_end -> "
+                             "game_start gap against it (default 300ms)")
     parser.add_argument("--timeout-scenario", action="store_true")
     parser.add_argument("--disconnect-scenario", action="store_true")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -657,6 +842,12 @@ def main() -> int:
 
     binary = find_binary(args.server_bin)
     print(f"[e2e] binary={binary}")
+    if args.match:
+        result = run_full_match(binary, args.seed, "整场玩家", args.verbose, args.port,
+                                args.inter_hand_delay_ms)
+        print(f"[e2e] MATCH OK: rounds={result['rounds']} (M1/M2/M3/N8/M10/N1/N11/P9/P11/P12/M7/M8)")
+        run_multi_room_scenario(binary, args.seed + 5, args.verbose, args.port)
+        return 0
     reasons = []
     for index in range(args.games):
         seed = args.seed + index

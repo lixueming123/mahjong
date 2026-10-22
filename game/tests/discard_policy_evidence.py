@@ -45,7 +45,8 @@ int main(int argc, char** argv) {
   if (argc < 2) return 2;
   uint64_t seed = std::strtoull(argv[1], nullptr, 10);
   std::vector<mahjong::Tile> wall = mahjong::BuildWall(seed);
-  mahjong::Deal deal = mahjong::DealTiles(wall);
+  // B1：DealTiles 的庄家改为显式参数；本工具只关心牌山推进，庄家恒 seat 0。
+  mahjong::Deal deal = mahjong::DealTiles(wall, /*dealer=*/0);
   std::printf("next_index %d remaining %d size %zu\\n", deal.next_index, deal.remaining, wall.size());
   std::printf("draws");
   for (size_t i = static_cast<size_t>(deal.next_index); i < wall.size(); ++i) {

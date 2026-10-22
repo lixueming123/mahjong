@@ -75,6 +75,9 @@ GAME_START = {
     "type": "game_start",
     "seat": 0,
     "dealer": 0,
+    # v2.0（PROTOCOL v1.6 §5.4）：场次进度；0 基 round_index + 恒 4 的 round_count
+    "round_index": 0,
+    "round_count": 4,
     # 庄家 14 张（含字牌 1z/1z/5z/7z；按 §2.2 排序：数牌在前、字牌 1z..7z）
     "hand": ["1m", "1m", "2m", "3m", "4m", "5m", "6p", "6p", "7p", "9s",
              "1z", "1z", "5z", "7z"],
@@ -132,16 +135,38 @@ DISCARD_REQUEST = {
 GAME_END = {
     "type": "game_end",
     "reason": "win_ron",
+    # v2.0（PROTOCOL v1.6 §5.10）：局终帧新增字段
+    "round_index": 0,
+    "dealer": 0,
+    "renchan_count": 0,
+    "match_will_continue": True,
     "results": [
-        {"seat": 0, "delta_score": -4, "hand": [], "win_type": []},
-        {"seat": 1, "delta_score": 4,
+        {"seat": 0, "delta_score": -4, "match_total": -4, "hand": [], "win_type": []},
+        {"seat": 1, "delta_score": 4, "match_total": 4,
          "hand": ["1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2p", "2p", "6p", "6p", "8p", "8p"],
          "win_type": ["seven_pairs", "ron"]},
-        {"seat": 2, "delta_score": 0, "hand": [], "win_type": []},
-        {"seat": 3, "delta_score": 0, "hand": [], "win_type": []},
+        {"seat": 2, "delta_score": 0, "match_total": 0, "hand": [], "win_type": []},
+        {"seat": 3, "delta_score": 0, "match_total": 0, "hand": [], "win_type": []},
     ],
     "win": {"seat": 1, "tile": "8p", "from_seat": 0, "tsumo": False,
-            "tags": ["seven_pairs"], "multiplier": 4, "per_payer": 4, "total": 4},
+            "tags": ["seven_pairs"], "multiplier": 8, "per_payer": 8, "total": 8,
+            "yaku": [{"id": "menzen", "han": 1}, {"id": "seven_pairs", "han": 2}],
+            "han": 3,
+            "han_breakdown": {"base": 3, "tsumo": 0, "dealer": 0, "total": 3},
+            "dealer_bonus": False, "rinshan": False},
+}
+
+# v2.0（PROTOCOL v1.6 §5.15）：场终帧（每场恰好 1 次）
+MATCH_END = {
+    "type": "match_end",
+    "hands_played": 5,   # D2 终裁：= game_end 下发手数（4..8，含连庄）
+    "renchan_count": 1,
+    "rankings": [
+        {"seat": 1, "final_score": 24, "rank": 1},
+        {"seat": 0, "final_score": -8, "rank": 2},
+        {"seat": 3, "final_score": -8, "rank": 2},   # 并列跳号：两行「第 2 名」，无第 3 名
+        {"seat": 2, "final_score": -8, "rank": 2},
+    ],
 }
 
 # 战绩用例（ACCOUNT_DESIGN §3.4 / UI_UX_SPEC v1.7）：四个汇总数字 + 最近 ≤10 局，倒序。
@@ -1374,6 +1399,138 @@ def main() -> int:
     check(drop_app.state.screen == SCREEN_LOGIN, "大厅断线 → 回登录界面")
     check(drop_app.disconnect_reason is None, "大厅断线不显示断线蒙层")
     check("连接已断开" in drop_app.login_status, f"大厅断线在状态行说明原因：{drop_app.login_status!r}")
+
+    # ---------------------------------------------------------------- v2.0（B4）：一场四局客户端接入
+    print("[18] v2.0：局终页 / 场终页 / game_start 重置 / 自理杠 / 牌背 18（§9.6 / §4.8 / §4.6）")
+
+    # --- 局终页：无出口按钮、番种明细、卡片累计分 ---
+    round_app = make_app()
+    sent: list[tuple] = []
+    round_app.send_frame = lambda ftype, **fields: (sent.append((ftype, fields)) or True)
+    round_app.connected = True
+    round_app._on_frame({"type": "login_ok", "player_id": "p-3f2a1c", "name": "玩家_"}, time.monotonic())
+    round_app._on_frame(dict(ROOM_JOINED), time.monotonic())
+    round_app._on_frame(dict(GAME_START), time.monotonic())
+    round_app._on_frame(dict(STATE_SYNC), time.monotonic())
+    round_app._on_frame(dict(GAME_END), time.monotonic())
+    check(round_app.state.screen == SCREEN_RESULT, "game_end → 局终页（SCREEN_RESULT）")
+    check(round_app.state.match_end is None, "局终页：match_end 未到（不是场终页）")
+    win = round_app.state.result.get("win")
+    detail = result_view._yaku_detail(win)
+    check("七对子 2番" in detail and "门前清 1番" in detail and "合计 3 番（8 分）" in detail,
+          f"D-4: 番种明细按 §9.2 形状渲染（含合计番/分）：{detail}")
+    check("已封顶" not in detail, f"D-4: 未封顶不得出现「已封顶」：{detail}")
+    capped = dict(win)
+    capped["han_breakdown"] = {"base": 5, "tsumo": 0, "dealer": 1, "total": 6}
+    capped["multiplier"] = 64
+    capped["han"] = 6
+    capped_detail = result_view._yaku_detail(capped)
+    check("已封顶" in capped_detail and "（64 分）已封顶" in capped_detail,
+          f"D-4: 封顶提示必须是「（N 分）已封顶」句式：{capped_detail}")
+    check("无番（0 番）" == result_view._yaku_detail({"yaku": []}), "无番和牌文案 = 无番（0 番）（§9.2）")
+    check("平和" not in result_view._yaku_detail({"yaku": []}), "无番文案不得再用「平和」")
+    # D-3（§9.2 收付文案末行）：按 match_total 取领先者，并列时「并列领先」
+    leader = result_view._leader_text(round_app.state)
+    check(leader == "本场累计：AI-1 领先", f"D-3: 唯一最大 → 「XX 领先」，got {leader!r}")
+    tie_state = make_app()
+    tie_state.state.apply(dict(GAME_START))
+    tie_end = dict(GAME_END)
+    tie_end["results"] = [dict(entry, match_total=0) for entry in GAME_END["results"]]
+    tie_state.state.apply(tie_end)
+    tie_text = result_view._leader_text(tie_state.state)
+    check(tie_text.endswith("并列领先") and "、" in tie_text,
+          f"D-3: 并列最大 → 「XX、YY 并列领先」，got {tie_text!r}")
+    check(round_app.state.renchan_count == 0, "局终帧的 renchan_count 已入状态")
+    round_app.now = time.monotonic()
+    round_app.render_frame(present=False)
+    # 局终页点击出口 → 无效果（§9.5：出口只在场终页；局间发帧会撞 BAD_REQUEST）
+    btn = T.R_RESULT_REMATCH_BTN
+    round_app._on_left_click((btn[0] + btn[2] / 2, btn[1] + btn[3] / 2))
+    check(round_app.state.screen == SCREEN_RESULT and round_app.state.match_end is None,
+          "局终页点「再来一局」必须无效果")
+    check(not any(f[0] in ("create_room", "ready") for f in sent), "局终页出口不发出站帧")
+    # D-1：键盘出口同规则——局终页 Enter/ESC 必须无效果
+    import pygame as _pg
+    round_app._on_key(_pg.event.Event(_pg.KEYDOWN, key=_pg.K_RETURN))
+    round_app._on_key(_pg.event.Event(_pg.KEYDOWN, key=_pg.K_ESCAPE))
+    check(round_app.state.screen == SCREEN_RESULT and round_app.state.match_end is None,
+          "D-1: 局终页 Enter/ESC 不得触发出口")
+
+    # --- 场终页：match_end → 排名表 + 两出口恢复 ---
+    round_app._on_frame(dict(MATCH_END), time.monotonic())
+    check(round_app.state.match_end is not None, "match_end → 场终页数据就位")
+    rankings = round_app.state.match_end.get("rankings")
+    check([r["rank"] for r in rankings] == [1, 2, 2, 2], "rankings 并列跳号（1,2,2,2）照协议直渲")
+    check(sum(r["final_score"] for r in rankings) == 0, "rankings.final_score 零和")
+    round_app.now = time.monotonic()
+    round_app.render_frame(present=False)  # 场终页渲染不崩溃
+
+    # --- game_start = 本地牌桌整体重置（新一局）；round_index 推进 ---
+    next_start = dict(GAME_START)
+    next_start["round_index"] = 1
+    next_start["dealer"] = 1
+    round_app._on_frame(next_start, time.monotonic())
+    check(round_app.state.screen == SCREEN_TABLE, "下一局 game_start → 回到牌桌界面")
+    check(round_app.state.round_index == 1 and round_app.state.round_count == 4,
+          f"场次进度来自 game_start：{round_app.state.round_index}/{round_app.state.round_count}")
+    check(round_app.state.melds == [] and round_app.state.result is None and round_app.state.match_end is None,
+          "game_start 整体重置：副露/局终/场终载荷清空")
+    check(len(round_app.state.hand) == 14 and round_app.state.dealer == 1, "新一局手牌与庄家重建")
+
+    # --- 自理杠（v2.0 §5.3/§4.6）：按钮顺序 + 提交 tiles 恰 1 牌面 ---
+    kan_sync = dict(STATE_SYNC)
+    kan_sync["melds"] = [
+        {"type": "ankan", "tiles": ["1z", "1z", "1z", "1z"]},   # 本家暗杠：4 张牌面形态
+    ]
+    kan_sync["seats"] = [
+        dict(STATE_SYNC["seats"][0], melds=[{"type": "ankan", "tiles": ["1z", "1z", "1z", "1z"]}]),
+        dict(STATE_SYNC["seats"][1], melds=[{"type": "ankan", "tiles": []}]),  # 他家暗杠：空数组形态
+        dict(STATE_SYNC["seats"][2], melds=[{"type": "kakan", "tiles": ["3p", "3p", "3p", "3p"]}]),
+        dict(STATE_SYNC["seats"][3]),
+    ]
+    round_app._on_frame(kan_sync, time.monotonic())
+    check(round_app.state.melds[0].type == "ankan" and len(round_app.state.melds[0].tiles) == 4,
+          "本家暗杠解析：4 张牌面形态")
+    check(round_app.state.seat_view(1).melds[0].type == "ankan"
+          and round_app.state.seat_view(1).melds[0].tiles == [],
+          "他家暗杠解析：tiles == [] 空数组形态（两种都必须可解析）")
+    check(round_app.state.seat_view(2).melds[0].type == "kakan", "加杠组解析（type=kakan）")
+    kan_request = {
+        "type": "action_request",
+        "seq": 8,
+        "deadline_ms": int(time.time() * 1000) + 15000,
+        "window": "discard",
+        "options": [
+            {"action": "ankan", "tiles": ["1z"]},
+            {"action": "kakan", "tiles": ["6p"]},
+        ],
+    }
+    round_app._on_frame(kan_request, time.monotonic())
+    buttons = actionbar.build_buttons(round_app.state, round_app._remaining_ms())
+    kinds = [b.kind for b in buttons]
+    check(kinds == ["discard", "ankan", "kakan"], f"打牌窗口按钮顺序（§5.3 v2.0）= {kinds}")
+    labels = [b.label for b in buttons]
+    check(labels[1] == "暗杠", f"暗杠按钮文案不显示牌名（防录屏泄露）：{labels[1]!r}")
+    check(labels[2].startswith("加杠 "), f"加杠按钮显示牌名：{labels[2]!r}")
+    sent.clear()
+    check(round_app._do_action("ankan", ["1z"]), "暗杠可提交")
+    round_app.state.clear_pending()  # PENDING 守卫：同窗口第二个动作前先清（真实流程由服务端帧推进）
+    check(round_app._do_action("kakan", ["6p"]), "加杠可提交")
+    kan_frames = [f for f in ([{"type": t, **fields} for t, fields in sent]) if f.get("type") == "action"]
+    check(all(len(f.get("tiles") or []) == 1 for f in kan_frames),
+          f"ankan/kakan 出站 tiles 恰好 1 个牌面元素：{[f.get('tiles') for f in kan_frames]}")
+    check(not round_app._do_action("ankan", ["1z", "1z"]), "暗杠 tiles 多于 1 个 → 拒绝发送")
+    check(not round_app._do_action("ankan", []), "暗杠 tiles 为空 → 拒绝发送")
+
+    # --- 他家牌背容量 14 → 18（§4.6 v2.0：15..18 换行第二行）---
+    check(T.OPP_BACK_MAX == 18 and T.OPP_BACK_ROW_CAPACITY == 14, "牌背容量常量 = 18（首行 14）")
+    backs = round_app.state.seats
+    backs[1].hand_count = 18
+    round_app.now = time.monotonic()
+    round_app.render_frame(present=False)  # 18 张（含换行第二行）渲染不崩溃、不裁剪
+    backs[1].hand_count = 13
+
+    round_app.close_socket("B4 用例结束")
 
     # 两个大厅版面落盘（账号会话带战绩 / 游客会话无战绩）
     for label, account in (("client_lobby.png", True), ("client_lobby_guest.png", False)):

@@ -75,10 +75,22 @@ DEFAULT_SEED = 86
 BASELINE_SEED_START = 17  # the seed t6's 200-game baseline started from (seeds 17..216)
 DEFAULT_LOG = os.path.join(REPO_ROOT, "game", "tests", "artifacts", "e2e_log.jsonl")
 DEFAULT_STATS_OUT = os.path.join(REPO_ROOT, "game", "tests", "artifacts", "e2e_stats.json")
+DEFAULT_MATCH_LOG = os.path.join(REPO_ROOT, "game", "tests", "artifacts", "e2e_match_log.jsonl")
 GLOBAL_TIMEOUT_S = 120.0  # hard ceiling for one game: the script must never hang
 DEFAULT_GAME_TIMEOUT_S = 90.0  # per-game budget; an AI-paced round needs ~40s (t31)
+# Q3 裁决（A1_ACCEPTANCE E2/E3）：**整场**兜底超时 = 960s（8 局 × 120s，单场上界 8 局）；
+# 单局 120s 口径不变。
+MATCH_TIMEOUT_S = 960.0
 SEAT_COUNT = 4
 DEALT_TILES = SEAT_COUNT * 13 + 1  # three 13-tile hands + the dealer's 14th tile
+
+# P11/P3（PROTOCOL §10.4 ③）：番种 id 冻结判定序（= RULESET §6.4 / GAME_DESIGN §6.4 表序）。
+# e2e 用它断言 win.yaku[] 严格按此序、无重复；tags ⊆ yaku id 且同为该序的子序列。
+YAKU_FROZEN_ORDER = [
+    "menzen", "tanyao", "pinfu", "iipeikou", "yakuhai", "rinshan",
+    "sanshoku_doujun", "ittsuu", "toitoi", "sanankou", "honitsu", "shousangen",
+    "seven_pairs", "pure_one_suit",
+]
 
 # First milestone baseline (t6, 200 games, seeds 17..216) — the number the second milestone has to
 # beat. Frozen here on purpose: the point of the statistics mode is the side-by-side comparison.
@@ -150,7 +162,10 @@ class Recorder:
 
 
 class Client:
-    """Minimal blocking NDJSON client plus the human's local hand bookkeeping."""
+    """Minimal blocking NDJSON client plus the human's local hand bookkeeping.
+
+    E2：每帧的**归一化文本**（`normalize_frame`）同时留在 `self.frames`，供整场逐帧 diff。
+    """
 
     def __init__(self, port: int, recorder: Recorder, deadline: float):
         self.recorder = recorder
@@ -159,10 +174,12 @@ class Client:
         self.seat: int | None = None
         self.hand: list[str] = []
         self.drawn: str | None = None
+        self.frames: list[str] = []
         self.sock = socket.create_connection(("127.0.0.1", port), timeout=10.0)
 
     # ---- transport -------------------------------------------------------------------
     def send(self, frame: dict) -> None:
+        self.frames.append("out " + normalize_frame(frame))
         self.recorder.frame("out", frame)
         self.sock.sendall(json.dumps(frame, ensure_ascii=False).encode("utf-8") + b"\n")
 
@@ -183,6 +200,7 @@ class Client:
             self.buffer += chunk
         line, _, self.buffer = self.buffer.partition(b"\n")
         frame = json.loads(line.decode("utf-8"))
+        self.frames.append("in  " + normalize_frame(frame))
         self.recorder.frame("in", frame)
         return frame
 
@@ -519,10 +537,451 @@ def run_one_game(binary: str, seed: int, port: int, log_path: str, verbose: bool
 
 
 # ---------------------------------------------------------------------------------------------
-# single game (t6)
+# whole-match mode (E2/E3, A1_ACCEPTANCE §七): 一场 4..8 局 + PROTOCOL §10.4 三组断言
 # ---------------------------------------------------------------------------------------------
 
-def run_single(args: argparse.Namespace) -> int:
+def normalize_frame(frame: dict) -> str:
+    """E2 逐帧 diff 用的归一化：剥离两类**合法的逐次不同**字段。
+
+    * `action_request.deadline_ms` —— 真实时钟（§5.7），两次运行必然不同；
+    * `login_ok.player_id` —— 游客会话 id 逐连接生成。
+    其余字段（含 seq、hand、yaku、rankings）参与逐字节比对。
+    """
+    cleaned = json.loads(json.dumps(frame, ensure_ascii=False))
+    if cleaned.get("type") == "action_request" and "deadline_ms" in cleaned:
+        cleaned["deadline_ms"] = 0
+    if cleaned.get("type") == "login_ok":
+        cleaned.pop("player_id", None)
+    return json.dumps(cleaned, ensure_ascii=False, sort_keys=True)
+
+
+def assert_yaku_group(end: dict, label: str) -> None:
+    """番数组（N1/N11/P11，PROTOCOL §10.4 ③）：逐局 game_end 的番数自洽。"""
+    win = end.get("win")
+    if not isinstance(win, dict):
+        return
+    yaku = win.get("yaku")
+    breakdown = win.get("han_breakdown")
+    if not isinstance(yaku, list) or not isinstance(breakdown, dict):
+        raise Failure(f"{label}: win.yaku/han_breakdown missing (v1.6 fields): {win}")
+    ids = [item.get("id") for item in yaku if isinstance(item, dict)]
+    if len(ids) != len(set(ids)):
+        raise Failure(f"{label}: yaku id 重复：{ids}")
+    order_indexes = [YAKU_FROZEN_ORDER.index(i) for i in ids if i in YAKU_FROZEN_ORDER]
+    if len(order_indexes) != len(ids):
+        raise Failure(f"{label}: 未知 yaku id：{ids}")
+    if order_indexes != sorted(order_indexes):
+        raise Failure(f"{label}: yaku 未按冻结判定序：{ids}")
+    base = sum(item.get("han", 0) for item in yaku if isinstance(item, dict))
+    if breakdown.get("base") != base:
+        raise Failure(f"{label}: N11 失败 Σyaku.han={base} != base={breakdown.get('base')}")
+    if breakdown.get("tsumo") != 0:
+        raise Failure(f"{label}: N1 失败 tsumo 必须恒 0（自摸不是番种）: {breakdown}")
+    dealer = breakdown.get("dealer", 0)
+    expected_total = min(base + dealer, 6)
+    if breakdown.get("total") != expected_total or win.get("han") != expected_total:
+        raise Failure(f"{label}: total/han={breakdown.get('total')}/{win.get('han')} != {expected_total}")
+    if win.get("dealer_bonus") != (dealer == 1):
+        raise Failure(f"{label}: dealer_bonus 派生字段不一致: {win}")
+    tags = win.get("tags") or []
+    if not set(tags) <= set(ids):
+        raise Failure(f"{label}: P11 失败 tags ⊄ yaku[].id：tags={tags} yaku={ids}")
+    tag_order = [ids.index(t) for t in tags]
+    if tag_order != sorted(tag_order):
+        raise Failure(f"{label}: P11 tags 未按 yaku 冻结序：tags={tags} yaku={ids}")
+
+
+def assert_rankings(match_end: dict, last_end: dict, label: str) -> None:
+    """M3/N8（PROTOCOL §10.4 / §5.15）：rankings 排序 + 并列跳号 + 与 match_total 同一份数据。"""
+    rankings = match_end.get("rankings")
+    if not isinstance(rankings, list) or len(rankings) != SEAT_COUNT:
+        raise Failure(f"{label}: match_end.rankings must hold {SEAT_COUNT} entries: {rankings}")
+    scores = {}
+    for entry in rankings:
+        seat, score, rank = entry.get("seat"), entry.get("final_score"), entry.get("rank")
+        if not isinstance(seat, int) or not isinstance(score, int) or not isinstance(rank, int):
+            raise Failure(f"{label}: ranking entry malformed: {entry}")
+        scores[seat] = score
+    if sum(scores.values()) != 0:
+        raise Failure(f"{label}: Σ final_score must be 0, got {scores}")
+    for entry in rankings:
+        strictly_greater = sum(1 for s in scores.values() if s > entry["final_score"])
+        if entry["rank"] != 1 + strictly_greater:
+            raise Failure(f"{label}: rank 并列跳号 broken: {entry} (scores={scores})")
+    for prev, cur in zip(rankings, rankings[1:]):
+        ok = prev["final_score"] > cur["final_score"] or (
+            prev["final_score"] == cur["final_score"] and prev["seat"] < cur["seat"])
+        if not ok:
+            raise Failure(f"{label}: rankings 未按分数降序/同分 seat 升序: {rankings}")
+    results = last_end.get("results") or []
+    match_totals = {entry.get("seat"): entry.get("match_total") for entry in results}
+    if match_totals and any(scores.get(seat) != total for seat, total in match_totals.items()):
+        raise Failure(f"{label}: M10 final_score 必须与最后一次 game_end.match_total 逐座位相等: "
+                      f"{scores} vs {match_totals}")
+
+
+def assert_round_frames(end: dict, last_sync: dict | None, first_sync_total: int | None,
+                        label: str) -> None:
+    """P6/P12：局终帧 + 该局最后一份 state_sync 的暗杠揭示与物理守恒。"""
+    # P6（局终揭示）：game_end 前最后一份 state_sync 里，ankan 组必须已补全为 4 张同面
+    # （空数组形态只允许出现在**非**局终的 sync 里）。
+    if last_sync is not None:
+        for entry in last_sync.get("seats") or []:
+            for meld in entry.get("melds") or []:
+                if meld.get("type") != "ankan":
+                    continue
+                tiles = meld.get("tiles") or []
+                if len(tiles) == 0:
+                    raise Failure(f"{label}: 局终揭示前的最后一份 state_sync 未揭示 ankan：{meld}")
+                if len(tiles) != 4 or len(set(tiles)) != 1:
+                    raise Failure(f"{label}: 局终揭示形态非法（须 4 张同面）：{meld}")
+    # P12：物理守恒（per round；荣和的河中牌允许 +1，PROTOCOL §5.10 H4）。
+    if last_sync is not None and first_sync_total is not None:
+        seats = last_sync.get("seats") or []
+        total = last_sync.get("remaining", 0)
+        total += sum(entry.get("hand_count", 0) for entry in seats)
+        total += sum(len(meld.get("tiles", [])) for entry in seats for meld in entry.get("melds") or [])
+        total += sum(len(entry.get("discards") or []) for entry in seats)
+        win = end.get("win")
+        ron = isinstance(win, dict) and not win.get("tsumo")
+        allowed = {first_sync_total, first_sync_total + 1} if ron else {first_sync_total}
+        if total not in allowed:
+            raise Failure(f"{label}: P12 物理守恒失败：{total} ∉ {sorted(allowed)}")
+
+
+def play_match(client: Client, recorder: Recorder, deadline: float, verbose: bool,
+               inter_hand_delay_ms: int, initial_start: dict | None = None) -> dict:
+    """打完整场（game_end 4..8 次 → match_end），途中执行 M7 探针与全部场次断言的原始采集。
+
+    `initial_start` 是 handshake() 已消费的第一局 game_start（P9 需要把它计入 starts）。
+    """
+    stats = {"draws": 0, "discard_events": 0, "action_requests": 0, "errors": [],
+             "ends": [], "starts": [initial_start] if initial_start else [],
+             "match_end": None, "last_state_sync": None,
+             "syncs_by_round": [], "action_events": [], "request_seqs": [],
+             "inter_hand_gaps_ms": [], "last_end_monotonic": None, "m7_probe_armed": False,
+             "m7_bad_requests": 0, "first_sync_total": None}
+
+    def finish_round(end: dict) -> None:
+        stats["ends"].append(end)
+        stats["syncs_by_round"].append(stats["last_state_sync"])
+        stats["last_state_sync"] = None
+        stats["last_end_monotonic"] = time.monotonic()
+
+    def send_m7_probe_once() -> None:
+        """M7 探针（仅第一局间）：game_end 刚到、下一局尚未开局 ⇒ 服务端必处 kRoundEnd，
+        此时发一帧对局帧，预期**恰好一条** error{BAD_REQUEST}（单独计数，不计入 C）。"""
+        if len(stats["ends"]) == 1 and not stats["m7_probe_armed"] and stats["m7_bad_requests"] == 0:
+            stats["m7_probe_armed"] = True
+            seq = stats["request_seqs"][-1] if stats["request_seqs"] else 1
+            client.send({"type": "discard", "tile": "1m", "seq": seq})
+            recorder.write({"event": "m7_probe", "seq": seq})
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise Failure("the match did not finish within the match timeout (960s)")
+        try:
+            frame = client.recv_frame(min(30.0, remaining))
+        except TimeoutError:
+            raise Failure(f"no server frame for {min(30.0, remaining):.0f}s during the match "
+                          f"(last frames: {' | '.join(recorder.tail[-4:])})")
+        if verbose:
+            print(f"[e2e] <- {json.dumps(frame, ensure_ascii=False)[:160]}")
+        kind = frame.get("type")
+        if kind == "error":
+            if stats["m7_probe_armed"] and frame.get("code") == "BAD_REQUEST":
+                # M7 探针的预期回答：单独计数，不计入 C 的 error 断言。
+                stats["m7_probe_armed"] = False
+                stats["m7_bad_requests"] += 1
+                continue
+            stats["errors"].append(frame)
+            continue
+        if kind == "match_end":
+            stats["match_end"] = frame
+            return stats
+        if kind == "pong":
+            continue
+        if kind == "game_start":
+            if stats["last_end_monotonic"] is not None:
+                gap_ms = (time.monotonic() - stats["last_end_monotonic"]) * 1000.0
+                stats["inter_hand_gaps_ms"].append(gap_ms)
+            stats["starts"].append(frame)
+            round_started_monotonic = time.monotonic()
+            continue
+        if kind == "game_end":
+            finish_round(frame)
+            send_m7_probe_once()
+            continue
+        if kind == "draw":
+            if frame.get("seat") == client.seat:
+                client.note_draw(frame["tile"])
+            stats["draws"] += 1
+            continue
+        if kind == "discard_event":
+            client.note_discard_event(frame["seat"], frame["tile"])
+            stats["discard_events"] += 1
+            continue
+        if kind == "state_sync":
+            client.adopt_state_sync(frame)
+            if stats["first_sync_total"] is None:
+                stats["first_sync_total"] = tile_total_of(frame)
+            stats["last_state_sync"] = frame
+            continue
+        if kind == "action_event":
+            action = frame.get("action")
+            if action in ("ankan", "kakan") and "from_seat" in frame:
+                raise Failure(f"P7 失败：{action} 的 action_event 不得携带 from_seat：{frame}")
+            if frame.get("seat") == client.seat and action == "win" and "from_seat" in frame:
+                client.hand.extend(frame.get("tiles", []))
+            continue
+        if kind == "action_request":
+            stats["action_requests"] += 1
+            seq = frame.get("seq")
+            stats["request_seqs"].append(seq)
+            decision = answer_request(client, frame)
+            recorder.write({"event": "decision", "window": frame.get("window"), "seq": seq,
+                            "options": [option.get("action") for option in frame.get("options", [])],
+                            "reply": decision})
+            if verbose:
+                print(f"[e2e] -> {decision} (window={frame.get('window')} seq={seq})")
+            continue
+        # Unknown server frames are ignored (forward compatible, PROTOCOL.md §1.3).
+
+
+def tile_total_of(sync: dict) -> int:
+    seats = sync.get("seats") or []
+    total = sync.get("remaining", 0)
+    total += sum(entry.get("hand_count", 0) for entry in seats)
+    total += sum(len(meld.get("tiles", [])) for entry in seats for meld in entry.get("melds") or [])
+    total += sum(len(entry.get("discards") or []) for entry in seats)
+    return total
+
+
+def assert_match(starts: list, ends: list, match_end: dict, stats: dict,
+                 inter_hand_delay_ms: int) -> dict:
+    """E3/P3：一场的全部场次级断言（M 组 / 番数组 / 暗杠组 / P5/P9/P12 / M7/M8 / C）。"""
+    label = "match"
+    if stats["errors"]:
+        raise Failure(f"C 失败：收到 {len(stats['errors'])} 帧 error：{stats['errors'][:3]}")
+    if not stats["m7_bad_requests"]:
+        raise Failure("M7: 局间探针未收到预期的 error{BAD_REQUEST}（局间拒帧未生效或探针未发）")
+    # M2：match_end 恰好 1 次（能走到这里即已收到），hands_played = game_end 下发手数（D2 终裁）。
+    ends_count = len(ends)
+    hands_played = match_end.get("hands_played")
+    renchan = match_end.get("renchan_count")
+    if not isinstance(hands_played, int) or not isinstance(renchan, int):
+        raise Failure(f"M2: match_end 缺 hands_played/renchan_count: {match_end}")
+    if not 4 <= hands_played <= 8:
+        raise Failure(f"M2: hands_played 必须 ∈ [4,8]（C15 双闸），got {hands_played}")
+    if hands_played != ends_count:
+        raise Failure(f"M2/D2: hands_played({hands_played}) 必须 == game_end 下发次数({ends_count})")
+    if not ends:
+        raise Failure("M1: 一场至少要有一次 game_end")
+    last_end = ends[-1]
+    if last_end.get("renchan_count") != renchan:
+        raise Failure(f"M2: renchan_count({renchan}) 必须与最后一次 game_end({last_end.get('renchan_count')}) 同值")
+    # M1（PROTOCOL §10.4 的恒等式，D2 终裁口径）：game_end 次数 = hands_played（连庄由 renchan 承载）。
+    if ends_count != hands_played:
+        raise Failure(f"M1: game_end 次数 {ends_count} != hands_played {hands_played}")
+
+    # P9：game_start 每局恰一次；round_index 连庄不动/轮庄 +1；dealer 推导一致；round_count==4。
+    if len(starts) != ends_count:
+        raise Failure(f"P9: game_start({len(starts)}) 必须与 game_end({ends_count}) 一一对应")
+    expected_round, expected_dealer = 0, starts[0].get("dealer") if starts else 0
+    if not isinstance(expected_dealer, int):
+        raise Failure(f"P9: game_start.dealer 缺失: {starts[0]}")
+    for index, start in enumerate(starts):
+        if start.get("round_index") != expected_round:
+            raise Failure(f"P9: 第 {index} 局 round_index={start.get('round_index')} != {expected_round}")
+        if start.get("round_count") != 4:
+            raise Failure(f"P9: round_count 必须恒 4: {start}")
+        if start.get("dealer") != expected_dealer:
+            raise Failure(f"P9: 第 {index} 局 dealer={start.get('dealer')} != 推导值 {expected_dealer}")
+        end = ends[index]
+        reason = end.get("reason")
+        win = end.get("win")
+        winner = win.get("seat") if isinstance(win, dict) else None
+        if reason != "draw_exhausted" and winner != expected_dealer:
+            expected_round += 1
+            expected_dealer = (expected_dealer + 1) % SEAT_COUNT
+    # C15：一场打完时 round_index 已走满 4（或被连庄闸截断）。
+    if expected_round not in (4,):
+        if not renchan > 4:
+            raise Failure(f"C15: 场终时 round_index 终值 {expected_round} 既非 4 也未触发连庄闸")
+
+    # M8：局间间隔 ≥ 配置的 --inter-hand-delay-ms（容差 50ms；上限 2s 防呆）。
+    floor_ms = max(0.0, inter_hand_delay_ms - 50.0)
+    for index, gap_ms in enumerate(stats["inter_hand_gaps_ms"]):
+        if gap_ms < floor_ms:
+            raise Failure(f"M8: 第 {index + 1} 个局间隔 {gap_ms:.0f}ms < {inter_hand_delay_ms}ms")
+        if gap_ms > 2000.0 + inter_hand_delay_ms:
+            raise Failure(f"M8: 第 {index + 1} 个局间隔 {gap_ms:.0f}ms 异常长（>{2000 + inter_hand_delay_ms}ms）")
+
+    # P5：action_request.seq 整场严格递增（跨局不重置）。
+    for prev, cur in zip(stats["request_seqs"], stats["request_seqs"][1:]):
+        if not (isinstance(prev, int) and isinstance(cur, int) and cur > prev):
+            raise Failure(f"P5: action_request.seq 必须整场严格递增：{prev} -> {cur}")
+
+    # 逐局：P6 暗杠揭示 + P12 物理守恒 + 番数组（N1/N11/P11）。
+    for index, end in enumerate(ends):
+        last_sync = stats["syncs_by_round"][index] if index < len(stats["syncs_by_round"]) else None
+        assert_round_frames(end, last_sync, stats["first_sync_total"], f"round {index}")
+        assert_yaku_group(end, f"round {index}")
+
+    # M3/N8/M10：rankings。
+    assert_rankings(match_end, last_end, label)
+    print("[e2e] note: 本场的暗杠/加杠是否发生不影响 P6/P7（它们是条件断言，动作事件与揭示形态"
+          "在发生时才被校验）")
+    return {"hands_played": hands_played, "renchan": renchan,
+            "rounds": ends_count, "gaps_ms": [round(g) for g in stats["inter_hand_gaps_ms"]],
+            "m7_bad_requests": stats["m7_bad_requests"]}
+
+
+def run_one_match(binary: str, seed: int, port: int, log_path: str, verbose: bool,
+                  timeout: float, ai_delay_ms: int | None,
+                  inter_hand_delay_ms: int) -> dict:
+    """E3：打完整场（4..8 局 → match_end）， enforcing P3 三组断言；返回场次摘要。"""
+    recorder = Recorder(log_path)
+    server_log = tempfile.NamedTemporaryFile(prefix="mahjong_match_", suffix=".log", delete=False)
+    recorder.write({"event": "start", "binary": binary, "port": port, "seed": seed,
+                    "inter_hand_delay_ms": inter_hand_delay_ms})
+    command = [binary, "--port", str(port), "--seed", str(seed),
+               "--inter-hand-delay-ms", str(inter_hand_delay_ms)]
+    if ai_delay_ms is not None:
+        command += ["--ai-delay-ms", str(ai_delay_ms)]
+    process = subprocess.Popen(command, stdout=server_log, stderr=subprocess.STDOUT)
+    client = None
+    deadline = time.monotonic() + timeout
+    try:
+        require_own_listener(port, process, server_log.name)
+        client = Client(port, recorder, deadline)
+        start = handshake(client, recorder)
+        stats = play_match(client, recorder, deadline, verbose, inter_hand_delay_ms, initial_start=start)
+        match_end = stats["match_end"]
+        if match_end is None:
+            raise Failure("the server stream ended without a match_end frame")
+        summary = assert_match(stats["starts"], stats["ends"], match_end, stats, inter_hand_delay_ms)
+        summary["seed"] = seed
+        summary["draws"] = stats["draws"]
+        summary["discard_events"] = stats["discard_events"]
+        summary["action_requests"] = stats["action_requests"]
+        recorder.write({"event": "match_end", "summary": summary})
+        print(f"[e2e] match done: seed={seed} rounds={summary['rounds']} "
+              f"hands_played={summary['hands_played']} renchan={summary['renchan']} "
+              f"m7_bad={summary['m7_bad_requests']} gaps_ms={summary['gaps_ms']}")
+        return summary
+    except Exception as error:  # noqa: BLE001 - every failure path must log and exit non-zero
+        recorder.write({"event": "failure", "error": f"{type(error).__name__}: {error}"})
+        print(f"[e2e] FAIL (match seed={seed}): {type(error).__name__}: {error}", file=sys.stderr)
+        print("[e2e] last frames:", file=sys.stderr)
+        for line in recorder.tail:
+            print(f"  {line}", file=sys.stderr)
+        try:
+            with open(server_log.name, "r", encoding="utf-8", errors="replace") as source:
+                with open(log_path + ".server.log", "w", encoding="utf-8") as target:
+                    target.write(source.read())
+        except OSError:
+            pass
+        raise Failure(f"match seed {seed}: {type(error).__name__}: {error}") from error
+    finally:
+        if client is not None:
+            client.close()
+        recorder.write({"event": "server_shutdown"})
+        process.send_signal(signal.SIGINT)
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        server_log.close()
+        os.unlink(server_log.name)
+        recorder.close()
+
+
+def collect_normalized_frames(binary: str, seed: int, log_path: str, verbose: bool,
+                              timeout: float) -> list[str]:
+    """E2：跑一场整场，返回 Client 采集的**归一化帧序列**（Recorder 产物同时落盘备查）。"""
+    recorder = Recorder(log_path)
+    server_log = tempfile.NamedTemporaryFile(prefix="mahjong_det_", suffix=".log", delete=False)
+    recorder.write({"event": "start", "binary": binary, "seed": seed})
+    port = free_port()
+    # 归一化剔除 deadline_ms/player_id 后，时序配置不参与 diff；50ms/0 pacing 只为跑得快。
+    command = [binary, "--port", str(port), "--seed", str(seed), "--inter-hand-delay-ms", "50",
+               "--ai-delay-ms", "0"]
+    process = subprocess.Popen(command, stdout=server_log, stderr=subprocess.STDOUT)
+    client = None
+    deadline = time.monotonic() + timeout
+    try:
+        require_own_listener(port, process, server_log.name)
+        client = Client(port, recorder, deadline)
+        start = handshake(client, recorder)
+        stats = play_match(client, recorder, deadline, verbose, 50, initial_start=start)
+        if stats["match_end"] is None:
+            raise Failure("determinism run ended without match_end")
+        assert_match(stats["starts"], stats["ends"], stats["match_end"], stats, 50)
+    except Exception as error:  # noqa: BLE001
+        recorder.write({"event": "failure", "error": f"{type(error).__name__}: {error}"})
+        raise Failure(f"determinism run seed {seed}: {type(error).__name__}: {error}") from error
+    finally:
+        if client is not None:
+            client.close()
+        process.send_signal(signal.SIGINT)
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        server_log.close()
+        os.unlink(server_log.name)
+        recorder.close()
+    return client.frames if client is not None else []
+
+
+def run_match(args: argparse.Namespace) -> int:
+    binary = find_binary(args.server_bin)
+    port = resolve_port(args.port)
+    print(f"[e2e] match mode: binary={binary} seed={args.seed} "
+          f"inter_hand_delay_ms={args.inter_hand_delay_ms} timeout={MATCH_TIMEOUT_S:.0f}s")
+    summary = run_one_match(binary, args.seed, port, args.match_log, args.verbose,
+                            args.match_timeout, args.ai_delay_ms, args.inter_hand_delay_ms)
+    print(f"[e2e] MATCH PASS: M1/M2 (game_end={summary['rounds']} == hands_played="
+          f"{summary['hands_played']}, renchan={summary['renchan']}) | "
+          f"M3/N8/M10 (rankings) | N1/N11/P11 (yaku) | P5/P9/P12 | "
+          f"M7 (局间 BAD_REQUEST ×{summary['m7_bad_requests']}) | "
+          f"M8 (gaps ≥ {args.inter_hand_delay_ms}ms: {summary['gaps_ms']}) | C (0 unexpected error)")
+    return 0
+
+
+def run_determinism(args: argparse.Namespace) -> int:
+    """E2（Q3 裁决 960s）：同 --seed 两次 TCP 整场，归一化帧序列逐帧 diff 为空。"""
+    binary = find_binary(args.server_bin)
+    print(f"[e2e] determinism mode: two whole matches with seed={args.seed} "
+          f"(timeout={MATCH_TIMEOUT_S:.0f}s each)")
+    first = collect_normalized_frames(binary, args.seed, args.match_log + ".run1", args.verbose,
+                                      args.match_timeout)
+    print(f"[e2e] run 1 done: {len(first)} normalized frames")
+    second = collect_normalized_frames(binary, args.seed, args.match_log + ".run2", args.verbose,
+                                       args.match_timeout)
+    print(f"[e2e] run 2 done: {len(second)} normalized frames")
+    if len(first) != len(second):
+        for index in range(min(len(first), len(second))):
+            if first[index] != second[index]:
+                print(f"[e2e] first diff at frame {index}:\n  A: {first[index][:200]}\n  B: {second[index][:200]}",
+                      file=sys.stderr)
+                break
+        raise Failure(f"E2 失败：两场帧数不同（{len(first)} vs {len(second)}）")
+    for index, (a, b) in enumerate(zip(first, second)):
+        if a != b:
+            print(f"[e2e] first diff at frame {index}:\n  A: {a[:300]}\n  B: {b[:300]}", file=sys.stderr)
+            raise Failure(f"E2 失败：同 seed 两场在第 {index} 帧分叉")
+    print(f"[e2e] E2 PASS: 同 seed 两场整场逐帧一致（{len(first)} 帧，归一化剔除 deadline_ms/player_id）")
+    return 0
+
+
+# ---------------------------------------------------------------------------------------------
+# single game (t6)
+# ---------------------------------------------------------------------------------------------
     binary = find_binary(args.server_bin)
     port = resolve_port(args.port)
     print(f"[e2e] binary={binary} port={port} seed={args.seed} log={args.log}"
@@ -934,6 +1393,23 @@ def main() -> int:
     parser.add_argument("--concurrency-check", action="store_true",
                         help="t26: run two sweeps of this script in parallel and assert they do not "
                              "disturb each other (uses --games, at least 10 per instance)")
+    # ---- v1.6 整场模式（E2/E3, A1_ACCEPTANCE §七）----
+    parser.add_argument("--matches", type=int, default=0,
+                        help="play this many WHOLE matches (4..8 rounds each -> match_end) with the "
+                             "PROTOCOL §10.4 match-level assertions (M1/M2/M3/N8/M10/N1/N11/P5/P9/"
+                             "P11/P12 + M7/M8). Timeout = 960s per match (Q3).")
+    parser.add_argument("--inter-hand-delay-ms", type=int, default=300,
+                        help="forward --inter-hand-delay-ms to the server for match mode; the M8 "
+                             "assertion checks every game_end -> game_start gap against this value "
+                             "(default 300ms keeps a match fast while still observable)")
+    parser.add_argument("--determinism-check", action="store_true",
+                        help="E2: run the WHOLE match twice with the same --seed and assert the "
+                             "normalized frame sequences are identical (deadline_ms/player_id "
+                             "stripped). Timeout = 960s per run (Q3).")
+    parser.add_argument("--match-log", default=DEFAULT_MATCH_LOG,
+                        help=f"match-mode frame artefact (default {DEFAULT_MATCH_LOG})")
+    parser.add_argument("--match-timeout", type=float, default=MATCH_TIMEOUT_S,
+                        help=f"per-match budget in seconds (default {MATCH_TIMEOUT_S:.0f} = Q3)")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
     # t31: one game has its own budget (clamped by the hard ceiling) so a stalled game fails
@@ -947,6 +1423,17 @@ def main() -> int:
     try:
         if args.concurrency_check:
             return run_concurrency_check(args)
+        if args.determinism_check:
+            return run_determinism(args)
+        if args.matches > 0:
+            binary = find_binary(args.server_bin)
+            for index in range(args.matches):
+                seed = args.seed + index
+                port = resolve_port(args.port)
+                run_one_match(binary, seed, port, f"{args.match_log}.{index}", args.verbose,
+                              args.match_timeout, args.ai_delay_ms, args.inter_hand_delay_ms)
+            print(f"[e2e] MATCH SWEEP PASS: {args.matches} 场整场全部通过")
+            return 0
         if args.games <= 1:
             return run_single(args)
         return run_stats(args)
