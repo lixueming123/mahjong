@@ -209,6 +209,20 @@ R_SIDE_R_RIVER = (1012, 248, 260, 306)
 
 R_TOAST = (440, 344, 400, 24)
 
+# B 批（FEEL_SPEC §2.2 F-TP-01）：听牌条 — 单行横条，居中于手牌区正上方。
+# 下沿 554，与手牌区选中/摸牌上移的 558 留 4 px 余量；不遮牌河（自家 356..514）与操作栏（650）。
+R_TENPAI = (240, 514, 800, 40)
+# ⚠️ 版式冲突（实现期发现，待 game-design-director 复核）：F-TP-01 的 (240,514,800,40) 与
+# 本家副露区 R_SELF_MELD = (452,518,376,36) **完全重叠**——有副露时副露组会被听牌条盖住。
+# 处置：本家**有副露**时整条上移 44 px（R_TENPAI_SHIFTED），代价是可能与自家牌河下沿
+# （y 470..514）相碰，但牌河自上而下填充、只有 >12 张才落到下沿，冲突概率远低于「必然盖住副露」。
+R_TENPAI_SHIFTED = (240, 470, 800, 40)
+TENPAI_BG_ALPHA = 216          # F-TP-02（比卡片 235 略透明）
+TENPAI_ITEM_X0 = 256           # F-TP-03
+TENPAI_ITEM_GAP = 16           # F-TP-03
+TENPAI_ITEM_WIDTH_EST = 74     # F-TP-04（溢出降级用的估算宽）
+TENPAI_PREFIX_GAP = 8          # F-TP-05
+
 # 牌元素几何（§4.4）
 HAND_TILE_W = 56
 HAND_TILE_H = 76
@@ -331,6 +345,7 @@ FS_H2 = 28
 FS_H3 = 22
 FS_BODY = 18
 FS_SMALL = 15
+FS_MICRO = 12        # B 批（FEEL_SPEC §2.2 F-TP-03）：听牌条「N 枚」的枚数字号
 FS_TILE_HAND_RANK = 26
 FS_TILE_HAND_SUIT = 15
 FS_TILE_RIVER_RANK = 16

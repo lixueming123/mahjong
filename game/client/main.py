@@ -26,6 +26,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default=DEFAULT_HOST, help="目标服务器地址（默认 127.0.0.1）")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="目标服务器端口（默认 9527）")
     parser.add_argument("--fullscreen", action="store_true", help="全屏显示（非验收项）")
+    parser.add_argument(
+        "--no-feel",
+        action="store_true",
+        help="关闭 B 批手感表现：不播任何动画（音效仍受 M 键控制），用于自动化与性能比对",
+    )
     parser.add_argument("--log-level", default="INFO", help="日志级别（DEBUG/INFO/WARNING）")
     return parser
 
@@ -39,11 +44,17 @@ def cli_main(argv: list[str] | None = None) -> int:
     logging.getLogger("mahjong.client").info(
         "启动客户端：目标 %s:%s", args.host, args.port
     )
-    app = GameApp(host=args.host, port=args.port, fullscreen=args.fullscreen)
+    app = GameApp(host=args.host, port=args.port, fullscreen=args.fullscreen, no_feel=args.no_feel)
     try:
         app.run()
     except KeyboardInterrupt:  # pragma: no cover - 交互式中断
         app.shutdown()
+    finally:
+        # 退出时把三条通道收干净（F-AU-26 的兜底：避免进程尾巴上拖一段余韵）
+        try:
+            app.audio.stop_all(0)
+        except Exception:  # pragma: no cover
+            pass
     return 0
 
 

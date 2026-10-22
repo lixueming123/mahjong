@@ -168,6 +168,11 @@ class GameState:
         self.error_count: int = 0
         self.last_error: dict | None = None
         self.recv_ms: dict[str, float] = {}
+        # B 批（PROTOCOL v1.7 §5.16）：听牌条——**仅本家**、独立 `tenpai_seq`（不掺 room.seq）。
+        self.tenpai_seq: int | None = None
+        self.tenpai_waits: list[dict] = []
+        self.is_tenpai: bool = False
+        self.last_discard_seat: int | None = None   # B 批：F-CL-01 被鸣牌定位（公开派生）
 
     # ------------------------------------------------------------ 派生查询
 
@@ -239,6 +244,7 @@ class GameState:
             "action_request": self._apply_action_request,
             "action_event": self._apply_action_event,
             "state_sync": self._apply_state_sync,
+            "tenpai": self._apply_tenpai,          # v1.7 §5.16（B 批）
             "game_end": self._apply_game_end,
             "match_end": self._apply_match_end,  # v2.0：场终帧（§9.6）
         }.get(ftype)
@@ -289,6 +295,8 @@ class GameState:
         self.screen = SCREEN_TABLE
         self.phase = "对局中"
         self.check_hand_count()
+        self.tenpai_seq = None   # 新场次 ⇒ 服务端也归零（§5.16）；此处跟随
+        self.clear_tenpai()      # F-TP-12：game_start 无条件清空上一局的 waits 与动画状态
 
         # 保留 room_joined 缓存的昵称 / is_bot，清空对局数据
         for view in self.seats:
@@ -329,6 +337,9 @@ class GameState:
             log.warning("discard_event.tile 非法：%r，已忽略", tile)
             return
         self.seat_view(seat).discards.append(tile)
+        # B 批（FEEL_SPEC §3.2 F-CL-01）：被鸣牌 = **最近一次被打出的那张**，定位需要它。
+        # 这是客户端从公开信息派生的视觉事实，不新增协议字段。
+        self.last_discard_seat = seat
         if seat == self.my_seat:
             if not remove_leftmost(self.hand, tile):
                 log.warning("本家 discard_event 的牌不在手牌中：%s", tile)
@@ -409,6 +420,9 @@ class GameState:
             self.frozen = True
             if isinstance(seat, int):
                 self.win_seat = seat
+        # F-TP-11 ①⑤：本家和牌 / 本家副露生效 ⇒ 立刻清空听牌（牌形已变，旧 waits 是脏数据）
+        if action == "win" or action in ("pong", "chow", "kong", "ankan", "kakan"):
+            self.clear_tenpai()
         # §5.1 兜底规则：任一 action_event → 本窗口已结算 → 立即清除 PENDING
         self.clear_pending()
 
@@ -453,6 +467,56 @@ class GameState:
             self.current_seat = current
         self.check_hand_count()
 
+    # ------------------------------------------------------------ 听牌（v1.7 §5.16）
+
+    def clear_tenpai(self) -> None:
+        """F-TP-11：清空听牌缓存（八条清零时机的统一落点）。
+
+        `tenpai_seq` **不清零**——它是「每座位一条、跨局不重置」的服务端计数器
+        （§5.16），客户端跟着服务端走，本地清零会导致后续帧被误判成过期而丢弃。
+        """
+        self.tenpai_waits = []
+        self.is_tenpai = False
+
+    def _apply_tenpai(self, frame: dict) -> None:
+        """`tenpai` 帧：**仅本家**、独立 `tenpai_seq`、不掺 `room.seq`。
+
+        - F-TP-11 ⑧：`is_tenpai == false` ⇒ 下发即清空（服务端 MUST 发清空信号）；
+        - §7 R6：只接受 `tenpai_seq` **严格递增**的帧，乱序/重放一律丢弃（不回退显示）。
+        """
+        seq = frame.get("tenpai_seq")
+        if not isinstance(seq, int):
+            log.warning("tenpai 帧缺少 tenpai_seq，已丢弃")
+            return
+        if self.tenpai_seq is not None and seq <= self.tenpai_seq:
+            log.warning("收到过期 tenpai 帧（tenpai_seq=%s <= %s），已丢弃", seq, self.tenpai_seq)
+            return
+        self.tenpai_seq = seq
+        waits_raw = frame.get("waits")
+        clean: list[dict] = []
+        if isinstance(waits_raw, list):
+            for item in waits_raw:
+                if not isinstance(item, dict):
+                    continue
+                tile = item.get("tile")
+                remaining = item.get("remaining")
+                if not is_valid_tile(tile):
+                    log.warning("tenpai.waits 含非法牌面，已过滤：%r", tile)
+                    continue
+                if not isinstance(remaining, int) or not 0 <= remaining <= 4:
+                    # §2.3：`> 4` 视为服务端缺陷（多半误填了 wall_remaining_），照画不崩 + WARN。
+                    log.warning("tenpai.waits[%s].remaining=%r 越界（应 0..4），照画不崩", tile, remaining)
+                    if not isinstance(remaining, int):
+                        remaining = 0
+                clean.append({"tile": tile, "remaining": remaining})
+        else:
+            log.warning("tenpai.waits 非法，按空处理")
+        flag = frame.get("is_tenpai")
+        self.tenpai_waits = clean
+        self.is_tenpai = bool(flag) if isinstance(flag, bool) else bool(clean)
+        if not self.is_tenpai:
+            self.tenpai_waits = []  # 双向一致（false ⇒ []）
+
     def _apply_game_end(self, frame: dict) -> None:
         # §5.10 / H5：game_end 不携带 seq，不参与 seq 比较。v2.0：game_end = 局终页（非终态），
         # `match_will_continue == true` 时等待下一局 game_start，`false` 时等待 match_end。
@@ -466,6 +530,7 @@ class GameState:
         self.frozen = True
         self.screen = SCREEN_RESULT
         self.phase = "结算"
+        self.clear_tenpai()      # F-TP-11 ②③：局终（含荒庄）一律清空
         win = frame.get("win")
         if isinstance(win, dict) and isinstance(win.get("seat"), int):
             self.win_seat = win["seat"]
@@ -487,6 +552,7 @@ class GameState:
         self.frozen = True
         self.screen = SCREEN_RESULT
         self.phase = "结算"
+        self.clear_tenpai()      # F-TP-11 ⑦：场终清空
         log.info(
             "场终：hands_played=%s renchan=%s",
             frame.get("hands_played"), frame.get("renchan_count"),

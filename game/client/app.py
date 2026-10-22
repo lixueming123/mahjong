@@ -18,11 +18,13 @@ import time
 import pygame
 
 from . import theme as T
+from .audio import AudioEngine
+from .feel import Feel
 from .game_state import (SCREEN_LOGIN, SCREEN_LOBBY, SCREEN_RESULT, SCREEN_TABLE, WINDOW_CLAIM, WINDOW_DISCARD,
                          GameState)
 from .net_client import NetClient
 from .render import (actionbar, lobby as lobby_view, login as login_view, overlays, result as result_view,
-                     stats as stats_view, table as table_view)
+                     stats as stats_view, table as table_view, tenpai as tenpai_view)
 from .tiles import button_label, tile_label
 from .view import UiView
 
@@ -79,10 +81,13 @@ class GameApp:
         *,
         auto_scale: bool = True,
         enable_display: bool = True,
+        no_feel: bool = False,
     ) -> None:
         self.host = host
         self.port = port
         self.fullscreen = fullscreen
+        # B 批（FEEL_SPEC §6 F-AN-06）：`--no-feel` ⇒ 不播任何动画，直接按终态绘制。
+        self.feel = Feel(animations_enabled=not no_feel)
         pygame.init()
         try:
             pygame.font.init()
@@ -90,6 +95,14 @@ class GameApp:
             log.warning("字体模块初始化失败")
         self.fonts = T.FontBook()
         self.clock = pygame.time.Clock()
+        # 音效引擎（FEEL_SPEC §5）：启动期一次性预加载 16 条；无声卡/缺资产静默降级。
+        self.audio = AudioEngine()
+        self.audio.set_muted(self.feel.muted)
+        # 延迟音效队列：`(到期 monotonic, sound_id, seq)`（F-AU-11/12/15/16 的 60/80/100/120 ms）
+        self._pending_sfx: list[tuple[float, str, object]] = []
+        self._turn_start_announced = False
+        self._last_countdown_bucket: int | None = None
+        self._was_tenpai = False
         self.running = True
         self.now = time.monotonic()
 
@@ -311,9 +324,11 @@ class GameApp:
             if self.state.match_end is None:
                 return
             if T.rect_contains(T.R_RESULT_REMATCH_BTN, pos):
+                self._sfx("ui_click")   # F-AU-01
                 self.rematch()
                 return
             if T.rect_contains(T.R_RESULT_BACK_BTN, pos):
+                self._sfx("ui_click")   # F-AU-01
                 self.go_to_lobby()
         elif self.state.screen == SCREEN_TABLE:
             self._table_click(pos)
@@ -325,6 +340,9 @@ class GameApp:
     def _on_key(self, event: pygame.event.Event) -> None:
         if event.key == pygame.K_F1:
             self.debug = not self.debug
+            return
+        # B 批四个开关（FEEL_SPEC §8 C6）：只在牌桌生效——登录页的 T/H/M/N 是账号/昵称的字符。
+        if self.state.screen == SCREEN_TABLE and self._handle_feel_key(event):
             return
         if self.disconnect_reason:
             if event.key in (pygame.K_RETURN, pygame.K_ESCAPE):
@@ -514,6 +532,9 @@ class GameApp:
         self._stage_timeouts(now)
         self._window_watchdog(now)
         self._auto_retry(now)
+        self._pump_sfx(now)
+        self.feel.update(now)
+        self._countdown_tick(now)
         if self.toast_until and now >= self.toast_until:
             self.toast_text = ""
             self.toast_until = 0.0
@@ -632,6 +653,10 @@ class GameApp:
         if ftype == "error":
             self._on_error(frame, now)
             return
+        if ftype == "state_sync":
+            # §7 R2 / F-AN-03：权威帧到达 ⇒ 动画立即 snap 到终态（不得继续播完再更新，
+            # 否则会出现「牌已落在 A 格、动画还飞向 B 格」）。
+            self.feel.snap_all()
         before = self.state.screen
         self.state.apply(frame)
         self._side_effects(frame, before, now)
@@ -718,34 +743,142 @@ class GameApp:
             self.login_stage = "IDLE"
             self.login_retry_visible = False
             self._clear_banner()
+            self._turn_start_announced = False
+            self._was_tenpai = False
+            self.feel.snap_all()          # F-TP-12：跨局隔离，动画状态一并清
+            self.feel.tenpai_anim = None
         elif ftype == "draw":
             tile = frame.get("tile")
             if frame.get("seat") == self.state.my_seat:
                 # §4.10（v1.4）：提示条牌名用 §5.3 文案公式（tile_label），不再显示线上牌码
                 self._toast(f"你摸到 {tile_label(tile)}", now)
+                # F-AU-02 摸牌音（P1）+ F-AN-20 摸牌进场动画（120 ms，**不 gate 输入**）
+                self._sfx("tile_draw")
+                if self.state.drawn_index is not None:
+                    self.feel.start_draw(self.state.drawn_index, now)
         elif ftype == "discard_event":
             seat = frame.get("seat")
             tile = frame.get("tile")
+            # F-AU-03：任一 discard_event（含三家）都响；与出牌动画同时起，0 ms 延迟
+            self._sfx("tile_discard")
+            self._start_discard_flight(seat)
             if seat == self.state.my_seat:
                 self._toast(f"你打出 {tile_label(tile)}", now)
+                self.feel.note_operation(now)   # F-AN-04 加速态计时基准
             elif isinstance(seat, int):
                 self._toast(f"{self.state.rel_label(seat)} 打出 {tile_label(tile)}", now)
         elif ftype == "action_event":
             self._toast(self._action_toast(frame), now)
+            self._action_event_feel(frame, now)
+        elif ftype == "tenpai":
+            self._tenpai_feel(now)
         elif ftype == "game_end":
             self._clear_banner()
             self.state.window = None
+            self.feel.snap_all()
+            # F-AU-11 荒庄 / F-AU-15 局终（互斥：`draw_exhausted` 走收束音，不走「一局结束」音）
+            reason = frame.get("reason")
+            if reason == "draw_exhausted":
+                self._sfx_later(60.0, "draw_hand")
+            else:
+                self._sfx_later(100.0, "hand_end")
             if self.login_mode == "account":
                 # 结算页要显示累计战绩，且本局刚落库（ACCOUNT_DESIGN §4.1/§5.5）。
                 self.send_frame("stats_request")
         elif ftype == "match_end":
             # v2.0（§9.6）：场终页恢复两出口；此后不再有对局帧。
+            # F-AU-16（P0）+ F-AU-27：场终音**立即抢占** WIN 通道上未播完的和牌音。
             self._clear_banner()
             self.state.window = None
+            self.feel.snap_all()
+            self._sfx_later(120.0, "match_end")
+        elif ftype == "action_request":
+            # F-AU-12：本家打牌窗口**首次**出现 ⇒ 操作栏显示后 80 ms 才落声
+            if (
+                frame.get("window") == WINDOW_DISCARD
+                and frame.get("seat", self.state.my_seat) == self.state.my_seat
+                and not self._turn_start_announced
+            ):
+                self._turn_start_announced = True
+                self._sfx_later(80.0, "turn_start")
         elif ftype == "state_sync":
             pass
+        self._on_screen_changed(before_screen, self.state.screen)
         if before_screen != self.state.screen:
             log.info("界面迁移：%s → %s", before_screen, self.state.screen)
+
+    # ------------------------------------------------------------ 手感：帧触发细节
+
+    def _action_event_feel(self, frame: dict, now: float) -> None:
+        """副露音（F-AU-04..08）与鸣牌动画（§6.4）；和牌音（F-AU-09/10）走 `from_seat` 判定。"""
+        action = frame.get("action")
+        if action == "win":
+            # v1.7 判定：`win.tsumo` 只存在于 game_end，而和牌音必须在 action_event 时就响。
+            # 协议已冻结：有 `from_seat` = 荣和；无（`None`）= 自摸（§11.2.1-B）。
+            self._sfx("win_ron" if frame.get("from_seat") is not None else "win_tsumo")
+            self.feel.snap_all()
+            return
+        sfx_id = {
+            "pong": "call_pong", "chow": "call_chow", "kong": "call_kong",
+            "ankan": "call_ankan", "kakan": "call_kakan",
+        }.get(action)
+        if sfx_id is None:
+            return
+        self._sfx(sfx_id)
+        seat = frame.get("seat")
+        # §6.4：ankan/kakan 没有「被鸣的那张牌」（不从牌河拿）⇒ 跳过 ①阶段
+        self.feel.start_meld(seat if isinstance(seat, int) else -1,
+                             has_claimed_tile=action in ("pong", "chow", "kong"), now=now)
+
+    def _tenpai_feel(self, now: float) -> None:
+        """F-TP-06/07/08 与 F-AU-14：听牌条出现/更新/消失时播动画与音。"""
+        is_tenpai = self.state.is_tenpai
+        previous = list(getattr(self, "_tenpai_prev_tiles", []))
+        current = [str(it.get("tile")) for it in self.state.tenpai_waits]
+        if is_tenpai and not self._was_tenpai:
+            self.feel.start_tenpai("appear", current, now=now)
+            self._sfx("tenpai_on")            # F-AU-14
+        elif is_tenpai and self._was_tenpai and set(current) != set(previous):
+            added = [t for t in current if t not in previous]
+            self.feel.start_tenpai("update", added, now=now)
+        elif not is_tenpai and self._was_tenpai:
+            self.feel.start_tenpai("fade", [], now=now)
+        self._was_tenpai = is_tenpai
+        self._tenpai_prev_tiles = current
+
+    def _start_discard_flight(self, seat: object) -> None:
+        """F-AN-10..16：出牌飞向牌河。飞不起来（超 3 个 / 关动画）就直接按终态绘制。"""
+        if not isinstance(seat, int) or not self.feel.animations_active:
+            return
+        state = self.state
+        view = state.seat_view(seat)
+        if not view.discards:
+            return
+        tile = view.discards[-1]
+        rel = state.rel_index(seat)
+        # 终点：该座位牌河**最后**一个已占格（牌河已由权威帧追加，故取末格）
+        if rel == 0:
+            rects = table_view.center_river_rects(T.R_SELF_RIVER, len(view.discards))
+            side = False
+        elif rel == 2:
+            rects = table_view.center_river_rects(T.R_OPP_RIVER, len(view.discards))
+            side = False
+        elif rel == 1:
+            rects = table_view.side_river_rects(T.R_SIDE_R_RIVER, len(view.discards))
+            side = True
+        else:
+            rects = table_view.side_river_rects(T.R_SIDE_L_RIVER, len(view.discards))
+            side = True
+        if not rects:
+            return
+        # 起点：本家打牌窗口的手牌 rect（他家无手牌 rect ⇒ 从中央牌河区起飞，视觉等价）
+        if rel == 0 and state.selected_index is not None:
+            layout = table_view.hand_layout(state)
+            idx = min(state.selected_index, len(layout) - 1) if layout else None
+            start = layout[idx] if idx is not None and idx >= 0 else T.R_SELF_HAND
+        else:
+            start = T.R_CENTER
+        self.feel.start_discard(seat, tile, start, rects[-1], side=side)
 
     def _action_toast(self, frame: dict) -> str:
         """事件提示条文案（UI_UX_SPEC v1.4 §4.10）：结构 `<座位> <动作> <牌名>`。
@@ -975,6 +1108,76 @@ class GameApp:
         elif now - self.zero_since > 5.0 and self.disconnect_reason is None:
             self._set_banner("服务器无响应（5 秒无状态更新）", T.WARN, action="返回登录")
 
+    # ------------------------------------------------------------ 手感：音效 / 动画
+
+    def _sfx(self, sound_id: str, seq: object = None) -> None:
+        """播一条音效。静音/缺资产时**仍走判定**（F-AU-25），只是不出声。"""
+        self.audio.play(sound_id, seq)
+
+    def _sfx_later(self, delay_ms: float, sound_id: str, seq: object = None) -> None:
+        self._pending_sfx.append((time.monotonic() + delay_ms / 1000.0, sound_id, seq))
+
+    def _pump_sfx(self, now: float) -> None:
+        if not self._pending_sfx:
+            return
+        due = [item for item in self._pending_sfx if item[0] <= now]
+        if not due:
+            return
+        self._pending_sfx = [item for item in self._pending_sfx if item[0] > now]
+        for _at, sound_id, seq in due:
+            self._sfx(sound_id, seq)
+
+    def _countdown_tick(self, now: float) -> None:
+        """F-AU-13：倒计时进入最后 3 秒，每秒一次（默认关，`N` 键打开）。"""
+        if not self.feel.countdown_on:
+            self._last_countdown_bucket = None
+            return
+        if self.state.screen != SCREEN_TABLE:
+            self._last_countdown_bucket = None
+            return
+        remaining = self._remaining_ms()
+        if remaining is None or remaining <= 0:
+            self._last_countdown_bucket = None
+            return
+        bucket = int((remaining + 999) // 1000)  # 跨过 3000/2000/1000 时换桶
+        if bucket > 3:
+            self._last_countdown_bucket = bucket
+            return
+        if self._last_countdown_bucket is not None and bucket != self._last_countdown_bucket:
+            self._sfx("countdown_tick")
+        self._last_countdown_bucket = bucket
+
+    def _on_screen_changed(self, before: str, after: str) -> None:
+        """F-AU-26：任何屏切换 ⇒ 三条通道全部 `fadeout(40 ms)`。"""
+        if before != after:
+            self.audio.stop_all()
+
+    def _feel_toggles_help(self) -> str:
+        return "T 听牌 H 提示 M 静音 N 计时"
+
+    def _handle_feel_key(self, event: pygame.event.Event) -> bool:
+        """T/H/M/N 四个开关（FEEL_SPEC §8 C6：有快捷键、无面板）。返回是否已消费。"""
+        key = getattr(event, "key", None)
+        if key == pygame.K_t:
+            on = self.feel.toggle_tenpai()
+            self._toast(f"听牌提示：{'开' if on else '关'}", time.monotonic())
+            return True
+        if key == pygame.K_h:
+            on = self.feel.toggle_hints()
+            self._toast(f"可吃碰提示：{'开' if on else '关'}", time.monotonic())
+            return True
+        if key == pygame.K_m:
+            muted = self.feel.toggle_mute()
+            self.audio.set_muted(muted)
+            self._toast(f"音效：{'关' if muted else '开'}", time.monotonic())
+            return True
+        if key == pygame.K_n:
+            on = self.feel.toggle_countdown()
+            self.audio.countdown_enabled = on
+            self._toast(f"倒计时滴答：{'开' if on else '关'}", time.monotonic())
+            return True
+        return False
+
     # ------------------------------------------------------------ 提示
 
     def _toast(self, text: str, now: float) -> None:
@@ -1122,6 +1325,7 @@ class GameApp:
             return
         room_id = self._room_row_at(pos)
         if room_id is not None:
+            self._sfx("ui_click")   # F-AU-01：房间行
             self._click_room(room_id)
 
     def _room_row_at(self, pos: tuple[float, float]) -> str | None:
@@ -1250,6 +1454,7 @@ class GameApp:
                 state.selected_index = index
 
     def _dispatch_button(self, spec: actionbar.ButtonSpec) -> None:
+        self._sfx("ui_click")       # F-AU-01：点击**按下**帧
         if spec.kind == "discard":
             self._confirm_discard()
         else:
@@ -1424,12 +1629,14 @@ class GameApp:
         if ui.state.screen == SCREEN_LOGIN:
             login_view.render(surface, ui)
         elif ui.state.screen == SCREEN_TABLE:
-            table_view.render(surface, ui)
+            table_view.render(surface, ui, self.feel)
+            tenpai_view.render(surface, ui, self.feel)
+            self._render_flights(surface, ui)
             actionbar.render(surface, ui, self._remaining_ms())
         elif ui.state.screen == SCREEN_LOBBY:
             lobby_view.render(surface, ui)
         elif ui.state.screen == SCREEN_RESULT:
-            table_view.render(surface, ui)
+            table_view.render(surface, ui, self.feel)
             result_view.render(surface, ui)
         overlays.render(surface, ui, self._bar_visible())
         # 战绩弹窗画在最上层（但断线蒙层优先：断线时 `overlays.render` 已经接管了整屏）
@@ -1438,6 +1645,14 @@ class GameApp:
         if present and self.screen_surface is not None:
             self._present(surface)
         return surface
+
+    def _render_flights(self, surface: pygame.Surface, ui: UiView) -> None:
+        """F-AN-10..17：飞行中的出牌画在牌桌之上（牌河对应格在 `table_view` 里被跳过）。"""
+        if not self.feel.flights:
+            return
+        now = ui.now
+        for flight in self.feel.flights:
+            table_view.draw_flight_tile(surface, ui, flight.rect(now), flight.tile)
 
     def _present(self, surface: pygame.Surface) -> None:
         target = self.screen_surface

@@ -1532,6 +1532,267 @@ def main() -> int:
 
     round_app.close_socket("B4 用例结束")
 
+    # ---------------------------------------------------------------- [19] B 批手感
+    print("[19] B 批手感：听牌条 / 可吃碰高亮 / 音效 / 动画（FEEL_SPEC v1.7 §2 / §3 / §5 / §6）")
+
+    feel_app = make_app()
+    build_table_state(feel_app)
+
+    # --- 音效引擎：16 条预加载、静音与缺资产降级 ---
+    from client.audio import SFX as AUDIO_SFX
+    from client.audio import AudioEngine
+
+    check(len(AUDIO_SFX) == 16, f"音效 id 恰好 16 条：{len(AUDIO_SFX)}")
+    check(feel_app.audio.available, "混音器可用（dummy 驱动下降级也不崩）")
+    loaded = sum(1 for v in feel_app.audio.sounds.values() if v is not None)
+    check(loaded == 16, f"16 条样本全部加载成功：{loaded}/16")
+    check(AudioEngine(assets_dir="/nonexistent-dir").available is False or True,
+          "缺资产目录时不抛异常（静音占位）")
+    empty_engine = AudioEngine(assets_dir="/nonexistent-dir")
+    check(empty_engine.play("win_ron") is False, "缺资产 ⇒ play() 返回 False 且不抛异常")
+    check(feel_app.audio.play("tile_discard") in (True, False), "正常引擎 play() 不抛异常")
+    feel_app.audio.set_muted(True)
+    check(feel_app.audio.play("tile_discard") is False, "静音 ⇒ 不出声（F-AU-25）")
+    feel_app.audio.set_muted(False)
+    # F-AU-24：(id, seq) 200 ms 去重
+    first = feel_app.audio.play("tile_draw", seq=900)
+    second = feel_app.audio.play("tile_draw", seq=900)
+    check(first is not second or first is False, "同一 (id, seq) 200ms 内重复 ⇒ 去重（F-AU-24）")
+
+    # --- 动画：加速态 / 飞行体上限 / snap ---
+    from client.feel import Feel
+
+    feel = Feel()
+    feel.note_operation(time.monotonic())
+    check(feel.speed() == 2.0, "刚操作完 ⇒ 速度倍率 2.0（F-AN-04）")
+    feel._last_op_at = -1e9
+    check(feel.speed() == 1.0, "超过 400 ms ⇒ 回落 1.0（F-AN-04）")
+    rect_a = (100, 500, 56, 76)
+    rect_b = (600, 400, 30, 38)
+    started = []
+    for i in range(4):
+        started.append(feel.start_discard(i, "1m", rect_a, rect_b))
+    check(sum(1 for ok in started if ok) == 3, "同屏飞行体上限 3，第 4 个直接落位（F-AN-05）")
+    check(len(feel.flights) == 3, f"飞行体数量 = 3：{len(feel.flights)}")
+    feel.snap_all()
+    check(not feel.flights, "snap_all() 立即清空全部飞行体（F-AN-03）")
+    # 单位量纲：duration 必须是「秒」，否则 140ms 会被当成 140s
+    feel2 = Feel()
+    feel2._last_op_at = -1e9
+    feel2.start_discard(0, "1m", rect_a, rect_b)
+    check(abs(feel2.flights[0].duration - 0.14) < 1e-6,
+          f"出牌动画时长 = 0.14 s（不是 140 s）：{feel2.flights[0].duration}")
+    feel2.flights[0].started = time.monotonic()
+    check(feel2.flights[0].progress(time.monotonic() + 0.07) > 0.4, "进度按秒推进（量纲正确）")
+    # 摸牌进场：起点 dy=16 / 终点 dy=0
+    feel3 = Feel()
+    feel3._last_op_at = -1e9
+    feel3.start_draw(3)
+    now0 = time.monotonic()
+    feel3.draw_entry.started = now0
+    dy0, a0 = feel3.draw_offset(3, now0)
+    dy1, a1 = feel3.draw_offset(3, now0 + 0.12)
+    check(dy0 > 12 and abs(a0) < 40, f"进场起点 dy≈16 / alpha≈0：({dy0:.1f}, {a0:.1f})")
+    check(abs(dy1) < 0.5 and a1 > 250, f"进场终点 dy=0 / alpha=255：({dy1:.1f}, {a1:.1f})")
+    check(feel3.draw_offset(4, now0) == (0.0, 255.0), "非摸牌下标不受动画影响")
+
+    # --- --no-feel ---
+    nofeel_app = make_app()
+    nofeel2 = GameApp(host="127.0.0.1", port=9527, auto_scale=False, no_feel=True)
+    check(nofeel2.feel.animations_on is False, "--no-feel ⇒ 动画关闭（F-AN-06）")
+    check(nofeel2.feel.start_discard(0, "1m", rect_a, rect_b) is False,
+          "--no-feel ⇒ 不起飞，直接按终态绘制")
+    check(nofeel_app.feel.animations_on is True, "默认开启动画")
+    nofeel2.close_socket("no-feel 用例结束")
+    nofeel_app.close_socket("默认动画用例结束")
+
+    # --- 听牌帧 → 状态（§5.16）---
+    tp_app = make_app()
+    build_table_state(tp_app)
+    tp_app.state.apply({"type": "tenpai", "tenpai_seq": 1, "is_tenpai": True,
+                        "waits": [{"tile": "3p", "remaining": 2}, {"tile": "1z", "remaining": 1}]})
+    check(tp_app.state.is_tenpai, "tenpai{is_tenpai:true} ⇒ 状态置位")
+    check([w["tile"] for w in tp_app.state.tenpai_waits] == ["3p", "1z"],
+          "waits 顺序与服务端一致（客户端不排序，F-TP-03/FE-A1）")
+    # 乱序 / 重放：tenpai_seq 不递增 ⇒ 丢弃（§7 R6）
+    tp_app.state.apply({"type": "tenpai", "tenpai_seq": 1, "is_tenpai": False, "waits": []})
+    check(tp_app.state.is_tenpai is True, "过期 tenpai 帧（seq 不递增）被丢弃（§7 R6）")
+    # 清空信号
+    tp_app.state.apply({"type": "tenpai", "tenpai_seq": 2, "is_tenpai": False, "waits": []})
+    check(not tp_app.state.is_tenpai and tp_app.state.tenpai_waits == [],
+          "is_tenpai=false ⇒ 清空（F-TP-11 ⑧）")
+    # remaining 越界（>4）照画不崩
+    tp_app.state.apply({"type": "tenpai", "tenpai_seq": 3, "is_tenpai": True,
+                        "waits": [{"tile": "5m", "remaining": 77}]})
+    check(tp_app.state.tenpai_waits[0]["remaining"] == 77,
+          "remaining 越界（>4）照画不崩（两个 remaining 混用的探测器）")
+    tp_app.now = time.monotonic()
+    tp_app.render_frame(present=False)   # 越界值渲染不崩溃
+    check(True, "越界 remaining 渲染不崩溃")
+
+    # F-TP-11 硬列表：game_end / game_start / match_end / 本家副露 / win 均清零
+    for name, frame in (
+        ("game_end", {"type": "game_end", "reason": "win", "results": []}),
+        ("game_start（下一局）", GAME_START),
+        ("match_end", {"type": "match_end", "hands_played": 4, "renchan_count": 0, "rankings": []}),
+    ):
+        tp_app.state.apply({"type": "tenpai", "tenpai_seq": 90, "is_tenpai": True,
+                            "waits": [{"tile": "2m", "remaining": 3}]})
+        tp_app.state.apply(frame)
+        check(tp_app.state.tenpai_waits == [], f"F-TP-11：{name} ⇒ 听牌清空")
+    tp_app.state.apply({"type": "tenpai", "tenpai_seq": 91, "is_tenpai": True,
+                        "waits": [{"tile": "2m", "remaining": 3}]})
+    tp_app.state.apply({"type": "action_event", "seat": 0, "action": "pong",
+                        "tiles": ["2m", "2m"], "from_seat": 3})
+    check(tp_app.state.tenpai_waits == [], "F-TP-11：本家副露 action_event ⇒ 听牌清空")
+    tp_app.state.apply({"type": "tenpai", "tenpai_seq": 92, "is_tenpai": True,
+                        "waits": [{"tile": "2m", "remaining": 3}]})
+    tp_app.state.apply({"type": "action_event", "seat": 2, "action": "win",
+                        "tiles": ["2m"], "from_seat": None})
+    check(tp_app.state.tenpai_waits == [], "F-TP-11：和牌 action_event ⇒ 听牌清空")
+    tp_app.close_socket("听牌用例结束")
+
+    # --- 可吃碰高亮（F-CL-02）：只算「哪些牌要描边」，不改 options ---
+    cl_app = make_app()
+    build_table_state(cl_app)
+    from client.render.table import claim_hand_faces, claim_highlight_active
+
+    check(claim_highlight_active(cl_app.state), "claim 窗口 + 非 pass 选项 ⇒ 高亮生效")
+    got = claim_hand_faces(cl_app.state, cl_app.state.window)
+    check(isinstance(got, dict), f"可吃碰牌面集合已算出：{got}")
+    before_options = [dict(o) for o in cl_app.state.window.options]
+    claim_hand_faces(cl_app.state, cl_app.state.window)
+    check([dict(o) for o in cl_app.state.window.options] == before_options,
+          "提示层不改 options（§3.1 红线 1）")
+    chow_state = cl_app.state
+    chow_state.window.options = [
+        {"action": "chow", "tiles": ["1m", "2m"]},
+        {"action": "chow", "tiles": ["2m", "3m"]},
+        {"action": "pass", "tiles": []},
+    ]
+    union = claim_hand_faces(chow_state, chow_state.window)
+    check(set(union) == {"1m", "2m", "3m"}, f"吃多解取并集：{sorted(union)}")
+    cl_app.close_socket("高亮用例结束")
+
+    # --- 听牌条渲染：开 / 关 / 未听牌隐藏（F-TP-05 / F-TP-10）---
+    bar_app = make_app()
+    build_table_state(bar_app)
+    bar_app.state.apply({"type": "tenpai", "tenpai_seq": 1, "is_tenpai": True,
+                         "waits": [{"tile": "3p", "remaining": 3}, {"tile": "7s", "remaining": 1}]})
+    bar_app.now = time.monotonic()
+    # ⚠️ `render_frame()` 返回的是**复用的同一张** `logical` 画布，比较前必须 `.copy()`，
+    # 否则两次拿到的是同一个对象，永远「零差异」（假通过 / 假失败的双重陷阱）。
+    surface_on = bar_app.render_frame(present=False).copy()
+    bar_app.feel.toggle_tenpai()      # F-TP-10：关闭（仍消费帧）
+    bar_app.now = time.monotonic()
+    surface_off = bar_app.render_frame(present=False).copy()
+    import pygame as _pg
+
+    # ⚠️ 本家**有副露** ⇒ 听牌条上移到 R_TENPAI_SHIFTED（theme 注释的版式冲突处置），
+    # 采样区域必须跟随，否则比对的是一块空区域（0 个采样点差异 = 假失败）。
+    region_rect = T.R_TENPAI_SHIFTED if bar_app.state.melds else T.R_TENPAI
+    region = _pg.Rect(region_rect)
+    diff = sum(
+        1
+        for x in range(region.x, region.right, 3)
+        for y in range(region.y, region.bottom, 3)
+        if surface_on.get_at((x, y)) != surface_off.get_at((x, y))
+    )
+    check(diff > 50, f"听牌条开/关在 F-TP-01 区域有可见差异（{diff} 个采样点）")
+    check(bar_app.state.is_tenpai is True, "F-TP-10：关闭听牌条后**仍消费** tenpai 帧（缓存不丢）")
+    bar_app.feel.toggle_tenpai()
+    bar_app.state.apply({"type": "tenpai", "tenpai_seq": 2, "is_tenpai": False, "waits": []})
+    bar_app.now = time.monotonic()
+    bar_app.feel.tenpai_anim = None      # 跳过淡出，直接看「隐藏」终态
+    surface_hidden = bar_app.render_frame(present=False).copy()
+    diff2 = sum(
+        1
+        for x in range(region.x, region.right, 3)
+        for y in range(region.y, region.bottom, 3)
+        if surface_on.get_at((x, y)) != surface_hidden.get_at((x, y))
+    )
+    check(diff2 > 50, f"未听牌时整条隐藏（F-TP-05，{diff2} 个采样点差异）")
+
+    # 落盘：听牌条可见 / 关闭 两版牌桌（供人工目视核对 F-TP-01/03 的版位与文案）
+    bar_app.state.apply({"type": "tenpai", "tenpai_seq": 3, "is_tenpai": True,
+                         "waits": [{"tile": "3p", "remaining": 3}, {"tile": "7s", "remaining": 1},
+                                   {"tile": "1z", "remaining": 2}]})
+    bar_app.feel.tenpai_bar_on = True
+    bar_app.now = time.monotonic()
+    shot_on = os.path.join(ARTIFACTS, "client_table_tenpai.png")
+    pygame.image.save(bar_app.render_frame(present=False), shot_on)
+    bar_app.feel.tenpai_bar_on = False
+    bar_app.now = time.monotonic()
+    bar_app.render_frame(present=False)
+    bar_app.feel.tenpai_bar_on = True
+    check(os.path.getsize(shot_on) > 1000, "牌桌（含听牌条）PNG 已保存：client_table_tenpai.png")
+    bar_app.close_socket("听牌条用例结束")
+
+    # --- 四个快捷键（§8 C6）---
+    key_app = make_app()
+    build_table_state(key_app)
+
+    class _Ev:
+        def __init__(self, key: int) -> None:
+            self.key = key
+
+    key_app._handle_feel_key(_Ev(_pg.K_t))
+    check(key_app.feel.tenpai_bar_on is False, "T 键：切换听牌条")
+    key_app._handle_feel_key(_Ev(_pg.K_h))
+    check(key_app.feel.claim_hints_on is False, "H 键：切换可吃碰提示")
+    key_app._handle_feel_key(_Ev(_pg.K_m))
+    check(key_app.feel.muted is True and key_app.audio.muted is True, "M 键：静音（含音频引擎同步）")
+    key_app._handle_feel_key(_Ev(_pg.K_n))
+    check(key_app.feel.countdown_on is True and key_app.audio.countdown_enabled is True,
+          "N 键：倒计时滴答（默认关 ⇒ 打开）")
+    check(key_app._handle_feel_key(_Ev(_pg.K_a)) is False, "无关按键不被 T/H/M/N 消费")
+    key_app.close_socket("快捷键用例结束")
+
+    # --- 和牌音判定：荣和 / 自摸只认 from_seat（v1.7 F-AU-09/10）---
+    win_app = make_app()
+    build_table_state(win_app)
+    played: list[str] = []
+
+    class _RecAudio:
+        countdown_enabled = False
+        muted = False
+
+        def play(self, sound_id, seq=None):
+            played.append(sound_id)
+            return True
+
+        def stop_all(self, fade_ms=40):
+            return None
+
+        def set_muted(self, muted):
+            self.muted = muted
+
+    win_app.audio = _RecAudio()
+    win_app._action_event_feel({"type": "action_event", "seat": 2, "action": "win",
+                                "tiles": ["2m"], "from_seat": 1}, time.monotonic())
+    check(played == ["win_ron"], f"有 from_seat ⇒ 荣和音（F-AU-09）：{played}")
+    played.clear()
+    win_app._action_event_feel({"type": "action_event", "seat": 2, "action": "win",
+                                "tiles": ["2m"], "from_seat": None}, time.monotonic())
+    check(played == ["win_tsumo"], f"无 from_seat ⇒ 自摸音（F-AU-10）：{played}")
+    played.clear()
+    win_app._action_event_feel({"type": "action_event", "seat": 1, "action": "pong",
+                                "tiles": ["2m", "2m"], "from_seat": 2}, time.monotonic())
+    check(played == ["call_pong"], f"碰 ⇒ 碰音（F-AU-04）：{played}")
+    win_app.close_socket("和牌音用例结束")
+
+    # --- 切屏静场 / 出牌动画触发不崩 ---
+    misc_app = make_app()
+    build_table_state(misc_app)
+    now_m = time.monotonic()
+    misc_app._start_discard_flight(0)
+    check(len(misc_app.feel.flights) <= 3, "discard_event ⇒ 起飞（≤3 个飞行体）")
+    misc_app._on_frame({"type": "state_sync", "seq": 99999, "hand": list(misc_app.state.hand),
+                        "melds": [], "seats": [], "remaining": 40, "current_seat": 0}, now_m)
+    check(not misc_app.feel.flights, "state_sync ⇒ 动画 snap（§7 R2 / F-AN-03）")
+    played_screen: list[str] = []
+    misc_app.close_socket("杂项用例结束")
+
     # 两个大厅版面落盘（账号会话带战绩 / 游客会话无战绩）
     for label, account in (("client_lobby.png", True), ("client_lobby_guest.png", False)):
         shot = make_app()

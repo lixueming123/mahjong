@@ -167,15 +167,66 @@ def meld_layout(
 # ---------------------------------------------------------------- 绘制
 
 
-def render(surface: pygame.Surface, ui: UiView) -> None:
+def render(surface: pygame.Surface, ui: UiView, feel=None) -> None:
     state = ui.state
     surface.fill(T.BG)
     _draw_hud(surface, ui)
     for seat in range(4):
-        _draw_seat(surface, ui, seat)
+        _draw_seat(surface, ui, seat, feel)
     _draw_center(surface, ui)
-    _draw_self_hand(surface, ui)
+    _draw_self_hand(surface, ui, feel)
     _draw_toast(surface, ui)
+
+
+# ---------------------------------------------------------------- 可吃碰提示（FEEL_SPEC §3）
+
+#: 每个动作从手牌里消耗的**同面张数** / 构成张（F-CL-02）
+_CLAIM_HAND_COUNT = {"pong": 2, "kong": 3, "ankan": 4, "kakan": 1}
+
+
+def claim_hand_faces(state, window) -> dict[str, int]:
+    """F-CL-02：本家手牌里参与鸣牌的牌面 → 需要高亮的张数。
+
+    `chow` 取**所有吃法的并集**（每条吃法贡献其 2 张）；多条吃法同一牌面时取最大张数。
+    **不改 `options`、不给建议**（§3.1 红线 1/2）：这里只算「哪些牌要描边」。
+    """
+    out: dict[str, int] = {}
+    for opt in window.options:
+        action = opt.get("action")
+        tiles = [t for t in (opt.get("tiles") or []) if isinstance(t, str)]
+        if action == "chow":
+            for face in tiles[:2]:
+                out[face] = max(out.get(face, 0), 1)
+            continue
+        count = _CLAIM_HAND_COUNT.get(action)
+        if count is None or not tiles:
+            continue
+        face = tiles[0]
+        out[face] = max(out.get(face, 0), count)
+    return out
+
+
+def draw_flight_tile(
+    surface: pygame.Surface, ui: UiView, rect: tuple[float, float, float, float], face: str
+) -> None:
+    """F-AN-14/15：飞行体牌面（尺寸随进度插值、旋转 0 度），画在牌桌之上。"""
+    W.draw_tile(
+        surface,
+        ui.fonts,
+        (int(rect[0]), int(rect[1]), max(1, int(rect[2])), max(1, int(rect[3]))),
+        face,
+        rank_size=T.FS_TILE_RIVER_RANK,
+        suit_size=T.FS_TILE_RIVER_SUIT,
+        honor_size=T.FS_TILE_Z_RIVER_CENTER,
+    )
+
+
+def claim_highlight_active(state) -> bool:
+    """F-CL-04/06：只在「claim 窗口且有非 pass 选项」时才画高亮。"""
+    window = state.window
+    if window is None or window.window != "claim":
+        return False
+    return any(opt.get("action") not in (None, "pass") for opt in window.options)
 
 
 def _draw_hud(surface: pygame.Surface, ui: UiView) -> None:
@@ -305,7 +356,7 @@ def _draw_back_row(
         )
 
 
-def _draw_seat(surface: pygame.Surface, ui: UiView, seat: int) -> None:
+def _draw_seat(surface: pygame.Surface, ui: UiView, seat: int, feel=None) -> None:
     state, fonts = ui.state, ui.fonts
     rel = state.rel_index(seat)
     view = state.seat_view(seat)
@@ -315,7 +366,7 @@ def _draw_seat(surface: pygame.Surface, ui: UiView, seat: int) -> None:
         if active:
             W.draw_border_alpha(surface, T.R_HUD_LEFT, T.ACTIVE, _active_alpha(ui.now), width=2)
         _draw_melds(surface, ui, seat, T.R_SELF_MELD, vertical=False)
-        _draw_river(surface, ui, seat, T.R_SELF_RIVER, center=True)
+        _draw_river(surface, ui, seat, T.R_SELF_RIVER, center=True, feel=feel)
     elif rel == 2:
         _draw_name_strip(
             surface, ui, T.R_OPP_NAME, seat, align=W.ALIGN_CENTER, active=active,
@@ -325,7 +376,7 @@ def _draw_seat(surface: pygame.Surface, ui: UiView, seat: int) -> None:
             _draw_dealer_badge(surface, ui, (T.R_OPP_NAME[0] - 22, T.R_OPP_NAME[1], 20, 20))
         _draw_back_row(surface, T.R_OPP_BACK, view.hand_count)
         _draw_melds(surface, ui, seat, T.R_OPP_MELD, vertical=False)
-        _draw_river(surface, ui, seat, T.R_OPP_RIVER, center=True)
+        _draw_river(surface, ui, seat, T.R_OPP_RIVER, center=True, feel=feel)
     elif rel == 1:
         strip = T.R_SIDE_R_NAME
         _draw_name_strip(
@@ -336,7 +387,7 @@ def _draw_seat(surface: pygame.Surface, ui: UiView, seat: int) -> None:
             _draw_dealer_badge(surface, ui, (strip[0] + strip[2] - 20, strip[1], 20, 20))
         _draw_back_row(surface, T.R_SIDE_R_BACK, view.hand_count)
         _draw_melds(surface, ui, seat, T.R_SIDE_R_MELD, vertical=True)
-        _draw_river(surface, ui, seat, T.R_SIDE_R_RIVER, center=False)
+        _draw_river(surface, ui, seat, T.R_SIDE_R_RIVER, center=False, feel=feel)
     else:
         strip = T.R_SIDE_L_NAME
         _draw_name_strip(
@@ -347,7 +398,7 @@ def _draw_seat(surface: pygame.Surface, ui: UiView, seat: int) -> None:
             _draw_dealer_badge(surface, ui, (strip[0] + strip[2] - 20, strip[1], 20, 20))
         _draw_back_row(surface, T.R_SIDE_L_BACK, view.hand_count)
         _draw_melds(surface, ui, seat, T.R_SIDE_L_MELD, vertical=True)
-        _draw_river(surface, ui, seat, T.R_SIDE_L_RIVER, center=False)
+        _draw_river(surface, ui, seat, T.R_SIDE_L_RIVER, center=False, feel=feel)
 
 
 def _draw_river(
@@ -357,6 +408,7 @@ def _draw_river(
     rect: tuple[int, int, int, int],
     *,
     center: bool,
+    feel=None,
 ) -> None:
     discards = ui.state.seat_view(seat).discards
     if center:
@@ -367,10 +419,28 @@ def _draw_river(
         rects = side_river_rects(rect, len(discards))
         rank, suit = T.FS_TILE_SIDE_RANK, T.FS_TILE_SIDE_SUIT
         honor = T.FS_TILE_Z_RIVER_SIDE
-    for tile_rect, face in zip(rects, discards):
+    # F-AN-16：飞行期间该格**不画**（否则同一张牌会同时出现在牌河与飞行体里）
+    skip_last = bool(feel is not None and seat in feel.flying_seats())
+    last_index = len(discards) - 1
+    # F-CL-01：被鸣牌（最近一次打出的那张）呼吸描边
+    mark_claimed = (
+        seat == ui.state.last_discard_seat
+        and claim_highlight_active(ui.state)
+        and getattr(feel, "claim_hints_on", True)
+    )
+    for index, (tile_rect, face) in enumerate(zip(rects, discards)):
+        if skip_last and index == last_index:
+            continue
         W.draw_tile(
             surface, ui.fonts, tile_rect, face, rank_size=rank, suit_size=suit, honor_size=honor
         )
+        if mark_claimed and index == last_index:
+            alpha = _active_alpha(ui.now)
+            if ui.state.pending:
+                # F-CL-07：已提交 ⇒ 降级为 PANEL_EDGE 1 px（表示「已处理」），不闪烁
+                W.draw_border_alpha(surface, tile_rect, T.PANEL_EDGE, 1.0, width=1)
+            else:
+                W.draw_border_alpha(surface, tile_rect, T.ACTIVE, alpha, width=2)
 
 
 def _draw_melds(
@@ -427,9 +497,14 @@ def _draw_center(surface: pygame.Surface, ui: UiView) -> None:
         )
 
 
-def _draw_self_hand(surface: pygame.Surface, ui: UiView) -> None:
+def _draw_self_hand(surface: pygame.Surface, ui: UiView, feel=None) -> None:
     state, fonts = ui.state, ui.fonts
     rects = hand_layout(state)
+    # F-CL-02：可吃碰关联高亮（只读描边，不改可点性）
+    faces = claim_hand_faces(state, state.window) if (
+        claim_highlight_active(state) and getattr(feel, "claim_hints_on", True)
+    ) else {}
+    consumed: dict[str, int] = {}
     if not rects and state.game_started:
         W.draw_text(
             surface, "手牌为空", fonts.get(T.FS_BODY), T.NEG, T.R_SELF_HAND, W.ALIGN_CENTER
@@ -438,6 +513,9 @@ def _draw_self_hand(surface: pygame.Surface, ui: UiView) -> None:
     if ui.pending_flash:
         pygame.draw.rect(surface, T.NEG, T.R_SELF_HAND, width=2)
     for i, (tile_rect, face) in enumerate(zip(rects, state.hand)):
+        # F-AN-22：摸牌进场位移（dy 16 → 0），只动绘制、不动命中矩形（§7 R3）
+        dy, draw_alpha = feel.draw_offset(i, ui.now) if feel is not None else (0.0, 255.0)
+        shifted = (tile_rect[0], int(tile_rect[1] + dy), tile_rect[2], tile_rect[3])
         hovered = ui.hand_hover_index == i and (
             state.window is not None
             and not state.pending
@@ -446,16 +524,28 @@ def _draw_self_hand(surface: pygame.Surface, ui: UiView) -> None:
         W.draw_tile(
             surface,
             fonts,
-            tile_rect,
+            shifted,
             face,
             radius=6,
             rank_size=T.FS_TILE_HAND_RANK,
             suit_size=T.FS_TILE_HAND_SUIT,
             honor_size=T.FS_TILE_Z_HAND,
             selected=state.selected_index == i,
-            drawn=state.drawn_index == i,
+            drawn=state.drawn_index == i and draw_alpha >= 255.0,
             pending=bool(state.pending and state.pending_index == i),
         )
+        # F-AN-23：进场期间 DRAWN 描边 alpha 0→255（终态后交给 `draw_tile` 自己画）
+        if state.drawn_index == i and draw_alpha < 255.0:
+            W.draw_border_alpha(surface, shifted, T.DRAWN, draw_alpha / 255.0, width=2)
+        # F-CL-02 / F-CL-07 / F-CL-09
+        if faces and state.selected_index != i:
+            want = faces.get(face, 0)
+            if want > 0 and consumed.get(face, 0) < want:
+                consumed[face] = consumed.get(face, 0) + 1
+                if state.pending:
+                    W.draw_border_alpha(surface, shifted, T.PANEL_EDGE, 1.0, width=1)
+                else:
+                    W.draw_border_alpha(surface, shifted, T.WARN, 0.95, width=2)
         if hovered:
             lift = T.HAND_DRAWN_LIFT if state.drawn_index == i else 0
             pygame.draw.rect(
