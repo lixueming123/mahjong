@@ -1,5 +1,7 @@
 build
+build-release
 compile_commands.json
+.agent-teams
 .cache
 docs/.config
 docs/.config
@@ -13,3 +15,8 @@ docs/contents/contributing.md
 Testing/
 core.*
 *.log
+
+# 本地/生成物
+.workbuddy/
+__pycache__/
+game/tests/artifacts/
