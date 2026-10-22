@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS match_results (
   id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   account_id   BIGINT UNSIGNED NOT NULL,
   room_id      VARCHAR(16)     NOT NULL,   -- 一场 = 一个 room_id
-  hands_played INT             NOT NULL,   -- 本场计入局数的局数（= round_count，恒 4；不含连庄的额外手）
+  hands_played INT             NOT NULL,   -- 本场实际手数（= game_end 下发次数，4..8，含连庄额外手）
   dealer_hands INT             NOT NULL,   -- 本场该账号作庄的「手数」（含连庄的额外手；非局数）
   final_score  INT             NOT NULL,   -- 本场累计得失分（零和：同 room_id 四行之和 = 0）
   final_rank   TINYINT         NOT NULL,   -- 1..4；并列时同名次并跳号（PROTOCOL.md §5.15）
@@ -216,8 +216,8 @@ C→S stats_request → S→C stats{...}
 5. **中途断线托管后跑完的局**：照记（局终事件与断线无关）。
 6. 写入失败只记日志；同一局重复通知不会重复入库（依赖既有的「恰好一次」保证，不做去重键）。
 7. **场次汇总（v1.3 新增，写 `match_results`）**：**一场一个账号一行**（不是一局一行）。写入时机是**场终**（`PROTOCOL.md` §5.15 `match_end`）之后，与 §4 第 1 条的局终写入**是两条独立路径**，互不替代：
-   - `hands_played` = 本场计入局数的局数（= `round_count`，恒 4）；
-   - `dealer_hands` = 本场该账号作庄的**手数**（含连庄的额外手，故可能 > `hands_played / 4`）；
+   - `hands_played` = 本场**实际手数**（= `game_end` 下发次数，取值 4..8，**含连庄的额外手**；口径见 `PROTOCOL.md` §5.15 与 D2 终裁）；
+   - `dealer_hands` = 本场该账号作庄的**手数**（含连庄的额外手；恒 `<= hands_played`）；
    - `final_score` = 该账号本场累计得失分 = 该 `room_id` 下其 `matches.delta_score` 之和（MUST 与该和在整数上相等）；
    - `final_rank` = 服务端在 `match_end.rankings[]` 里给出的 `rank`（并列跳号口径见 `PROTOCOL.md` §5.15）。
    - **一致性约束**：同 `room_id` 的四行 `final_score` 之和 MUST 为 0；`matches` 的每局行与 `match_results` 的场次行 MUST 同时存在（不允许"有局无场"写成半套）。
@@ -256,6 +256,7 @@ C→S stats_request → S→C stats{...}
 
 | 版本 | 修订内容 | 来源 | 是否改动冻结数值 |
 | --- | --- | --- | --- |
+| **v1.3（口径修正）** | 同版内修正：`match_results.hands_played` 由「本场计入局数的局数（= `round_count`，恒 4；不含连庄额外手）」改为「**本场实际手数（= `game_end` 下发次数，4..8，含连庄额外手）**」；`dealer_hands` 补「恒 `<= hands_played`」。与 `PROTOCOL.md` §5.15 的 D2 终裁同批，表结构与既有字段**未动**，代码侧同一快照 | captain 裁决（D2 终裁，第三次裁决） | **否**（仅字段口径措辞，无表结构/字段/类型变化） |
 | **v1.3** | **新增场次汇总**：① §2.1 增第三张表 `match_results`（一场每账号一行：`hands_played` / `dealer_hands` / `final_score` / `final_rank`，`(room_id, account_id)` 唯一），附四条约定（键/建表方式/**加表不改表**/本期不展示）；② §0 增"局制（v1.3）"一行，说明 `matches` 仍按局一行、场次维度另表承载；③ §4 增第 7 条"场次汇总"口径与一致性约束；④ §0 数值行注明**算分数值由 `RULESET` 的 A 批修订版承载**，本文不涉及。**`matches` 表零字段变更、`StatsJob`/`RecordJob` 零改动、`stats` 帧零改动** | captain 裁决（A 批需求评审；线协议侧见 `PROTOCOL.md` v1.6 §5.15 `match_end`） | **否**（账号模型、口令口径、身份映射、错误码与配额、降级语义、`matches` 的字段与写入时机、`stats` 帧形状**全部未动**；仅新增一张表与一段口径） |
 | v1.2 | §6.1 第 1 条的**论据**更正：原文以「handler 一旦挂起就不再持有 mailbox」为理由之一；自 v1.2 起每个 actor 的 handler 由 `AsyncGate` 保证互斥（`GAME_DESIGN.md` §0.3 v1.8），挂起本身不再破坏原子性，DB 留在 actor 之外的理由收窄为「它会阻塞」。**实现形状（submit → 结果以消息回投）与 §1–§5、§6 其余约束不变** | 用户需求（本轮 actor 化重构） | **否**（账号模型、口令口径、身份映射、错误码、降级语义、战绩写入时机与字段**全部未动**；仅一处论据表述更新） |
 | v1.1 | 依 captain 裁决（用户需求）把战绩的主界面扩到**客户端大厅界面**（`UI_UX_SPEC.md` §12，v1.8）：登录成功后先进大厅、那里常驻战绩；结算页战绩块与牌桌弹窗维持 v1.0 口径 | captain 裁决（用户需求） | **否**（账号模型、口令口径、身份映射、错误码、降级语义、战绩写入时机与字段**全部未动**；仅客户端多了一个展示位） |

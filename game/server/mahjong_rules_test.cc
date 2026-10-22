@@ -1807,6 +1807,144 @@ TEST(MahjongRules, YakuDetectionIsDeterministicUnderShuffles) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// v1.7 听牌张（PROTOCOL §11.2 / PB-1 / PB-3 / FEEL_SPEC §2）
+// ---------------------------------------------------------------------------
+namespace {
+std::set<std::string> FaceSet(const std::vector<Tile>& tiles) {
+  std::set<std::string> out;
+  for (Tile tile : tiles) out.insert(FormatTile(tile));
+  return out;
+}
+}  // namespace
+
+// 形状覆盖：两面 / 嵌张 / 边张 / 单骑（含字牌）/ 多面 / 七对子 / 未听牌 / 带副露 / 行动态（14 张）。
+TEST(MahjongRules, WaitingTilesUnitShapes) {
+  struct Case {
+    const char* label;
+    std::vector<Tile> concealed;
+    std::vector<Meld> melds;
+    std::set<std::string> expected;
+  };
+  const Meld pong_1p = Pong({"1p", "1p", "1p"});
+  const std::vector<Meld> none;
+  const Case cases[] = {
+      {"两面 23m → 1m/4m",
+       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "2m", "3m"}), none,
+       {"1m", "4m"}},
+      {"嵌张 13m → 2m",
+       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "1m", "3m"}), none,
+       {"2m"}},
+      {"边张 12m → 仅 3m（不可 0m）",
+       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "1m", "2m"}), none,
+       {"3m"}},
+      {"单骑字牌 5z → 5z",
+       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "9s", "9s", "9s", "5z"}), none,
+       {"5z"}},
+      {"多面 34567m → 2m/5m/8m",
+       H({"3m", "4m", "5m", "6m", "7m", "1p", "1p", "1p", "9p", "9p", "9p", "5z", "5z"}), none,
+       {"2m", "5m", "8m"}},
+      {"七对子 13 张 → 6p",
+       H({"1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2p", "2p", "4p", "4p", "6p"}), none,
+       {"6p"}},
+      {"未听牌 → 空",
+       H({"1m", "3m", "5m", "7m", "9m", "1p", "3p", "5p", "1s", "3s", "5s", "2z", "4z"}), none,
+       {}},
+      {"带副露（碰 111p + 10 张）→ 1m/4m",
+       H({"2m", "3m", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z"}), {pong_1p},
+       {"1m", "4m"}},
+      {"行动态 14 张 → 空（未听牌口径）",
+       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "2m", "3m", "6z"}), none,
+       {}},
+  };
+  for (const Case& item : cases) {
+    EXPECT_EQ(FaceSet(WaitingTiles(item.concealed, item.melds)), item.expected) << item.label;
+  }
+  // 顺序 = §2.2 冻结牌序（WaitingTiles 直接按面升序返回，同一牌面至多一条）。
+  const std::vector<Tile> multi =
+      H({"3m", "4m", "5m", "6m", "7m", "1p", "1p", "1p", "9p", "9p", "9p", "5z", "5z"});
+  std::vector<Tile> waits = WaitingTiles(multi, none);
+  EXPECT_EQ(waits, SortedTiles(waits)) << "waits 必须按 §2.2 牌序";
+  for (size_t i = 1; i < waits.size(); ++i) {
+    EXPECT_NE(FaceOf(waits[i]), FaceOf(waits[i - 1])) << "同一牌面至多一条";
+  }
+}
+
+// PB-3（门禁）：随机 200 手牌，WaitingTiles 与「逐面 CanWinExact」两条独立路径必须一致。
+TEST(MahjongRules, WaitingTilesMatchesCanWinExact) {
+  std::mt19937 rng(20261119);
+  for (int round = 0; round < 200; ++round) {
+    const uint64_t seed = 1000 + static_cast<uint64_t>(round);
+    std::vector<Tile> wall = BuildWall(seed);
+    std::vector<Tile> concealed(wall.begin(), wall.begin() + 13);
+    SortTiles(concealed);
+    const std::vector<Meld> none;
+    std::set<std::string> brute;
+    for (int face = 0; face < kFaceCount; ++face) {
+      std::vector<Tile> with_win = concealed;
+      with_win.push_back(MakeTileFromFace(static_cast<Face>(face)));
+      if (CanWinExact(with_win, none)) brute.insert(FormatTile(MakeTileFromFace(static_cast<Face>(face))));
+    }
+    EXPECT_EQ(FaceSet(WaitingTiles(concealed, none)), brute) << "round " << round << "（seed " << seed << "）";
+  }
+}
+
+// PB-1（门禁卡点）：WaitingTiles 单次耗时 ≤ 200µs（均值）、p99 ≤ 400µs。
+// 最坏输入用九面听（1112345678999m，13 张，判 9 次 CanWinExact）；写法照 ChooseDiscard 性能用例。
+TEST(MahjongRules, WaitingTilesPerfBudget) {
+  const std::vector<Tile> worst =
+      H({"1m", "1m", "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "9m", "9m"});
+  const std::vector<Meld> none;
+  ASSERT_GE(WaitingTiles(worst, none).size(), 5u) << "九面听的手牌必须真的多面听";
+  for (int warmup = 0; warmup < 10; ++warmup) {
+    (void)WaitingTiles(worst, none);
+  }
+  std::vector<double> samples;
+  samples.reserve(200);
+  for (int iter = 0; iter < 200; ++iter) {
+    const auto started = std::chrono::steady_clock::now();
+    (void)WaitingTiles(worst, none);
+    const double us =
+        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - started).count();
+    samples.push_back(us);
+  }
+  double sum = 0.0;
+  for (double sample : samples) sum += sample;
+  const double mean = sum / static_cast<double>(samples.size());
+  std::sort(samples.begin(), samples.end());
+  const double p99 = samples[static_cast<size_t>(samples.size() * 0.99)];
+  std::printf("WaitingTiles: mean=%.1f us, p99=%.1f us\n", mean, p99);
+  EXPECT_LT(mean, 200.0) << "PB-1：WaitingTiles 均值必须 ≤ 200µs";
+  EXPECT_LT(p99, 400.0) << "PB-1：WaitingTiles p99 必须 ≤ 400µs";
+}
+
+// F-SORT-01c（身份不变量）：排序**不得改变任何一张牌的 copy 身份**——打乱 1000 次后排序，
+// `face+copy`（即物理牌 id）多重集必须与原始逐一相等（只动顺序、不动身份）。
+TEST(MahjongRules, SortPreservesTileIdentity) {
+  std::vector<Tile> hand = BuildWall(20251005);
+  hand.resize(14);
+  const auto identity = [](const std::vector<Tile>& tiles) {
+    std::vector<int> ids;
+    ids.reserve(tiles.size());
+    for (Tile tile : tiles) ids.push_back(tile.id);
+    std::sort(ids.begin(), ids.end());
+    return ids;
+  };
+  const std::vector<int> expected = identity(hand);
+  std::mt19937 rng(20261120);
+  for (int iter = 0; iter < 1000; ++iter) {
+    std::shuffle(hand.begin(), hand.end(), rng);
+    SortTiles(hand);
+    ASSERT_EQ(identity(hand), expected) << "第 " << iter << " 次打乱+排序后身份丢失/错位";
+  }
+  // 同面副本的相对次序稳定（copy 是排序键第三分量）。
+  for (size_t i = 1; i < hand.size(); ++i) {
+    if (FaceOf(hand[i]) == FaceOf(hand[i - 1])) {
+      EXPECT_LT(CopyOf(hand[i - 1]), CopyOf(hand[i])) << "同面副本必须按 copy 升序";
+    }
+  }
+}
+
 TEST(MahjongRules, ZeroSumForEverySettlementKind) {  std::vector<Tile> hand =
       H({"1m", "2m", "3m", "4p", "5p", "6p", "7p", "8p", "9p", "2m", "2m"});
   const std::vector<Meld> pong = {Pong({"9s", "9s", "9s"})};

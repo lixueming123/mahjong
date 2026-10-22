@@ -1,7 +1,7 @@
 # A 批验收计划（A1_ACCEPTANCE）
 
 - 文档 ID：A1_ACCEPTANCE
-- 版本：v1.2（B3/B4 交付核对记录见 §九；v1.1 已并入主理人对 Q1–Q5 的裁决；v1.0 草案经主理人验收通过，闸门定义采纳为 B5 放行标准）
+- 版本：v1.3（最终验收报告见 §十；M1/M2 已按主理人终裁口径改写；新增 M11 随机性判据）
 - 作者：qa-lead（严过关）
 - 判定对象：A 批四项交付 —— **番型表 + 番数结算 + 一场四局/连庄 + 暗杠加杠**（B1 规则库 + B2 房间状态机已交付；B3 match_results 落库进行中；B4 客户端未开工）
 - 判据唯一来源（只引用，不重造）：
@@ -28,7 +28,7 @@
 | --- | --- | --- | --- | --- |
 | N1 | `win.han_breakdown.total == min(base + tsumo + dealer, 6)` 且 `tsumo` 恒 0；`yaku[]` 不含 `tsumo`/`dealer_bonus` | GAME_DESIGN §6.1/§6.4、RULESET §6.1（v1.3 内修正） | 已覆盖：gtest `BonusTsumoAndDealerBonus`、`ExpectScoreConsistent`；协议字段层随 E2 补 | 自动化测试 |
 | N2 | `win.multiplier == 2^total`，R ∈ {1,2,4,8,16,32,64} 逐行等于 GAME_DESIGN §6.1 全表 | RULESET §10.3 S2 | 已覆盖：gtest `HanToMultiplierTable`、`ScoreHandCoversEveryHanRow`、`ScoreMultipliers` | 自动化测试 |
-| N3 | **0 番自摸恰好 −2/+6**：0 番手 tsumo ⇒ delta = {−2,−2,−2,+6}、`per_payer==2`、`total==6`（R=1 绝对值锚） | RULESET §6.3/§10.3 S3、GAME_DESIGN §6.1 | **待补**：`ZeroSumForEverySettlementKind` 只断言关系式 `total==3×per_payer`，无 R=1 绝对值断言；补一条显式 gtest | 自动化测试 |
+| N3 | **0 番自摸恰好 −2/+6**：0 番手 tsumo ⇒ delta = {−2,−2,−2,+6}、`per_payer==2`、`total==6`（R=1 绝对值锚） | RULESET §6.3/§10.3 S3、GAME_DESIGN §6.1 | 已覆盖：gtest `ZeroHanTsumoIsExactlyMinusTwoPlusSix`（我定向复跑通过） | 自动化测试 |
 | N4 | 0 番荣和 ±1（唯一新旧回归锚） | RULESET §10.3 S1/S3 | 已覆盖：gtest `ZeroHanWinScoresOne` | 自动化测试 |
 | N5 | 无起和番：tags 为空照常和牌 | RULESET §3.5/§6.4 规则 4 | 已覆盖：同 N4（`score.yaku.empty()` + 得 1 分） | 自动化测试 |
 | N6 | 逐局 `Σ results[].delta_score == 0`（荣和/自摸/荒庄三种均断言） | GAME_DESIGN §10.2 GD-B1 | 已覆盖：gtest `ZeroSumForEverySettlementKind` + room `FullGamesSatisfyProtocolInvariants`；e2e 单局已有（GD-B1） | 自动化测试 |
@@ -54,26 +54,29 @@
 | R8 | 杠补牌 `remaining` 用派生式 `136 − next_index`，三种杠同源；杠后牌数守恒 | RULESET §1.5、附录 C12 | 已覆盖：gtest `KongTileAccountingStaysInsideBothFormulas` + room 守恒断言 | 自动化测试 |
 | R9 | 庄家 14 张、其余 13 张；`DealTiles(wall, dealer)` 每个庄家位都正确 | RULESET §1.4、GAME_DESIGN §3.3 | 已覆盖：gtest `DealTilesRespectsDealerSeat` | 自动化测试 |
 | R10 | **荒庄一律连庄**（判据 B 无附加条件） | RULESET §7.3 S4-B、GAME_DESIGN §3.4 | 已覆盖：gtest `NextDealerAndClassifyRound`（`draw_exhausted` → 连庄） | 自动化测试 |
-| R11 | 打牌窗口 options：手中 4 张同面且 `remaining ≥ 1` 才出 `ankan`；有碰组 + 第 4 张且 `remaining ≥ 1` 才出 `kakan`；`remaining==0` 时两者都不出现 | RULESET §5.2、GAME_DESIGN §4.2 步 5 | **待补**：规则库 `DiscardOptionsKongWindows` 覆盖 remaining 参数；RoomActor 接线层「`remaining==0` 不出杠选项」专项用例未见，补一条 room 级 gtest | 自动化测试 |
+| R11 | 打牌窗口 options：手中 4 张同面且 `remaining ≥ 1` 才出 `ankan`；有碰组 + 第 4 张且 `remaining ≥ 1` 才出 `kakan`；`remaining==0` 时两者都不出现 | RULESET §5.2、GAME_DESIGN §4.2 步 5 | 已覆盖：gtest `DiscardOptionsKongWindows`（规则库层）+ room `NoKongOptionsWhenWallExhausted`（`remaining==0` 不出杠选项，我定向复跑通过） | 自动化测试 |
 | R12 | 打牌窗口合法动作序 `win → ankan → kakan`（discard 不入 options）；该窗口回 `pass` = `ILLEGAL_ACTION` | RULESET §5.2、PROTOCOL §6.3 | 已覆盖：room `ClaimWindowRejectsDiscardAndUnknownAction`、`PostMeldDiscardWindowRejectsWinEvenWhenTheHandIsComplete`、`IllegalOperationsChangeNothing`；gtest `DiscardOptionsAndDefaultDiscard` | 自动化测试 |
 | R13 | 抢杠和永久不做：加杠不产生任何应答窗口、不占 15s、不参与优先级 | RULESET §4.6 | 已覆盖（结构性负判据）：room `SelfKanActionsRoundTripThroughTheDiscardWindow`（加杠链路无 claim 窗口） | 自动化测试 |
 | R14 | 拆法枚举冻结序（将牌升序 → 最小未用牌面 → 刻子先于顺子）；同番取枚举序第一个、禁止跨拆法拼凑 | RULESET §6.4 规则 3 | 已覆盖：gtest `EnumerateDecompositionsReturnsAllSplits`、`EnumerateDecompositionsAgreesWithWinningJudge`、`WinPureOneSuit`（P5 同分取舍用例）、`DifferentialAgainstBruteForce`（14300 手差分） | 自动化测试 |
-| R15 | 判番确定性：同一手牌判 1000 次 + 打乱输入牌序，`yaku[]`/`han` 逐字段相同 | RULESET §10.3 S12、PROTOCOL §10.4 ③ | **待补**：现无该专项 gtest（`ChooseDiscardDeterminism` 是打牌策略，不是判番）；补一条 | 自动化测试 |
+| R15 | 判番确定性：同一手牌判 1000 次 + 打乱输入牌序，`yaku[]`/`han` 逐字段相同 | RULESET §10.3 S12、PROTOCOL §10.4 ③ | 已覆盖：gtest `YakuDetectionIsDeterministicUnderShuffles`（我定向复跑通过） | 自动化测试 |
 
 ### G3 场次类（10 条）
 
 | ID | 判据 | 来源 | 状态 | 责任方 |
 | --- | --- | --- | --- | --- |
-| M1 | `game_end` 下发次数 == `match_end.hands_played + match_end.renchan_count`（连庄每一手各发一次）；**`hands_played` 按 v1.1 裁决口径 = `round_index 终值 + 1`（无截断）**，不再写「恒 4」 | PROTOCOL §10.4、GAME_DESIGN §6.4；Q1 裁决 | 已覆盖：room 帧计数断言（`ends.size() == round_index + renchan`）；⚠️ 期望值待 PROTOCOL §5.15 与 room.cc 同批修正落地后回填；e2e 随 E2 补 | 自动化测试 |
-| M2 | `match_end` 每场**恰好 1 次**、`hands_played == round_index 终值 + 1`（Q1 裁决口径；打满 4 局的正常场即 4）、`renchan_count == game_end 里的终值` | PROTOCOL §5.15/§10.2 | 已覆盖：room `FullGamesSatisfyProtocolInvariants`、`FinishedCallbackFiresOncePerRoundAndFlagsTheMatchEnd`（期望值待同批修正后回填）；e2e 随 E2 补 | 自动化测试 |
+| M1 | `game_end` 下发次数 == `match_end.hands_played + match_end.renchan_count`（连庄每一手各发一次）；**终裁口径：`hands_played` = `game_end` 下发次数，取值 4..8**（主理人 Q1 终裁，取代「round_index 终值+1」与「恒 4」两种旧表述） | PROTOCOL §10.4、GAME_DESIGN §6.4；Q1 终裁 | 已覆盖：room 帧计数断言 + `match_full_e2e_test.py`（实测 rounds=7/hands_played=7、rounds=5/hands_played=5，逐场相等） | 自动化测试 |
+| M2 | `match_end` 每场**恰好 1 次**、`hands_played == game_end 下发次数`（终裁口径 4..8，打满 4 局的正常场即 4）、`renchan_count == game_end 里的终值` | PROTOCOL §5.15/§10.2；Q1 终裁 | 已覆盖：room `FullGamesSatisfyProtocolInvariants`、`FinishedCallbackFiresOncePerRoundAndFlagsTheMatchEnd` + `match_full_e2e_test.py`（hands_played 与下发次数逐场相等，实测 2 场） | 自动化测试 |
 | M3 | 连庄不占局数：连庄时 `round_index` 与上一局相同、`dealer` 不变 | PROTOCOL §10.4、GAME_DESIGN §3.4 | 已覆盖：room 逐局断言；gtest `NextDealerAndClassifyRound` | 自动化测试 |
 | M4 | **C15 双闸**：场终当且仅当 `round_index ≥ 4` **或** `renchan_count > 4`；二者均满足边界 | GAME_DESIGN §3.4、RULESET §7.3 S5-D/E | 已覆盖：room C15 令牌专项 + `EXPECT_TRUE(expected_round_index == 4 \|\| last_renchan > 4)`；M1/M2 同批修正后联合重验 | 自动化测试 |
 | M5 | **局终不回收房间、场终才回收**（ReapRoom 只在场终 arm） | RULESET §7.3、PROTOCOL §1.4.5 | 已覆盖：lobby `ReclaimsARoomAndItsConnectionAfterMatchEnd`、`ReapRoomIsIdempotentAndLeavesOtherRoomsAlone` | 自动化测试 |
 | M6 | 单场局数上界 8（`4 + 4`），任何 seed 的整场 `game_end` 次数 ≤ 8 | GAME_DESIGN §1.2/§3.4 | 已覆盖（随 M1 的帧计数）；与 M1 同批修正后联合重验 | 自动化测试 |
-| M7 | 局间 `Phase::kHandSettled`：无未决窗口、不下发 `state_sync`、拒绝一切对局帧（`BAD_REQUEST`）、迟到超时静默丢弃 | PROTOCOL §10.2 局间行、GAME_DESIGN §2.2 ⑦′ | **待补**：t4 清单明文要求，未见专项 room 用例；补一条（局间发 `discard`/`join_room` 必被拒） | 自动化测试 |
-| M8 | 局间隔默认 5000 ms（`--inter-hand-delay-ms` 缺省值），e2e 观察相邻 `game_end`→`game_start` 间隔 ≥5000ms；**客户端全程无任何「继续提前」出站帧**（Q2 裁决：§2.1 图为文档缺陷，以 §2.2 冻结口径为准） | GAME_DESIGN §2.2 ⑦′、RULESET §7.2 | **待补**：缺省值断言 + 整场 e2e 时序观察 | 自动化测试 |
+| M7 | 局间 `Phase::kHandSettled`：无未决窗口、不下发 `state_sync`、拒绝一切对局帧（`BAD_REQUEST`）、迟到超时静默丢弃 | PROTOCOL §10.2 局间行、GAME_DESIGN §2.2 ⑦′ | 已覆盖：room `RoundEndRejectsEveryGameFrame`（我定向复跑通过）+ `match_full_e2e_test.py` 真链路 M7 探针（局间发一帧对局帧，实测恰好回 1 条 `BAD_REQUEST`，两场均为 m7_bad=1） | 自动化测试 |
+| M8 | 局间隔默认 5000 ms（`--inter-hand-delay-ms` 缺省值），e2e 观察相邻 `game_end`→`game_start` 间隔 ≥5000ms；**客户端全程无任何「继续提前」出站帧**（Q2 裁决：§2.1 图为文档缺陷，以 §2.2 冻结口径为准） | GAME_DESIGN §2.2 ⑦′、RULESET §7.2 | 已覆盖：gtest `InterHandDelayDefaultIsFrozen`（缺省值）+ `match_full_e2e_test.py`（gaps 305–310ms @ delay=300，逐间隔 ≥ 参数值） | 自动化测试 |
 | M9 | 轮庄：`dealer = (dealer+1)%4`、`round_index += 1`，只此一种情形递增 | GAME_DESIGN §3.4 | 已覆盖：`NextDealerAndClassifyRound` + room 逐局断言 | 自动化测试 |
-| M10 | `match_end.rankings[].final_score` 与最后一份 `game_end.results[].match_total` **同一份数据**（逐座位相等，不得两算） | GAME_DESIGN §6.4、PROTOCOL §5.15 | 已覆盖：room rankings 断言；e2e 随 E2 补 | 自动化测试 |
+| M10 | `match_end.rankings[].final_score` 与最后一份 `game_end.results[].match_total` **同一份数据**（逐座位相等，不得两算） | GAME_DESIGN §6.4、PROTOCOL §5.15 | 已覆盖：room rankings 断言 + `e2e_full_game.py --matches 1`（rankings 与末次 match_total 逐座位核对） | 自动化测试 |
+| M11 | **随机性/多样性（盲区补件）**：同一场内**相邻两局**的牌山与四家起手牌必须不同（**含连庄场**：连庄时 dealer 相同、round_index 相同，仍必须是新牌山）；不同 `--seed` 的服务器必须发不同牌山；固定 `--seed` 时整场可复现 | 新增需求（用户实玩发现「同场每局牌山相同」blocker 后新增，2026-10-22） | 已覆盖：gtest `ConsecutiveRoundsDealDifferentWallsAndHands`（连庄 + 轮庄两类转换）、`DifferentServerSeedsDealDifferentWalls`、`RoundSeedIsPureAndPerHand`、`SameSeedReplaysTheWholeMatchFrameForFrame`（四条我逐条复跑通过） | 自动化测试 |
+
+> ⚠️ **M11 是原 60 条判据的盲区**：60 条判据全部在验「规则算得对不对 / 协议字段对不对 / 场次推进对不对」，**没有一条在验「这是不是新的一局」**。牌山复用属于「每局都合法、每局都一样」，任何规则断言都必然通过。它只能被两种方式发现：① 真人连续打两局（用户路径）；② 显式比较相邻两局的牌山。本条即该盲区的补件。
 
 ### G4 协议类（12 条）
 
@@ -81,7 +84,7 @@
 | --- | --- | --- | --- | --- |
 | P1 | **t4 清单（§10.2）逐条**：seq 单调/窗口唯一、seq 跨局不重置、超时走 seq 作废、超时/托管永不选杠、H1 打牌窗口不收 pass、H3 action_event 语义、H8 重算、广播并行、game_end 零和字段完整 | PROTOCOL §10.2 | 已覆盖：room 测试群（`StaleSequencesAreDroppedSilently`、`TimeoutPlaysTheDefaultActionAndStaleTimeoutsAreIgnored`、`IllegalOperationsChangeNothing`、`EntrustedSeatPlaysImmediately`、invariants 群） | 自动化测试 |
 | P2 | **t5 清单（§10.3）逐条**：出站回带 seq、options 内取值、按 from_seat 移牌河、他家无牌面、state_sync 整体覆盖、局终≠场终、暗杠/加杠按钮位、局间不显示倒计时 | PROTOCOL §10.3 | **需人工**（B4 未开工；随 B4 验收执行，占位见 §五） | 人工 + 用户试玩 |
-| P3 | **t6 清单（§10.4）逐条**：场次级断言（M1/M2/M3/M8 组）、暗杠断言（P6/P12 组）、番数断言（N1/N11/R15 组）落到 e2e | PROTOCOL §10.4 | **待补**：现行 e2e 全部单局口径（见 G5），升级后逐条落表 | 自动化测试 |
+| P3 | **t6 清单（§10.4）逐条**：场次级断言（M1/M2/M3/M8 组）、暗杠断言（P6/P12 组）、番数断言（N1/N11/R15 组）落到 e2e | PROTOCOL §10.4 | 已覆盖：`match_full_e2e_test.py`（M1/M2/M7/M8 真链路）+ `e2e_full_game.py --matches`（M10/N1/N11/P5/P9/P11/P12/P6/P7 组，实测通过） | 自动化测试 |
 | P4 | 零新增错误码：错误码总数恒 14、语义未动；整场全程零 `error` 帧（GD-C1） | PROTOCOL §7.1/§10.2 | 已覆盖：静态核对 `protocol.h` 错误码枚举 + 现行 e2e GD-C1 | 自动化测试 |
 | P5 | `seq` 整场严格递增、跨局不重置 | PROTOCOL §6.2 第 5 条、§10.4 | 已覆盖：room `SameSeedReplaysTheWholeMatchFrameForFrame` + 帧计数；e2e 随 E2 补 | 自动化测试 |
 | P6 | 他家 `ankan.tiles` 恒 `[]`、本家 4 张、局终最后一份 `state_sync` 与 `game_end.results[].hand` 补全揭示 | PROTOCOL §10.2 暗杠行、§5.9 | 已覆盖：room `SelfKanActionsRoundTripThroughTheDiscardWindow` + `BuildSeatsArray` 三态测试；e2e 随 E2 补 | 自动化测试 |
@@ -97,17 +100,17 @@
 | ID | 判据 | 来源 | 状态 | 责任方 |
 | --- | --- | --- | --- | --- |
 | E1 | 同 `--seed` 两次**逐帧一致**（C++ 进程内整场回放） | GAME_DESIGN §7.4/§10.6 | 已覆盖：room `SameSeedReplaysTheWholeMatchFrameForFrame` | 自动化测试 |
-| E2 | 同 `--seed` 两次 **TCP 整场逐帧一致**（真网关 + agent 链路）：`python3 game/tests/e2e_full_game.py --seed 17` 跑两遍，`artifacts/e2e_log.jsonl` 逐帧 diff 为空；**整场兜底超时 = 960s**（Q3 裁决：8 × 120s，对应单场上界 8 局；单局 120s 口径不变） | PROTOCOL §10.4、GAME_DESIGN §10.6；Q3 裁决 | **待补**（随 E3 升级一并实现） | 自动化测试 |
-| E3 | `e2e_full_game.py` —— **单局口径需升级**：现行版本在首个 `game_end` 即停（docstring 自述 single game），全文无 `match_end`/`round_index`/`renchan`/`yaku`/`han_breakdown` 断言；须升级为「打完整场 + PROTOCOL §10.4 v1.6 三组断言 + GD-B8」，兜底超时改 **960s** | GAME_DESIGN §10、PROTOCOL §10.4；Q3 裁决 | **待补**（本计划的第一补件优先级） | 自动化测试 |
-| E4 | `room_full_game_test.py` —— **单局口径需升级**：无 `match_end` 引用，跑到单局 `game_end` 结束；须覆盖整场（或并入 E3 后退役，避免双份维护） | — | **待补** | 自动化测试 |
-| E5 | `account_e2e_test.py` —— **单局口径需升级**：ACCOUNT_DESIGN §7.2 v1.3 已改为「打完一场 4 局」（`games` +4、`matches` 每局一行 ×4、`match_results` 每场一行）；脚本须改为整场 + 落库核对 | ACCOUNT_DESIGN §7.2/§4.7 | **待补**（依赖 B3 落码，见 §四） | 自动化测试 |
-| E6 | `client_headless_test.py` —— **单局口径需升级**：须覆盖「局终页无出口按钮 → 场终页两出口」的 UX-13 断链，随 B4 一并升级 | UI_UX_SPEC §9.5/§9.6、UX-13 | **待补**（依赖 B4） | 自动化测试 |
+| E2 | 同 `--seed` 两次 **TCP 整场逐帧一致**（真网关 + agent 链路）；整场兜底超时 = 960s（Q3 裁决） | PROTOCOL §10.4、GAME_DESIGN §10.6；Q3 裁决 | **按用户裁决降级**：逐帧哈希比对不做（用户原话「e2e 简单跑即可，不要浪费太多时间」）。**等价覆盖**：进程内 `SameSeedReplaysTheWholeMatchFrameForFrame`（逐帧回放断言，实跑通过）；`--determinism-check` 双跑模式已随 E3 提供，可按需启用 | 自动化测试 |
+| E3 | `e2e_full_game.py` —— 升级为整场：`--matches N` 打完整场 + PROTOCOL §10.4 v1.6 三组断言 + GD-B8，兜底超时 960s | GAME_DESIGN §10、PROTOCOL §10.4；Q3 裁决 | 已覆盖：`--matches 1 --seed 17` 实测通过（rounds=5 hands_played=5 renchan=1 m7_bad=1 gaps=303–310ms）；⚠️ **默认无参入口 `run_single` 未定义会 NameError**（缺陷 D-5，用 `--matches N` 替代） | 自动化测试 |
+| E4 | `room_full_game_test.py` —— 整场口径 | — | 已覆盖：实测通过（`reason=win_tsumo requests=21 discards=70 max_seq=139` + 多房间不同牌山可复现）；保留为房间级整局回归 | 自动化测试 |
+| E5 | `account_e2e_test.py` —— 整场 + `matches` 每局一行 + `match_results` 每场一行（真库） | ACCOUNT_DESIGN §7.2/§4.7 | 已覆盖：实测通过（rounds=5 → `games=5 net_score=-8`，`match_results` 行 `hands=5 dealer=1 score=-8 rank=4` 逐字段核对、rematch 新房间、重启后账号与战绩存活）**= B3-8 终证** | 自动化测试 |
+| E6 | `client_headless_test.py` —— 局终页/场终页 UX-13 断链 | UI_UX_SPEC §9.5/§9.6、UX-13 | 已覆盖：实测 233 断言（232 PASS + 1 帧耗时偶发 FAIL，见 D-2）；D-1 键盘守卫**仅代码核对、未补断言**（见 D-1 状态） | 自动化测试 |
 | E7 | `gateway_smoke_test.py` —— **无需升级**：网关冒烟，无对局语义；按 ACCOUNT_DESIGN §7.1 保持「一行不改」全绿 | ACCOUNT_DESIGN §7.1 | 已覆盖（维持现状即可） | 自动化测试 |
 | E8 | GAME_DESIGN §10 断言组映射：A1–A5、B1–B7、C1–C4 在现行单局 e2e 中已全部落地 | GAME_DESIGN §10.1–10.3 | 已覆盖（单局口径）；⚠️ GD-A5 的 120 秒是**单局**口径，整场阈值见 Q3 | 自动化测试 |
 | E9 | **真人试玩清单**（见 §六）：从冷启动、不开调试钩子，走完 登录 → 大厅 → 一场 → 场终页出口 | UI_UX_SPEC §12 UX-1..UX-15 | **需人工**（B4 交付后执行；自动化全绿不能替代本项） | 用户试玩 |
 | E10 | 压力/统计冒烟：`e2e_full_game.py --games 200 --seed 17` 仍全绿（荒庄率、局时长分布无回归级漂移）+ `mahjong_room_bench` | — | 已覆盖（可选加强项，不作本批阻断） | 自动化测试 |
 
-**判据总数 60**：【自动化已覆盖】47、【自动化待补】11（N3、R11、R15、M7、M8、P3、E2、E3、E4、E5、E6）、【需人工】2（P2、E9）。
+**判据总数 61**（v1.3：原 60 条 + 新增 M11 随机性/多样性盲区补件）：【自动化已覆盖】59（其中 E2 的逐帧哈希按用户裁决降级，等价覆盖指向进程内逐帧回放）、【自动化待补】0、【需人工】2（P2 已由我执行完毕；E9 待用户试玩）。
 
 ---
 
@@ -278,3 +281,77 @@ python3 game/client/main.py
 | game_start 唯一重置信号；game_end 不退出牌桌；match_end 才进最终结算页；局间不显示倒计时 | ✅ game_state.py:252-302（game_start 重置）、:456-493（局终→SCREEN_RESULT 非终态、场终→match_end）；局间提示行为已拍板差异 #4 |
 
 **P2 判定：通过（含 D-1 待修，D-1 属 §9.5 出口纪律，不属 t5 七项中的任何一项）**。
+
+---
+
+## 十、A 批最终验收报告（v1.3，qa-lead，2026-10-22）
+
+> 判定对象：A 批四项交付（番型表 + 番数结算 + 一场四局/连庄 + 暗杠加杠）+ B3 场次汇总落库 + B4 客户端接入。
+> 判定口径：§一 61 条判据 + §三 闸门。**本报告只判技术面**；「好不好玩」由用户试玩（E9）给出，我不代判。
+
+### 10.1 本轮实测证据（我亲自执行的命令与输出摘要）
+
+| # | 命令 | 实测结果 |
+| --- | --- | --- |
+| 1 | `ctest --test-dir build-release -R mahjong` | **8/8 全绿**（room 22.0s / lobby 3.9s） |
+| 2 | `mahjong_rules_test --gtest_list_tests` / `mahjong_room_test --gtest_list_tests` | **rules 67 / room 34**（与主程序自报一致） |
+| 3 | 四条局种子修复断言定向复跑 | `ConsecutiveRoundsDealDifferentWallsAndHands`、`DifferentServerSeedsDealDifferentWalls`、`RoundSeedIsPureAndPerHand`、`SameSeedReplaysTheWholeMatchFrameForFrame` → **4/4 PASS** |
+| 4 | `ZeroHanTsumoIsExactlyMinusTwoPlusSix` + `YakuDetectionIsDeterministicUnderShuffles` | **2/2 PASS**（N3 / R15 补件确认） |
+| 5 | `NoKongOptionsWhenWallExhausted` / `RoundEndRejectsEveryGameFrame` / `InterHandDelayDefaultIsFrozen` / `StateSyncWaitsAreOwnPrivateAndConsistent` | 前 3 条 **PASS**；第 4 条**单独运行失败**（见 D-6） |
+| 6 | `.venv/bin/python game/tests/client_headless_test.py` | **233 断言 = 232 PASS + 1 帧耗时偶发 FAIL**（三次复跑：牌桌/结算交替出现 1–2 项失败，max 13.9–57.4ms，中位 3.0–5.5ms） |
+| 7 | `.venv/bin/python game/tests/gateway_smoke_test.py` | **13/13 PASS** |
+| 8 | `.venv/bin/python game/tests/match_full_e2e_test.py --inter-hand-delay-ms 300` | **PASS**：`rounds=7 hands_played=7 renchan=3 m7_bad=1 gaps=[306,305,304,305,304,309]` |
+| 9 | `.venv/bin/python game/tests/e2e_full_game.py --matches 1 --seed 17` | **PASS**：`rounds=5 hands_played=5 renchan=1 m7_bad=1 gaps=[307,310,305,303]` |
+| 10 | `.venv/bin/python game/tests/e2e_full_game.py`（默认无参） | **崩溃** `NameError: name 'run_single' is not defined`（D-5） |
+| 11 | `.venv/bin/python game/tests/e2e_full_game.py --games 2 --seed 17` | PASS（统计模式未受影响） |
+| 12 | `.venv/bin/python game/tests/room_full_game_test.py` | PASS（`win_tsumo requests=21 discards=70 max_seq=139` + 多房间不同牌山可复现） |
+| 13 | `.venv/bin/python game/tests/account_e2e_test.py`（真库） | PASS：rounds=5 → `games=5 net_score=-8`；`match_results` 行 `hands=5 dealer=1 score=-8 rank=4` 逐字段核对；rematch 新房间；重启后存活 —— **B3-8 / E5 终证** |
+| 14 | `mahjong_room_test --gtest_shuffle --gtest_random_seed=12345` | **3 项 FAIL**（D-6 证据：套件顺序依赖） |
+
+### 10.2 AC 编号 → 逐条实测证据（按判据组汇总，逐条状态见 §一）
+
+| 组 | 判据 | 实测证据落点 | 结论 |
+| --- | --- | --- | --- |
+| G1 数值（13） | N1–N13 | 证据 #2/#4 + `ScoreRonAndTsumo`/`ScoreMultipliers`/`ZeroHanWinScoresOne`/`ZeroHanTsumoIsExactlyMinusTwoPlusSix` | **13/13 通过** |
+| G2 规则（15） | R1–R15 | 证据 #2/#5 + 14 个 `Yaku*` 成对正反例 + `DifferentialAgainstBruteForce`（14300 手差分）+ `NoKongOptionsWhenWallExhausted` + `YakuDetectionIsDeterministicUnderShuffles` | **15/15 通过** |
+| G3 场次（11） | M1–M11 | 证据 #3/#5/#8/#9 + room 帧计数 + lobby 回收 + `match_full_e2e` 的 hands_played/gaps 实测 | **11/11 通过** |
+| G4 协议（12） | P1–P12 | 证据 #1/#5/#7/#8/#9 + room 协议不变量群 + `match_full_e2e` M7 探针（真链路 BAD_REQUEST 恰 1 条） | **12/12 通过**（P2 由我逐条实码核对，见 §九 9.5） |
+| G5 端到端（10） | E1–E10 | 证据 #3/#6/#8/#9/#11/#12/#13；E2 按用户裁决降级（等价覆盖 `SameSeedReplaysTheWholeMatchFrameForFrame`）；E9 待用户 | **9/10 通过，E9 待用户试玩** |
+
+### 10.3 D-1..D-4 当前状态
+
+| 编号 | 上轮级别 | 当前状态 | 复验证据 |
+| --- | --- | --- | --- |
+| D-1 局终页键盘出口旁路 | major | **已修（关闭）** | `app.py` 的 `_on_key` SCREEN_RESULT 分支现已含 `if self.state.match_end is None: return`，注释标注「D-1 守卫（§9.5 v2.0）」；与点击路径守卫同规则。⚠️ 备注：修复**仅代码核对**，headless 未新增对应断言（建议后续补，不计缺陷） |
+| D-2 单帧耗时尖峰 | minor | **未关闭 → 记入交付说明（已知局限）** | 复跑 3 次恒有 1–2 项超 10ms（max 13.9–57.4ms），中位 3.0–5.5ms 稳定；失败对象在「牌桌/结算」间漂移 → 判为偶发尖峰（疑字形缓存/GC），不影响操作与判定 |
+| D-3 「本场累计：XX 领先」缺失 | minor | **已修（关闭）** | `render/result.py:125-140` 新增 `_match_total_hint`，含「并列领先」分支 |
+| D-4 封顶文案 | nit | **已修（关闭）** | `render/result.py:118-120`：「 ｜ 合计 N 番（M 分）」+「已封顶」，与 §9.2 冻结形状一致 |
+
+### 10.4 本轮新增缺陷
+
+| 编号 | 描述 | 复现路径 | 级别 | 建议 |
+| --- | --- | --- | --- | --- |
+| D-5 | `game/tests/e2e_full_game.py` **默认无参入口崩溃**：`main()` 在 `--games <= 1` 分支 `return run_single(args)`，但 `run_single` 从未定义（只有 `run_one_game`/`run_one_match`）；docstring 仍自述「single game (default)」 | `python3 game/tests/e2e_full_game.py` → `NameError` | **minor（验收资产，非产品代码）** | lead-programmer 一行修复（改走 `run_one_game` 或删掉该分支并更新 docstring）。整场能力不受影响（`--matches N` 与 `match_full_e2e_test.py` 均实测通过），故不阻断；若团队认为验收资产入口失效应按 major 计，我接受升级 |
+| D-6 | **room 套件 3 个测试顺序依赖**：`StateSyncWaitsAreOwnPrivateAndConsistent`、`HandsStaySortedForEverySeat`、`SelfKanActionsRoundTripThroughTheDiscardWindow` 单独运行或 `--gtest_shuffle` 下必挂，默认注册顺序下通过（其中 `SelfKanActionsRoundTrip` 是 A 批 R13/P6/P7 的取证测试） | `mahjong_room_test --gtest_filter='*SelfKanActionsRoundTrip*'` → FAILED；`--gtest_shuffle --gtest_random_seed=12345` → 3 FAILED | **minor** | fixture 显式初始化调度器/世界（`SetUpTestSuite`）或在用例内自建，使每条断言可独立复跑。**门禁本身成立**（CI 走默认序），但「单条可复跑」能力被削弱 |
+
+### 10.5 缺陷计数与可交付判定
+
+| 级别 | 本轮状态 | 明细 |
+| --- | --- | --- |
+| blocker | **0** | 用户实玩的「同场每局牌山相同」blocker 已由主程序修复，我以 4 条断言 + 整场 e2e 复验通过 |
+| major | **0** | D-1 已修并复验关闭 |
+| minor | **2** | D-2（已知局限，中位达标）、D-5（验收资产默认入口）、D-6（测试顺序依赖）—— D-2/D-5/D-6 均不改变产品行为 |
+| nit | **0** | D-4 已修关闭 |
+
+**判定：技术面「有条件通过」，可交用户试玩（E9）。**
+
+- 放行依据：blocker 0 / major 0；61 条判据 59 条自动化已覆盖（E2 按用户裁决降级、等价覆盖成立）、1 条人工判据（P2）我已执行完毕；唯一未执行项是 E9 真人试玩本身。
+- 随交付说明带走的已知局限 3 条：① D-2 单帧耗时偶发尖峰（中位 3.0–5.5ms 达标，预算 10ms）；② D-5 `e2e_full_game.py` 默认入口失效（用 `--matches N` 或 `matches_full_e2e` 替代）；③ D-6 三条 room 测试需按默认顺序运行。
+- **不承诺「必过」「好玩」**：本报告只证明技术面达标。用户试玩（E9）是独立闸门——若试玩发现新 blocker/major，本判定自动失效并按新缺陷重开。
+
+### 10.6 盲区复盘：原 60 条判据为什么没抓到「同场每局牌山相同」
+
+- 60 条判据的判定对象分别是：算分算术（G1）、番种判定（G2）、场次推进（G3）、协议字段与序列（G4）、可复跑与脚本口径（G5）。
+- 「每局牌山复用」在这五类下**全部合法**：牌局能正常打完、算分零和、场次推进正确、协议字段完整、同 seed 也确实可复现（甚至更「可复现」）。同 seed 复现类断言反而把它当成正确行为。
+- 它只能被两类手段发现：① **真人连续打两局并注意到起手牌一模一样**（用户路径）；② 显式断言「相邻两局牌山/四家起手牌不同」。前者不在自动化能力内，后者原判据表里没有。已补为 M11。
+- 教训（写入本报告以示记录）：**「规则正确」与「每局是新的一局」是两类正交性质**。后者属于「随机性/多样性」维度，验收表若没有这一维度，任何实现缺陷都只能靠玩家运气发现。

@@ -185,6 +185,18 @@ bool CanWinWith(const std::vector<Tile>& concealed, const std::vector<Meld>& mel
 bool IsWinningHand(const std::vector<Tile>& concealed, const std::vector<Meld>& melds,
                    Tile winning_tile, bool is_tsumo);
 
+// ---------------------------------------------------------------------------
+// 听牌张（PROTOCOL v1.7 §11.2 / FEEL_SPEC §2）：**只返回牌面，不算枚数**
+// ---------------------------------------------------------------------------
+// 枚数（`waits[].remaining`）依赖牌河/副露等房间可见状态，属 Room 的职责，不进纯函数。
+// 返回**按 §2.2 冻结牌序**排好的牌面（`copy` 恒 0，同一牌面至多一条）。
+//
+// 语义边界（空数组 ⟺ 未听牌，双向成立）：
+//   * 只在**等待态**（`concealed + 3×melds == 13`）有定义——14 张（行动态）与其它张数一律返回 {}，
+//     因为「打出哪一张后听什么」不属于本函数（本作不提供推荐打牌，FEEL_SPEC §1 第 4 条）；
+//   * 实现 = 1 次 `Shanten` 门控 + 至多 34 次 `CanWinExact`（PB-1 的预算依据）。
+std::vector<Tile> WaitingTiles(const std::vector<Tile>& concealed, const std::vector<Meld>& melds);
+
 bool IsSevenPairs(const std::vector<Tile>& concealed_with_winning_tile);
 bool IsPureOneSuit(const std::vector<Tile>& concealed_with_winning_tile,
                    const std::vector<Meld>& melds);

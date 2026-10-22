@@ -344,6 +344,24 @@ def play_game(client: Client, model: TableModel, verbose: bool,
             stats["state_syncs"] += 1
             stats["last_state_sync"] = frame
             continue
+        if kind == "tenpai":
+            # v1.7 §5.16：听牌帧只发本家、独立 tenpai_seq、**不参与 room.seq**，
+            # 也不得污染 state_sync 的任何字段。e2e 只做形状与单调性校验。
+            check("tenpai_seq" in frame and frame["tenpai_seq"] > 0, "tenpai needs tenpai_seq")
+            check("seq" not in frame, "tenpai must not carry room.seq (§5.16)")
+            check(isinstance(frame.get("is_tenpai"), bool), "tenpai needs is_tenpai bool")
+            waits = frame.get("waits") or []
+            check(bool(frame["is_tenpai"]) == bool(waits), "is_tenpai ⟺ waits non-empty")
+            check(bool(frame["is_tenpai"]) or not waits, "is_tenpai=false ⇒ waits must be []")
+            for item in waits:
+                check(0 <= item.get("remaining", -1) <= 4,
+                      f"waits[].remaining must be 0..4, got {item}")
+            seq_now = frame["tenpai_seq"]
+            check(seq_now > stats.get("max_tenpai_seq", 0), "tenpai_seq must strictly increase")
+            stats["max_tenpai_seq"] = seq_now
+            stats["tenpai_frames"] = stats.get("tenpai_frames", 0) + 1
+            stats["tenpai_non_empty"] = stats.get("tenpai_non_empty", 0) + (1 if waits else 0)
+            continue
         if kind == "action_request":
             check(frame["window"] in ("discard", "claim"), f"unknown window: {frame}")
             check(frame["seq"] > previous_request_seq, "action_request.seq must strictly increase")

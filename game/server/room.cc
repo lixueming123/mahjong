@@ -471,19 +471,16 @@ std::array<std::string, kSeatCount> RoomActor::StateSyncFrames() const {
   // 禁止对所有人下发真实牌面。此循环无 await，渲染期间状态不可变（原 hoist 注释仍成立）。
   std::array<std::string, kSeatCount> frames;
   std::string masked_json;
-  bool holder_json_used = false;
-  std::string holder_json;
   for (int seat = 0; seat < kSeatCount; ++seat) {
     if (seats_[static_cast<size_t>(seat)].endpoint.IsEmpty()) {
       continue;  // bots have no wire
     }
     if (SeatHoldsAnkan(seat)) {
-      // 暗杠持有者：只此座位看到自己的 4 张真实牌面
-      if (!holder_json_used) {
-        holder_json = BuildSeatsArray(seat).Dump();
-        holder_json_used = true;
-      }
-      frames[static_cast<size_t>(seat)] = BuildStateSync(seat, holder_json);
+      // 暗杠持有者：只此座位看到自己的 4 张真实牌面。
+      // ⚠️ 视图**必须按持有者逐个构建**，不可跨座位复用（v1.7 修复）：若把第 1 个持有者的
+      // 视图缓存后发给第 2 个持有者，后者既看不到自己的暗杠牌面，又能看到前者的暗杠牌面
+      // —— 一次复用同时造成「本家信息缺失」与「他家暗杠泄露」两个 P0。
+      frames[static_cast<size_t>(seat)] = BuildStateSync(seat, BuildSeatsArray(seat).Dump());
       continue;
     }
     if (masked_json.empty()) {
@@ -550,6 +547,9 @@ std::string RoomActor::BuildStateSync(int for_seat) const {
 }
 
 std::string RoomActor::BuildStateSync(int for_seat, const std::string& seats_json) const {
+  // PROTOCOL v1.7 §5.16 裁决：听牌数据走**独立的 `tenpai` 帧**（仅本家、不塞 state_sync），
+  // 因此 state_sync 的字段集与 v1.6 完全一致（§11.2 的「state_sync.waits」是同一文档里的
+  // 过期草案，§5.16/§8.1/§11.3 与客户端契约均以 tenpai 帧为准）。
   json::Value frame = json::Value::Obj(7);  // type, seq, remaining, current_seat, hand, melds, seats
   frame.Set("type", json::Value::Str("state_sync"));
   frame.Set("seq", json::Value::Int(static_cast<int64_t>(seq_)));
@@ -561,6 +561,69 @@ std::string RoomActor::BuildStateSync(int for_seat, const std::string& seats_jso
   // (BuildSeatsArray().Dump()), which is why the frame bytes are unchanged (§5.9).
   frame.Set("seats", json::Value::RawJson(seats_json));
   return frame.Dump();
+}
+
+// PROTOCOL v1.7 §5.16：`tenpai` 帧 = **本家私有的听牌全量快照**（不是增量、不参与 room.seq）。
+//   * `tenpai_seq`：每座位一条独立单调计数器，从 1 起、**跨局不重置**（新场次才归零）；
+//   * `is_tenpai`：等待态（concealed + 3×melds == 13）且存在至少一张可和牌面；
+//   * `waits[]`：§2.2 牌序、同面至多一条；`is_tenpai == false` 时恒为 `[]`（MUST 下发清空信号）；
+//   * `waits[].remaining` = **可见枚数** = 4 −（本家手牌 + 四家牌河 + 四家副露）中该牌面的张数，
+//     **他家暗杠的 4 张不扣减**（扣了就能反推出暗杠牌面，§5.16 冻结口径）；**牌山真值永不入帧**。
+json::Value RoomActor::BuildTenpaiFrame(int seat) const {
+  const std::vector<Tile>& concealed = hands_[static_cast<size_t>(seat)];
+  const std::vector<Meld>& melds = melds_[static_cast<size_t>(seat)];
+  json::Value waits = json::Value::Arr(0);
+  const bool waiting_state = concealed.size() + 3 * melds.size() == 13;
+  std::vector<Tile> faces;
+  if (waiting_state) {
+    faces = WaitingTiles(concealed, melds);
+  }
+  if (!faces.empty()) {
+    FaceCounts visible{};
+    visible.fill(0);
+    for (Tile tile : concealed) ++visible[FaceOf(tile)];
+    for (int other = 0; other < kSeatCount; ++other) {
+      for (const Meld& meld : melds_[static_cast<size_t>(other)]) {
+        // 他家暗杠：牌面对本家不可见 ⇒ **不扣减**（否则 4 − 可见 会反推出暗杠牌面）。
+        if (meld.type == MeldType::kAnkan && other != seat) continue;
+        for (Tile tile : meld.tiles) ++visible[FaceOf(tile)];
+      }
+      for (Tile tile : discards_[static_cast<size_t>(other)]) ++visible[FaceOf(tile)];
+    }
+    for (Tile face : faces) {
+      const int seen = visible[FaceOf(face)];
+      const int left = seen >= kCopiesPerFace ? 0 : kCopiesPerFace - seen;
+      json::Value item = json::Value::Obj(2);  // tile, remaining
+      item.Set("tile", json::Value::Str(FormatTile(face)));
+      item.Set("remaining", json::Value::Int(left));
+      waits.Append(std::move(item));
+    }
+  }
+  json::Value frame = json::Value::Obj(4);  // type, tenpai_seq, is_tenpai, waits
+  frame.Set("type", json::Value::Str("tenpai"));
+  frame.Set("tenpai_seq", json::Value::Int(static_cast<int64_t>(tenpai_seq_[static_cast<size_t>(seat)])));
+  frame.Set("is_tenpai", json::Value::Bool(!faces.empty()));
+  frame.Set("waits", std::move(waits));
+  return frame;
+}
+
+// §5.16 下发（T1 打牌后 / T2 副露后 / T3 sync 补发）：只发本家、一份；bot 无 wire 不发。
+// PB-2：构建耗时超 300µs 打一次 warn（日志巡检；纯测量、不进任何帧字段）。
+exec::task<void> RoomActor::DeliverTenpai(int seat) {
+  if (seat < 0 || seat >= kSeatCount || seats_[static_cast<size_t>(seat)].endpoint.IsEmpty()) {
+    co_return;
+  }
+  ++tenpai_seq_[static_cast<size_t>(seat)];  // 每座位独立计数，跨局不重置
+  const auto started = std::chrono::steady_clock::now();
+  const std::string frame = BuildTenpaiFrame(seat).Dump();
+  const double us =
+      std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - started).count();
+  if (us > 300.0) {
+    spdlog::warn("slow tenpai build: {:.0f} us (seat {}, room {})", us, seat, room_id_);
+  }
+  std::array<std::string, kSeatCount> frames;
+  frames[static_cast<size_t>(seat)] = frame;
+  co_await Deliver(std::move(frames));
 }
 
 std::string RoomActor::BuildGameStart(int for_seat) const {
@@ -723,6 +786,7 @@ exec::task<void> RoomActor::StartMatch() {
   renchan_count_ = 0;
   match_totals_ = {};
   dealer_hands_ = {};  // B3：坐庄手数随场次清零
+  tenpai_seq_ = {};    // v1.7 §5.16：tenpai_seq 从 1 起；跨局不重置，新场次才归零
   dealer_ = 0;  // 首局庄家 = seat 0（GAME_DESIGN v1.10 §3.3）
   co_await StartRound();
 }
@@ -740,7 +804,11 @@ exec::task<void> RoomActor::StartRound() {
   round_advance_pending_ = false;
   kong_draw_tile_.reset();
 
-  wall_ = BuildWall(seed_);
+  // v1.6 局种子：**房间种子只管「房间之间不同」，局种子管「局与局之间不同」，两者缺一不可**。
+  // 只用 seed_ 时一场 4~8 局的牌山会逐局完全相同（用户实玩 blocker：第 1 局与第 2 局起手牌
+  // 一模一样的根因）。hands_played_ 在 AdvanceAfterRound 里逐局 +1，且在本行之前已更新到
+  // 「本局序号」（第 1 手 = 0），所以它就是 hand_index。
+  wall_ = BuildWall(DeriveRoundSeed(seed_, static_cast<uint32_t>(hands_played_)));
   // C9：庄家显式传参（B1 改造后的签名）。发牌后不变量：庄家 14 张、其余 13 张、牌山 83。
   Deal deal = DealTiles(wall_, dealer_);
   hands_ = deal.hands;  // hands[dealer] is the dealer (14 tiles), the others 13
@@ -902,6 +970,8 @@ exec::task<void> RoomActor::ApplyDiscard(int seat, Tile tile) {
   }
   co_await Deliver(std::move(events));
   spdlog::debug("room {}: seat {} discards {} (seq={})", room_id_, seat, FormatTile(tile), old_seq);
+  // v1.7 §5.16 T1：本家打牌生效后（手牌回到 13 张等待态）——听牌唯一有定义的状态，主时机。
+  co_await DeliverTenpai(seat);
 
   std::array<bool, kSeatCount> recipients {};
   std::array<std::vector<Option>, kSeatCount> options;
@@ -1116,6 +1186,10 @@ exec::task<void> RoomActor::ApplyMeld(int seat, const std::string& action, const
   meld.tiles.push_back(claimed_tile);
   SortTiles(meld.tiles);
   melds_[static_cast<size_t>(seat)].push_back(std::move(meld));
+  // FEEL_SPEC F-SORT-01b 触发点 ④：**每次鸣牌扣牌后**重排 `hands_[seat]`（pong/chow/kong 同源）。
+  // 扣牌本身保序，此调用按规格显式声明该不变量，避免将来改动扣牌实现时静默破序。
+  // 只排手牌：`discards_`（牌河顺序是信息）与 `melds_[].tiles`（组内序由 §4.8 冻结）一律不排。
+  SortTiles(hands_[static_cast<size_t>(seat)]);
   if (from_seat >= 0 && !discards_[static_cast<size_t>(from_seat)].empty()) {
     discards_[static_cast<size_t>(from_seat)].pop_back();  // GAME_DESIGN §4.2 step 10
   }
@@ -1158,6 +1232,9 @@ exec::task<void> RoomActor::ApplyMeld(int seat, const std::string& action, const
     co_await Deliver(std::move(draws));
   }
   co_await Deliver(StateSyncFrames());
+  // v1.7 §5.16 T2：本家副露（含杠补牌）生效后重算听牌——此刻是 14 逻辑张（待打牌），
+  // 因此实际下发的是「清空」信号（is_tenpai=false / waits: []），T1 会在打牌后补上真值。
+  co_await DeliverTenpai(seat);
   co_await OpenDiscardWindow(/*win_check=*/action == "kong", replacement);
 }
 
@@ -1191,10 +1268,13 @@ exec::task<void> RoomActor::ApplySelfKan(int seat, const std::string& action,
   Transition();  // close the discard window; the replacement-draw window takes the new seq
   phase_ = Phase::kDiscardWindow;
 
-  // action_event（PROTOCOL §5.8 v1.6）：ankan/kakan **不带 from_seat**、**不动牌河**；
-  // tiles = 恰 1 个牌面元素（与请求同形）。
+  // action_event（PROTOCOL §5.8 v1.6）：ankan/kakan **不带 from_seat**、**不动牌河**。
+  // PROTOCOL v1.7 §11.5 修正：`ankan` 的 `tiles` **恒为 []（对所有收件人，含暗杠者本人）**——
+  // action_event 是广播帧，v1.6 带 [T] 等于把暗杠牌面告诉三家，绕过 state_sync 的打码；
+  // 本家牌面不受损（紧随其后的 state_sync.melds[] 带 4 张真实牌面）。`kakan` 不变（公开动作）。
+  const std::vector<Tile> event_tiles = action == "ankan" ? std::vector<Tile> {} : client_tiles;
   std::array<std::string, kSeatCount> events;
-  const std::string event = BuildActionEventFrame(seat, action, client_tiles, /*from_seat=*/-1, old_seq);
+  const std::string event = BuildActionEventFrame(seat, action, event_tiles, /*from_seat=*/-1, old_seq);
   for (int target = 0; target < kSeatCount; ++target) {
     if (!seats_[static_cast<size_t>(target)].endpoint.IsEmpty()) {
       events[static_cast<size_t>(target)] = event;
@@ -1222,6 +1302,8 @@ exec::task<void> RoomActor::ApplySelfKan(int seat, const std::string& action,
 
   // 自理杠之后必定下发 state_sync（§5.12/§5.8 注 4：他家以此权威覆盖 melds[]）。
   co_await Deliver(StateSyncFrames());
+  // v1.7 §5.16 T2：自理杠（暗杠/加杠）同属副露——本家听牌重算（14 逻辑张 ⇒ 清空信号）。
+  co_await DeliverTenpai(seat);
   co_await OpenDiscardWindow(/*win_check=*/true, drawn);
 }
 
@@ -1531,6 +1613,9 @@ exec::task<void> RoomActor::Sync(PlayerInfo player) {
     co_return;
   }
   co_await ReplyFrame(seat, BuildStateSync(seat));
+  // v1.7 §5.16 T3：`tenpai` 不在 state_sync 里，`sync` 之后必须补发一次——
+  // 否则客户端听牌条会永久停在旧值。
+  co_await DeliverTenpai(seat);
 }
 
 exec::task<void> RoomActor::OnPlayerDisconnected(PlayerInfo player) {

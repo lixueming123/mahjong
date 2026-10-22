@@ -487,6 +487,28 @@ bool IsWinningHand(const std::vector<Tile>& concealed, const std::vector<Meld>& 
   return CanWinWith(concealed, melds, winning_tile);
 }
 
+std::vector<Tile> WaitingTiles(const std::vector<Tile>& concealed, const std::vector<Meld>& melds) {
+  std::vector<Tile> waits;
+  // 语义边界（见头文件）：只在等待态（13 逻辑张）有定义；14 张（行动态）与其它张数一律空。
+  if (concealed.size() + 3 * melds.size() != 13) {
+    return waits;
+  }
+  // PB-1：先用 Shanten 门控——非听牌手牌一次向听计算就返回，避免 34 次 CanWinExact。
+  // 等待态的 13 张不可能是和牌形，故 Shanten == 0 等价于「听牌」。
+  if (Shanten(concealed, melds) != 0) {
+    return waits;
+  }
+  for (int face = 0; face < kFaceCount; ++face) {
+    std::vector<Tile> with_win = concealed;
+    with_win.push_back(MakeTileFromFace(static_cast<Face>(face)));
+    if (CanWinExact(with_win, melds)) {
+      waits.push_back(MakeTileFromFace(static_cast<Face>(face)));
+    }
+  }
+  // face 升序即为 §2.2 冻结牌序（m<p<s<z、rank 升序），无需再排。
+  return waits;
+}
+
 bool IsSevenPairs(const std::vector<Tile>& concealed_with_winning_tile) {
   if (concealed_with_winning_tile.size() != 14) return false;
   const FaceCounts counts = CountFaces(concealed_with_winning_tile);

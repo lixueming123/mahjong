@@ -1,15 +1,17 @@
 # 麻将里程碑协议（PROTOCOL）
 
 - 文档 ID：PROTOCOL
-- 版本：**v1.6（冻结）**
+- 版本：**v1.7（冻结）**
+  v1.7 **B 批增补**（手感表现的数据通路）：① 新增服务端帧 **`tenpai`**（听牌提示，**仅发本家**，S→C 14 → **15 条**，见 §5.16）——**独立低频帧，不塞 `state_sync`**；② `tenpai.tenpai_seq` 是**独立单调计数器**，与 `room.seq`（窗口作废）**解耦**，理由见 §11.2（若挂载 `room.seq` 会把正常的 `action_request` 判成过期，玩家收不到鸣牌请求）；③ 下发时机冻结 6 行（T1 打牌后 / T2 副露后 / **T3 `sync` 后补发** / T4 摸牌后**不发** / T5 他家动作不发 / T6 局终·新局·场终不发）；④ `waits[].remaining` 冻结为**可见枚数**口径，**他家暗杠的 4 张不扣减**（扣了就能反推出暗杠牌面），**牌山真值永不入帧**（§11.3）；⑤ 三条性能预算 PB-1/PB-2/PB-3 各自绑定可执行处置（§11.4）；⑥ **修正 v1.6 缺陷**：`action_event{action:"ankan"}` 的 `tiles` 恒为 `[]`（v1.6 广播 `[T]` 会把暗杠牌面泄露给三家）；⑦ 新增 §11.6「表现事件来源矩阵」E1–E13 与 §11.7「客户端四条陷阱」。**零新增错误码**；v1.6 客户端不读新帧也能正常跑（未知帧类型忽略，§1.3）。见附录 C v1.7 行。
   v1.6 **A 批增补**（番型表 + 番数结算 + 一场四局/连庄/场次总分 + 暗杠/加杠）：① `action` 动作词表 5 → **7**（+`ankan`、+`kakan`），**不新增窗口类型**（两者是 `discard` 窗口的附加 `options`）；② `melds[].type` 3 → **5**（+`ankan`、+`kakan`），暗杠对他家的 `tiles` 为**空数组**并在局终揭示（§5.9、§8.1）；③ `game_end` **只增字段**（`win.yaku[]` / `win.han_breakdown{base,tsumo,dealer,total}` / `win.han` / `win.dealer_bonus` / `win.rinshan` / `results[].match_total` / 顶层 `round_index` / `dealer` / `renchan_count` / `match_will_continue`），既有字段形状一律不动（**`win.tags` 保持旧语义**，仍是 `yaku[].id` 的子集）；④ 新增服务端帧 **`match_end`**（场终，§5.15）；⑤ **零新增错误码**（仍 14 条，§7.1）；⑥ 明确 `seq` **跨局单调不重置**（§6.2）。见附录 C v1.6 行。
   v1.5 大厅选房：新增 `list_rooms` / `room_list`；`join_room` 在开局前替换一个 AI 座位并回 `room_joined`；`create_room` 不自动开局；`ready` 仍是开局信号。错误码不新增。见 §3、§4.2–§4.4、§4.11、§5.14。
 - 状态：**已冻结**（t3 网关、t4 房间状态机、t5 客户端、t6 端到端脚本必须严格按本文实现；变更须走新的需求评审）
-- 修订：v1.6 依 captain 裁决（A 批需求评审，见 `A1_ARCH_ASSESSMENT.md` 的 `0.3` 与附录 C v1.6 行）**增补**番型表/番数结算、一场四局/连庄/场次总分、暗杠/加杠：帧数 C→S **10 条不变**（动作词表扩到 7 值，不新增帧类型）、S→C **13 → 14**（+`match_end`），错误码 **14 条不变**。既有 14 条错误码的语义与阈值、15 s 窗口、`seq` 作废方案、136/83/84/21、零和口径、私有信息规则（除暗杠一处新增）**全部未动**；`M ∈ {1,4,16}` 的算分口径随 `RULESET`/`GAME_DESIGN` 的 A 批修订版改由番数表承载（本文只改承载字段，不改数值）
+- 修订：v1.7 依 captain 裁决（B 批「手感表现」需求）**增补**：新增服务端帧 `tenpai`（§5.16，仅发本家）、`tenpai_seq` 与 `room.seq` 解耦的时序判据（§11.2）、`remaining` 可见枚数口径与暗杠例外（§11.3）、三条性能预算（§11.4）、**修正** `action_event` 的 `ankan.tiles` 为 `[]`（§11.5）、表现事件来源矩阵与客户端陷阱（§11.6/§11.7）。既有帧的字段、错误码、窗口与 `room.seq` 机制**一律未动**
+  v1.6 依 captain 裁决（A 批需求评审，见 `A1_ARCH_ASSESSMENT.md` 的 `0.3` 与附录 C v1.6 行）**增补**番型表/番数结算、一场四局/连庄/场次总分、暗杠/加杠：帧数 C→S **10 条不变**（动作词表扩到 7 值，不新增帧类型）、S→C **13 → 14**（+`match_end`），错误码 **14 条不变**。既有 14 条错误码的语义与阈值、15 s 窗口、`seq` 作废方案、136/83/84/21、零和口径、私有信息规则（除暗杠一处新增）**全部未动**；`M ∈ {1,4,16}` 的算分口径随 `RULESET`/`GAME_DESIGN` 的 A 批修订版改由番数表承载（本文只改承载字段，不改数值）
   v1.4 依用户需求（本轮 actor 化重构）补 §7.2 一句话：计数与阈值**逐字不变**，仅**计数归属**从 `Connection` 移到该连接的 `ConnectionActor`。**帧格式、字段、时序、错误码与配额数值一律未动**（见附录 C v1.4 行）
   v1.3 依 captain 裁决（账号功能需求）**增补**账号注册/登录、战绩查询与三条错误码；帧数 8→10（C→S）、12→13（S→C），错误码 11→14。既有 11 条错误码的语义与阈值、15 s 窗口、`seq` 作废、私有信息规则、136/83/84/21 与零和口径**全部未动**（见附录 C v1.3 行与 `ACCOUNT_DESIGN.md`）
 - 作者 / 负责人：game-architect（t1）
-- 上游源头：`game/docs/GAME_DESIGN.md` **v1.10（A 批修订版，待创意总监定稿后确认版本号）**（玩法源头）、`game/docs/UI_UX_SPEC.md` **v1.1**（表现层）。A 批（番型表/番数/局制/暗杠加杠）的**规则源头**以 `GAME_DESIGN.md` / `RULESET.md` 的 A 批修订版为准，与本文 v1.6 同批冻结（由创意总监定稿）；两者冲突时以 `GAME_DESIGN.md` 为准（§0.1）
+- 上游源头：`game/docs/GAME_DESIGN.md` **v1.10**（玩法源头，A 批已定稿）、`game/docs/UI_UX_SPEC.md` **v1.9**（表现层，A 批修订后为 v2.0）。A 批（番型表/番数/局制/暗杠加杠）的**规则源头**以 `GAME_DESIGN.md` v1.10 / `RULESET.md` v1.3 为准，与本文 v1.6 同批冻结；两者冲突时以 `GAME_DESIGN.md` 为准（§0.1）
 - 关联文档：`game/docs/RULESET.md`（t1，规则数值与算法）、`game/docs/GAME_DESIGN_REVIEW.md`（t10/t12 门禁与 H1–H7 移交项）、`game/docs/ACCOUNT_DESIGN.md`（v1.3，账号与战绩）、`game/docs/A1_ARCH_ASSESSMENT.md`（v1.6 的架构评估与改造点清单）
 - 适用里程碑：**单房间、四座位（1 真人 + 3 服务端 AI）；v1.6 起为「一场 4 局 + 连庄」的场次（§0.4）**
 
@@ -35,6 +37,7 @@
 | H8 | 服务端**永不采信**客户端的和牌/副露/算分结论，必须用规则库重算 | §8.3 |
 | H9 | `state_sync` 为权威状态；`action_event` 仅为即时事件，两者到达顺序不作保证 | §5.12、§8.4 |
 | H10 | 牌编码与排序口径自包含 | §2 |
+| **H11** | **广播帧不得承载保密信息**（v1.7 新增通则）。若某动作"发生"是公开的、但"内容"是保密的（当前唯一实例：**暗杠**），则该帧只广播"发生了"（`seat` + `action`），**内容一律以空数组/省略表达**，真实内容只走**私有视角**（`state_sync.melds[]` 本家视角）或**局终揭示**。**禁止**"本人真值、他家空值"的双份广播帧——那会丢掉"一次构建四家复用"，且给每个"部分保密"的动作开一个新裂缝 | §5.8、§5.9、§8.1、§11.5 |
 | S1–S4 | 打牌窗口不接受 `pass`、`action` 带 `seq`、`melds[]` 形状、他家无 `hand` | H1/H2/H4/H6 |
 
 ### 0.3 术语（与 `GAME_DESIGN.md` §0.2 逐字一致）
@@ -200,7 +203,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | C9 | `register` | `username`, `password`, `name?` | 账号注册（v1.3，`ACCOUNT_DESIGN.md` §3.2）；注册成功即登录 |
 | C10 | `stats_request` | — | 登录后任意时刻（v1.3，查询本人累计战绩） |
 
-### 3.2 服务端 → 客户端（14 条）
+### 3.2 服务端 → 客户端（15 条）
 
 | # | `type` | 字段 | 收件人 |
 | --- | --- | --- | --- |
@@ -218,9 +221,10 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | S13 | `stats` | `games`, `wins`, `draws`, `net_score`, `recent[]` | 请求者本人（v1.3） |
 | S14 | `room_list` | `rooms[]` | 请求 `list_rooms` 的连接（v1.5） |
 | S15 | `match_end` | `hands_played`, `renchan_count`, `rankings[]` | 广播 4 家（**场终**，v1.6；**无 `seq`**） |
+| S16 | `tenpai` | `tenpai_seq`, `is_tenpai`, `waits[]{tile,remaining}` | **仅本家**（v1.7；**走 `tenpai_seq`，不参与 `room.seq` 比较**） |
 
-> 表中 `S12` 不存在：本版本共 13 类服务端帧 + `pong` 计 **14 条**（v1.6 由 13 增补 `match_end`），与 GAME_DESIGN §11.2 的对应关系见该节。
-> （编号沿用 v1.0 的历史序：`S12` 从未存在，v1.3 新增的 `stats` 取 `S13`，v1.6 新增的 `match_end` 取 `S15`。）
+> 表中 `S12` 不存在：本版本共 14 类服务端帧 + `pong` 计 **15 条**（v1.6 增补 `match_end`、v1.7 增补 `tenpai`），与 GAME_DESIGN §11.2 的对应关系见该节。
+> （编号沿用 v1.0 的历史序：`S12` 从未存在，v1.3 新增的 `stats` 取 `S13`，v1.6 的 `match_end` 取 `S15`，v1.7 的 `tenpai` 取 `S16`。）
 
 ---
 
@@ -517,7 +521,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | --- | --- | --- |
 | `seat` | integer | **执行该动作的座位**（鸣牌者 / 自理杠者 / 和牌者） |
 | `action` | string | `∈ {pong, chow, kong, ankan, kakan, win}`（**`pass` 永不出现**；v1.6 由 4 值增至 6 值） |
-| `tiles` | array | `pong`/`kong`/`ankan`/`kakan` = `[T]`；`chow` = `[a,b]`（手中的两张）；`win` = `[和牌张]` |
+| `tiles` | array | `pong`/`kong`/`kakan` = `[T]`；**`ankan` = `[]`（v1.7 修正，见 §11.5）**；`chow` = `[a,b]`（手中的两张）；`win` = `[和牌张]` |
 | `from_seat` | integer | 被鸣 / 被荣和那张牌的**打出者座位**；`pong`/`chow`/`kong`/荣和 **必带**；**自摸和牌、`ankan`、`kakan` MUST NOT 携带**（省略等同于 `null`）——三者都没有"被鸣的那张牌" |
 | `seq` | integer | 触发该动作的窗口序号（= 对应 `action_request.seq`） |
 
@@ -612,7 +616,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | --- | --- | --- |
 | `round_index` | int | 本局序号，0 基（与 `game_start.round_index` 同值） |
 | `dealer` | int | **本局**庄家座位（0..3） |
-| `renchan_count` | int | **截至本局结束**已发生的连庄次数（首次开局为 0；庄家和牌或荒庄则下一局 +1，见 `RULESET.md` A 批修订版） |
+| `renchan_count` | int | 本场累计**连庄次数**，**含本局的累计值（post-increment）**——这是使 §5.15「`match_end.renchan_count` 与最后一次 `game_end` 同值」恒成立的唯一口径（C15 连庄上限触发的场终尤其如此）。首次开局为 0；庄家和牌或荒庄则计入一次（见 `RULESET.md` §7） |
 | `match_will_continue` | bool | `true` = 本场还有下一局（服务端稍后会下发新的 `game_start`）；`false` = 本场结束，随后下发 **`match_end`**（§5.15） |
 | `results[].match_total` | int | 该座位在**本场**的累计得失分（含本局）：`Σ 本场各局 delta_score`，四家之和恒为 0 |
 | `win.yaku` | array | 番种明细：`[{"id":<string>,"han":<int>}, …]`。**顺序 = `RULESET.md` 番种表的冻结判定序**（即结算页渲染序）；**每个 `id` 至多出现一条**（`yakuhai` 命中 n 组也合并为一条、`han = n`）。`Σ yaku[].han == win.han_breakdown.base`。荒庄/他家无此字段 |
@@ -710,7 +714,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 ### 5.15 `match_end`（**v1.6 新增**，场终）
 
 ```json
-{"type":"match_end","hands_played":4,"renchan_count":1,
+{"type":"match_end","hands_played":5,"renchan_count":1,
  "rankings":[{"seat":1,"final_score":37,"rank":1},
              {"seat":0,"final_score":0,"rank":2},
              {"seat":3,"final_score":0,"rank":2},
@@ -720,7 +724,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `hands_played` | int | 本场**计入局数的**局数（= `round_count`，恒 4；连庄不占局数，故连庄不会让它变大）。**实际下发的 `game_end` 次数 = `hands_played + renchan_count`**（连庄的每一手也各下发一次 `game_end`） |
+| `hands_played` | int | **本场实际手数 = 本场下发 `game_end` 的次数**，取值 **4..8**（无连庄时为 4；连庄使每一手都 +1 并各自下发一次 `game_end`，故随连庄增大；上界 8 由 §0.4 的双闸 `max_rounds=4` / `max_renchan=4` 决定）。**连庄信息由 `renchan_count` 单独承载，不要用 `hands_played` 反推局数**（v1.6 口径修正：早期草案的「= `round_count`，恒 4」与「`game_end` 次数 = `hands_played + renchan_count`」两条均已作废） |
 | `renchan_count` | int | 本场累计**连庄次数**（与最后一次 `game_end.renchan_count` 同值） |
 | `rankings[]` | array | 恒 4 项，覆盖 `{0,1,2,3}` 无重复。元素 `{seat, final_score, rank}` |
 
@@ -735,6 +739,58 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 - 收件人：广播 4 家（含托管座位）。
 - **时序**：`match_end` 只在 `match_will_continue == false` 的那一局之后下发，且**每场恰好一次**；`match_end` 之后服务端按 §1.4 第 5 条在 30 秒后回收房间与连接，不再下发任何对局帧。
 - **与 `game_end` 的分工**：`game_end` 表达"这一局怎么结束的"（含和牌明细，可能 4 次）；`match_end` 表达"整场谁赢了"（含最终名次，恰好 1 次）。客户端**不得**用 `match_end` 替代 `game_end` 的明细展示。
+
+### 5.16 `tenpai`（**v1.7 新增**，听牌提示，**仅发本家**）
+
+```json
+{"type":"tenpai","tenpai_seq":7,"is_tenpai":true,
+ "waits":[{"tile":"1m","remaining":2},{"tile":"4m","remaining":3}]}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `tenpai_seq` | int | **独立单调计数器**（每座位一条，从 1 起，**跨局不重置**）。**不是** `room.seq`——理由见 §11.2 |
+| `is_tenpai` | bool | 本家门前手牌**当前**是否已听牌（判定口径：`concealed + 3×melds == 13` 且存在至少一张可和牌面） |
+| `waits` | array | 听牌张列表，**已按 §2.2 牌序排好**（数牌 `m<p<s`、字牌 `1z..7z`、同面不重复），客户端**不再排序**；`is_tenpai == false` 时**恒为 `[]`**（MUST，见下） |
+| `waits[].tile` | string | 牌面码，编码同 §2.1 |
+| `waits[].remaining` | int | 该牌面的**可见剩余枚数**，`0..4`，口径见 §11.3（**不是**牌山真值） |
+
+> ⚠️ **两个同名的 `remaining`，语义完全不同，实现与文档都不得混用（v1.7 显式消歧）**：
+>
+> | 字段 | 含义 | 随摸牌变化？ | 可见性 |
+> | --- | --- | --- | --- |
+> | `state_sync.remaining`（v1.0 起） | **牌山剩余张数**（`136 − 已摸牌数`） | **每次任何一家摸牌都 −1**（含杠补牌） | 全体公开 |
+> | `tenpai.waits[].remaining`（v1.7） | **单牌面的可见剩余枚数**（`4 − 已露面的张数`） | **只在"该牌面出现/消失"时变**；别人摸进暗手牌**不影响**它 | 仅本家 |
+>
+> 建议 C++ 侧命名也分开（如 `wall_remaining_` / `visible_left`），不要都叫 `remaining`——**E2 的推导依赖前者、`waits` 的数字是后者**，混用会直接推导错（见 §11.6 E2）。**这条不是建议而是要求，落点见 §11.3「代码侧命名要求」**（两者必须能靠名字区分，不依赖注释）。
+
+**冻结规则**
+
+1. **收件人：仅本家（1 份，不是广播）**。他家听牌信息在协议中**不存在任何字段**（§8.1）。
+2. **`is_tenpai == false` 时必须下发（`waits: []`），不得用"不发帧"表示未听牌**。理由：客户端需要一条明确的"清空"信号；若靠"不发"表达，客户端只能靠超时或推测，会把"听牌条消失"变成不可判定。（这是与 FEEL_SPEC §2.4 `F-TP-11` ⑧ 的对齐点：`tenpai{is_tenpai:false}` 是清空信号之一。）
+3. **`tenpai_seq` 与 `room.seq` 解耦**：本帧**不参与** §6.2 的窗口 `seq` 作废比较，客户端也**不得**用 `room.seq` 的规则处理它。判据见 §11.2。
+   - **客户端禁令（v1.7，MUST，与 `UI_UX_SPEC.md` v2.2 §10.3 同口径）**：
+     - **MUST NOT** 把 `tenpai_seq` 写入 `last_seq` / `current_seq`（或任何"窗口序号"变量）。理由见 §11.2 结论 1——写进去会抬高窗口水位，把随后正常的 `action_request` 判成过期而丢弃，表现为**玩家收不到鸣牌请求、干等 15 s**。
+     - **MUST NOT** 因收到 `tenpai` 而关闭/推进任何窗口：不清 PENDING、不置 `window = None`、不改变 `action_request` 的截止计时。
+     - `tenpai` 只影响**听牌条的渲染状态**，与其他一切无关。
+4. **无 `state_sync` 伴随**：`tenpai` 是**独立的全量快照**（每次带全量 `waits`，不是增量），客户端收到即整体替换。
+5. **`waits` 的顺序与 `remaining` 都在同一次计算内产出**，不得分两次算（否则会漂移）。
+
+**下发时机（服务端责任，冻结）**
+
+| # | 时机 | 发不发 | 说明 |
+| --- | --- | --- | --- |
+| T1 | 本家**打牌生效后**（手牌回到 13 张等待态） | ✅ 发 | 主时机：这是"听牌"唯一有定义的状态 |
+| T2 | 本家**副露（碰/吃/明杠/暗杠/加杠）生效后**（含杠补牌后回到 13 张） | ✅ 发 | 副露改变牌形，必须重算 |
+| T3 | 收到本家 `sync`（客户端主动要全量对齐） | ✅ **补发一次** | **v1.7 关键**：`tenpai` 不在 `state_sync` 里，若不补发，`sync` 之后客户端听牌条会永久停在旧值。见 §11.2 第 4 点 |
+| T4 | 本家**摸牌后**（手牌 14 张） | ❌ **不发**（**已裁决，v1.7 定案**） | 14 张口径没有"听牌"定义。若按"打掉刚摸那张"去算，等于替玩家做了唯一的打牌假设，与 `FEEL_SPEC` §0 第 4 条「不设计帮玩家决策的功能」直接相抵；且摸牌后 ≤15 s 内本家必然打牌，T1 会立刻补上最新值，不存在"长时间看到旧值" |
+| T5 | **他家任何动作** | ❌ 不发 | 本家手牌未变；避免把本家私有帧塞进四家热路径 |
+| T6 | 局终 `game_end` / 新一局 `game_start` / 场终 `match_end` | ❌ 不发 | 客户端在这些时刻**立即清空**听牌条（`FEEL_SPEC` `F-TP-11`）；发一份"场终前最后状态"是死数据，没有消费方 |
+
+> **T4 已裁决（v1.7 定案，与 `FEEL_SPEC` v1.4/v1.5 一致）**：摸牌后**不发** `tenpai`。理由见 T4 行（14 张口径无"听牌"定义；硬算等于替玩家做打牌假设，与 `FEEL_SPEC` §0 第 4 条相抵）。
+> **保留一个"若将来翻案"的注脚（当前不生效）**：若以后要改成"摸牌后也刷新"，唯一可行的冻结口径是"`is_tenpai`/`waits` 仍按**打掉刚摸那张之后**的 13 张算"，接口与字段形状完全不变，实现只多一处调用点。**不得**出现第二种口径（例如"按 14 张算听牌面"）。
+
+- 无 `seq`（走 `tenpai_seq`）；`tenpai` **不改变**任何牌局状态，纯只读快照。
 
 ---
 
@@ -756,7 +812,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 1. `room.seq` 在**本场开局**时为 **1**（v1.6：整场内单调递增、**跨局不重置**，见第 5 条），**每个窗口过渡恰好自增一次**：进入一个新窗口时自增；窗口因动作/超时结束而关闭本身**不自增**（其自增由紧随其后的新窗口过渡承担）。单调递增、永不回退。
    > **裁决（captain，t4 提出）**：原文「在窗口开启或窗口结束时自增」与 §9.4（`draw{seq:9}` 与 `action_request{seq:9}` 同值）及 `GAME_DESIGN.md` §4.3（碰后 `state_sync` 与 `DISCARD_WINDOW` 同为 `seq=3`）不自洽；§9.2 的 `action_request{seq:4}` 已据此改为 `seq:3`。同窗口内多帧共用同一 `seq` 是自洽的，客户端按单调比较处理，两种编号在客户端侧行为等价。
 2. **携带 `seq` 的服务端帧**：`action_request`、`state_sync`、`action_event`、`discard_event`、`draw`。
-3. **不携带 `seq`**：`game_end`（不参与比较）、**`match_end`（v1.6，同 `game_end`）**；`login_ok`/`error`/`room_joined`/`game_start`/`pong` 亦无 `seq`。
+3. **不携带 `seq`**：`game_end`（不参与比较）、**`match_end`（v1.6，同 `game_end`）**、**`tenpai`（v1.7，走独立的 `tenpai_seq`，见 §11.2）**；`login_ok`/`error`/`room_joined`/`game_start`/`pong` 亦无 `seq`。
 4. 客户端 **MUST** 在 `discard`/`action` 中回带最近一次收到的 `action_request.seq`。
 5. **v1.6：`seq` 在整场内单调递增，跨局不重置。** 下一局的第一份 `action_request` 的 `seq` **严格大于**上一局任何一帧的 `seq`。这不是新语义，而是 §6.2 第 1 条「单调递增、永不回退」在"一场多局"下的直接推论；实现上等价于：**每局开局不得把 `seq` 归零**（重新从 1 开始会直接违反本条，并破坏客户端"严格更大才推进窗口"的判定）。
    - 客户端**不得**依赖"每局从 1 开始"来做本地重置；本地重置的唯一信号是 `game_start`（§5.4）。
@@ -852,7 +908,8 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | 他家手牌张数 | ✅ | ✅ | `state_sync.seats[].hand_count` |
 | 牌河（牌面与顺序） | ✅ | ✅ | `discard_event`、`state_sync.seats[].discards[]` |
 | 副露（分组与牌面） | ✅ | ✅（**暗杠除外**，见下一行） | `action_event`、`state_sync.melds` / `seats[].melds[]` |
-| **暗杠的 4 张牌面（v1.6）** | ✅ 本家始终可见 | ❌ **绝不**（`tiles` 恒为 `[]`），**局终揭示**（最后一份 `state_sync` 与 `game_end.results[].hand`） | `state_sync.melds[]`（本家）/ `seats[].melds[]`（他家，空数组） |
+| **暗杠的 4 张牌面（v1.6）** | ✅ 本家始终可见 | ❌ **绝不**（`tiles` 恒为 `[]`），**局终揭示**（最后一份 `state_sync` 与 `game_end.results[].hand`） | `state_sync.melds[]`（本家）/ `seats[].melds[]`（他家，空数组）；`action_event{ankan}` 的 `tiles` **恒为 `[]`**（v1.7 §11.5） |
+| **本家听牌张与剩余枚数（v1.7）** | ✅ 仅本家 | ❌ **绝不**（他家听牌在协议中不存在任何字段；`state_sync` 与 `seats[]` 均不含） | `tenpai.waits[]`（**仅发本家**，§5.16） |
 | 牌山剩余 | ✅ | ✅ | `state_sync.remaining` |
 | 当前行动座位 | ✅ | ✅ | `state_sync.current_seat` |
 | `options` | ✅ 仅窗内座位 | ❌ | `action_request`（只发给窗内座位） |
@@ -992,11 +1049,11 @@ S→C game_end{round_index:1,dealer:1,renchan_count:1,match_will_continue:true, 
 S→C game_start{seat:0,dealer:1,round_index:1,round_count:4,hand:[…]} # 连庄：round_index 不变
 … 第 3、4 局 …
 S→C game_end{round_index:3,dealer:3,renchan_count:1,match_will_continue:false, …}
-S→C match_end{hands_played:4,renchan_count:1,
+S→C match_end{hands_played:5,renchan_count:1,
               rankings:[{seat,…,"final_score":…,"rank":…}, …]}       # 场终恰好一次
 （30 s 后服务端回收房间与连接，§1.4 第 5 条）
 ```
-> 注意三件事：①`game_end` 与 `match_end` 是**两个**语义层，前者 `hands_played + renchan_count` 次、后者恰好 1 次（上例共 5 手 = 4 局 + 1 连庄）；②连庄时 `round_index` **不递增**（连庄不占局数），但 `renchan_count` 递增；③`match_total` / `final_score` 是**累计**值，`delta_score` 永远是**单局**值。
+> 注意三件事：①`game_end` 与 `match_end` 是**两个**语义层，前者由 `hands_played` 计数、后者恰好 1 次（上例：5 手 = 4 局 + 1 连庄，故 `hands_played = 5`、`renchan_count = 1`）；②连庄时 `round_index` **不递增**（连庄不占局数），但 `renchan_count` 与 `hands_played` 都递增；③`match_total` / `final_score` 是**累计**值，`delta_score` 永远是**单局**值。
 
 ---
 
@@ -1028,15 +1085,209 @@ S→C match_end{hands_played:4,renchan_count:1,
 - [ ] 他家不渲染任何牌面；`seats[].hand` 即使出现也不消费（§8.2）；**他家 `ankan.tiles == []` 时按"扣着的杠"渲染**
 - [ ] `state_sync` 整体覆盖，`action_event` 仅即时反馈（§8.4）
 - [ ] **v1.6 场次级**：`game_start` 是"新一局"的唯一重置信号；`game_end`（局终）不得当作"对局结束"退出牌桌；`match_end`（场终）才进最终结算页；局间不显示倒计时（协议不承诺秒数）
+- [ ] **v1.7 听牌与事件**：①渲染 `tenpai`（`is_tenpai:false` 时整条隐藏，**不得**用本地规则复算）；②`tenpai` 走 `tenpai_seq` 判据，**不得**与 `room.seq` 混用（§11.7 P4）；③收到 `game_start` 时**清空上一帧快照**并清听牌条，但**不清** `last_tenpai_seq`（§11.7 P1）；④音效/动画按 `(type, seq, seat, action)` **幂等**（§11.7 P2）；⑤他家摸牌音效只用 `remaining` 递减量推导（§11.7 P3）；⑥他家暗杠只播"杠"音效、**不得**显示牌面（`ankan.tiles == []`）；⑦`sync` 后必须能收到一条 `tenpai`（T3），否则听牌条会停在旧值
 
 ### 10.4 t6（端到端脚本）
 
 - [ ] 握手顺序 `login → create_room → ready`（§9.1）
 - [ ] 每帧回带 `seq`；`window=="discard"` 时优先 `win`，否则 `discard{刚摸到的牌}`
 - [ ] 断言：`login_ok.player_id` 非空、`game_start.hand` 长度 13/14、至少一次 `draw` 与 `discard_event`、`game_end.results` 长度 4、`Σ delta_score == 0`、全程零 `error`
-- [ ] **v1.6 场次级断言**：`game_end` 次数 == `match_end.hands_played + match_end.renchan_count`；`match_end` 恰好 1 次且 `Σ final_score == 0`；`rankings` 覆盖 4 个座位且 `rank` 并列跳号；`round_index` 单调不减且连庄处相等；`seq` 跨局严格递增（§6.2 第 5 条）
+- [ ] **v1.6 场次级断言**：`game_end` 次数 == `match_end.hands_played`（4..8）；`hands_played <= match_end.renchan_count + 4`；`match_end` 恰好 1 次且 `Σ final_score == 0`；`rankings` 覆盖 4 个座位且 `rank` 并列跳号；`round_index` 单调不减且连庄处相等；`seq` 跨局严格递增（§6.2 第 5 条）
 - [ ] **v1.6 暗杠断言**：他家视角 `ankan.tiles` 恒 `[]`，局终揭示后被补全；杠后 `remaining` 递减且牌数守恒（`remaining + 各家手牌 + 副露 + 牌河 == 136`）
 - [ ] **v1.6 番数断言**（对齐 `GAME_DESIGN` A13–A15）：①`yaku[]` 严格按冻结判定序、**每 id 至多一条**、`tags ⊆ yaku[].id`；②`Σ yaku[].han == han_breakdown.base`、`han_breakdown.total == min(base+tsumo+dealer, 6)`、`win.han == han_breakdown.total`、`dealer_bonus == (dealer==1)`、`rinshan == (yaku 含 rinshan)`；③同一手牌判番 1000 次、且打乱输入顺序后逐字段相同（确定性回归）
+- [ ] **v1.7 听牌断言**：①`tenpai` **只发本家**（他家连接收不到任何 `tenpai`）；②本家每帧 `is_tenpai == false` 时 `waits == []`（MUST，且"未听牌必须发帧"）；③`waits[]` 按 §2.2 牌序且同面不重复；④`waits[].remaining == 4 − 本家手牌 − 本家副露 − 三家**公开**副露 − 四家牌河`（**他家 `ankan` 计 0**；**不得**用牌山真值；**不得**统计任何跨局数据）；⑤`tenpai_seq` 严格递增、与 `room.seq` 无可比关系；⑥单帧 < 1024 字节（PB-2）
+- [ ] **v1.7 事件断言**：①`action_event{action:"ankan"}` 的 `tiles` 恒为 `[]`（对所有座位）；②`kakan` 的 `tiles` 恒为 `[T]`；③`seq` 在连庄（`round_index` 不变）前后仍严格递增
+
+---
+
+## 11. 听牌提示与表现事件（**v1.7 增补**）
+
+> 目的：B 批「手感表现」（音效 / 出牌动画 / 听牌提示）需要**唯一权威数据源**。本节只做两件事：①给听牌数据一个明确的线协议形状与成本预算；②把"表现事件该从哪一帧的哪个字段推导"一次性钉死，避免客户端各自发明。
+>
+> **增补式**：v1.6 客户端不读任何新字段也能正常跑（未知字段按 §1.3 忽略）。**零新增帧、零新增错误码**。唯一**修正**是 §11.5 的暗杠事件形状（v1.6 缺陷，不是新功能）。
+
+### 11.1 设计前提：听牌由服务端算，客户端不复制规则
+
+- 规则（听牌判定、剩余枚数）**只存在于服务端规则库**；客户端不实现任何麻将规则。
+- 因此 `tenpai` 是**服务端权威下发**的私有数据，客户端只负责渲染。
+- 与既有原则一致：H8（服务端永不采信客户端结论）、§8.1（私有信息矩阵）。
+- **为什么是独立帧而不是塞进 `state_sync`**（三个理由，第 3 条是决定性的）：
+  1. `state_sync` 是**四家广播热路径**（每次摸牌/副露各 4 份）；
+  2. 其 `seats` 块是 v1.6 的「一次渲染喂四家」共享缓存（N1 方案），塞本家专属字段会逼它按座位分版本；
+  3. **听牌只在"本家手牌变化"两个时刻有意义，而 `state_sync` 在"他家动作"时也会发**（他家摸牌/副露/打牌后都要给他家发 `draw`/事件，`state_sync` 随之广播）——把本家专属数据挂在四家热路径上，等于让三个不相干的座位为它付带宽，且**语义错配**：`waits` 与 `hand` 同源，应当在 `hand` 变化时发，而不是在任意座位动作时发。
+- **已否决方案（明文不做，实现方不得再选）**：**把 `waits` 作为 `state_sync` 的顶层字段下发**（v1.7 草案曾采用，已作废）。作废理由 = 上面三条。**写在协议里是为了让"两套并存"不可能出现**：`state_sync` 中**不存在**任何听牌字段，`seats[]` 中同样不存在；听牌数据的唯一出口是 §5.16 的 `tenpai` 帧。
+- **独立帧的代价**：多一个帧类型（S→C 14 → 15 条），多一条客户端分派分支；并额外需要一条恢复路径（T3：`sync` 后补发）。**收益**：热路径零成本，频率天然被"本家回合数"限住（见 §11.4 频率上界）。
+
+### 11.2 与 `state_sync` 的时序关系与乱序判据（**本节是协议层的结论，不是设计稿的复述**）
+
+**结论 1：`tenpai_seq` 不复用 `room.seq`。**
+
+- `room.seq` 的语义是**窗口标识**，其作废机制（§0.5/§6.2）依赖"一个未决窗口 = 一个 `seq`"，并且**客户端的窗口推进、`action_request` 的接受/丢弃全都由它驱动**。
+- 若 `tenpai` 携带 `room.seq`，则它的**发送点必须落在"最终 seq 已确定"之后**——而"打牌后"这一刻的 `seq` 恰恰在变化中：`ApplyDiscard` 先 `Transition()`（关打牌窗口），再看有没有鸣牌：有则开 claim 窗口（同 seq），无则再 `Transition()` 推进到下一家。发送点若算早一拍，`tenpai` 会带一个**比随后 `action_request` 更大的 seq**；客户端按"严格更大才推进"更新 `last_seq` 后，会把这个 `action_request` 当成过期帧**静默丢弃**——**玩家永远收不到鸣牌请求，只能等 15 s 超时**。这是"给负载型帧挂载作废语义"的典型事故。
+- 因此：**`tenpai_seq` 是一条独立的每座位单调计数器**（从 1 起、跨局不重置），与窗口机制完全隔离。`room.seq` 的语义不受本帧影响（§6.2 第 3 条的"不携带 `seq`"清单同步 +1）。
+
+**结论 2：客户端判据 —— 丢弃 `tenpai_seq` 更旧的帧，应用更新的帧。**
+
+```
+on tenpai(frame):
+    if frame.tenpai_seq <= last_tenpai_seq: drop        // 迟到/重复
+    else: last_tenpai_seq = frame.tenpai_seq; 整体替换 waits 与 is_tenpai
+```
+
+- `last_tenpai_seq` 在**收到 `game_start` 时不清零**（因为 `tenpai_seq` 跨局不重置）。全客户端只有一处保存它。
+
+**结论 3：`tenpai` 晚于其后的 `state_sync` —— 丢弃还是应用？**
+
+**应用**（按 `tenpai_seq` 判据，与 `state_sync` 的到达顺序无关）。理由：
+- `tenpai` 的数据是**本家手牌的函数**，`state_sync` 里也有同一份 `hand`/`melds`。两者**不存在冲突**，只存在"哪个更新"的问题。
+- `tenpai_seq` 单调且**每帧全量**，所以"最新到达的最高 `tenpai_seq`"必然是最新状态；`state_sync` 的 `seq` 与它无关，不构成判据。
+- **不要**用"`tenpai.seq` 与 `state_sync.seq` 比大小"来实现——两条计数器不可比（结论 1）。
+- 唯一的真实约束：**客户端不得用 `state_sync` 到达来清除 `tenpai` 状态**（`state_sync` 不含听牌信息，它不是"更新"，而是"无关"）。
+
+**结论 4：不会永久丢失"最后一次听牌状态"——但前提是有 `sync` 补发（T3）。**
+
+- 稳定态下不会丢：`tenpai` 走同一 TCP 连接、由 actor 串行发送（同一房间的 `Dispatch` 有 `AsyncGate` 串行），**物理顺序由 TCP 保证**；`tenpai_seq` 判据只是防御"将来引入多路复用/重发"。
+- **可能丢的场景只有一个**：最后一条 `tenpai` 在网络上丢失且此后本家再无手牌变化（例如你已听牌并打出一张，之后再无你的动作，直到别人和牌）。此时客户端显示的是**上一条**听牌状态——但那条与本条的区别只有 `remaining`（听牌面在同一次打牌后已确定），误差可接受。
+- **兜底**：`sync` 必补发一条 `tenpai`（T3）。客户端的 `sync` 是"任意时刻的权威对齐手段"（§4.7），所以任何"状态疑似不一致"的场景都有恢复路径。**这是把 `waits` 从 `state_sync` 搬出来之后必须补上的一条，否则 `sync` 的语义会被破坏**（v1.6 阶段 `waits` 在 `state_sync` 里时，`sync` 天然包含它；改成独立帧后必须显式补发）。
+
+### 11.3 `remaining` 的口径：只减**公开可见**的张数（暗杠是唯一例外）
+
+> **先消歧**：本节讨论的 `remaining` 是 `tenpai.waits[].remaining`——**单牌面的可见枚数**（0..4），**不是** `state_sync.remaining`（牌山剩余张数，随每次摸牌 −1）。两者同名不同义，对照表见 §5.16。**这条区分同时是 §11.6 E2「他家摸牌」判据成立的前提**。
+
+**冻结定义**：
+
+```
+remaining(tile) = 4
+  − 本家手牌中该牌面的张数
+  − 本家副露中该牌面的张数            // 本家的 ankan/kakan/kong 各计 4、pong/chow 计 3
+  − 三家已公开副露中该牌面的张数      // pong/chow/kong/kakan 可见 ⇒ 计；**ankan 不可见 ⇒ 计 0**
+  − 四家牌河中该牌面的张数
+```
+
+**只统计「本局这一副牌」内的位置**（即上面的四项），**没有第五项**。
+
+> ⚠️ **v1.7 口径修正（撤掉"已结算局的公开手牌"）**：v1.7 草案曾在公式里保留一项"− 已结算各局公开的和牌者手牌"，**该项在当前规则下恒为 0，已删除**。
+> 理由：**每局重新洗牌发牌**（`StartRound` 重建 136 张牌山、发 83 张），上一局局终揭示的手牌属于**上一局那副牌**，与本局的牌山**不是同一批物理牌** ⇒ 扣它会让本局 `remaining` **虚低**（甚至为负）。
+> **实现禁令**：**不得为听牌提示维护任何"跨局可见牌集"**，也不得用 `game_end.results[].hand`（上一局的数据）参与本局的 `remaining`。听牌状态每局从零开始（`tenpai` 在新局由 T1 重新产出）。
+> **派生结论**：v1.7 草案里配套的"扁平手牌去重规则"（只减扁平 hand、不再减其副露）**随之作废**——因为不再有跨局项，也就不存在重复扣减。
+
+即 **"4 减去一切本家能看到的张数"**，是**上界**（会高估：别人暗手牌与暗杠里的张数被算作"还没露面"）。
+
+**逐条推理（回答"会不会反推他家暗牌"）**
+
+| # | 情形 | 减不减 | 推理 |
+| --- | --- | --- | --- |
+| 1 | 本家手牌 | **减** | 本家自己知道，无泄露 |
+| 2 | 本家副露（含本家暗杠 4 张） | **减** | 自己杠的自己知道；不减会让本家听牌剩余数虚高，属实现错误 |
+| 3 | 三家**公开**副露（pong/chow/kong/kakan） | **减** | `tiles` 在 `seats[].melds[]` 里完全可见 ⇒ 减它不增加任何信息 |
+| 4 | 三家**暗杠**（`tiles == []`） | **不减** | **这是关键**：暗杠对客户端不可见。若减了，`remaining(某面)` 会在"某人暗杠"后**突降 4** ⇒ 本家立刻反推出"他暗杠的是这个牌面"。**等于把 §5.9 的打码从 `remaining` 这一侧重新打开**。这不是"可接受的公开信息"——公开的只是"某座位杠了"，不是"杠的是什么" |
+| 5 | 四家牌河 | **减** | 公开 |
+| 6 | **上一局**揭示的手牌 | **不减**（且**不得**统计） | 属于**另一副牌**：每局重新洗牌 ⇒ 与本局牌山无物理对应关系。扣了会让 `remaining` 虚低。见上方"v1.7 口径修正" |
+| 7 | 三家**暗手牌** | **不减** | 不可见 |
+| 8 | 牌山内容（真值） | **绝不** | 见下 |
+
+**为什么不用牌山真值**（服务端算得出来，但绝不能下发）：
+
+1. `wall(f) = 4 − 所有非牌山位置的张数（含他家暗手牌）`。
+2. 一旦下发 `wall(f)`，本家可解出 `他三家暗手牌中 f 的总数 = 4 − 自己可见部分 − wall(f)`。
+3. 那是"三家手牌里某牌面的**精确总数**"。人类只能靠读牌估计；把它变成精确读数，等于**多开一层牌山信息**，且能与牌河交叉推断出"某一家是否握着 f"。
+4. 本节的"可见枚数"口径**不含任何隐藏位置** ⇒ 无法反解 ⇒ **无泄露**。
+
+**对第 4 条的补充结论（暗杠的处理是"正确性 vs 精度"的取舍，我选正确性）**
+
+- 代价：某人暗杠 `5z` 后，本家若听 `5z`，`remaining` 会显示"还剩 N"（N 可能 > 0），而**真实可摸数为 0**。这是**上界**的固有误差。
+- 但这是**唯一自洽的选择**：真实麻将里玩家也只能数公开信息；显示比"人类可推算"更多的信息才是作弊。**注意：这个误差不会因局终揭示而"自动修好"**——下一局是**另一副牌**，`remaining` 从该局自己的可见张数重新起算（见上方"v1.7 口径修正"）。
+- **给客户端的一句话**：听牌条的"N 枚"语义是**"还没露面的最多还有 N 张"**，不是"还能摸到 N 张"。（`FEEL_SPEC` §2.3 的颜色编码据此仍然成立：`0` 表示"已全部露面"，而不是"确定摸不到"。）
+
+> **本节的实现边界（一句话）**：`remaining` 是**本局牌**的纯函数，输入只有 4 项（本家手牌、本家副露、三家公开副露、四家牌河），**不读任何跨局状态、不读牌山**。任何超出这 4 项的输入都是缺陷。
+
+> **代码侧命名要求（v1.7，必须照此，否则下一个人会在同一个词上再摔一次）**：协议里有**两个同名不同义的 `remaining`**（§5.16 对照表）。C++ 实现**不得**两者都叫 `remaining`，按下面分开命名：
+> - `state_sync.remaining` ⇒ `wall_remaining_`（牌山剩余，每次摸牌 −1，全体公开）；
+> - `tenpai.waits[].remaining` ⇒ `visible_left`（单牌面可见枚数，本家私有，别人摸进暗手牌时不变）。
+>
+> 理由是**推错方向相反**：拿 `visible_left` 去推摸牌会永远得 0；拿 `wall_remaining_` 去填 `waits[].remaining` 会泄露牌山真值（§11.3 的禁令）。两个词必须在代码里就能区分，不依赖注释。
+
+### 11.4 性能预算（三条，均绑定可执行处置）
+
+| # | 指标 | 数值目标 | 测量方式 | 超阈处置 |
+| --- | --- | --- | --- | --- |
+| **PB-1** | `WaitingTiles(concealed, melds)` 单次纯函数耗时（13 张等待态的最坏手牌） | **≤ 200 µs**（均值；p99 ≤ 400 µs） | `mahjong_rules_test` 新增 perf 用例，写法照 `ChooseDiscardPerformanceAndDefaultUnchanged`（`mahjong_rules_test.cc:1160-1174`：预热 10 次 + 200 次取均值 + `EXPECT_LT`） | **门禁卡点**：单测 `EXPECT_LT(per_call_us, 200.0)` 失败即阻断合入，判定人＝跑 `ctest` 的人 / CI，不达标后果＝B1 不验收。纯函数无运行时降级空间 ⇒ 门禁类 |
+| **PB-2** | 单次 `tenpai` 帧的**端到端构建耗时**（含 34 面 `remaining` 统计）与帧字节 | 构建 **≤ 300 µs**；单帧 **< 1 KB**（`waits` 至多 34 项 × ~30 B ≈ 1 KB，实际听牌面 ≤ 9） | ①`RoomActor::SendTenpai(seat)` 处一次性计时，**阈值 300 µs 打 `spdlog::warn("slow tenpai build: N us")`**（触发点＝每次构建）；②t6 脚本断言每条 `tenpai` 原始字节 < 1024 | **自动降级**（真实落点，二选一，按触发先后）：若 PB-2 超线 → ①先把 `remaining` 的统计从"每次重算 4 项输入"改为**增量维护一张 34 面可见计数表**（`VisibleCounts counts_[34]`，在**本局内**的摸牌/打牌/副露时 +1/−1；**不跨局**，`StartRound` 清零）——这是纯优化、语义不变；②若增量表后仍超线，则 `tenpai` 改为**仅在 `is_tenpai` 或 `waits` 集合变化时下发**（牺牲 `remaining` 刷新，客户端保留旧值） |
+| **PB-3** | `tenpai` 正确性（不得出现陈旧值/与手牌不一致） | **0 次不一致**：任何 `hands_`/`melds_` 变化后的首条 `tenpai` 必须与新状态一致 | 单测 `WaitingTilesMatchesCanWinExact`：随机 200 手牌，断言 `WaitingTiles(h,m) == {f \| CanWinExact(h+{f}, m)}`（两条独立代码路径交叉验证）；房间层断言"`tenpai` 与该时刻 `hands_[seat]`/`melds_[seat]` 自洽" | **门禁卡点**：两条单测任一失败即阻断；不达标后果＝B1 不验收。**不做结果缓存**（每次触发都是"手牌刚变"的时刻，必然 miss；缓存只会制造陈旧值） |
+
+**成本依据（为什么 200 µs 是合理线）**：现有门禁是 `ChooseDiscard < 2000 µs`，而它内部是"34 个候选打牌 × 每个再看 34 面"≈ 千次级向听计算；`WaitingTiles` 只是"1 次 `Shanten` 门控 + 至多 34 次 `CanWinExact`"，量级小一个数量级以上。200 µs 给了约 10 倍余量，且远低于 10 ms 渲染帧预算（`FEEL_SPEC` `F-G-01` 60 FPS）。
+
+**下发频率上界（为什么这个帧不可能是热路径）**
+
+- 每个**本家回合**至多 2 条（T1 打牌后 + 可能的 T2 副露后）；一局最多 84 次打牌 ⇒ **< 170 条/局**。
+- 一场 4–8 局 ⇒ **< 1400 条/场**；按一局 ≤ 120 s 的冻结上界（`GAME_DESIGN` §2）折算 **< 2 条/秒**，远低于出站配额与 §1.7 的 100 帧/秒入站限速（两者不同向，但同一数量级可比）。
+- 对比 `state_sync`（每次摸牌/副露 4 份广播，一局 ≥ 4×34 份），`tenpai` 的量级是它的 **1/8 且只发 1 份**。这就是"独立帧"方案的成本优势的量化依据。
+
+
+### 11.5 【修正】`action_event` 的 `ankan.tiles` 必须恒为 `[]`
+
+**这是 v1.6 的一个真实缺陷**（协议与实现同错，必须修）：
+
+- v1.6 §5.8 写"`ankan`/`kakan` = `[T]`"，实现也照此**广播同一份** `action_event`（`room.cc:1201`，四家收到同一 `tiles`）。
+- 但 §5.9/§8.1 又规定**暗杠牌面对他家不可见**。两者直接冲突：`action_event` 是广播帧，带 `[T]` 就等于**把暗杠牌面告诉了三家**——`seats[].melds[].ankan.tiles` 的打码被这一帧完全绕过。
+- **修正口径（v1.7）**：`action_event{action:"ankan"}` 的 `tiles` **恒为 `[]`（对所有收件人，包括暗杠者本人）**。
+  - 他人视角：只知道"某座位暗杠了"，不知道杠的是什么——与真实麻将一致（暗杠要报杠、不报牌）。
+  - 本家视角：自己的牌面无损失地从紧随其后的 `state_sync.melds[]`（本家视角带 4 张真实牌面，§5.9）或 `action_request` 的 `options` 得知。
+  - **`kakan` 不变**：加杠是公开动作，`tiles` 仍为 `[T]`。
+- **兼容性**：客户端 `_apply_action_event` 目前只用 `action`/`seat`/`from_seat` 分派，不读 `ankan.tiles`（`game_state.py:390-413`）⇒ **零客户端改动**。
+- **为什么选"全部发空"而不是"本人发真实值、他家发空"**：后者会让一条广播帧裂成两份（丢失"一次构建、四家复用"的优化），而收益只是省一次 `state_sync` 的读取——不值。
+- 修正后的冻结规则（替代 v1.6 §5.8 表中 `tiles` 一行的 `ankan` 部分）：
+
+| `action` | v1.7 `tiles` | 备注 |
+| --- | --- | --- |
+| `pong` / `kong` / `kakan` | `[T]` | 公开动作，不变 |
+| `ankan` | **`[]`** | **v1.7 修正**：不泄露暗杠牌面；`seat` 足以驱动音效/动画 |
+| `chow` | `[a,b]` | 不变 |
+| `win` | `[和牌张]` | 不变 |
+
+### 11.6 表现事件的来源矩阵（音效 / 动画逐事件）
+
+**结论先行：无需新增任何帧或字段；`draw` + `discard_event` + `action_event` + `state_sync` + `game_end` + `match_end` 已足以无歧义推导全部表现事件**（前提是遵守 §11.7 的三条陷阱）。
+
+| # | 表现事件 | 权威来源（帧+字段） | 可靠性 | 备注 / 坑 |
+| --- | --- | --- | --- | --- |
+| E1 | **本家摸牌** | `draw{tile,seat,seq}`（仅本人） | ✅ 100% | 含**杠补牌**（补牌也用 `draw`，§5.5） |
+| E2 | **他家摸牌** | 无 `draw` 帧；用 **`state_sync.remaining`（牌山剩余张数）的递减量**：`Δ = 上一帧 remaining − 本帧 remaining`，`Δ > 0` ⇒ 期间发生 `Δ` 次摸牌，摸牌者 = 该帧 `current_seat` | ⚠️ 可推导 | **判据必须用 `state_sync.remaining`（牌山剩余），不是 `tenpai.waits[].remaining`**（后者是"可见枚数"，别人摸进暗手牌时**不变**，永远推不出摸牌）。见下方三条禁令 |
+| E3 | **出牌** | `discard_event{seat,tile,seq}` | ✅ 100% | 广播 4 家 |
+| E4 | **碰 / 吃 / 明杠** | `action_event{action∈{pong,chow,kong}, seat, tiles, from_seat, seq}` | ✅ 100% | 需从 `from_seat` 牌河 pop 一张（既有规则，§5.8 注 2） |
+| E5 | **本家暗杠/加杠** | `action_event{action∈{ankan,kakan}, seat, seq}` + 随后 `state_sync.melds[]` | ✅ 100% | v1.7 起 `ankan.tiles == []`（§11.5） |
+| E6 | **他家暗杠** | 同上（`seat` + `action:"ankan"`） | ✅ 事件可靠、**牌面不可知**（设计如此） | **不得**指望从任何帧拿到他家暗杠牌面（只有局终揭示那一份 `state_sync` 才有） |
+| E7 | **自摸和牌** | `action_event{action:"win", seat, tiles:[T]}`（**无 `from_seat`**）+ `game_end.win.tsumo == true` | ✅ 双源一致 | 音效必须在 `action_event` 时触发（`game_end` 到达偏晚） |
+| E8 | **荣和** | `action_event{action:"win", seat, from_seat}` + `game_end.win.from_seat` | ✅ 双源一致 | 同 E7 |
+| E9 | **荒庄** | `game_end{reason:"draw_exhausted", win:null}` | ✅ 100% | **荒庄没有 `action_event`** ⇒ 不可只靠 `action_event` 判"本局结束" |
+| E10 | **局终** | `game_end`（每局一次） | ✅ 100% | 一场会有 4–8 次（= `hands_played`） |
+| E11 | **连庄** | `game_end.renchan_count`（post-increment）与上一局同字段比较，+1 = 本局触发了连庄 | ✅ 100% | **绝不能靠 `round_index` 区分连庄**：连庄时 `round_index` **不变** |
+| E12 | **场终** | `match_end`（恰好一次）；提前预判用 `game_end.match_will_continue == false` | ✅ 100% | `match_will_continue` 是"还会不会有下一局"的唯一权威 |
+| E13 | **本家听牌状态变化** | `tenpai{tenpai_seq, is_tenpai, waits[]}` 帧本身（全量快照，与上一帧比差集只为"要不要播更新动画"） | ✅ 100% | 只发本家；`is_tenpai:false` 是**明确的清空信号**（不得靠"不发帧"推断）。判据见 §11.2/P4 |
+
+**E2 的三条禁令（写清"为什么不能那样推"，否则下一个人一定会再犯）**
+
+| 禁令 | 为什么不行 |
+| --- | --- |
+| ❌ **不得用 `tenpai.waits[].remaining` 推摸牌** | 它是**单牌面的可见枚数**——别人把牌摸进暗手牌时，这张牌"两头都不可见"，该值**根本不变**。用它推摸牌永远得 0。**（这正是"两个 `remaining` 同名"最容易踩的坑，见 §5.16 对照表）** |
+| ❌ **不得用 `hand_count` 单独判摸牌** | 吃/碰/明杠会让手牌数**下降**（14→11 等），暗杠下降 4；用它判"是否摸了牌"必须额外维护"上一次该座位是否鸣牌"的状态，**比 E2 现有判据复杂且更容易错**。`hand_count` 只用于渲染张数。 |
+| ⚠️ **不新增 `draw_event` 广播帧** | 曾经考虑把"谁摸了牌"改成广播，但**没必要**：`state_sync.remaining` 已经是四家公开字段（`PROTOCOL` §5.9 "全体公开"），`Δ > 0` 精确等于摸牌次数，且每次摸牌后**必定**紧跟一份 `state_sync`（`room.cc:857-862`）。新增帧只会多一条需要同步维护的通路。**结论：不增帧。** |
+
+**E2 的唯一已知边界**：一帧内若 `Δ > 1`（理论上不会：一次 `state_sync` 最多对应一次摸牌），按 `Δ` 次摸牌处理；若将来出现"一帧多摸"，摸牌者无法逐次归属，此时才需要重新评审（当前不需要）。
+
+**回答一个具体提问：连庄时连续两次自摸，客户端能否区分是两次不同事件？**
+
+能，且有三条独立依据：①两次各自有独立的 `action_event{action:"win"}`，其 `seq` **严格递增**（§6.2 第 5 条：`seq` 跨局不重置）；②两次之间必有 `game_end` 与下一局的 `game_start`；③两次的 `game_end.renchan_count` 相差 1。
+**但不能用 `round_index`**（连庄时两局同值），也**不能用 `game_end` 的序号**（客户端没有"第几个 game_end"的内置概念，需自己计数——可以，但不如 seq 直接）。**推荐判据：`seq` 单调 + `(type, seq, seat, action)` 作为事件幂等键。**
+
+### 11.7 客户端实现陷阱（四条，直接影响 B 批能否验收）
+
+| # | 陷阱 | 后果 | 正确做法 |
+| --- | --- | --- | --- |
+| **P1** | **换局不重置事件推导基准** | 第 2 局第一帧 `state_sync` 会被误判成"3 家各弃了 13 张牌 + 发生了 13 次摸牌"，触发连串虚假音效/动画 | 收到 `game_start` 时**清空"上一帧快照"**（上一份 **`state_sync.remaining`（牌山剩余）**/`hand_count`/`current_seat`），并**立即清空听牌条**（`FEEL_SPEC` `F-TP-11` ④/`F-TP-12`）。**注意**：`last_tenpai_seq` **不要清**（`tenpai_seq` 跨局单调，与 `room.seq` 同策略） |
+| **P2** | **`state_sync` 与 `action_event` 到达顺序不保证**（H9） | 同一动作被播两次（先 `action_event` 后 `state_sync` 再推一次），或动画与音效错位 | 事件层必须**幂等**：以 `(type, seq, seat, action)` 为去重键，或统一按 `seq` 单调推进；**禁止"收到即播"式无状态计数** |
+| **P3** | **用 `hand_count` 判他家摸牌** | 吃/碰/明杠/暗杠之后手牌数会**下降**，会漏判或误判摸牌 | 判据只用 **`state_sync.remaining`（牌山剩余）的递减量**；`hand_count` 只用于显示张数。**另注意不要把它和 `tenpai.waits[].remaining` 混用**（§5.16 对照表 + E2 禁令 1） |
+| **P4** | **用 `room.seq` 的规则处理 `tenpai`** | ①拿 `tenpai.tenpai_seq` 与 `last_seq` 比大小 ⇒ 会把正常的 `action_request` 判成过期而丢弃（玩家收不到鸣牌请求，干等 15 s 超时）；②反过来用 `room.seq` 丢 `tenpai` ⇒ 听牌条长时间不更新 | `tenpai` 走**独立判据**：`tenpai_seq <= last_tenpai_seq` 才丢（§11.2 结论 2）。**两条计数器不可比** |
 
 ---
 
@@ -1058,14 +1309,15 @@ S→C match_end{hands_played:4,renchan_count:1,
 | `draw` | S→C | `tile`, `seat` | ✅ |
 | `discard_event` | S→C | `seat`, `tile` | ✅ |
 | `action_request` | S→C | `deadline_ms`, `window`（仅 `discard`/`claim`）, `options[]` | ✅ |
-| `action_event` | S→C | `seat`, `action`, `tiles[]`, `from_seat?`（`ankan`/`kakan`/自摸 不带） | ✅ |
+| `action_event` | S→C | `seat`, `action`, `tiles[]`（**`ankan` 恒 `[]`**，v1.7 §11.5）, `from_seat?`（`ankan`/`kakan`/自摸 不带） | ✅ |
 | `state_sync` | S→C | `hand`, `melds[]`（5 种 type）, `seats[]`（他家 `ankan.tiles` 为 `[]`）, `remaining`, `current_seat` | ✅ |
+| `tenpai` | S→C | **仅本家（v1.7）**：`tenpai_seq`, `is_tenpai`, `waits[]{tile,remaining}` | ❌（走 `tenpai_seq`） |
 | `game_end` | S→C | **局终**：`reason`, `results[4]`（+`match_total`）, `win`（+`yaku[]`/`han_breakdown{base,tsumo,dealer,total}`/`han`/`dealer_bonus`/`rinshan`；`tags` 保持旧语义）, `round_index`, `dealer`, `renchan_count`, `match_will_continue`（后四个 v1.6） | ❌ |
 | `match_end` | S→C | **场终（v1.6）**：`hands_played`, `renchan_count`, `rankings[]{seat,final_score,rank}` | ❌ |
 | `stats` | S→C | `games`, `wins`, `draws`, `net_score`, `recent[]` | ❌ |
 | `pong` | S→C | — | — |
 
-> **v1.6 帧数小结**：C→S **10 条**（帧类型不变，`action` 动作词表 5→7）；S→C **13 → 14**（新增 `match_end`）；错误码 **14 条不变**。
+> **v1.7 帧数小结**：C→S **10 条**（不变）；S→C **14 → 15**（新增 `tenpai`）；错误码 **14 条不变**。
 
 ## 附录 B：采纳 UI_UX_SPEC §10.2 数据项清单的对照
 
@@ -1083,7 +1335,8 @@ S→C match_end{hands_played:4,renchan_count:1,
 
 | 版本 | 内容 | 来源 |
 | --- | --- | --- |
-| **v1.6** | **A 批增补**（番型表 + 番数结算 + 一场四局/连庄/场次总分 + 暗杠/加杠），全部为**增补式**：① §4.6 `action` 动作词表 5 → **7**（+`ankan`、+`kakan`），合法性矩阵由 5 列扩 7 列，`tiles` 语义表增 2 行；**不新增窗口类型**（§6.1 明文，两者是 `discard` 窗口的附加 `options`）；② §5.9 `melds[].type` 3 → **5**（+`ankan`、+`kakan`），新增**暗杠私有权重**与**局终揭示时序契约**（他家 `tiles` 恒 `[]`，局终最后一份 `state_sync` 与 `game_end.results[].hand` 补全）；③ §5.4 `game_start` 增 `round_index`/`round_count`，`dealer` **不再恒为 0**；④ §5.10 `game_end` **只增字段**（`round_index`/`dealer`/`renchan_count`/`match_will_continue`/`results[].match_total`/`win.yaku[]`/`win.han_breakdown{base,tsumo,dealer,total}`/`win.han`/`win.dealer_bonus`/`win.rinshan`），`reason` 词表与既有字段形状一律不变（**`win.tags` 保持旧语义**、`results[].win_type` 保持旧形状），并澄清 `game_end` **仍只表示局终**；冻结 `win.yaku[].id` 的 14 个词汇与判定顺序（番值以 `RULESET` 为唯一权威）；⑤ 新增 §5.15 **`match_end`**（S→C 14 条），冻结 `rankings[]` 的排序与**并列跳号**口径；⑥ §6.2 第 5 条明确 **`seq` 跨局单调不重置**；⑦ §6.3 判定表增 3 行（打牌窗口回 `pass`、鸣牌窗口回 `ankan`/`kakan`、打牌窗口回鸣牌动作均 `ILLEGAL_ACTION`）；⑧ §6.4 冻结**超时/托管永不选杠**，并明确局间无窗口；⑨ §1.4 第 5 条回收时机改为**场终**（局终不回收），新增第 6 条局间契约；⑩ §0.2 **H1 重述**（按窗口 `options` 判定）、§0.4 局制改为「一场 4 局 + 连庄（max_rounds=4 / max_renchan=4）」并把抢杠列为**永久不做**、§0.6 把 136/83/84/21 标注为**每局**口径并写明杠补牌不改变上界；⑪ §8.1 私有信息矩阵增「暗杠」一行，§8.3 补暗杠/加杠重算与补牌不得由客户端触发；⑫ §9 增 §9.5（暗杠链路）与 §9.6（一场四局+连庄+场终）示例，§10 三份清单补场次级与暗杠自检项，附录 A 补 `match_end` 与字段速查。**零新增错误码（仍 14 条）**；既有 14 条错误码语义与阈值、15 s 窗口、`seq` 作废方案、136/83/84/21 数值、零和口径**全部未动** | captain 裁决（A 批需求评审，Q1–Q6）；架构评估与改造点清单见 `A1_ARCH_ASSESSMENT.md`；实现落点提示见其 §3（C1–C15） |
+| **v1.7** | **B 批增补**（手感表现的数据通路），零新增错误码：① 新增 §11「听牌提示与表现事件」整节 + **§5.16 `tenpai` 帧**（S→C **14 → 15** 条）；② `tenpai` **仅发本家**、独立低频帧，**不塞 `state_sync`**（三条理由：`state_sync` 是四家广播热路径；其 `seats` 块是"一次渲染喂四家"的共享缓存；听牌只在"本家手牌变化"时有意义，挂四家热路径语义错配）；③ **`tenpai_seq` 与 `room.seq` 解耦**（独立每座位单调计数器，跨局不重置）——若挂载 `room.seq`，"打牌后"这一刻的 seq 尚在变化中，`tenpai` 可能带出比随后 `action_request` 更大的 seq，客户端会把它当过期帧丢弃，**玩家收不到鸣牌请求、干等 15 s 超时**；④ 下发时机冻结 6 行 **T1–T6**（打牌后 / 副露后 / **`sync` 后补发** / 摸牌后**不发（已裁决定案）** / 他家动作不发 / 局终·新局·场终不发），其中 T3 是"把 `waits` 从 `state_sync` 搬出来之后必须补上的一条，否则 `sync` 的权威对齐语义被破坏"；T4 **已裁决为"不发"**（14 张口径无"听牌"定义，按"打掉刚摸那张"算等于替玩家预设打法，与 `FEEL_SPEC` §0 第 4 条相抵；`FEEL_SPEC` v1.4/v1.5 已实际删除该时机，主理人追认为定案）；⑤ `remaining` 冻结"**只减公开可见张数**"，**他家暗杠的 4 张不扣减**（扣了就能从"某面突降 4"反推出暗杠牌面，等于从 `remaining` 侧重新打开 §5.9 的打码），**牌山真值永不入帧**（会反解出三家暗手牌中某面的精确总数）；⑥ 三条性能预算 PB-1（`WaitingTiles` ≤ 200 µs，门禁）/ PB-2（`tenpai` 构建 ≤ 300 µs、帧 < 1 KB，超线先上"34 面可见计数增量表"、再退化为"仅变化时下发"）/ PB-3（零陈旧，门禁，不做缓存）；⑦ **修正 v1.6 缺陷**：`action_event{action:"ankan"}` 的 `tiles` **恒为 `[]`**（v1.6 广播 `[T]` 会把暗杠牌面泄露给三家）；⑧ §11.6 事件矩阵 E1–E13（含"连庄连续两次自摸靠 `seq` 而非 `round_index` 区分"）、§11.7 客户端四条陷阱 P1–P4（新增 P4：不得用 `room.seq` 规则处理 `tenpai`）；⑨ §6.2 第 3 条"不携带 `seq`"清单增 `tenpai`；§8.1 私有信息矩阵增「本家听牌」一行；⑩ **新增通则 H11**（§0.2）：「广播帧不得承载保密信息」——部分保密的动作只广播"发生了"（`seat`+`action`），内容走私有视角或局终揭示，**禁止**"本人真值/他家空值"的双份广播；⑪ **两个 `remaining` 显式消歧**（§5.16 对照表 + §11.3/§11.6 交叉引用）：`state_sync.remaining` = 牌山剩余（随每次摸牌 −1，全体公开），`tenpai.waits[].remaining` = 单牌面可见枚数（别人摸进暗手牌时**不变**，仅本家）——E2「他家摸牌」只用前者，并写明三条禁令（不得用 `waits[].remaining`、不得单用 `hand_count`、不新增 `draw_event`）；⑫ **同版内口径修正**：撤掉 §11.3 公式里的"− 已结算各局公开手牌"项（**每局重新洗牌 ⇒ 上一局的揭示牌与本局牌山不是同一批物理牌**，扣了会让 `remaining` 虚低），配套的"扁平手牌去重规则"一并作废，并写明实现禁令「**不得为听牌维护任何跨局可见牌集**」；`remaining` 只统计本局 4 项输入；⑬ §5.16 增**客户端禁令**（`tenpai_seq` MUST NOT 写入 `last_seq`/`current_seq`、不得因它关窗/清 PENDING），与 `UI_UX_SPEC.md` v2.2 §10.3 同口径；⑭ §11.3 增**代码侧命名要求**（`wall_remaining_` / `visible_left` 必须分开命名，禁止两者都叫 `remaining`） | captain 裁决（B 批「手感表现」需求：听牌由服务端下发、不复制规则到客户端；`FEEL_SPEC.md` v1.0 §2.1 的 `tenpai` 提案） |
+| **v1.6** | **A 批增补**（番型表 + 番数结算 + 一场四局/连庄/场次总分 + 暗杠/加杠），全部为**增补式**：① §4.6 `action` 动作词表 5 → **7**（+`ankan`、+`kakan`），合法性矩阵由 5 列扩 7 列，`tiles` 语义表增 2 行；**不新增窗口类型**（§6.1 明文，两者是 `discard` 窗口的附加 `options`）；② §5.9 `melds[].type` 3 → **5**（+`ankan`、+`kakan`），新增**暗杠私有权重**与**局终揭示时序契约**（他家 `tiles` 恒 `[]`，局终最后一份 `state_sync` 与 `game_end.results[].hand` 补全）；③ §5.4 `game_start` 增 `round_index`/`round_count`，`dealer` **不再恒为 0**；④ §5.10 `game_end` **只增字段**（`round_index`/`dealer`/`renchan_count`/`match_will_continue`/`results[].match_total`/`win.yaku[]`/`win.han_breakdown{base,tsumo,dealer,total}`/`win.han`/`win.dealer_bonus`/`win.rinshan`），`reason` 词表与既有字段形状一律不变（**`win.tags` 保持旧语义**、`results[].win_type` 保持旧形状），并澄清 `game_end` **仍只表示局终**；冻结 `win.yaku[].id` 的 14 个词汇与判定顺序（番值以 `RULESET` 为唯一权威）；⑤ 新增 §5.15 **`match_end`**（S→C 14 条），冻结 `rankings[]` 的排序与**并列跳号**口径；⑥ §6.2 第 5 条明确 **`seq` 跨局单调不重置**；⑦ §6.3 判定表增 3 行（打牌窗口回 `pass`、鸣牌窗口回 `ankan`/`kakan`、打牌窗口回鸣牌动作均 `ILLEGAL_ACTION`）；⑧ §6.4 冻结**超时/托管永不选杠**，并明确局间无窗口；⑨ §1.4 第 5 条回收时机改为**场终**（局终不回收），新增第 6 条局间契约；⑩ §0.2 **H1 重述**（按窗口 `options` 判定）、§0.4 局制改为「一场 4 局 + 连庄（max_rounds=4 / max_renchan=4）」并把抢杠列为**永久不做**、§0.6 把 136/83/84/21 标注为**每局**口径并写明杠补牌不改变上界；⑪ §8.1 私有信息矩阵增「暗杠」一行，§8.3 补暗杠/加杠重算与补牌不得由客户端触发；⑫ §9 增 §9.5（暗杠链路）与 §9.6（一场四局+连庄+场终）示例，§10 三份清单补场次级与暗杠自检项，附录 A 补 `match_end` 与字段速查。**零新增错误码（仍 14 条）**；既有 14 条错误码语义与阈值、15 s 窗口、`seq` 作废方案、136/83/84/21 数值、零和口径**全部未动**。**同版内口径修正（不升版）**：① `match_end.hands_played` 定为「本场实际手数 = `game_end` 下发次数，4..8」，早期草案的「= `round_count` 恒 4」与「`game_end` 次数 = `hands_played + renchan_count`」两条**作废**（恒等式退化为 `game_end 次数 = hands_played`，连庄由 `renchan_count` 单独承载）；② `game_end.renchan_count` 明确为**含本局的 post-increment 累计值**；③ 上游源头指针校正为 `GAME_DESIGN` v1.10 / `UI_UX_SPEC` v1.9 | captain 裁决（A 批需求评审，Q1–Q6；`hands_played` 三次裁决以 D2 终裁为准）；架构评估与改造点清单见 `A1_ARCH_ASSESSMENT.md`；实现落点提示见其 §3（C1–C15） |
 | v1.0 | 首次冻结：传输/分帧/帧格式、8+12 条消息逐字段规范、`seq` 作废与窗口判定表、超时代打、11 条错误码与配额、私有信息矩阵、服务端权威（H8）、帧序列示例、实现方自检清单；相对任务草案的增补：`discard`/`action`/`draw`/`discard_event`/`action_event` 的 `seq`、`action_event.from_seat`、`action_request.window` 与 `options` 形状、`melds[]` 形状、`game_end.win` 明细、11 条错误码 | t1（依 GAME_DESIGN v1.1、UI_UX_SPEC v1.1、t10/t12 评审与 H1–H10） |
 | v1.1 | 仅同步上游版本指针与批准状态（当时口径为 108 张 / 牌山 55），**未改动本文任何字段** | captain（t13） |
 | v1.5 | 大厅选房：新增 C11 `list_rooms`、S14 `room_list`；`join_room` 在开局前替换 AI 座位；`create_room` 不自动开局；`ready` 仍立即洗牌。不新增错误码 | 用户需求（大厅要能新建并进入其他房间） |

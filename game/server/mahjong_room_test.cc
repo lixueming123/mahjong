@@ -1600,6 +1600,104 @@ TEST_F(RoomActorTest, FullGamesSatisfyProtocolInvariants) {
 // ---------------------------------------------------------------------------
 // M8 缺省值（A1_ACCEPTANCE §七）：局间隔冻结默认 5000 ms（--inter-hand-delay-ms 缺省口径）。
 // 相对时序观察在 e2e（E2/M8 时序观察）里用短配值跑，这里只钉死缺省常量。
+// v1.6 局种子（用户 blocker）：**同一场连续两局的牌山与四家起手牌必须不同**。
+// 连庄场（dealer 不变，只有 hand_index 在变）是这一层最容易漏的情形，必须覆盖到；
+// 轮庄场也一并覆盖。
+namespace {
+uint64_t WallFingerprint(const RoomActor& room) {
+  // FNV-1a over the dealt wall (post-deal remnant; identical walls ⇒ identical fingerprints).
+  uint64_t hash = 1469598103934665603ull;
+  for (Tile tile : room.wall_of()) {
+    for (char c : FormatTile(tile)) {
+      hash ^= static_cast<uint64_t>(static_cast<unsigned char>(c));
+      hash *= 1099511628211ull;
+    }
+  }
+  hash ^= static_cast<uint64_t>(room.wall_of().size());
+  return hash;
+}
+
+std::string HandsSignature(const RoomActor& room) {
+  std::string signature;
+  for (int seat = 0; seat < kSeatCount; ++seat) {
+    for (Tile tile : SortedTiles(room.hand_of(seat))) {
+      signature += FormatTile(tile);
+      signature += ',';
+    }
+    signature += '|';
+  }
+  return signature;
+}
+}  // namespace
+
+TEST_F(RoomActorTest, ConsecutiveRoundsDealDifferentWallsAndHands) {
+  int renchan_transitions = 0;
+  int rotation_transitions = 0;
+  for (uint64_t seed = 1; seed <= 20 && (renchan_transitions == 0 || rotation_transitions == 0); ++seed) {
+    TestRoom test_room(seed);
+    test_room.Ready();
+    test_room.sink()->Drain();
+    // 打几局，逐对比较相邻两局。
+    for (int round = 0; round < 3 && !test_room.room()->game_finished(); ++round) {
+      const uint64_t wall_before = WallFingerprint(*test_room.room());
+      const std::string hands_before = HandsSignature(*test_room.room());
+      const int dealer_before = test_room.room()->dealer();
+      if (!test_room.PlayFullRound()) {
+        break;
+      }
+      if (test_room.room()->game_finished() || !test_room.FireRoundAdvance()) {
+        break;
+      }
+      test_room.sink()->Drain();
+      const uint64_t wall_after = WallFingerprint(*test_room.room());
+      const std::string hands_after = HandsSignature(*test_room.room());
+      EXPECT_NE(wall_before, wall_after)
+          << "seed " << seed << " round " << round << ": 相邻两局的牌山不得相同（局种子缺失）";
+      EXPECT_NE(hands_before, hands_after)
+          << "seed " << seed << " round " << round << ": 相邻两局的四家起手牌不得相同";
+      if (test_room.room()->dealer() == dealer_before) {
+        ++renchan_transitions;
+      } else {
+        ++rotation_transitions;
+      }
+    }
+  }
+  EXPECT_GE(renchan_transitions, 1) << "必须覆盖连庄场（dealer 不变、只有局种子在变）";
+  EXPECT_GE(rotation_transitions, 1) << "必须覆盖轮庄场";
+}
+
+TEST_F(RoomActorTest, DifferentServerSeedsDealDifferentWalls) {
+  TestRoom first(424242);
+  TestRoom second(424243);
+  first.Ready();
+  second.Ready();
+  EXPECT_NE(WallFingerprint(*first.room()), WallFingerprint(*second.room()))
+      << "两个不同 --seed 的整场必须发出不同的牌山";
+  EXPECT_NE(HandsSignature(*first.room()), HandsSignature(*second.room()));
+}
+
+// 纯函数层：hand 0 必须与 base_seed 不同（不复用 DeriveRoomSeed 的 finalizer(0)==0），
+// 且各 hand_index 两两不同、与房间种子映射互不干扰。
+TEST(MahjongRules, RoundSeedIsPureAndPerHand) {
+  for (uint64_t base : {1ull, 7ull, 199ull, 20251005ull}) {
+    EXPECT_NE(DeriveRoundSeed(base, 0), base) << "hand 0 不得退回 base_seed";
+    std::set<uint64_t> seeds;
+    for (uint32_t hand = 0; hand < 8; ++hand) {
+      const uint64_t derived = DeriveRoundSeed(base, hand);
+      EXPECT_EQ(DeriveRoundSeed(base, hand), derived) << "必须是纯函数";
+      seeds.insert(derived);
+    }
+    EXPECT_EQ(seeds.size(), 8u) << "8 手的局种子必须两两不同";
+    for (uint32_t hand = 0; hand < 8; ++hand) {
+      EXPECT_NE(DeriveRoundSeed(base, hand), DeriveRoundSeed(base + 1, hand)) << "base 必须参与";
+    }
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+// M8 缺省值（A1_ACCEPTANCE §七）：局间隔冻结默认 5000 ms（--inter-hand-delay-ms 缺省口径）。
+// 相对时序观察在 e2e（E2 主体脚本）里用短配值跑，这里只钉死缺省常量。
 TEST(MahjongRules, InterHandDelayDefaultIsFrozen) {
   EXPECT_EQ(mahjong::kDefaultInterHandDelayMs, 5000);
   EXPECT_EQ(mahjong::kMaxInterHandDelayMs, 60000);
@@ -1696,6 +1794,224 @@ TEST_F(RoomActorTest, RoundEndRejectsEveryGameFrame) {
   EXPECT_EQ(test_room.room()->CurrentWindow(), "discard");
 }
 
+namespace {
+MeldType MeldTypeFromName(const std::string& name) {
+  if (name == "pong") return MeldType::kPong;
+  if (name == "chow") return MeldType::kChow;
+  if (name == "kong") return MeldType::kKong;
+  if (name == "ankan") return MeldType::kAnkan;
+  return MeldType::kKakan;
+}
+
+std::vector<Meld> MeldsFromJson(const json::Value& frame, const std::string& key) {
+  std::vector<Meld> out;
+  const json::Value* melds = frame.Find(key);
+  if (melds == nullptr || !melds->IsArray()) return out;
+  for (const json::Value& item : melds->AsArray()) {
+    Meld meld;
+    meld.type = MeldTypeFromName(StrOf(item, "type"));
+    meld.tiles = TilesOf(item, "tiles");
+    out.push_back(std::move(meld));
+  }
+  return out;
+}
+}  // namespace
+
+// v1.7 §5.16：`tenpai` 帧 —— **仅发本家**、独立 `tenpai_seq`（从 1 起、每座位一条）、
+// `is_tenpai == false` 时必须下发（waits: []）、`waits` = 可见枚数（他家暗杠不扣减）。
+// state_sync 与 seats[] **不得**携带任何听牌字段（§8.1）。
+TEST_F(RoomActorTest, TenpaiFrameIsOwnPrivateAndConsistent) {
+  int tenpai_frames = 0;
+  int non_empty_frames = 0;
+  for (uint64_t seed = 1; seed <= 25 && non_empty_frames < 3; ++seed) {
+    // smart_discard=true：默认的「摸切」策略永远摸不到听牌（Shanten 实测常年停在 2..5），
+    // 那样本用例只会观察到 1808 条全空的 tenpai 帧，等于没测到非空分支。
+    TestRoom test_room(seed, kDefaultTimeoutMs, /*ai_delay_ms=*/0, /*smart_discard=*/true);
+    test_room.Ready();
+    test_room.PlayFullGame();
+    ASSERT_TRUE(test_room.room()->game_finished()) << "seed " << seed;
+    std::vector<const json::Value*> tenpai_frames_seen;
+    for (const json::Value& frame : test_room.history()) {
+      const std::string type = TypeOf(frame);
+      if (type == "state_sync") {
+        // state_sync 不带听牌字段；seats[] 任何项也不得出现（§8.1 隐私矩阵）
+        EXPECT_EQ(frame.Find("waits"), nullptr) << "state_sync 不得携带 waits（v1.7 走独立 tenpai 帧）";
+        const json::Value* seats = frame.Find("seats");
+        ASSERT_NE(seats, nullptr);
+        for (const json::Value& entry : seats->AsArray()) {
+          EXPECT_EQ(entry.Find("waits"), nullptr) << "seats[] 不得出现 waits";
+          EXPECT_EQ(entry.Find("is_tenpai"), nullptr);
+        }
+        continue;
+      }
+      if (type != "tenpai") continue;
+      tenpai_frames_seen.push_back(&frame);
+      ++tenpai_frames;
+      // tenpai 不参与 room.seq；不带 seq 字段（走 tenpai_seq）。
+      EXPECT_EQ(frame.Find("seq"), nullptr) << "tenpai 不得携带 room.seq";
+      ASSERT_NE(frame.Find("is_tenpai"), nullptr);
+      ASSERT_NE(frame.Find("waits"), nullptr);
+      const bool is_tenpai = frame.Find("is_tenpai")->AsBool();
+      const json::Value* waits = frame.Find("waits");
+      ASSERT_TRUE(waits->IsArray());
+      EXPECT_EQ(is_tenpai, !waits->AsArray().empty())
+          << "is_tenpai 与 waits 必须双向一致（false ⇒ []，[] ⇒ false）";
+      if (!is_tenpai) continue;
+      ++non_empty_frames;
+      // 逐项：顺序 = §2.2（**按面**比较，不能用字符串——"9m" 字典序大于 "1p"，但牌序更小）、
+      // 无重复、remaining ∈ [0,4]。
+      // ⚠️ `remaining` 的**精确值**不在本用例校验：本用例在 `PlayFullGame()` 之后才翻历史，
+      // 而房间状态此刻已是终局态，拿终局态去比对历史上某一条帧必然不符（这是覆盖率陷阱，
+      // 不是产品缺陷）。精确校验见 `TenpaiRemainingMatchesVisibleCountAtEmission`。
+      int previous_face = -1;
+      for (const json::Value& item : waits->AsArray()) {
+        const std::string tile = StrOf(item, "tile");
+        ASSERT_FALSE(tile.empty());
+        const std::optional<Tile> face = ParseTile(tile);
+        ASSERT_TRUE(face.has_value()) << "waits 的牌面必须可解析：" << tile;
+        const int face_index = static_cast<int>(FaceOf(*face));
+        EXPECT_GT(face_index, previous_face) << "waits 必须按 §2.2 牌序（面上升序）且无重复";
+        previous_face = face_index;
+        const int remaining = static_cast<int>(IntOf(item, "remaining"));
+        EXPECT_GE(remaining, 0) << tile << " 的 remaining 不得为负";
+        EXPECT_LE(remaining, kCopiesPerFace)
+            << tile << " 的 remaining 越界（>4）——多半是误把 wall_remaining_ 填了进来";
+      }
+    }
+    // tenpai_seq：每座位一条独立单调计数器，从 1 起、逐帧 +1（跨局不重置）。
+    int64_t expected_seq = 0;
+    for (const json::Value* frame : tenpai_frames_seen) {
+      expected_seq += 1;
+      EXPECT_EQ(IntOf(*frame, "tenpai_seq"), expected_seq) << "tenpai_seq 必须从 1 起逐帧 +1";
+    }
+  }
+  EXPECT_GE(non_empty_frames, 1) << "必须观察到听牌帧（T1 打牌后是听牌的唯一有定义状态）";
+  std::printf("tenpai frames: %d (non-empty %d)\n", tenpai_frames, non_empty_frames);
+}
+
+// v1.7 §5.16：`waits[].remaining` 的**精确值**校验（可见枚数；他家暗杠不扣减、牌山真值永不入帧）。
+// 关键时序：T1 帧的发射态 = 「本家打牌生效后、鸣牌结算前」。而 `AnswerWindow()` 返回时房间
+// 通常已推进到下一家的摸牌，直接读「当前房间状态」会读到未来 —— 因此必须**在发帧之前快照**
+// 四家状态，再按打出的那一张做增量还原，才能对上帧里的数。
+TEST_F(RoomActorTest, TenpaiRemainingMatchesVisibleCountAtEmission) {
+  int checked = 0;
+  for (uint64_t seed = 1; seed <= 40 && checked < 3; ++seed) {
+    TestRoom test_room(seed, kDefaultTimeoutMs, /*ai_delay_ms=*/0, /*smart_discard=*/true);
+    test_room.Ready();
+    test_room.sink()->Drain();
+    for (int guard = 0; guard < 800 && !test_room.room()->round_finished(); ++guard) {
+      std::optional<json::Value> request = test_room.PendingRequest();
+      const bool human_discard =
+          test_room.room()->CurrentWindow() == "discard" &&
+          test_room.room()->current_seat() == kSeat0 &&
+          !(request.has_value() && OptionOf(*request, "win") != nullptr);
+      // —— 发射前快照（四家）——
+      std::array<std::vector<Tile>, kSeatCount> hand_snap {};
+      std::array<std::vector<Meld>, kSeatCount> meld_snap {};
+      std::array<std::vector<Tile>, kSeatCount> discard_snap {};
+      for (int s = 0; s < kSeatCount; ++s) {
+        hand_snap[static_cast<size_t>(s)] = test_room.room()->hand_of(s);
+        meld_snap[static_cast<size_t>(s)] = test_room.room()->melds_of(s);
+        discard_snap[static_cast<size_t>(s)] = test_room.room()->discards_of(s);
+      }
+      if (!test_room.AnswerWindow(request)) {
+        if (!test_room.FireAiPacing() && !test_room.AdvanceOpenWindow()) break;
+        continue;
+      }
+      if (!human_discard) continue;
+      std::vector<json::Value> frames = test_room.sink()->Drain();
+      std::optional<Tile> discarded;
+      const json::Value* tenpai_frame = nullptr;
+      for (const json::Value& frame : frames) {
+        if (TypeOf(frame) == "discard_event" && IntOf(frame, "seat") == kSeat0) {
+          discarded = ParseTile(StrOf(frame, "tile"));
+        }
+        if (TypeOf(frame) == "tenpai") tenpai_frame = &frame;
+      }
+      if (!discarded.has_value() || tenpai_frame == nullptr) continue;
+      const json::Value* waits = tenpai_frame->Find("waits");
+      ASSERT_NE(waits, nullptr);
+      if (waits->AsArray().empty()) continue;
+      // —— 还原发射态的可见枚数 ——
+      FaceCounts visible{};
+      visible.fill(0);
+      bool removed = false;
+      for (Tile tile : hand_snap[static_cast<size_t>(kSeat0)]) {
+        if (!removed && FaceOf(tile) == FaceOf(*discarded)) {
+          removed = true;  // 打出的那张离开手牌
+          continue;
+        }
+        ++visible[FaceOf(tile)];
+      }
+      ASSERT_TRUE(removed) << "打出的牌必须来自快照手牌";
+      for (int s = 0; s < kSeatCount; ++s) {
+        for (const Meld& meld : meld_snap[static_cast<size_t>(s)]) {
+          if (meld.type == MeldType::kAnkan && s != kSeat0) continue;  // 他家暗杠：不可见 ⇒ 不扣减
+          for (Tile tile : meld.tiles) ++visible[FaceOf(tile)];
+        }
+        for (Tile tile : discard_snap[static_cast<size_t>(s)]) ++visible[FaceOf(tile)];
+      }
+      ++visible[FaceOf(*discarded)];  // 打出的那张进了牌河 ⇒ 可见 +1
+      for (const json::Value& item : waits->AsArray()) {
+        const std::string tile = StrOf(item, "tile");
+        const std::optional<Tile> face = ParseTile(tile);
+        ASSERT_TRUE(face.has_value()) << "waits 的牌面必须可解析：" << tile;
+        const int seen = visible[FaceOf(*face)];
+        const int expected = seen >= kCopiesPerFace ? 0 : kCopiesPerFace - seen;
+        EXPECT_EQ(static_cast<int>(IntOf(item, "remaining")), expected)
+            << "seed " << seed << "：" << tile << " 的可见枚数不对（他家暗杠不得扣减）";
+      }
+      ++checked;
+    }
+  }
+  EXPECT_GE(checked, 1) << "必须至少校验一次非空 tenpai 帧的 remaining";
+}
+
+// FEEL_SPEC F-SORT-01b/01c：四家手牌**恒有序**（发牌后 / 摸牌后 / 杠补牌后 / 鸣牌扣牌后），
+// 且排序只动顺序不动身份（物理牌 id 在局中唯一、张数不变量保持）。
+TEST_F(RoomActorTest, HandsStaySortedForEverySeat) {
+  for (uint64_t seed : {static_cast<uint64_t>(1), static_cast<uint64_t>(7), static_cast<uint64_t>(20251005)}) {
+    TestRoom test_room(seed);
+    test_room.Ready();
+    test_room.sink()->Drain();
+    auto check_state = [&](const char* when) {
+      for (int seat = 0; seat < kSeatCount; ++seat) {
+        const std::vector<Tile>& hand = test_room.room()->hand_of(seat);
+        EXPECT_EQ(hand, SortedTiles(hand)) << "seed " << seed << " seat " << seat << " " << when;
+        const int logical = static_cast<int>(hand.size()) +
+                            3 * MeldCountOf(test_room.room()->melds_of(seat));
+        EXPECT_TRUE(logical == 13 || logical == 14) << "seed " << seed << " seat " << seat << " " << when;
+      }
+      // 排序身份不变量在规则库层单独覆盖（SortPreservesTileIdentity）；房间层只断言
+      // 「四家手牌恒有序 + 张数不变量」——全局物理牌 id 唯一性在本引擎属账外记账
+      //（鸣牌 tile 以面编码入组、荣和结算的 H4 双计数），与本批排序无关，不作断言。
+    };
+    check_state("发牌后（game_start 前）");
+    int guard = 0;
+    while (!test_room.room()->game_finished() && guard++ < 20000) {
+      if (test_room.room()->round_finished()) {
+        test_room.FireRoundAdvance();
+        check_state("换局发牌后");
+        continue;
+      }
+      std::optional<json::Value> request = test_room.PendingRequest();
+      if (test_room.AnswerWindow(request)) {
+        check_state("应答窗口后（含鸣牌/自理杠/摸牌）");
+        continue;
+      }
+      if (test_room.FireAiPacing()) {
+        check_state("AI 动作后");
+        continue;
+      }
+      if (!test_room.AdvanceOpenWindow()) {
+        break;
+      }
+      check_state("超时推进后");
+    }
+    ASSERT_TRUE(test_room.room()->game_finished()) << "seed " << seed;
+  }
+}
+
 TEST_F(RoomActorTest, SelfKanActionsRoundTripThroughTheDiscardWindow) {
   int ankan_hits = 0;
   int kakan_hits = 0;
@@ -1768,18 +2084,64 @@ TEST_F(RoomActorTest, SelfKanActionsRoundTripThroughTheDiscardWindow) {
           std::vector<json::Value> frames = test_room.sink()->Drain();
           bool saw_event = false;
           bool saw_draw = false;
+          bool saw_sync_after = false;
           for (const json::Value& frame : frames) {
             if (TypeOf(frame) == "action_event" && StrOf(frame, "action") == action) {
               saw_event = true;
               EXPECT_EQ(frame.Find("from_seat"), nullptr) << "自理杠不得携带 from_seat";
-              EXPECT_TRUE(SameFaces(TilesOf(frame, "tiles"), option_tiles));
+              // PROTOCOL v1.7 §11.5（P0 隐私修复）：**ankan 的 tiles 恒为 []**（广播帧，四家同帧，
+              // 本家视角也不例外——牌面由随后 state_sync.melds[] 给出）；kakan 保持 [T]。
+              if (is_ankan) {
+                EXPECT_EQ(TilesOf(frame, "tiles").size(), 0u)
+                    << "ankan 的 action_event 不得携带牌面（含本家视角）";
+              } else {
+                EXPECT_TRUE(SameFaces(TilesOf(frame, "tiles"), option_tiles))
+                    << "kakan 的 action_event 必须携带 [T]（公开动作）";
+              }
             }
             if (TypeOf(frame) == "draw") {
               saw_draw = true;
             }
+            if (TypeOf(frame) == "state_sync") {
+              saw_sync_after = true;
+              const json::Value* seats = frame.Find("seats");
+              ASSERT_NE(seats, nullptr);
+              ASSERT_EQ(seats->AsArray().size(), 4u);
+              const json::Value& mine = seats->AsArray()[static_cast<size_t>(kSeat0)];
+              const json::Value* melds = mine.Find("melds");
+              ASSERT_NE(melds, nullptr);
+              const json::Value* ankan = nullptr;
+              for (const json::Value& meld : melds->AsArray()) {
+                if (StrOf(meld, "type") == "ankan") ankan = &meld;
+              }
+              if (is_ankan) {
+                // 本家视角的暗杠：4 张真实牌面（与 action_event 的 [] 互补——别修一处漏一处）。
+                ASSERT_NE(ankan, nullptr) << "本家视角的 state_sync 必须含 ankan 组";
+                EXPECT_EQ(ankan->Find("tiles")->AsArray().size(), 4u) << "本家暗杠必须 4 张牌面";
+              } else {
+                // kakan：被升级的那组仍是公开副露，本家视角同样 4 张（且不存在 ankan 组）。
+                EXPECT_EQ(ankan, nullptr) << "kakan 不得凭空产生 ankan 组";
+                const json::Value* kakan_group = nullptr;
+                for (const json::Value& meld : melds->AsArray()) {
+                  if (StrOf(meld, "type") == "kakan") kakan_group = &meld;
+                }
+                ASSERT_NE(kakan_group, nullptr) << "本家视角的 state_sync 必须含 kakan 组";
+                EXPECT_EQ(kakan_group->Find("tiles")->AsArray().size(), 4u) << "本家加杠必须 4 张牌面";
+              }
+              // 他家视角的暗杠：tiles 恒 []（既有不变量，与 P0 一起复核）。
+              for (const json::Value& entry : seats->AsArray()) {
+                if (static_cast<int>(IntOf(entry, "seat")) == kSeat0) continue;
+                for (const json::Value& meld : entry.Find("melds")->AsArray()) {
+                  if (StrOf(meld, "type") == "ankan") {
+                    EXPECT_EQ(meld.Find("tiles")->AsArray().size(), 0u) << "他家暗杠必须脱敏";
+                  }
+                }
+              }
+            }
           }
           EXPECT_TRUE(saw_event) << "自理杠必须有 action_event";
           EXPECT_TRUE(saw_draw) << "自理杠之后必须补摸 1 张";
+          EXPECT_TRUE(saw_sync_after) << "自理杠之后必须下发 state_sync（权威覆盖 melds）";
           // 补牌后逻辑张数回到 14（公式逐字不变：concealed + 3×melds）
           EXPECT_EQ(test_room.room()->hand_of(kSeat0).size() + 3u * MeldCountOf(melds_after), 14u);
           EXPECT_EQ(test_room.room()->CurrentWindow(), "discard") << "补牌后重开打牌窗口";

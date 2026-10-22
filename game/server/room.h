@@ -18,6 +18,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -96,6 +97,24 @@ inline uint64_t DeriveRoomSeed(uint64_t base_seed, uint32_t room_index) {
   mixed ^= mixed >> 27;
   mixed *= 0x94D049BB133111EBull;
   mixed ^= mixed >> 31;  // finalizer(0) == 0, hence `base_seed` is returned unchanged for room 0
+  return base_seed ^ mixed;
+}
+
+// v1.6（一场四局 · 局种子）：**房间种子只管「房间之间不同」，局种子管「局与局之间不同」，
+// 两者缺一不可**——只有房间种子时，一场 4~8 局的牌山（连带四家起手牌）会逐局完全相同
+// （B2 把「一局」改「一场」时漏掉的这一层）。
+//
+// 与 DeriveRoomSeed 同族（同 finalizer + 奇数乘子保证双射），但**不能沿用它的
+// finalizer(0)==0 特性**：那一行会让 hand 0 退回 base_seed，与「房间 0 = 房间种子」的约定
+// 撞车。这里让 `hand_index + 1` 参与混合，保证 hand 0 也与 base_seed 不同；纯函数、无时间源，
+// 所以 `--seed` 固定时整场仍逐帧可复现（SameSeedReplaysTheWholeMatchFrameForFrame）。
+inline uint64_t DeriveRoundSeed(uint64_t base_seed, uint32_t hand_index) {
+  uint64_t mixed = (static_cast<uint64_t>(hand_index) + 1) * 0x9E3779B97F4A7C15ull;  // odd => bijective
+  mixed ^= mixed >> 30;
+  mixed *= 0xBF58476D1CE4E5B9ull;
+  mixed ^= mixed >> 27;
+  mixed *= 0x94D049BB133111EBull;
+  mixed ^= mixed >> 31;  // finalizer(hand_index + 1) is non-zero for every hand_index
   return base_seed ^ mixed;
 }
 
@@ -270,6 +289,8 @@ class RoomActor {
     return "";
   }
   const std::vector<Tile>& hand_of(int seat) const { return hands_[static_cast<size_t>(seat)]; }
+  // v1.6 局种子回归用：本局发牌后的牌山（含已发位置，next_index_ 之后才是未摸牌）。
+  const std::vector<Tile>& wall_of() const { return wall_; }
   const std::vector<Meld>& melds_of(int seat) const { return melds_[static_cast<size_t>(seat)]; }
   const std::vector<Tile>& discards_of(int seat) const { return discards_[static_cast<size_t>(seat)]; }
   int SeatOf(const std::string& player_id) const;
@@ -422,6 +443,9 @@ class RoomActor {
   // Only `hand`/`melds` come from |for_seat|; |seats_json| must be BuildSeatsArray(viewer).Dump().
   std::string BuildStateSync(int for_seat, const std::string& seats_json) const;
   std::string BuildStateSync(int for_seat) const;
+  // PROTOCOL v1.7 §5.16：独立 `tenpai` 帧（仅发本家、tenpai_seq 独立单调、不参与 room.seq）。
+  json::Value BuildTenpaiFrame(int seat) const;
+  exec::task<void> DeliverTenpai(int seat);
   std::string BuildGameStart(int for_seat) const;
   std::string BuildGameEnd(const Settlement& settlement) const;
   std::string BuildMatchEnd() const;
@@ -451,6 +475,9 @@ class RoomActor {
   int renchan_count_ = 0; // 本场累计连庄次数；> kMaxRenchan 强制场终（C15）
   std::array<int, kSeatCount> match_totals_ {};
   std::array<int, kSeatCount> dealer_hands_ {};  // B3：各座位本场坐庄手数（每局 +1，含连庄）
+  // v1.7 §5.16：`tenpai_seq` 是**每座位一条的独立单调计数器**（从 1 起、跨局不重置；
+  // 与 room.seq 完全解耦——挂 room.seq 会把正常 action_request 判成过期）。
+  std::array<uint64_t, kSeatCount> tenpai_seq_ {};
   // C15 双闸：单场上界 = 4 局 + 4 连庄 = 8 次 game_end
   static constexpr int kMaxRenchan = 4;
 
