@@ -102,14 +102,22 @@ def side_river_rects(rect: tuple[int, int, int, int], count: int) -> list[tuple[
 
 def meld_layout(
     area: tuple[int, int, int, int], melds, vertical: bool = False
-) -> list[tuple[pygame.Rect, list[tuple[tuple[int, int, int, int], str]]]]:
-    """副露分组布局（§4.8）：组内牌 28×36 pitch 30，组间距 8；空间不足时等比收缩 pitch。"""
+) -> list[tuple[pygame.Rect, list[tuple[tuple[int, int, int, int], str | None]]]]:
+    """副露分组布局（§4.8）：组内牌 28×36 pitch 30，组间距 8；空间不足时等比收缩 pitch。
+
+    v2.0 暗杠空数组形态：`tiles == []` 按占位 4 张（face=None ⇒ 由调用方画牌背，
+    §4.8 两形态之二），组宽按 4 张计。
+    """
     if not melds:
         return []
     gap = T.MELD_GROUP_GAP
     outer = 2  # 组框内边距
     tw, th = T.MELD_TILE
-    total_tiles = sum(max(1, len(m.tiles)) for m in melds)
+
+    def width_of(meld) -> int:
+        return len(meld.tiles) if meld.tiles else 4
+
+    total_tiles = sum(width_of(m) for m in melds)
 
     if vertical:
         max_w = area[2]
@@ -118,14 +126,16 @@ def meld_layout(
         y = area[1]
         for meld in melds:
             height = T.MELD_ROW_HEIGHT - 4
-            group_w = min(max_w, max(1, len(meld.tiles)) * pitch - 2 + 2 * outer)
+            n = width_of(meld)
+            group_w = min(max_w, max(1, n) * pitch - 2 + 2 * outer)
             group_rect = pygame.Rect(area[0], y, group_w, height)
             inner_pitch = pitch
-            if (len(meld.tiles) * inner_pitch - 2 + 2 * outer) > group_w:
-                inner_pitch = max(14, (group_w - 2 * outer + 2) // max(1, len(meld.tiles)))
+            if (n * inner_pitch - 2 + 2 * outer) > group_w:
+                inner_pitch = max(14, (group_w - 2 * outer + 2) // max(1, n))
+            faces: list[str | None] = list(meld.tiles) or [None] * 4
             tiles = [
                 ((area[0] + outer + i * inner_pitch, y + 2, min(tw, inner_pitch - 2), height - 4), face)
-                for i, face in enumerate(meld.tiles)
+                for i, face in enumerate(faces)
             ]
             out.append((group_rect, tiles))
             y += T.MELD_ROW_HEIGHT
@@ -133,19 +143,20 @@ def meld_layout(
 
     max_w = area[2]
     pitch = T.MELD_TILE_PITCH
-    widths = [max(1, len(m.tiles)) * pitch - 2 + 2 * outer for m in melds]
+    widths = [max(1, width_of(m)) * pitch - 2 + 2 * outer for m in melds]
     total = sum(widths) + gap * (len(melds) - 1)
     if total > max_w and total_tiles > 0:
         # 收缩：解出货架宽度 sum(n_i*pitch) + 常量 = max_w
         constant = len(melds) * (2 * outer - 2) + gap * (len(melds) - 1)
         pitch = max(16, int((max_w - constant) / total_tiles))
-        widths = [max(1, len(m.tiles)) * pitch - 2 + 2 * outer for m in melds]
+        widths = [max(1, width_of(m)) * pitch - 2 + 2 * outer for m in melds]
     out = []
     x = area[0]
     for meld, width in zip(melds, widths):
         group_rect = pygame.Rect(x, area[1], width, area[3])
         tiles = []
-        for i, face in enumerate(meld.tiles):
+        faces: list[str | None] = list(meld.tiles) or [None] * 4  # 暗杠空数组 ⇒ 4 张牌背占位
+        for i, face in enumerate(faces):
             tile_w = min(tw, pitch - 2)
             tiles.append(((x + outer + i * pitch, area[1], tile_w, area[3]), face))
         out.append((group_rect, tiles))
@@ -177,8 +188,20 @@ def _draw_hud(surface: pygame.Surface, ui: UiView) -> None:
     W.draw_text(
         surface, f"{room}  {me}（本家）", fonts.get(T.FS_SMALL), T.TEXT, T.R_HUD_LEFT, W.ALIGN_LEFT
     )
+    # v2.0（§4.11）：局号位「X/4」（X = round_index + 1，来自 game_start；局间不显示累计分）
+    if state.game_started:
+        W.draw_text(
+            surface,
+            f"{state.round_index + 1}/{state.round_count}",
+            fonts.get(T.FS_BODY, bold=True),
+            T.TEXT,
+            T.R_HUD_ROUND,
+            W.ALIGN_CENTER,
+        )
+    # v2.0：连庄提示并入中段阶段文案（账号会话局号右侧空档是战绩按钮，不能占用）
+    mid = state.phase if state.renchan_count <= 0 else f"{state.phase} · 连庄 {state.renchan_count}"
     W.draw_text(
-        surface, state.phase, fonts.get(T.FS_BODY), T.TEXT_DIM, T.R_HUD_MID, W.ALIGN_CENTER
+        surface, mid, fonts.get(T.FS_BODY), T.TEXT_DIM, T.R_HUD_MID, W.ALIGN_CENTER
     )
 
     dot_color = T.POS if ui.connected else T.NEG
@@ -259,15 +282,26 @@ def _draw_dealer_badge(surface: pygame.Surface, ui: UiView, rect: tuple[int, int
 def _draw_back_row(
     surface: pygame.Surface, rect: tuple[int, int, int, int], hand_count: int
 ) -> None:
-    """他家手牌：**只**画牌背（§4.6）。"""
+    """他家手牌：**只**画牌背（§4.6）。v2.0：容量 14 → 18（一般式 14 + kans，kans ≤ 4）。
+
+    15..18 张**换行**绘制第二行（行距 16 px，向下扩展），不裁剪、不缩小；
+    超过 18（协议上限）记 WARN 不绘制超出部分。
+    """
     max_tiles = max(0, rect[2] // T.OPP_BACK_PITCH)
-    shown = min(hand_count, 14, max_tiles)
-    if hand_count > 14:
-        log.warning("他家 hand_count=%d 超过 14，超出部分不绘制", hand_count)
+    per_row = min(T.OPP_BACK_ROW_CAPACITY, max_tiles)
+    shown = min(hand_count, T.OPP_BACK_MAX, per_row + 4)  # 第二行最多再放 4 张（14 + 4 = 18）
+    if hand_count > T.OPP_BACK_MAX:
+        log.warning("他家 hand_count=%d 超过 %d，超出部分不绘制", hand_count, T.OPP_BACK_MAX)
     for i in range(shown):
+        row, col = divmod(i, per_row)
         W.draw_tile_back(
             surface,
-            (rect[0] + i * T.OPP_BACK_PITCH, rect[1], T.OPP_BACK_TILE[0], T.OPP_BACK_TILE[1]),
+            (
+                rect[0] + col * T.OPP_BACK_PITCH,
+                rect[1] + row * rect[3],  # 行距 16 px（背条高度），向下扩展
+                T.OPP_BACK_TILE[0],
+                T.OPP_BACK_TILE[1],
+            ),
         )
 
 
@@ -356,7 +390,11 @@ def _draw_melds(
         return
     for group_rect, tiles in meld_layout(area, melds, vertical=vertical):
         W.draw_panel(surface, (group_rect.x, group_rect.y, group_rect.w, group_rect.h), radius=3)
+        # v2.0（§4.8）：face=None ⇒ 暗杠空数组形态，画**4 张牌背**（他家暗杠揭示前的恒常形态）
         for tile_rect, face in tiles:
+            if face is None:
+                W.draw_tile_back(surface, tile_rect)
+                continue
             W.draw_tile(
                 surface, ui.fonts, tile_rect, face,
                 rank_size=T.FS_TILE_MELD_RANK, suit_size=T.FS_TILE_MELD_SUIT,

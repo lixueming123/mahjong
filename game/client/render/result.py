@@ -1,6 +1,12 @@
-"""结算界面（UI_UX_SPEC §9）。
+"""结算界面（UI_UX_SPEC v2.0 §9：局终页 + 场终页两形态）。
 
 调用约定：`app` 先绘制牌桌快照，再调用本模块（蒙层 + 中央面板）。
+
+- **局终页**（`game_end` 后，一场最多 8 次）：标题带局号/连庄、番种明细（`win.yaku[]`
+  顺序渲染）、卡片累计分（`match_total`）、下一局 5 s 倒计时提示；**无出口按钮**
+  （§9.5：出口只在场终页，局终页发帧会撞服务端 BAD_REQUEST）。
+- **场终页**（`match_end` 后，每场 1 次）：`rankings[]` 排名表（数组序直渲、并列跳号）
+  + 两出口按钮；不渲染局终页遗留状态（金框/番种明细/收付/手牌）。
 """
 
 from __future__ import annotations
@@ -24,7 +30,35 @@ REASON_LABEL = {
     "draw_exhausted": "荒庄（牌山摸尽）",
 }
 
-TAG_LABEL = {"seven_pairs": "七对子", "pure_one_suit": "清一色"}
+# v2.0（§9.4）：番种 id → 中文标签（id 逐字取自 PROTOCOL v1.6 / RULESET §6.4；14 项全量）。
+# 「平和」只作 1 番番种名；无番和牌显示「无番（0 番）」（§9.2，v1.9 旧文案作废）。
+YAKU_LABEL = {
+    "menzen": "门前清",
+    "tanyao": "断幺九",
+    "pinfu": "平和",
+    "iipeikou": "一杯口",
+    "yakuhai": "箭刻",
+    "rinshan": "杠上开花",
+    "sanshoku_doujun": "三色同顺",
+    "ittsuu": "一气通贯",
+    "toitoi": "对对和",
+    "sanankou": "三暗刻",
+    "honitsu": "混一色",
+    "shousangen": "小三元",
+    "seven_pairs": "七对子",
+    "pure_one_suit": "清一色",
+}
+
+# 下一局倒计时时长（§9.2 下一局提示行：N 由 5 递减；与服务端 --inter-hand-delay-ms 默认同源）
+NEXT_ROUND_SECONDS = 5.0
+# v2.0（§9.2）：局终页下一局提示行（占用场终页「再来一局」按钮的位置）
+R_NEXT_ROUND_HINT = (430, 604, 420, 52)
+# v2.0（§9.6）：场终页排名表（行高 32、行首 y=250，按 rankings[] 数组序直渲）
+R_RANKINGS = (164, 246, 952, 140)
+RANKING_ROW_H = 32
+RANKING_ROW_Y0 = 250
+
+NEXT_DEALER_HINT = "下一局庄家"
 
 
 def _title(state: GameState) -> str:
@@ -33,11 +67,84 @@ def _title(state: GameState) -> str:
     return REASON_LABEL.get(reason, str(reason or "结算"))
 
 
-def _tags_text(win_diff: dict | None) -> str:
+def _round_prefix(state: GameState) -> str:
+    """局终页标题左段（§9.2 v2.0）：「第 X/4 局 · 连庄 N · 」。"""
+    result = state.result or {}
+    round_index = result.get("round_index")
+    x = round_index + 1 if isinstance(round_index, int) else state.round_index + 1
+    count = state.round_count
+    renchan = result.get("renchan_count")
+    n = renchan if isinstance(renchan, int) else state.renchan_count
+    return f"第 {x}/{count} 局 · 连庄 {n} · "
+
+
+def _yaku_detail(win_diff: dict | None) -> str:
+    """番种明细行（§9.2 v2.0 冻结形状）：`明细：门清 1番 · 七对子 2番 ｜ 庄家 +1 ｜ 合计 4 番（16 分）已封顶`。
+
+    - ① 按 `win.yaku[]` 顺序逐个「中文名 `N`番」；
+    - ② 「庄家 +`dealer`」（为 0 不显示；**自摸 +tsumo 恒 0，恒不显示**——自摸不是番种，B1.1）；
+    - ③ 结尾「合计 `total` 番（`multiplier` 分）」，`total == 6` 时追加「已封顶」；
+    - 无番和牌显示「无番（0 番）」（UX-15 冻结文案；「平和」只作 1 番番种名）。
+    """
     if not isinstance(win_diff, dict):
         return "本局不计分"
-    tags = [TAG_LABEL.get(t, str(t)) for t in (win_diff.get("tags") or [])]
-    return " · ".join(tags) if tags else "平和"
+    yaku = [y for y in (win_diff.get("yaku") or []) if isinstance(y, dict) and isinstance(y.get("id"), str)]
+    if not yaku:
+        return "无番（0 番）"
+    parts: list[str] = []
+    base = 0
+    for item in yaku:
+        yid = item["id"]
+        han = item.get("han") if isinstance(item.get("han"), int) else 0
+        base += han
+        label = YAKU_LABEL.get(yid, str(yid))
+        # 箭刻合并为一条（han = 组数）：han > 1 时显示「箭刻 N 组」（§9.4）
+        if yid == "yakuhai" and han > 1:
+            parts.append(f"{label} {han} 组")
+        else:
+            parts.append(f"{label} {han}番")
+    text = " · ".join(parts)
+    breakdown = win_diff.get("han_breakdown")
+    total = base
+    multiplier = None
+    if isinstance(breakdown, dict):
+        total = breakdown.get("total") if isinstance(breakdown.get("total"), int) else base
+        dealer = breakdown.get("dealer")
+        if isinstance(dealer, int) and dealer > 0:
+            text += f" ｜ 庄家 +{dealer}"
+    multiplier = win_diff.get("multiplier")
+    if not isinstance(multiplier, int) or multiplier <= 0:
+        multiplier = 1 << total  # = 2^total（§9.4：R = 2^番）
+    text += f" ｜ 合计 {total} 番（{multiplier} 分）"
+    if total >= 6:
+        text += "已封顶"
+    return text
+
+
+def _leader_text(state: GameState) -> str:
+    """D-3（§9.2 收付文案末行，灰色）：「本场累计：<领先者昵称> 领先」。
+
+    按 `results[].match_total` 降序取第一名；并列时写「…、… 并列领先」（v2.0）。
+    四家全为 0（首局荒庄且无人得分）也是并列，按并列渲染。
+    """
+    results = _results(state)
+    totals = {entry["seat"]: entry.get("match_total") for entry in results
+              if isinstance(entry.get("match_total"), int)}
+    if not totals:
+        return ""
+    best = max(totals.values())
+    leaders = [seat for seat, total in sorted(totals.items()) if total == best]
+    names = "、".join(state.name_of(seat) for seat in leaders)
+    if len(leaders) > 1:
+        return f"本场累计：{names} 并列领先"
+    return f"本场累计：{names} 领先"
+
+
+def _match_total_of(entry: dict) -> str:
+    total = entry.get("match_total")
+    if isinstance(total, int):
+        return f"累计 {total:+d}"
+    return ""
 
 
 def _results(state: GameState) -> list[dict]:
@@ -67,6 +174,12 @@ def group_winner_hand(state: GameState, win_seat: int) -> tuple[list, list[str]]
     pool = list(hand)
     groups = []
     for meld in melds:
+        if not meld.tiles and meld.is_concealed_kan:
+            # v2.0（§9.3）：暗杠空数组形态（理论上结算页应已揭示为 4 张；仍须容错）——
+            # 保留该组并在渲染时画 4 张牌背 + 记 WARN
+            log.warning("结算页出现 tiles 为空的暗杠组（未揭示形态），按 4 张牌背渲染")
+            groups.append(meld)
+            continue
         if multiset_remove(pool, meld.tiles):
             groups.append(meld)
         else:
@@ -75,19 +188,55 @@ def group_winner_hand(state: GameState, win_seat: int) -> tuple[list, list[str]]
     return groups, pool
 
 
+def _next_dealer(state: GameState) -> int | None:
+    """§9.2 下一局提示：下一局庄家由客户端按 §2.2 第 3 条本地推算（连庄不变、轮庄 +1）。"""
+    result = state.result or {}
+    dealer = result.get("dealer")
+    if not isinstance(dealer, int):
+        dealer = state.dealer
+    if not isinstance(dealer, int):
+        return None
+    reason = result.get("reason")
+    if reason == "draw_exhausted":
+        return dealer  # 荒庄一律连庄（§3.3 消歧）
+    win = result.get("win")
+    winner = win.get("seat") if isinstance(win, dict) else None
+    if winner == dealer:
+        return dealer
+    return (dealer + 1) % 4
+
+
+def _seconds_to_next_round(state: GameState, now: float) -> int:
+    if state.result_at is None:
+        return int(NEXT_ROUND_SECONDS)
+    left = NEXT_ROUND_SECONDS - max(0.0, now - state.result_at)
+    return max(0, int(left + 0.999))  # 由 5 递减到 0 的整数秒
+
+
 def render(surface: pygame.Surface, ui: UiView) -> None:
     state, fonts = ui.state, ui.fonts
-    result = state.result or {}
-    win = result.get("win") if isinstance(result.get("win"), dict) else None
-
     mask = pygame.Surface((T.LOGICAL_W, T.LOGICAL_H), pygame.SRCALPHA)
     mask.fill(T.MASK)
     surface.blit(mask, (0, 0))
 
     W.draw_panel(surface, T.R_RESULT_PANEL, fill=(24, 32, 30, 245), edge=T.PANEL_EDGE, radius=8, width=2)
 
-    # 标题行
-    W.draw_text(surface, _title(state), fonts.get(T.FS_H1, bold=True), T.TEXT, T.R_RESULT_TITLE)
+    if state.match_end is not None:
+        _render_match_end(surface, ui)
+    else:
+        _render_round_end(surface, ui)
+
+
+# ---------------------------------------------------------------- 局终页（§9.2–§9.5）
+
+
+def _render_round_end(surface: pygame.Surface, ui: UiView) -> None:
+    state, fonts = ui.state, ui.fonts
+    result = state.result or {}
+    win = result.get("win") if isinstance(result.get("win"), dict) else None
+
+    # 标题行：局号 + 连庄 + 和牌方式
+    W.draw_text(surface, f"{_round_prefix(state)}{_title(state)}", fonts.get(T.FS_H1, bold=True), T.TEXT, T.R_RESULT_TITLE)
     if win is not None:
         delta = None
         for entry in _results(state):
@@ -100,10 +249,10 @@ def render(surface: pygame.Surface, ui: UiView) -> None:
                 surface, f"{delta:+d}", fonts.get(T.FS_H1, bold=True), color, T.R_RESULT_TITLE, W.ALIGN_RIGHT
             )
 
-    # 牌型行
-    W.draw_text(surface, _tags_text(win), fonts.get(T.FS_H3), T.TEXT_DIM, T.R_RESULT_TAGS)
+    # 番种明细行（v2.0：win.yaku[] 顺序渲染；无番 → 「无番（0 番）」；无自摸加成行）
+    W.draw_text(surface, _yaku_detail(win), fonts.get(T.FS_H3), T.TEXT_DIM, T.R_RESULT_TAGS)
 
-    # 四座位结果卡片
+    # 四座位结果卡片（v2.0：delta + 累计分 match_total）
     from_payer = win.get("from_seat") if win is not None else None
     for entry in _results(state):
         seat = entry["seat"]
@@ -142,6 +291,13 @@ def render(surface: pygame.Surface, ui: UiView) -> None:
             (rect[0], rect[1] + 26, rect[2], 44),
             W.ALIGN_CENTER,
         )
+        # v2.0：卡片累计分（只在 game_end.match_total 出现；state_sync 永远不会有）
+        total_text = _match_total_of(entry)
+        if total_text:
+            W.draw_text(
+                surface, total_text, fonts.get(T.FS_SMALL), T.TEXT_DIM,
+                (rect[0] + 4, rect[1] + rect[3] - 22, rect[2] - 8, 18), W.ALIGN_CENTER,
+            )
         if from_payer is not None and from_payer == seat:
             tag_rect = (rect[0] + rect[2] - 46, rect[1] + 4, 42, 18)
             pygame.draw.rect(surface, T.NEG, tag_rect, border_radius=3)
@@ -160,11 +316,23 @@ def render(surface: pygame.Surface, ui: UiView) -> None:
     else:
         _render_win_block(surface, ui, win)
 
-    # 两个出口（UI_UX_SPEC §9.2/§9.5）：再来一局 = 断开重连开新局；返回大厅 = 断开回登录界面
-    for rect, label in ((T.R_RESULT_REMATCH_BTN, "再来一局"), (T.R_RESULT_BACK_BTN, "返回大厅")):
-        hovered = T.rect_contains(rect, ui.mouse)
-        W.draw_button(
-            surface, fonts, rect, label, enabled=True, hovered=hovered, pressed=hovered and ui.mouse_down
+    # v2.0（§9.2）：下一局提示行（仅局终页；无出口按钮——出口只在场终页 §9.5）
+    if result.get("match_will_continue") is False:
+        W.draw_text(
+            surface, "本场结束，正在统计排名…", fonts.get(T.FS_H3), T.TEXT,
+            R_NEXT_ROUND_HINT, W.ALIGN_CENTER,
+        )
+    else:
+        seconds = _seconds_to_next_round(state, ui.now)
+        dealer = _next_dealer(state)
+        dealer_text = f"{NEXT_DEALER_HINT}：{state.name_of(dealer)}" if dealer is not None else ""
+        W.draw_text(
+            surface, f"下一局即将开始（{seconds} 秒）", fonts.get(T.FS_H3), T.TEXT,
+            (R_NEXT_ROUND_HINT[0], R_NEXT_ROUND_HINT[1], R_NEXT_ROUND_HINT[2], 26), W.ALIGN_CENTER,
+        )
+        W.draw_text(
+            surface, dealer_text, fonts.get(T.FS_SMALL), T.TEXT_DIM,
+            (R_NEXT_ROUND_HINT[0], R_NEXT_ROUND_HINT[1] + 28, R_NEXT_ROUND_HINT[2], 22), W.ALIGN_CENTER,
         )
 
     # 战绩（UI_UX_SPEC §9.6）：账号会话在按钮上方内嵌「汇总 + 最近 ≤10 局」，游客会话不绘制。
@@ -172,9 +340,86 @@ def render(surface: pygame.Surface, ui: UiView) -> None:
 
     remaining = "—" if state.remaining is None else str(state.remaining)
     room = state.room_id or "—"
+    round_index = result.get("round_index")
+    x = round_index + 1 if isinstance(round_index, int) else state.round_index + 1
     W.draw_text(
         surface,
-        f"最终牌山剩余 {remaining} · 房间 {room} · 点「再来一局」开新局 / 「返回大厅」结束本局",
+        f"最终牌山剩余 {remaining} · 房间 {room} · 第 {x}/{state.round_count} 局",
+        fonts.get(T.FS_SMALL),
+        T.TEXT_DIM,
+        T.R_RESULT_FOOTER,
+        W.ALIGN_CENTER,
+    )
+
+
+# ---------------------------------------------------------------- 场终页（§9.6）
+
+
+def _render_match_end(surface: pygame.Surface, ui: UiView) -> None:
+    state, fonts = ui.state, ui.fonts
+    match_end = state.match_end or {}
+    hands_played = match_end.get("hands_played")
+    renchan = match_end.get("renchan_count")
+    n = hands_played if isinstance(hands_played, int) else "?"
+    m = renchan if isinstance(renchan, int) else 0
+
+    # 标题行：本场结束 · 共 N 局（含连庄 M 次）
+    W.draw_text(
+        surface, f"本场结束 · 共 {n} 局（含连庄 {m} 次）",
+        fonts.get(T.FS_H1, bold=True), T.TEXT, T.R_RESULT_TITLE,
+    )
+    W.draw_text(surface, "最终排名如下", fonts.get(T.FS_H3), T.TEXT_DIM, T.R_RESULT_TAGS)
+
+    # 排名表：按 rankings[] **数组顺序**直渲（协议已排好：final_score 降序、同分 seat 升序）；
+    # 第 1 名金色描边；并列名次照协议 rank 显示（并列跳号）。
+    rankings = [r for r in (match_end.get("rankings") or []) if isinstance(r, dict)]
+    for i, entry in enumerate(rankings):
+        seat = entry.get("seat")
+        if not isinstance(seat, int):
+            continue
+        y = RANKING_ROW_Y0 + i * RANKING_ROW_H
+        rect = (R_RANKINGS[0], y, R_RANKINGS[2], RANKING_ROW_H - 4)
+        rank = entry.get("rank") if isinstance(entry.get("rank"), int) else i + 1
+        score = entry.get("final_score")
+        score_text = f"{score:+d}" if isinstance(score, int) else "—"
+        color = T.POS if (isinstance(score, int) and score > 0) else (
+            T.NEG if (isinstance(score, int) and score < 0) else T.ZERO_SCORE
+        )
+        fill = (40, 56, 48, 245) if rank == 1 else T.PANEL
+        W.draw_panel(surface, rect, fill=fill, edge=T.PANEL_EDGE, radius=4)
+        if rank == 1:
+            pygame.draw.rect(surface, T.SELECT, rect, width=2, border_radius=4)
+        view = state.seat_view(seat)
+        name = view.name or f"座位{seat}"
+        if view.disconnected:
+            name += "（断线托管）"
+        W.draw_text(
+            surface,
+            f"第 {rank} 名 · {state.rel_label(seat)} {name}",
+            fonts.get(T.FS_BODY),
+            T.TEXT,
+            (rect[0] + 12, rect[1], rect[2] // 2, rect[3]),
+            W.ALIGN_LEFT,
+        )
+        W.draw_text(
+            surface, score_text, fonts.get(T.FS_BODY, bold=True), color,
+            (rect[0] + rect[2] - 200, rect[1], 188, rect[3]), W.ALIGN_RIGHT,
+        )
+
+    # 两出口按钮（§9.5/§9.6：仅场终页渲染）
+    for rect, label in ((T.R_RESULT_REMATCH_BTN, "再来一局"), (T.R_RESULT_BACK_BTN, "返回大厅")):
+        hovered = T.rect_contains(rect, ui.mouse)
+        W.draw_button(
+            surface, fonts, rect, label, enabled=True, hovered=hovered, pressed=hovered and ui.mouse_down
+        )
+
+    # 战绩块照常（§9.5 第 6 条：账号模式）
+    stats_view.render_result_block(surface, ui)
+
+    room = state.room_id or "—"
+    W.draw_text(
+        surface,
+        f"房间 {room} · 本场战绩已存档",
         fonts.get(T.FS_SMALL),
         T.TEXT_DIM,
         T.R_RESULT_FOOTER,
@@ -204,29 +449,47 @@ def _render_win_block(surface: pygame.Surface, ui: UiView, win: dict) -> None:
 
     winner_seat = win.get("seat")
     winner_name = state.name_of(winner_seat) if isinstance(winner_seat, int) else "—"
-    tags = _tags_text(win)
+    # §9.2（v2.0）收付文案：荣和 =「<和牌者> 荣和，合计 <total> 番，<放炮者> 支付 <per_payer> 分」；
+    # 自摸 =「<和牌者> 自摸，合计 <total> 番，三家各付 <per_payer> 分，合计 <total> 分」；
+    # 末行灰色「本场累计：<领先者昵称> 领先」（D-3：并列时「并列领先」）。
+    # 自摸**不渲染加成行**（B1.1：自摸不是番种，tsumo 恒 0 自然不显示）。
+    han_total = None
+    breakdown = win.get("han_breakdown")
+    if isinstance(breakdown, dict) and isinstance(breakdown.get("total"), int):
+        han_total = breakdown["total"]
     tsumo = bool(win.get("tsumo"))
     per_payer = win.get("per_payer")
     total = win.get("total")
-    lines: list[str] = []
+    han_text = f"合计 {han_total} 番" if han_total is not None else ""
+    lines: list[tuple[str, tuple]] = []
     if tsumo:
-        lines.append(f"{winner_name} 自摸 {tags}，")
-        lines.append(f"三家各付 {per_payer} 分，合计 {total} 分")
+        lines.append((f"{winner_name} 自摸，{han_text}，", T.TEXT))
+        lines.append((f"三家各付 {per_payer} 分，合计 {total} 分", T.TEXT))
     else:
         payer = win.get("from_seat")
         payer_name = state.name_of(payer) if isinstance(payer, int) else "—"
-        lines.append(f"{winner_name} 荣和 {tags}，")
-        lines.append(f"{payer_name} 支付 {per_payer} 分")
-    remaining = "—" if state.remaining is None else str(state.remaining)
-    lines.append(f"牌山剩余 {remaining}")
-    for i, line in enumerate(lines):
+        lines.append((f"{winner_name} 荣和，{han_text}，", T.TEXT))
+        lines.append((f"{payer_name} 支付 {per_payer} 分", T.TEXT))
+    leader = _leader_text(state)
+    if leader:
+        lines.append((leader, T.TEXT_DIM))
+    for i, (line, color) in enumerate(lines):
         W.draw_text(
             surface,
             line,
             fonts.get(20),
-            T.TEXT,
+            color,
             (T.R_RESULT_PAYMENT[0], T.R_RESULT_PAYMENT[1] + i * 28, T.R_RESULT_PAYMENT[2], 26),
         )
+
+    remaining = "—" if state.remaining is None else str(state.remaining)
+    W.draw_text(
+        surface,
+        f"牌山剩余 {remaining}",
+        fonts.get(20),
+        T.TEXT,
+        (T.R_RESULT_PAYMENT[0], T.R_RESULT_PAYMENT[1] + len(lines) * 28, T.R_RESULT_PAYMENT[2], 26),
+    )
 
     if not isinstance(winner_seat, int):
         return
@@ -238,13 +501,17 @@ def _render_win_block(surface: pygame.Surface, ui: UiView, win: dict) -> None:
     marked = False
     for group in groups:
         tile_pitch = T.RESULT_HAND_PITCH
-        group_w = len(group.tiles) * tile_pitch - 2 + 6
+        faces: list[str | None] = list(group.tiles) or [None] * 4  # 暗杠空数组 ⇒ 4 张牌背（§4.8）
+        group_w = len(faces) * tile_pitch - 2 + 6
         pygame.draw.rect(surface, T.PANEL, (x, area[1], group_w, area[3]), border_radius=3)
         pygame.draw.rect(surface, T.PANEL_EDGE, (x, area[1], group_w, area[3]), width=1, border_radius=3)
-        for i, face in enumerate(group.tiles):
+        for i, face in enumerate(faces):
+            rect = (x + 3 + i * tile_pitch, y, T.RESULT_HAND_TILE[0], T.RESULT_HAND_TILE[1])
+            if face is None:
+                W.draw_tile_back(surface, rect)
+                continue
             W.draw_tile(
-                surface, fonts,
-                (x + 3 + i * tile_pitch, y, T.RESULT_HAND_TILE[0], T.RESULT_HAND_TILE[1]), face,
+                surface, fonts, rect, face,
                 radius=4,
                 rank_size=T.FS_TILE_RESULT_HAND_RANK,
                 suit_size=T.FS_TILE_RESULT_HAND_SUIT,

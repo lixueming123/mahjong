@@ -10,6 +10,12 @@
 ./.venv/bin/python game/client/main.py --fullscreen          # 非验收项
 ```
 
+或者走启动脚本（固定用仓库根虚拟环境，参数原样透传）；服务端对应 `./game/start_server.sh`（缺二进制时自动编译）：
+
+```bash
+./game/start_client.sh --host 127.0.0.1 --port 9527
+```
+
 依赖：仓库根目录虚拟环境 `./.venv/bin/python`（pygame 2.6.1）。
 美术：**只**用 pygame 几何绘制 + 系统字体，不加载任何外部图片/字体文件（UI_UX_SPEC §1.3 / UX-9）。
 

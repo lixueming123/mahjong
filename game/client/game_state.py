@@ -33,7 +33,9 @@ REL_LABELS = ("自家", "下家", "对家", "上家")
 WINDOW_DISCARD = "discard"
 WINDOW_CLAIM = "claim"
 
-MELD_TYPES = ("pong", "chow", "kong")
+MELD_TYPES = ("pong", "chow", "kong", "ankan", "kakan")  # v2.0：3 → 5 值（PROTOCOL v1.6 §5.9）
+
+KAN_TYPES = ("kong", "ankan", "kakan")  # 张数第二道校验用：kans = 杠组数（§4.5 v2.0）
 
 
 @dataclass
@@ -43,7 +45,15 @@ class Meld:
 
     @property
     def label(self) -> str:
-        return {"pong": "碰", "chow": "吃", "kong": "杠"}.get(self.type, str(self.type))
+        # §4.8：组框右上角小字标注，v2.0 扩五种
+        return {"pong": "碰", "chow": "吃", "kong": "杠", "ankan": "暗杠", "kakan": "加杠"}.get(
+            self.type, str(self.type)
+        )
+
+    @property
+    def is_concealed_kan(self) -> bool:
+        """§4.8 暗杠两形态：本家恒 4 张牌面；他家揭示前 tiles == []（渲染 4 张牌背）。"""
+        return self.type == "ankan"
 
 
 def parse_meld(obj: Any) -> Meld | None:
@@ -129,6 +139,11 @@ class GameState:
         self.room_id: str | None = None
         self.my_seat: int | None = None
         self.dealer: int | None = None
+        # v2.0 场次（§4.11）：round_index/round_count 来自 game_start；renchan_count 来自
+        # game_end 且**跨局保留**（连庄由局终帧累计，game_start 不携带、不得清零）。
+        self.round_index: int = 0
+        self.round_count: int = 4
+        self.renchan_count: int = 0
         self.hand: list[str] = []
         self.melds: list[Meld] = []
         self.seats: list[SeatView] = [SeatView(seat=i) for i in range(4)]
@@ -143,7 +158,9 @@ class GameState:
         self.selected_index: int | None = None
         self.drawn_index: int | None = None
         self.frozen: bool = False           # 收到 action_event{win} 后冻结牌桌输入
-        self.result: dict | None = None     # game_end 原始载荷
+        self.result: dict | None = None     # game_end 原始载荷（局终页）
+        self.result_at: float | None = None  # 局终页倒计时基准（§9.2 下一局提示 5 s）
+        self.match_end: dict | None = None  # match_end 原始载荷（场终页，§9.6；None = 未场终）
         self.win_seat: int | None = None
         self.hand_warning: bool = False
         self.protocol_warning: bool = False  # 收到 seats[].hand（服务端缺陷）时置位
@@ -190,13 +207,26 @@ class GameState:
         remaining_guard = (win.recv_monotonic + win.window_ms / 1000.0 - now_mono) * 1000.0
         return abs(remaining_server - remaining_guard)
 
+    def kans(self) -> int:
+        """杠组数（§4.5 v2.0 第二道校验用）：melds 中 type ∈ {kong, ankan, kakan} 的组数。"""
+        return sum(1 for m in self.melds if m.type in KAN_TYPES)
+
     def check_hand_count(self) -> None:
-        """§4.5 张数交叉校验：`len(hand) + 3*len(melds) ∈ {13,14}`。"""
+        """§4.5 张数交叉校验（v2.0 两道）：
+
+        第一道（账面）：`len(hand) + 3*len(melds) ∈ {13,14}`；
+        第二道（物理）：`len(hand) + 3*len(melds) + kans`，等待态应为 `13 + kans`、
+        行动态 `14 + kans`（kans = 杠组数，第 4 张由 kans 补回）。任一道不过都只 WARN，
+        **不修改**本地数据。
+        """
         if not self.game_started:
             self.hand_warning = False
             return
         total = len(self.hand) + 3 * len(self.melds)
-        self.hand_warning = total not in (13, 14)
+        kans = self.kans()
+        physical = total + kans
+        ok = total in (13, 14) and physical in (13 + kans, 14 + kans)
+        self.hand_warning = not ok
 
     # ------------------------------------------------------------ 帧分发
 
@@ -210,6 +240,7 @@ class GameState:
             "action_event": self._apply_action_event,
             "state_sync": self._apply_state_sync,
             "game_end": self._apply_game_end,
+            "match_end": self._apply_match_end,  # v2.0：场终帧（§9.6）
         }.get(ftype)
         if handler is None:
             log.debug("忽略未消费的帧类型：%r", ftype)
@@ -232,6 +263,14 @@ class GameState:
         dealer = frame.get("dealer")
         if isinstance(dealer, int):
             self.dealer = dealer
+        # v2.0（§10.1 game_start 行）：整体重置牌桌 + 场次进度。**renchan_count 不在此清零**
+        # （连庄由局终帧累计、跨局保留；game_start 不携带该字段）。
+        round_index = frame.get("round_index")
+        if isinstance(round_index, int) and 0 <= round_index < 64:
+            self.round_index = round_index
+        round_count = frame.get("round_count")
+        if isinstance(round_count, int) and round_count > 0:
+            self.round_count = round_count
         self.melds = []
         self.remaining = None
         self.seq = None
@@ -243,6 +282,8 @@ class GameState:
         self.drawn_index = None
         self.frozen = False
         self.result = None
+        self.result_at = None
+        self.match_end = None
         self.win_seat = None
         self.game_started = True
         self.screen = SCREEN_TABLE
@@ -255,7 +296,10 @@ class GameState:
             view.discards = []
             view.melds = []
             view.disconnected = False
-        log.info("开局：seat=%s dealer=%s hand=%d 张", self.my_seat, self.dealer, len(self.hand))
+        log.info(
+            "开局：seat=%s dealer=%s round=%s/%s hand=%d 张",
+            self.my_seat, self.dealer, self.round_index + 1, self.round_count, len(self.hand),
+        )
 
     def _apply_draw(self, frame: dict) -> None:
         seat = frame.get("seat")
@@ -410,8 +454,10 @@ class GameState:
         self.check_hand_count()
 
     def _apply_game_end(self, frame: dict) -> None:
-        # §5.10 / H5：game_end 不携带 seq，不参与 seq 比较。
+        # §5.10 / H5：game_end 不携带 seq，不参与 seq 比较。v2.0：game_end = 局终页（非终态），
+        # `match_will_continue == true` 时等待下一局 game_start，`false` 时等待 match_end。
         self.result = frame
+        self.result_at = time.monotonic()
         self.window = None
         self.pending = False
         self.pending_label = None
@@ -425,6 +471,26 @@ class GameState:
             self.win_seat = win["seat"]
         else:
             self.win_seat = None
+        # v2.0：连庄次数由局终帧累计（HUD「连庄 N」与局终页标题共用；跨局保留）。
+        renchan = frame.get("renchan_count")
+        if isinstance(renchan, int) and renchan >= 0:
+            self.renchan_count = renchan
+
+    def _apply_match_end(self, frame: dict) -> None:
+        # v2.0（§9.6）：match_end = 场终页（每场恰好 1 次），此后不再有对局帧。
+        self.match_end = frame
+        self.window = None
+        self.pending = False
+        self.pending_label = None
+        self.selected_index = None
+        self.drawn_index = None
+        self.frozen = True
+        self.screen = SCREEN_RESULT
+        self.phase = "结算"
+        log.info(
+            "场终：hands_played=%s renchan=%s",
+            frame.get("hands_played"), frame.get("renchan_count"),
+        )
 
     # ------------------------------------------------------------ seq / 窗口推进
 

@@ -1,11 +1,13 @@
-"""操作界面（UI_UX_SPEC §5 操作栏 + §6 倒计时，与牌桌同屏叠加）。
+"""操作界面（UI_UX_SPEC v2.0 §5 操作栏 + §6 倒计时，与牌桌同屏叠加）。
 
 界面映射：`SCREEN_ACTIONBAR` 在 §2.1 中被定义为「覆盖层组件」而非独立屏幕，
 本实现对应 `GameState.window is not None and screen == SCREEN_TABLE and not frozen`
 （`bar_visible`），即「本连接最近收到一帧 `action_request` 且该窗口未被新帧推进」。
 
-按钮顺序冻结为 `打牌 → 胡 → 杠 → 碰 → 吃（每条 option 一个）→ 过`（§5.3）。
-打牌窗口 **不提供**「过」按钮（§5.3.1 / PROTOCOL H1）。
+按钮顺序冻结为 `打牌 → 胡 → 杠 → 暗杠 → 加杠 → 碰 → 吃（每条 option 一个）→ 过`
+（§5.3 v2.0：对应协议 options 全局顺序 `win → kong → ankan → kakan → pong → chow → pass`）。
+打牌窗口 **不提供**「过」按钮（§5.3.1 / PROTOCOL H1）；`ankan`/`kakan` 只出现在打牌窗口
+（PROTOCOL v1.6 §4.6），提交 `tiles` 恰好 1 个牌面元素。
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ ELLIPSIS = "…"
 
 @dataclass
 class ButtonSpec:
-    kind: str            # discard | win | kong | pong | chow | pass
+    kind: str            # discard | win | kong | ankan | kakan | pong | chow | pass
     label: str
     rect: tuple[int, int, int, int]
     enabled: bool
@@ -72,6 +74,12 @@ def build_buttons(state: GameState, remaining_ms: float | None) -> list[ButtonSp
         specs.append(("win", button_label("win"), [], True))
     for tiles in window.option_list("kong")[:1]:
         specs.append(("kong", button_label("kong", tiles), tiles, False))
+    # v2.0（§5.3）：暗杠 / 加杠 紧随明杠之后。暗杠可能有多条 option（每个可杠牌面一条，
+    # §5.7），每条一个按钮、文案均「暗杠」（不显示牌名）；提交时带该 option 的 1 个牌面。
+    for tiles in window.option_list("ankan"):
+        specs.append(("ankan", button_label("ankan"), tiles, False))
+    for tiles in window.option_list("kakan"):
+        specs.append(("kakan", button_label("kakan", tiles), tiles, False))
     for tiles in window.option_list("pong")[:1]:
         specs.append(("pong", button_label("pong", tiles), tiles, False))
     chow_options = window.option_list("chow")

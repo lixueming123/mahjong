@@ -114,6 +114,12 @@ def button_label(action: str, tiles: list[str] | None = None) -> str:
     tiles = list(tiles or [])
     if action == "kong":
         return f"杠 {tile_label(tiles[0]) if tiles else '?'}"
+    if action == "ankan":
+        # v2.0（§5.3）：暗杠文案**不显示牌名**——4 张本就在本家手牌里，发牌名会泄露给旁观录屏
+        return "暗杠"
+    if action == "kakan":
+        # v2.0（§5.3）：加杠显示「加杠 <牌名>」（T = 手中那一张）
+        return f"加杠 {tile_label(tiles[0]) if tiles else '?'}"
     if action == "pong":
         return f"碰 {tile_label(tiles[0]) if tiles else '?'}"
     if action == "chow":

@@ -306,6 +306,10 @@ class GameApp:
         elif self.state.screen == SCREEN_LOBBY:
             self._lobby_click(pos)
         elif self.state.screen == SCREEN_RESULT:
+            # v2.0（§9.5）：两出口**只在场终页**可用；局终页（match_end 未到）不响应，
+            # 避免局间发帧撞上服务端 BAD_REQUEST。
+            if self.state.match_end is None:
+                return
             if T.rect_contains(T.R_RESULT_REMATCH_BTN, pos):
                 self.rematch()
                 return
@@ -333,7 +337,11 @@ class GameApp:
         elif self.state.screen == SCREEN_TABLE:
             self._table_key(event)
         elif self.state.screen == SCREEN_RESULT:
-            # Enter 是最常用的那个（再来一局），ESC 走「返回大厅」（§9.5）
+            # Enter 是最常用的那个（再来一局），ESC 走「返回大厅」（§9.5）。
+            # D-1 守卫（§9.5 v2.0）：出口只在**场终页**可用——键盘与鼠标同规则，
+            # 局终页（match_end 未到）按 Enter/ESC 不得触发任何出口。
+            if self.state.match_end is None:
+                return
             if event.key == pygame.K_RETURN:
                 self.rematch()
             elif event.key == pygame.K_ESCAPE:
@@ -730,6 +738,10 @@ class GameApp:
             if self.login_mode == "account":
                 # 结算页要显示累计战绩，且本局刚落库（ACCOUNT_DESIGN §4.1/§5.5）。
                 self.send_frame("stats_request")
+        elif ftype == "match_end":
+            # v2.0（§9.6）：场终页恢复两出口；此后不再有对局帧。
+            self._clear_banner()
+            self.state.window = None
         elif ftype == "state_sync":
             pass
         if before_screen != self.state.screen:
@@ -1269,7 +1281,11 @@ class GameApp:
         remaining = self._remaining_ms()
         if remaining is not None and remaining <= 0:
             return False
-        if action in ("kong", "pong", "chow"):
+        if action in ("kong", "pong", "chow", "ankan", "kakan"):
+            # v2.0：ankan/kakan 的 tiles 恰好 1 个牌面元素（PROTOCOL v1.6 §4.6）
+            if action in ("ankan", "kakan") and len(tiles) != 1:
+                log.warning("%s 的 tiles 必须恰好 1 个牌面元素，拒绝发送：%r", action, tiles)
+                return False
             if not window.has(action, tiles):
                 log.warning("动作 %s%s 不在 options 中，拒绝发送", action, tiles)
                 return False
