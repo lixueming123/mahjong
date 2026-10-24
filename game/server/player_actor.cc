@@ -39,7 +39,7 @@ PlayerActor::PlayerActor(std::shared_ptr<Connection> conn, std::shared_ptr<Playe
 // coroutine runs to the co_return on the mailbox turn that popped it; the next message cannot
 // start in the middle. The visitor is a plain object rather than a coroutine per arm: nothing
 // here awaits, and wrapping the arms in tasks would add a coroutine frame to every message.
-exec::task<void> PlayerActor::Dispatch(PlayerEnvelope envelope) {
+stdexec::task<void> PlayerActor::Dispatch(PlayerEnvelope envelope) {
   std::visit(overloaded {
                  [this](PlayerEnvelope::SetSelfRefMsg&& m) { SetSelfRef(std::move(m.self)); },
                  [this](PlayerEnvelope::OnFrameMsg&& m) { OnFrame(std::move(m.line)); },

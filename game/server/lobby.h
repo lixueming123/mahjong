@@ -51,35 +51,35 @@ class LobbyActor {
   // It is how the delayed "reclaim this room" message comes back (§1.4.5): an empty ref would
   // make the reclaim's SendLocal throw on the timer thread, so CreateRoom refuses to build a
   // room it could never reclaim.
-  exec::task<void> SetSelfRef(ex_actor::ActorRef<LobbyActor> self);
+  stdexec::task<void> SetSelfRef(ex_actor::ActorRef<LobbyActor> self);
 
-  exec::task<void> CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player);
-  exec::task<void> JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player, std::string room_id);
+  stdexec::task<void> CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player);
+  stdexec::task<void> JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player, std::string room_id);
   // Open (not yet started) rooms, so the lobby screen can offer them.
-  exec::task<void> ListRooms(ex_actor::ActorRef<SeatEndpoint> conn);
-  exec::task<void> Ready(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player);
-  exec::task<void> Sync(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player);
+  stdexec::task<void> ListRooms(ex_actor::ActorRef<SeatEndpoint> conn);
+  stdexec::task<void> Ready(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player);
+  stdexec::task<void> Sync(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player);
 
   // Game-end reclaim (§1.4.5): drops the room registry entry and closes the connections that
   // belonged to it. Scheduled by the room's game-end notification; idempotent.
-  exec::task<void> ReapRoom(std::string room_id);
+  stdexec::task<void> ReapRoom(std::string room_id);
 
   // Connection lifecycle (PROTOCOL.md §1.4, §1.6, §8.5).
-  exec::task<void> OnConnectionClosed(PlayerInfo player);
+  stdexec::task<void> OnConnectionClosed(PlayerInfo player);
   // Lobby: drop the connection. In a room: forward to RoomActor, the seat becomes
   // entrusted and the connection stays open.
-  exec::task<void> OnIdleTimeout(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player);
+  stdexec::task<void> OnIdleTimeout(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player);
 
   // Reads the registry, so it takes the gate for that read (not const: acquiring the gate is a
   // mutation of the gate).
-  exec::task<size_t> room_count();
+  stdexec::task<size_t> room_count();
 
  private:
   // Seat-facing replies: the lobby's only way to answer a connection. The §7.2 quota for a
   // BAD_REQUEST is folded into the same message, so the frame is already queued before anything
   // can ask for a close.
-  exec::task<void> ReplyFrame(const ex_actor::ActorRef<SeatEndpoint>& conn, std::string frame);
-  exec::task<void> ReplyError(const ex_actor::ActorRef<SeatEndpoint>& conn, std::string_view code,
+  stdexec::task<void> ReplyFrame(const ex_actor::ActorRef<SeatEndpoint>& conn, std::string frame);
+  stdexec::task<void> ReplyError(const ex_actor::ActorRef<SeatEndpoint>& conn, std::string_view code,
                               std::string_view message);
 
   // Deliberately no `name`: the lobby never reads it. The nickname a client sees comes from

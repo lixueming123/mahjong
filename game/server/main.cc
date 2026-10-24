@@ -3,6 +3,7 @@
 //
 // Usage: mahjong_server [--port N] [--seed N] [--action-timeout-ms N] [--ai-delay-ms N]
 
+#include <array>
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
@@ -12,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include <spdlog/spdlog.h>
@@ -34,6 +36,17 @@ constexpr uint32_t kThreadPoolSize = 4;
 // dedicated db threads (and the DB's concurrency ceiling). Four is deliberately modest: the
 // bottleneck for this workload is the server, not the client, and every shard costs a thread.
 constexpr int kDbShardCount = 4;
+
+// A SchedulerUnion's alternatives are a compile-time pack, so "one scheduler per db shard plus the
+// game pool" has to be repeated at compile time. This turns a count into that pack.
+template <class Scheduler, size_t>
+using RepeatScheduler = Scheduler;
+template <class Scheduler, size_t N, class = std::make_index_sequence<N>>
+struct ShardSchedulerUnion;
+template <class Scheduler, size_t N, size_t... kIndices>
+struct ShardSchedulerUnion<Scheduler, N, std::index_sequence<kIndices...>> {
+  using Type = ex_actor::SchedulerUnion<RepeatScheduler<Scheduler, kIndices>...>;
+};
 
 struct Options {
   uint16_t port = mahjong::protocol::kDefaultPort;
@@ -242,14 +255,18 @@ int main(int argc, char** argv) {
   // account's requests — a match record and the stats request that must include it — land on the
   // same connection and stay ordered.
   auto game_pool = std::make_unique<ex_actor::WorkSharingThreadPool>(kThreadPoolSize);
+  using ShardScheduler = ex_actor::WorkSharingThreadPool::Scheduler;
+  constexpr size_t kSchedulerCount = static_cast<size_t>(kDbShardCount) + 1;
+  std::array<ShardScheduler, kSchedulerCount> schedulers {};
+  schedulers[0] = game_pool->GetScheduler();
   std::vector<std::unique_ptr<ex_actor::WorkSharingThreadPool>> db_pools;
-  std::vector<ex_actor::WorkSharingThreadPool::Scheduler> schedulers {game_pool->GetScheduler()};
   for (int i = 0; i < kDbShardCount; ++i) {
     db_pools.push_back(std::make_unique<ex_actor::WorkSharingThreadPool>(1));
-    schedulers.push_back(db_pools.back()->GetScheduler());
+    schedulers[static_cast<size_t>(i) + 1] = db_pools.back()->GetScheduler();
   }
-  auto pool_union = std::make_unique<ex_actor::SchedulerUnion<ex_actor::WorkSharingThreadPool::Scheduler>>(
-      std::move(schedulers));
+  using PoolUnion = typename ShardSchedulerUnion<ShardScheduler, kSchedulerCount>::Type;
+  auto pool_union = std::apply(
+      [](auto... shard_schedulers) { return std::make_unique<PoolUnion>(shard_schedulers...); }, schedulers);
 
   ex_actor::Init(pool_union->GetScheduler());
   // The registry holds the scheduler by raw pointers, so the pools and the union must outlive it.
@@ -268,10 +285,10 @@ int main(int argc, char** argv) {
   // the schema DDL is never issued by two shards at once.
   mahjong::DbService db;
   {
-    auto startup = [&]() -> exec::task<void> {
+    auto startup = [&]() -> stdexec::task<void> {
       for (int i = 0; i < kDbShardCount; ++i) {
         ex_actor::ActorConfig config {.scheduler_index = static_cast<size_t>(i) + 1};
-        db.AddShard(co_await ex_actor::Spawn<mahjong::DbActor>(config, options->db));
+        db.AddShard(co_await ex_actor::Spawn<mahjong::DbActor>(options->db).WithConfig(config));
       }
       // Probe on the shard's own thread — that thread owns its connection (db.h). A dead MySQL
       // is not fatal: the server starts and only the account frames answer INTERNAL (§2.3).

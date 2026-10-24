@@ -57,7 +57,7 @@ class PlayerActor : public SeatEndpoint {
 
   // The one public entry (seat_endpoint.h): gateway frames and socket events, account results,
   // and the seat's frame/error/close deliveries all arrive here, each as its own message type.
-  exec::task<void> Dispatch(PlayerEnvelope envelope) override;
+  stdexec::task<void> Dispatch(PlayerEnvelope envelope) override;
 
   // Introspection (logging and tests); like the room's getters it is deliberately outside the
   // gate, and nothing outside this actor reads it in production.

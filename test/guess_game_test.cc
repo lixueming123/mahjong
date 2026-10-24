@@ -15,7 +15,7 @@ class Player {
   explicit Player(ex_actor::ActorRef<GameManager> game_ref, int player_id)
       : game_ref_(game_ref), player_id_(player_id), rng_(std::random_device{}()) {}
 
-  exec::task<void> MakeGuess();
+  stdexec::task<void> MakeGuess();
 
   int GetPlayerId() const { return player_id_; }
 
@@ -48,7 +48,7 @@ class GameManager {
     std::cout << "[GameManager] Game started! Range: [" << min_num_ << ", " << max_num_ << "]\n";
   }
 
-  exec::task<void> ProcessTurn() {
+  stdexec::task<void> ProcessTurn() {
     if (!game_started_) {
       co_return;
     }
@@ -111,7 +111,7 @@ class GameManager {
   bool game_started_;
 };
 
-exec::task<void> Player::MakeGuess() {
+stdexec::task<void> Player::MakeGuess() {
   auto min_num = co_await game_ref_.template Send<&GameManager::GetMinNum>();
   auto max_num = co_await game_ref_.template Send<&GameManager::GetMaxNum>();
 
@@ -138,7 +138,7 @@ exec::task<void> Player::MakeGuess() {
 }
 
 TEST(GuessGameTest, ThreePlayersGuessNumber) {
-  auto game_coroutine = []() -> exec::task<void> {
+  auto game_coroutine = []() -> stdexec::task<void> {
     auto game_manager = co_await ex_actor::Spawn<GameManager>();
 
     auto player1 = co_await ex_actor::Spawn<Player>(game_manager, 0);

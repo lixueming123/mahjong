@@ -92,7 +92,7 @@ class CapturingSeatActor : public SeatEndpoint {
  public:
   explicit CapturingSeatActor(std::shared_ptr<CapturingSink> sink) : sink_(std::move(sink)) {}
 
-  exec::task<void> Dispatch(PlayerEnvelope envelope) override {
+  stdexec::task<void> Dispatch(PlayerEnvelope envelope) override {
     if (auto* m = std::get_if<PlayerEnvelope::SeatFrameMsg>(&envelope.msg)) {
       sink_->Push(std::move(m->frame));
     } else if (auto* e = std::get_if<PlayerEnvelope::SeatErrorMsg>(&envelope.msg)) {

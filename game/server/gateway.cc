@@ -22,6 +22,8 @@
 #include "protocol.h"
 #include "utf8.h"
 
+#include "ex_actor/internal/platform.h"
+
 namespace ex = stdexec;
 
 namespace mahjong {
@@ -121,7 +123,7 @@ void Gateway::Stop() {
 }
 
 void Gateway::Run() {
-  ex_actor::internal::util::SetThreadName("gw-poll");
+  ex_actor::internal::SetThreadName("gw-poll");
   if (listen_fd_ < 0) {
     spdlog::error("gateway: Run() called before a successful Start()");
     return;

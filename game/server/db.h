@@ -117,24 +117,24 @@ class DbActor {
   // Opens the connection and creates the schema. Runs on db_pool, so the connect's blocking
   // resolve/TCP/auth never touches the game pools. Returns whether accounts are usable; the
   // server starts either way (§2.3).
-  exec::task<bool> Initialize();
+  stdexec::task<bool> Initialize();
 
   // Login/Register/FetchStats answer by posting OnLoginResult/OnRegisterResult/OnStatsResult
   // into |reply|; they return nothing, so the caller never awaits MySQL.
-  exec::task<void> Login(std::string username, std::string password, ex_actor::ActorRef<PlayerActor> reply);
+  stdexec::task<void> Login(std::string username, std::string password, ex_actor::ActorRef<PlayerActor> reply);
   // `nickname` empty means "use the username" (§3.2).
-  exec::task<void> Register(std::string username, std::string password, std::string nickname,
+  stdexec::task<void> Register(std::string username, std::string password, std::string nickname,
                             ex_actor::ActorRef<PlayerActor> reply);
-  exec::task<void> FetchStats(uint64_t account_id, ex_actor::ActorRef<PlayerActor> reply);
+  stdexec::task<void> FetchStats(uint64_t account_id, ex_actor::ActorRef<PlayerActor> reply);
   // Fire and forget: a failed write is logged and never propagates to the game (§2.3, §4.6).
-  exec::task<void> RecordMatch(MatchRecord record);
+  stdexec::task<void> RecordMatch(MatchRecord record);
   // Fire and forget, v1.3 (§4 item 7): one `match_results` row per account at match end.
   // A duplicate (room_id, account_id) is logged as a WARN and ignored — never retried.
-  exec::task<void> RecordMatchResult(MatchResultRecord record);
+  stdexec::task<void> RecordMatchResult(MatchResultRecord record);
 
   // Closes the connection and releases the client library. Runs on db_pool (the library is
   // thread scoped, so opening and closing must happen on the same thread); idempotent.
-  exec::task<void> Stop();
+  stdexec::task<void> Stop();
 
   // Introspection for main()'s startup log; written only by Initialize()/Stop() on db_pool.
   bool available() const { return available_.load(std::memory_order_relaxed); }

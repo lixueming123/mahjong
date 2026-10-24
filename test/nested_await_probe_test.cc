@@ -1,11 +1,11 @@
-// Probe: awaiting a *nested* exec::task from a coroutine handler that was dispatched as an
+// Probe: awaiting a *nested* stdexec::task from a coroutine handler that was dispatched as an
 // actor message.
 //
 // Written while chasing a SIGTRAP in the mahjong sample, where a coroutine handler awaited a
 // private helper coroutine. All three shapes below turn out to be FINE — the real cause was
 // elsewhere and worth remembering:
 //
-//   **A function declared `exec::task<T>` that contains no coroutine keyword is not a coroutine.**
+//   **A function declared `stdexec::task<T>` that contains no coroutine keyword is not a coroutine.**
 //   In the sample, moving the gate up into `Dispatch` left one helper (`LobbyActor::SetSelfRef`)
 //   with no `co_await` at all, so it silently stopped being a coroutine, fell off the end of a
 //   non-void function and handed back an uninitialized task. `co_await`ing that traps in
@@ -32,10 +32,10 @@ namespace {
 class NestedProbe {
  public:
   // A. never suspends.
-  exec::task<void> NestedThatNeverSuspends() { co_return; }
+  stdexec::task<void> NestedThatNeverSuspends() { co_return; }
 
   // B. suspends once (a real await) before completing.
-  exec::task<void> NestedThatSuspends() {
+  stdexec::task<void> NestedThatSuspends() {
     co_await ex::schedule(ex::inline_scheduler {});
     co_return;
   }
@@ -43,17 +43,17 @@ class NestedProbe {
   // C. not a coroutine at all.
   void PlainHelper() { ++calls_; }
 
-  exec::task<void> DispatchNeverSuspending() {
+  stdexec::task<void> DispatchNeverSuspending() {
     co_await NestedThatNeverSuspends();
     ++calls_;
   }
 
-  exec::task<void> DispatchSuspending() {
+  stdexec::task<void> DispatchSuspending() {
     co_await NestedThatSuspends();
     ++calls_;
   }
 
-  exec::task<void> DispatchPlain() {
+  stdexec::task<void> DispatchPlain() {
     PlainHelper();
     co_return;
   }
@@ -65,7 +65,7 @@ class NestedProbe {
 };
 
 TEST(NestedAwaitProbeTest, PlainHelperInsideADispatchedCoroutine) {
-  auto coroutine = []() -> exec::task<void> {
+  auto coroutine = []() -> stdexec::task<void> {
     auto actor = co_await ex_actor::Spawn<NestedProbe>();
     co_await actor.SendLocal<&NestedProbe::DispatchPlain>();
     EXPECT_EQ(co_await actor.SendLocal<&NestedProbe::calls>(), 1);
@@ -76,7 +76,7 @@ TEST(NestedAwaitProbeTest, PlainHelperInsideADispatchedCoroutine) {
 }
 
 TEST(NestedAwaitProbeTest, SuspendingNestedTaskInsideADispatchedCoroutine) {
-  auto coroutine = []() -> exec::task<void> {
+  auto coroutine = []() -> stdexec::task<void> {
     auto actor = co_await ex_actor::Spawn<NestedProbe>();
     co_await actor.SendLocal<&NestedProbe::DispatchSuspending>();
     EXPECT_EQ(co_await actor.SendLocal<&NestedProbe::calls>(), 1);
@@ -87,7 +87,7 @@ TEST(NestedAwaitProbeTest, SuspendingNestedTaskInsideADispatchedCoroutine) {
 }
 
 TEST(NestedAwaitProbeTest, NonSuspendingNestedTaskInsideADispatchedCoroutine) {
-  auto coroutine = []() -> exec::task<void> {
+  auto coroutine = []() -> stdexec::task<void> {
     auto actor = co_await ex_actor::Spawn<NestedProbe>();
     co_await actor.SendLocal<&NestedProbe::DispatchNeverSuspending>();
     EXPECT_EQ(co_await actor.SendLocal<&NestedProbe::calls>(), 1);

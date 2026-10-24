@@ -220,7 +220,7 @@ namespace {
 // need alone, which is why it is the price for only them: the scheduler and the finished
 // callback are installed once per room and take_seat runs once per join, while game_frame and
 // window_timeout — the hot kinds — keep exactly the frames they had before (none extra).
-exec::task<void> NoOp() { co_return; }
+stdexec::task<void> NoOp() { co_return; }
 
 }  // namespace
 
@@ -232,7 +232,7 @@ exec::task<void> NoOp() { co_return; }
 // The visitor returns the task Dispatch awaits rather than being a coroutine itself: a coroutine
 // per arm would allocate a frame for every message, and the handlers already are the coroutines
 // — this is what `co_await Handler(...)` did before, at the same frame count.
-exec::task<void> RoomActor::Dispatch(RoomEnvelope envelope) {
+stdexec::task<void> RoomActor::Dispatch(RoomEnvelope envelope) {
   AsyncGate::Guard guard = co_await gate_.Acquire();
   co_await std::visit(
       overloaded {
@@ -330,7 +330,7 @@ bool RoomActor::ScheduleAiAction(int64_t delay_ms) {
   return true;
 }
 
-exec::task<bool> RoomActor::BotDeclaresTsumo(int seat) {
+stdexec::task<bool> RoomActor::BotDeclaresTsumo(int seat) {
   if (!discard_window_win_check_) {
     co_return false;
   }
@@ -348,7 +348,7 @@ exec::task<bool> RoomActor::BotDeclaresTsumo(int seat) {
   co_return true;
 }
 
-exec::task<bool> RoomActor::PlayAutomatedDiscard() {
+stdexec::task<bool> RoomActor::PlayAutomatedDiscard() {
   const int seat = current_seat_;
   ai_discard_pending_ = false;
   if (!discard_window_open_ || NeedsPlayerReply(seat)) {
@@ -422,7 +422,7 @@ bool RoomActor::IsAutomated(int seat) const {
 // Outbound delivery
 // ---------------------------------------------------------------------------------------
 
-exec::task<void> RoomActor::Deliver(std::array<std::string, kSeatCount> frames) {
+stdexec::task<void> RoomActor::Deliver(std::array<std::string, kSeatCount> frames) {
   // PROTOCOL.md §5.12 asks for a parallel broadcast: a slow seat must not delay the other three,
   // and the room must not move on until every seat has been told. Each seat is a PlayerActor
   // message now, so this really awaits four sends at once — the fixed arity is deliberate,
@@ -431,7 +431,7 @@ exec::task<void> RoomActor::Deliver(std::array<std::string, kSeatCount> frames) 
                              DeliverSeat(2, std::move(frames[2])), DeliverSeat(3, std::move(frames[3])));
 }
 
-exec::task<void> RoomActor::DeliverSeat(int seat, std::string frame) {
+stdexec::task<void> RoomActor::DeliverSeat(int seat, std::string frame) {
   const RoomSeat& room_seat = seats_[static_cast<size_t>(seat)];
   if (frame.empty() || room_seat.endpoint.IsEmpty()) {
     co_return;  // a bot, or a seat with no wire
@@ -439,13 +439,13 @@ exec::task<void> RoomActor::DeliverSeat(int seat, std::string frame) {
   co_await room_seat.endpoint.SendLocal<&SeatEndpoint::Dispatch>(PlayerEnvelope::SeatFrame(std::move(frame)));
 }
 
-exec::task<void> RoomActor::ReplyFrame(int seat, std::string frame) {
+stdexec::task<void> RoomActor::ReplyFrame(int seat, std::string frame) {
   std::array<std::string, kSeatCount> frames;
   frames[static_cast<size_t>(seat)] = std::move(frame);
   co_await Deliver(std::move(frames));
 }
 
-exec::task<void> RoomActor::ReplyError(int seat, std::string_view code, std::string_view message) {
+stdexec::task<void> RoomActor::ReplyError(int seat, std::string_view code, std::string_view message) {
   // PROTOCOL §7.2: the disconnect quota counts every error answered to a connection, so a
   // rejected room-level action is accounted too. The frame and the quota travel in ONE message,
   // which is what keeps "the frame is already queued" true before a quota can ask for a close.
@@ -609,7 +609,7 @@ json::Value RoomActor::BuildTenpaiFrame(int seat) const {
 
 // §5.16 下发（T1 打牌后 / T2 副露后 / T3 sync 补发）：只发本家、一份；bot 无 wire 不发。
 // PB-2：构建耗时超 300µs 打一次 warn（日志巡检；纯测量、不进任何帧字段）。
-exec::task<void> RoomActor::DeliverTenpai(int seat) {
+stdexec::task<void> RoomActor::DeliverTenpai(int seat) {
   if (seat < 0 || seat >= kSeatCount || seats_[static_cast<size_t>(seat)].endpoint.IsEmpty()) {
     co_return;
   }
@@ -759,7 +759,7 @@ std::string RoomActor::BuildGameEnd(const Settlement& settlement) const {
   return frame.Dump();
 }
 
-exec::task<void> RoomActor::BroadcastSettlement(const Settlement& settlement) {
+stdexec::task<void> RoomActor::BroadcastSettlement(const Settlement& settlement) {
   std::array<std::string, kSeatCount> frames;
   const std::string end = BuildGameEnd(settlement);
   for (int seat = 0; seat < kSeatCount; ++seat) {
@@ -781,7 +781,7 @@ uint64_t RoomActor::Transition() {
   return seq_;
 }
 
-exec::task<void> RoomActor::StartMatch() {
+stdexec::task<void> RoomActor::StartMatch() {
   // v1.6（C2）：一场一次。这里只动**场次**状态；局内状态全部归 StartRound（C3 清单）。
   game_started_ = true;
   round_index_ = 0;
@@ -795,7 +795,7 @@ exec::task<void> RoomActor::StartMatch() {
   co_await StartRound();
 }
 
-exec::task<void> RoomActor::StartRound() {
+stdexec::task<void> RoomActor::StartRound() {
   // v1.6（C3）：每局一次的重置清单。**禁止重置**：seq_（跨局单调，§6.2）、room_id_、seats_、
   // match_totals_、round_index_/renchan_count_/hands_played_（由局终推进逻辑维护）。
   melds_ = {};
@@ -849,7 +849,7 @@ exec::task<void> RoomActor::StartRound() {
   co_await Pump();
 }
 
-exec::task<void> RoomActor::Pump() {
+stdexec::task<void> RoomActor::Pump() {
   for (int step = 0; step < kMaxPumpSteps; ++step) {
     switch (phase_) {
       case Phase::kIdle:
@@ -912,7 +912,7 @@ exec::task<void> RoomActor::Pump() {
   spdlog::error("room {}: pump step limit reached (phase={})", room_id_, static_cast<int>(phase_));
 }
 
-exec::task<void> RoomActor::DrawForCurrentSeat() {
+stdexec::task<void> RoomActor::DrawForCurrentSeat() {
   const int seat = current_seat_;
   Tile tile = wall_[static_cast<size_t>(next_index_)];
   ++next_index_;
@@ -933,7 +933,7 @@ exec::task<void> RoomActor::DrawForCurrentSeat() {
   phase_ = Phase::kDiscardWindow;
 }
 
-exec::task<void> RoomActor::OpenDiscardWindow(bool win_check, std::optional<Tile> drawn_tile) {
+stdexec::task<void> RoomActor::OpenDiscardWindow(bool win_check, std::optional<Tile> drawn_tile) {
   drawn_tile_ = drawn_tile;
   discard_window_open_ = true;
   ai_discard_pending_ = false;  // a fresh window schedules its own pacing message
@@ -951,7 +951,7 @@ exec::task<void> RoomActor::OpenDiscardWindow(bool win_check, std::optional<Tile
   OpenWindowTimer();
 }
 
-exec::task<void> RoomActor::ApplyDiscard(int seat, Tile tile) {
+stdexec::task<void> RoomActor::ApplyDiscard(int seat, Tile tile) {
   const uint64_t old_seq = seq_;
   RemoveOneFace(&hands_[static_cast<size_t>(seat)], FaceOf(tile));
   discards_[static_cast<size_t>(seat)].push_back(tile);
@@ -1005,7 +1005,7 @@ exec::task<void> RoomActor::ApplyDiscard(int seat, Tile tile) {
   co_await OpenClaimWindow(seat, tile, recipients, options);
 }
 
-exec::task<void> RoomActor::OpenClaimWindow(int from_seat, Tile tile, const std::array<bool, kSeatCount>& recipients,
+stdexec::task<void> RoomActor::OpenClaimWindow(int from_seat, Tile tile, const std::array<bool, kSeatCount>& recipients,
                                 const std::array<std::vector<Option>, kSeatCount>& options) {
   claim_open_ = true;
   claim_from_seat_ = from_seat;
@@ -1125,7 +1125,7 @@ void RoomActor::ResetClaimWindow() {
   claim_pending_humans_ = 0;
 }
 
-exec::task<void> RoomActor::ResolveClaimWindow() {
+stdexec::task<void> RoomActor::ResolveClaimWindow() {
   int best_seat = -1;
   int best_priority = -1;
   int best_distance = kSeatCount;
@@ -1170,7 +1170,7 @@ exec::task<void> RoomActor::ResolveClaimWindow() {
   co_await ApplyMeld(best_seat, best_action, best_tiles, from_seat, tile);
 }
 
-exec::task<void> RoomActor::ApplyMeld(int seat, const std::string& action, const std::vector<Tile>& client_tiles,
+stdexec::task<void> RoomActor::ApplyMeld(int seat, const std::string& action, const std::vector<Tile>& client_tiles,
                                       int from_seat, Tile claimed_tile) {
   const Face claimed_face = FaceOf(claimed_tile);
   Meld meld;
@@ -1245,7 +1245,7 @@ exec::task<void> RoomActor::ApplyMeld(int seat, const std::string& action, const
 // v1.6 自理杠（ankan / kakan，PROTOCOL §4.6）：仅本家打牌窗口可触发（HandleAction 已重算合法性）。
 // 张数公式逐字不变：一个杠在 melds 里仍是 1 组、账面 3 张，第 4 张由 kans 单独补回 ——
 // 三个杠的差别只在「第 4 张从哪来」，本函数只负责把它放进去并补摸 1 张。
-exec::task<void> RoomActor::ApplySelfKan(int seat, const std::string& action,
+stdexec::task<void> RoomActor::ApplySelfKan(int seat, const std::string& action,
                                          const std::vector<Tile>& client_tiles) {
   const Face face = FaceOf(client_tiles.front());
   std::optional<KongResult> result;
@@ -1324,7 +1324,7 @@ Tile RoomActor::TsumoWinningTile(int seat) const {
   return sorted.empty() ? Tile {} : sorted.back();
 }
 
-exec::task<void> RoomActor::EndRoundWithWin(int winner_seat, int from_seat, Tile winning_tile, bool tsumo) {
+stdexec::task<void> RoomActor::EndRoundWithWin(int winner_seat, int from_seat, Tile winning_tile, bool tsumo) {
   const uint64_t old_seq = seq_;
   if (!tsumo) {
     // Ron: the winning tile completes the winner's hand (it stays visible in the river).
@@ -1392,7 +1392,7 @@ exec::task<void> RoomActor::EndRoundWithWin(int winner_seat, int from_seat, Tile
   co_await AdvanceAfterRound(settlement, score);
 }
 
-exec::task<void> RoomActor::EndRoundWithDraw() {
+stdexec::task<void> RoomActor::EndRoundWithDraw() {
   Transition();
   phase_ = Phase::kRoundEnd;
   claim_open_ = false;
@@ -1418,7 +1418,7 @@ exec::task<void> RoomActor::EndRoundWithDraw() {
 // v1.6（C7 局终 → 场终的推进）：荒庄也无条件累加（+0）、逐局 RecordMatch（C10）、
 // NextDealer + ClassifyRound 判定连庄/轮庄（荒庄一律连庄）、C15 双闸、场终 match_end、
 // 否则 kRoundEnd + 武装 C6 推进令牌（C5：本函数 co_return，推进由定时消息触发）。
-exec::task<void> RoomActor::AdvanceAfterRound(Settlement& settlement, const ScoreResult& score) {
+stdexec::task<void> RoomActor::AdvanceAfterRound(Settlement& settlement, const ScoreResult& score) {
   // C7：荒庄也 +0 无条件累加；match_total 含本局。B3：坐庄手数每局 +1（含连庄的额外手）。
   for (int seat = 0; seat < kSeatCount; ++seat) {
     match_totals_[static_cast<size_t>(seat)] += settlement.delta[static_cast<size_t>(seat)];
@@ -1489,7 +1489,7 @@ exec::task<void> RoomActor::AdvanceAfterRound(Settlement& settlement, const Scor
   co_await FinishMatch();
 }
 
-exec::task<void> RoomActor::FinishMatch() {
+stdexec::task<void> RoomActor::FinishMatch() {
   // v1.6（C7 场终）：match_end 广播 + kMatchEnd；之后只剩 §1.4.5 的 30s 回收（C10）。
   phase_ = Phase::kMatchEnd;
   round_advance_pending_ = false;
@@ -1533,7 +1533,7 @@ void RoomActor::OpenWindowTimer() {
   timeout_scheduler_(action_timeout_ms_, seq_);
 }
 
-exec::task<void> RoomActor::OnWindowTimeout(uint64_t token) {
+stdexec::task<void> RoomActor::OnWindowTimeout(uint64_t token) {
   // Three kinds of scheduled messages arrive here: a real window deadline (plain envelope seq),
   // an AI pacing deadline (kAiPacingTokenBit), and the v1.6 round-advance deadline
   // (kRoundAdvanceTokenBit). **判据顺序固定（C6，不得调换）**：
@@ -1625,7 +1625,7 @@ exec::task<void> RoomActor::OnWindowTimeout(uint64_t token) {
   }
 }
 
-exec::task<void> RoomActor::Ready(PlayerInfo player) {
+stdexec::task<void> RoomActor::Ready(PlayerInfo player) {
   if (SeatOf(player.player_id) < 0) {
     co_return;
   }
@@ -1636,7 +1636,7 @@ exec::task<void> RoomActor::Ready(PlayerInfo player) {
   co_await StartMatch();
 }
 
-exec::task<void> RoomActor::Sync(PlayerInfo player) {
+stdexec::task<void> RoomActor::Sync(PlayerInfo player) {
   const int seat = SeatOf(player.player_id);
   if (seat < 0) {
     co_return;
@@ -1651,7 +1651,7 @@ exec::task<void> RoomActor::Sync(PlayerInfo player) {
   co_await DeliverTenpai(seat);
 }
 
-exec::task<void> RoomActor::OnPlayerDisconnected(PlayerInfo player) {
+stdexec::task<void> RoomActor::OnPlayerDisconnected(PlayerInfo player) {
   const int seat = SeatOf(player.player_id);
   if (seat < 0 || seats_[static_cast<size_t>(seat)].disconnected) {
     co_return;
@@ -1671,9 +1671,9 @@ exec::task<void> RoomActor::OnPlayerDisconnected(PlayerInfo player) {
   co_await Pump();
 }
 
-exec::task<void> RoomActor::OnIdleTimeout(PlayerInfo player) { co_await OnPlayerDisconnected(std::move(player)); }
+stdexec::task<void> RoomActor::OnIdleTimeout(PlayerInfo player) { co_await OnPlayerDisconnected(std::move(player)); }
 
-exec::task<void> RoomActor::HandleGameFrame(PlayerInfo player, json::Value frame) {
+stdexec::task<void> RoomActor::HandleGameFrame(PlayerInfo player, json::Value frame) {
   const int seat = SeatOf(player.player_id);
   if (seat < 0 || !game_started_) {
     co_return;
@@ -1705,7 +1705,7 @@ exec::task<void> RoomActor::HandleGameFrame(PlayerInfo player, json::Value frame
   }
 }
 
-exec::task<void> RoomActor::HandleDiscard(int seat, json::Value frame) {
+stdexec::task<void> RoomActor::HandleDiscard(int seat, json::Value frame) {
   const json::Value* tile_value = frame.Find("tile");
   if (phase_ != Phase::kDiscardWindow || !discard_window_open_ || seat != current_seat_) {
     co_await ReplyError(seat, protocol::kCodeNotYourTurn, "there is no discard window for you");
@@ -1725,7 +1725,7 @@ exec::task<void> RoomActor::HandleDiscard(int seat, json::Value frame) {
   co_await Pump();
 }
 
-exec::task<void> RoomActor::HandleAction(int seat, json::Value frame) {
+stdexec::task<void> RoomActor::HandleAction(int seat, json::Value frame) {
   const json::Value* action_value = frame.Find("action");
   const json::Value* tiles_value = frame.Find("tiles");
   if (action_value == nullptr || !action_value->IsString() || tiles_value == nullptr || !tiles_value->IsArray()) {

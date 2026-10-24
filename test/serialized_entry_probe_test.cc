@@ -36,7 +36,7 @@ class Peer {
 template <class Impl, class... Args>
 class SerializedEntry {
  public:
-  exec::task<int> Entries(Args... args) {
+  stdexec::task<int> Entries(Args... args) {
     ++entered_;
     co_return co_await static_cast<Impl*>(this)->Handle(std::move(args)...);
   }
@@ -59,7 +59,7 @@ class CounterActor : public SerializedEntry<CounterActor, int> {
   // The real handler. Private + friend, so it cannot be called through the framework and the
   // gate can never be bypassed. Awaits another actor *inside* the handler, i.e. it suspends
   // while the entry is on the stack.
-  exec::task<int> Handle(int delta) {
+  stdexec::task<int> Handle(int delta) {
     if (peer_.IsEmpty()) {
       peer_ = co_await ex_actor::Spawn<Peer>();
     }
@@ -84,7 +84,7 @@ concept PubliclyReachableHandle = requires(T& actor) { actor.Handle(1); };
 static_assert(!PubliclyReachableHandle<CounterActor>, "the private handler leaked; the gate could be bypassed");
 
 TEST(SerializedEntryProbeTest, InheritedEntryRunsThroughSendLocal) {
-  auto coroutine = []() -> exec::task<void> {
+  auto coroutine = []() -> stdexec::task<void> {
     auto actor = co_await ex_actor::Spawn<CounterActor>(10);
     // 10 + 5 + 42: the entry ran on the right instance and the handler's suspension worked.
     int result = co_await actor.SendLocal<&CounterActor::Entries>(5);
@@ -98,7 +98,7 @@ TEST(SerializedEntryProbeTest, InheritedEntryRunsThroughSendLocal) {
 }
 
 TEST(SerializedEntryProbeTest, InheritedEntryRunsThroughGenericSend) {
-  auto coroutine = []() -> exec::task<void> {
+  auto coroutine = []() -> stdexec::task<void> {
     auto actor = co_await ex_actor::Spawn<CounterActor>(0);
     int result = co_await actor.Send<&CounterActor::Entries>(5);
     EXPECT_EQ(result, 47);
@@ -110,7 +110,7 @@ TEST(SerializedEntryProbeTest, InheritedEntryRunsThroughGenericSend) {
 }
 
 TEST(SerializedEntryProbeTest, EntryStateIsPerActorInstance) {
-  auto coroutine = []() -> exec::task<void> {
+  auto coroutine = []() -> stdexec::task<void> {
     auto first = co_await ex_actor::Spawn<CounterActor>(0);
     auto second = co_await ex_actor::Spawn<CounterActor>(0);
     EXPECT_EQ(co_await first.SendLocal<&CounterActor::Entries>(1), 43);

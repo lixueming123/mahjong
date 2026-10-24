@@ -67,14 +67,14 @@ LobbyActor::LobbyActor(uint64_t seed, int action_timeout_ms, std::shared_ptr<Win
 // PlayerActor and the frame lands in that connection's outbox (PROTOCOL §7.2's quota is
 // charged by the same message when the error is a BAD_REQUEST). Awaiting them keeps the old
 // synchronous behaviour: when a lobby handler returns, its frames are already queued.
-exec::task<void> LobbyActor::ReplyFrame(const ex_actor::ActorRef<SeatEndpoint>& conn, std::string frame) {
+stdexec::task<void> LobbyActor::ReplyFrame(const ex_actor::ActorRef<SeatEndpoint>& conn, std::string frame) {
   if (conn.IsEmpty()) {
     co_return;  // no wire (the unit test's seatless players)
   }
   co_await conn.SendLocal<&SeatEndpoint::Dispatch>(PlayerEnvelope::SeatFrame(std::move(frame)));
 }
 
-exec::task<void> LobbyActor::ReplyError(const ex_actor::ActorRef<SeatEndpoint>& conn, std::string_view code,
+stdexec::task<void> LobbyActor::ReplyError(const ex_actor::ActorRef<SeatEndpoint>& conn, std::string_view code,
                                         std::string_view message) {
   if (conn.IsEmpty()) {
     co_return;
@@ -84,7 +84,7 @@ exec::task<void> LobbyActor::ReplyError(const ex_actor::ActorRef<SeatEndpoint>& 
       PlayerEnvelope::SeatError(protocol::ErrorFrame(code, message), quota));
 }
 
-exec::task<void> LobbyActor::SetSelfRef(ex_actor::ActorRef<LobbyActor> self) {
+stdexec::task<void> LobbyActor::SetSelfRef(ex_actor::ActorRef<LobbyActor> self) {
   AsyncGate::Guard guard = co_await gate_.Acquire();
   self_ref_ = std::move(self);
 }
@@ -105,7 +105,7 @@ ex_actor::ActorRef<RoomActor> LobbyActor::FindRoom(const std::string& room_id) c
   return it == rooms_.end() ? ex_actor::ActorRef<RoomActor>() : it->second;
 }
 
-exec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player) {
+stdexec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player) {
   // Reserve the player, then drop the lock for Spawn. A second create_room sees `creating_`
   // and is rejected; a disconnect erases the reservation so the commit below does not register
   // a room whose owner is already gone.
@@ -258,7 +258,7 @@ exec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn, P
   }
 }
 
-exec::task<void> LobbyActor::ListRooms(ex_actor::ActorRef<SeatEndpoint> conn) {
+stdexec::task<void> LobbyActor::ListRooms(ex_actor::ActorRef<SeatEndpoint> conn) {
   json::Value rooms = json::Value::Arr();
   {
     for (const auto& [room_id, seats] : room_seats_) {
@@ -290,7 +290,7 @@ exec::task<void> LobbyActor::ListRooms(ex_actor::ActorRef<SeatEndpoint> conn) {
   co_await ReplyFrame(conn, frame.Dump());
 }
 
-exec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player, std::string room_id) {
+stdexec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player, std::string room_id) {
   std::string code;
   std::string message;
   RoomSeat claimed;
@@ -378,7 +378,7 @@ exec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, Pla
   co_await ReplyFrame(conn, BuildRoomJoinedFrame(room_id, claimed.seat, snapshot));
 }
 
-exec::task<void> LobbyActor::Ready(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player) {
+stdexec::task<void> LobbyActor::Ready(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player) {
   std::string error;
   ex_actor::ActorRef<RoomActor> room;
   {
@@ -405,7 +405,7 @@ exec::task<void> LobbyActor::Ready(ex_actor::ActorRef<SeatEndpoint> conn, Player
   ActorSendScope().spawn(room.SendLocal<&RoomActor::Dispatch>(RoomEnvelope::Ready(std::move(player))));
 }
 
-exec::task<void> LobbyActor::Sync(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player) {
+stdexec::task<void> LobbyActor::Sync(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player) {
   std::string error;
   ex_actor::ActorRef<RoomActor> room;
   {
@@ -427,7 +427,7 @@ exec::task<void> LobbyActor::Sync(ex_actor::ActorRef<SeatEndpoint> conn, PlayerI
   ActorSendScope().spawn(room.SendLocal<&RoomActor::Dispatch>(RoomEnvelope::Sync(std::move(player))));
 }
 
-exec::task<void> LobbyActor::OnConnectionClosed(PlayerInfo player) {
+stdexec::task<void> LobbyActor::OnConnectionClosed(PlayerInfo player) {
   AsyncGate::Guard guard = co_await gate_.Acquire();
   // A create still in Spawn has no players_ entry yet. Dropping the reservation makes that
   // commit refuse the room.
@@ -481,12 +481,12 @@ exec::task<void> LobbyActor::OnConnectionClosed(PlayerInfo player) {
   spdlog::info("lobby: player {} disconnected, room {} dropped", player.player_id, room_id);
 }
 
-exec::task<size_t> LobbyActor::room_count() {
+stdexec::task<size_t> LobbyActor::room_count() {
   AsyncGate::Guard guard = co_await gate_.Acquire();
   co_return rooms_.size();
 }
 
-exec::task<void> LobbyActor::ReapRoom(std::string room_id) {
+stdexec::task<void> LobbyActor::ReapRoom(std::string room_id) {
   // Drop the registry under the lock, then close sockets without it. A close awaits the
   // connection actor; holding the lobby lock across that would stall every other lobby message.
   std::vector<ex_actor::ActorRef<SeatEndpoint>> closing;
@@ -519,7 +519,7 @@ exec::task<void> LobbyActor::ReapRoom(std::string room_id) {
   spdlog::info("lobby: reclaimed room {} after game_end ({} connection(s) closed)", room_id, closing.size());
 }
 
-exec::task<void> LobbyActor::OnIdleTimeout(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player) {
+stdexec::task<void> LobbyActor::OnIdleTimeout(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player) {
   bool drop_connection = false;
   ex_actor::ActorRef<RoomActor> room;
   {

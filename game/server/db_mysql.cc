@@ -142,7 +142,7 @@ DbActor::DbActor(DbConfig config) : config_(std::move(config)) {
   // on the thread that called Spawn. Initialize() does the opening, on the right thread.
 }
 
-exec::task<bool> DbActor::Initialize() {
+stdexec::task<bool> DbActor::Initialize() {
   // The library is initialised once for the whole process (DbLibraryInit); this call only
   // registers the current thread with it, which is what makes the client usable here at all.
   // Every db_pool thread runs this for itself.
@@ -285,35 +285,35 @@ std::string DbActor::Escape(const std::string& value) {
 
 // ---- handlers (db_pool thread) -----------------------------------------------------------
 
-exec::task<void> DbActor::Login(std::string username, std::string password, ex_actor::ActorRef<PlayerActor> reply) {
+stdexec::task<void> DbActor::Login(std::string username, std::string password, ex_actor::ActorRef<PlayerActor> reply) {
   ReplyAuth(reply, LoginJob(username, password));
   co_return;
 }
 
-exec::task<void> DbActor::Register(std::string username, std::string password, std::string nickname,
+stdexec::task<void> DbActor::Register(std::string username, std::string password, std::string nickname,
                                    ex_actor::ActorRef<PlayerActor> reply) {
   ReplyRegister(reply, RegisterJob(username, password, nickname));
   co_return;
 }
 
-exec::task<void> DbActor::FetchStats(uint64_t account_id, ex_actor::ActorRef<PlayerActor> reply) {
+stdexec::task<void> DbActor::FetchStats(uint64_t account_id, ex_actor::ActorRef<PlayerActor> reply) {
   ReplyStats(reply, StatsJob(account_id));
   co_return;
 }
 
-exec::task<void> DbActor::RecordMatch(MatchRecord record) {
+stdexec::task<void> DbActor::RecordMatch(MatchRecord record) {
   // Fire and forget: a failed write is logged and never propagates to the game (§2.3, §4.6).
   RecordJob(record);
   co_return;
 }
 
-exec::task<void> DbActor::RecordMatchResult(MatchResultRecord record) {
+stdexec::task<void> DbActor::RecordMatchResult(MatchResultRecord record) {
   // Fire and forget (§4 item 7)：场终一次性写入；失败只记日志，绝不影响 match_end 的广播。
   RecordMatchResultJob(record);
   co_return;
 }
 
-exec::task<void> DbActor::Stop() {
+stdexec::task<void> DbActor::Stop() {
   Disconnect();
   // Only this thread unregisters itself; the library itself is torn down once by main() after
   // every db thread has stopped (DbLibraryShutdown).

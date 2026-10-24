@@ -9,7 +9,7 @@
 // The turnstile makes the test deterministic: a handler parks *inside* the critical section
 // until the test releases that exact turn, so "who is inside right now" is not a race.
 //
-// Note these fixtures send messages with `ex::start_detached`, NOT through the process-wide
+// Note these fixtures send messages with `exec::start_detached`, NOT through the process-wide
 // `ActorSendScope()` the game drains before shutdown: tests here deliberately leave a handler
 // parked forever (ParkedWaiterDoesNotHoldThePoolThread never releases its turnstile), so waiting
 // for the scope to drain would deadlock. Shutdown ordering is exercised in mahjong_lobby_test
@@ -29,6 +29,7 @@
 #include <utility>
 #include <vector>
 
+#include <exec/start_detached.hpp>
 #include <gtest/gtest.h>
 
 #include "ex_actor/api.h"
@@ -127,7 +128,7 @@ void RecordMaxInside(OverlapDetector& detector, int candidate) {
 template <class Impl, class... Args>
 class SerializedEntry {
  public:
-  exec::task<void> Entries(Args... args) {
+  stdexec::task<void> Entries(Args... args) {
     static_cast<Impl*>(this)->OnArrived();
     AsyncGate::Guard guard = co_await gate_.Acquire();
     co_await static_cast<Impl*>(this)->Handle(std::move(args)...);
@@ -145,7 +146,7 @@ class SerializedActor : public SerializedEntry<SerializedActor, int> {
  private:
   void OnArrived() { detector_->arrived.fetch_add(1, std::memory_order_acq_rel); }
 
-  exec::task<void> Handle(int turn) {
+  stdexec::task<void> Handle(int turn) {
     const int inside = detector_->inside.fetch_add(1, std::memory_order_acq_rel) + 1;
     RecordMaxInside(*detector_, inside);
     {
@@ -177,7 +178,7 @@ class ThrowingActor : public SerializedEntry<ThrowingActor, int> {
  private:
   void OnArrived() { detector_->arrived.fetch_add(1, std::memory_order_acq_rel); }
 
-  exec::task<void> Handle(int id) {
+  stdexec::task<void> Handle(int id) {
     const int inside = detector_->inside.fetch_add(1, std::memory_order_acq_rel) + 1;
     RecordMaxInside(*detector_, inside);
     detector_->inside.fetch_sub(1, std::memory_order_acq_rel);
@@ -240,14 +241,14 @@ std::vector<int> OrderCopy(OverlapDetector& detector) {
 // ---------------------------------------------------------------------------------------
 
 TEST(AsyncGateTest, HandlersDoNotOverlapAndEntriesStayInOrder) {
-  auto coroutine = []() -> exec::task<void> {
+  auto coroutine = []() -> stdexec::task<void> {
     constexpr int kMessages = 5;
     auto detector = std::make_shared<OverlapDetector>();
     auto turnstile = std::make_shared<Turnstile>();
     auto actor = co_await ex_actor::Spawn<SerializedActor>(detector, turnstile);
 
     for (int turn = 1; turn <= kMessages; ++turn) {
-      ex::start_detached(actor.SendLocal<&SerializedActor::Entries>(turn));
+      exec::start_detached(actor.SendLocal<&SerializedActor::Entries>(turn));
     }
 
     // Every message reached the door, but exactly one got through it: the rest are parked on
@@ -296,14 +297,14 @@ TEST(AsyncGateTest, HandlersDoNotOverlapAndEntriesStayInOrder) {
 // in a row — covering lost wakeups (a waiter parked after the releaser had already looked) and
 // the inline-handoff chain, and catching any overlap the gate lets through under that pressure.
 TEST(AsyncGateTest, BurstStaysSerializedAndLosesNoWakeups) {
-  auto coroutine = []() -> exec::task<void> {
+  auto coroutine = []() -> stdexec::task<void> {
     constexpr int kMessages = 200;
     auto detector = std::make_shared<OverlapDetector>();
     auto turnstile = std::make_shared<Turnstile>();
     auto actor = co_await ex_actor::Spawn<SerializedActor>(detector, turnstile);
 
     for (int turn = 1; turn <= kMessages; ++turn) {
-      ex::start_detached(actor.SendLocal<&SerializedActor::Entries>(turn));
+      exec::start_detached(actor.SendLocal<&SerializedActor::Entries>(turn));
     }
     if (!WaitForOrFail([&] { return detector->arrived.load() == kMessages && OrderSize(*detector) == 1; },
                        "all 200 messages at the door and the first one inside")) {
@@ -334,19 +335,19 @@ TEST(AsyncGateTest, BurstStaysSerializedAndLosesNoWakeups) {
 // waiter occupied the thread, nothing else could ever run — this test would time out instead
 // of passing.
 TEST(AsyncGateTest, ParkedWaiterDoesNotHoldThePoolThread) {
-  auto coroutine = []() -> exec::task<void> {
+  auto coroutine = []() -> stdexec::task<void> {
     auto detector = std::make_shared<OverlapDetector>();
     auto turnstile = std::make_shared<Turnstile>();  // never released: the handler stays parked
     auto count = std::make_shared<std::atomic<int>>(0);
     auto serialized = co_await ex_actor::Spawn<SerializedActor>(detector, turnstile);
     auto other = co_await ex_actor::Spawn<CounterActor>(count);
 
-    ex::start_detached(serialized.SendLocal<&SerializedActor::Entries>(1));
+    exec::start_detached(serialized.SendLocal<&SerializedActor::Entries>(1));
     if (!WaitForOrFail([&] { return detector->inside.load() == 1; }, "the handler to park inside the gate")) {
       co_return;
     }
 
-    ex::start_detached(other.SendLocal<&CounterActor::Bump>());
+    exec::start_detached(other.SendLocal<&CounterActor::Bump>());
     if (!WaitForOrFail([&] { return count->load() == 1; }, "the other actor to run while the gate is held")) {
       co_return;
     }
@@ -358,11 +359,11 @@ TEST(AsyncGateTest, ParkedWaiterDoesNotHoldThePoolThread) {
 
     // Now the other kind of waiting: a handler parked *on* the gate (not inside it). It must
     // give up the single pool thread too.
-    ex::start_detached(serialized.SendLocal<&SerializedActor::Entries>(2));
+    exec::start_detached(serialized.SendLocal<&SerializedActor::Entries>(2));
     if (!WaitForOrFail([&] { return detector->arrived.load() == 2; }, "the second handler to park on the gate")) {
       co_return;
     }
-    ex::start_detached(other.SendLocal<&CounterActor::Bump>());
+    exec::start_detached(other.SendLocal<&CounterActor::Bump>());
     if (!WaitForOrFail([&] { return count->load() == 2; }, "the other actor to run while a waiter is parked on the gate")) {
       co_return;
     }
@@ -376,7 +377,7 @@ TEST(AsyncGateTest, ParkedWaiterDoesNotHoldThePoolThread) {
 }
 
 TEST(AsyncGateTest, ExceptionInsideCriticalSectionStillReleasesTheGate) {
-  auto coroutine = []() -> exec::task<void> {
+  auto coroutine = []() -> stdexec::task<void> {
     auto detector = std::make_shared<OverlapDetector>();
     auto actor = co_await ex_actor::Spawn<ThrowingActor>(detector);
 
@@ -409,7 +410,7 @@ TEST(AsyncGateTest, ExceptionInsideCriticalSectionStillReleasesTheGate) {
 // The gate itself, with no actor runtime involved: a moved-from Guard must not release a second
 // time, and a normal acquisition must not. `AsyncGate` depends on nothing but <coroutine>.
 TEST(AsyncGateTest, GuardMoveReleasesExactlyOnce) {
-  auto coroutine = []() -> exec::task<void> {
+  auto coroutine = []() -> stdexec::task<void> {
     AsyncGate gate;
     EXPECT_FALSE(gate.held());
     {

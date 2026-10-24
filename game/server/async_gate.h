@@ -98,7 +98,7 @@ class AsyncGate {
   // stopped at the first `co_await` of a guarded handler). Sending the Guard as a *task result*
   // uses the same path as any other task-returning handler in this process, and keeps the exotic
   // part down to a void awaitable. Cost: one coroutine frame per acquire.
-  [[nodiscard]] exec::task<Guard> Acquire() {
+  [[nodiscard]] stdexec::task<Guard> Acquire() {
     co_await ParkAwaiter(*this);
     co_return Guard(this);
   }

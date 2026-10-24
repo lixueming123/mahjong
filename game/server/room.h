@@ -258,7 +258,7 @@ class RoomActor {
   // private, so no caller can reach room state without passing the gate (async_gate.h explains
   // why that matters). It is a coroutine, so a non-actor caller — the unit test drives the room
   // directly — has to start it (stdexec::sync_wait).
-  exec::task<void> Dispatch(RoomEnvelope envelope);
+  stdexec::task<void> Dispatch(RoomEnvelope envelope);
 
   // Pure claim policy of an automated seat (exposed so it can be unit-tested directly with
   // crafted hands; RoomActor::OpenClaimWindow calls exactly this function for bots, and
@@ -317,14 +317,14 @@ class RoomActor {
   void TakeSeat(RoomSeat seat, const std::shared_ptr<bool>& accepted);
 
   // Client intents, already shape-checked by PlayerActor and room-checked by LobbyActor.
-  exec::task<void> Ready(PlayerInfo player);
-  exec::task<void> Sync(PlayerInfo player);
-  exec::task<void> HandleGameFrame(PlayerInfo player, json::Value frame);
+  stdexec::task<void> Ready(PlayerInfo player);
+  stdexec::task<void> Sync(PlayerInfo player);
+  stdexec::task<void> HandleGameFrame(PlayerInfo player, json::Value frame);
 
   // Frozen timeout scheme: the message carries the window seq it was scheduled for.
-  exec::task<void> OnWindowTimeout(uint64_t window_seq);
-  exec::task<void> OnPlayerDisconnected(PlayerInfo player);
-  exec::task<void> OnIdleTimeout(PlayerInfo player);
+  stdexec::task<void> OnWindowTimeout(uint64_t window_seq);
+  stdexec::task<void> OnPlayerDisconnected(PlayerInfo player);
+  stdexec::task<void> OnIdleTimeout(PlayerInfo player);
 
   enum class Phase {
     kIdle,           // created, no match yet
@@ -374,32 +374,32 @@ class RoomActor {
   };
 
   // ---- turn driving ----------------------------------------------------------------
-  exec::task<void> StartMatch();   // v1.6（C2）：ready 后一次；reset 场次状态
-  exec::task<void> StartRound();   // v1.6（C3）：每局一次；reset 全部局内状态
-  exec::task<void> Pump();
-  exec::task<void> DrawForCurrentSeat();
-  exec::task<void> OpenDiscardWindow(bool win_check, std::optional<Tile> drawn_tile);
-  exec::task<void> ApplyDiscard(int seat, Tile tile);
-  exec::task<void> OpenClaimWindow(int from_seat, Tile tile, const std::array<bool, kSeatCount>& recipients,
+  stdexec::task<void> StartMatch();   // v1.6（C2）：ready 后一次；reset 场次状态
+  stdexec::task<void> StartRound();   // v1.6（C3）：每局一次；reset 全部局内状态
+  stdexec::task<void> Pump();
+  stdexec::task<void> DrawForCurrentSeat();
+  stdexec::task<void> OpenDiscardWindow(bool win_check, std::optional<Tile> drawn_tile);
+  stdexec::task<void> ApplyDiscard(int seat, Tile tile);
+  stdexec::task<void> OpenClaimWindow(int from_seat, Tile tile, const std::array<bool, kSeatCount>& recipients,
                                    const std::array<std::vector<Option>, kSeatCount>& options);
-  exec::task<void> ResolveClaimWindow();
-  exec::task<void> ApplyMeld(int seat, const std::string& action, const std::vector<Tile>& client_tiles, int from_seat,
+  stdexec::task<void> ResolveClaimWindow();
+  stdexec::task<void> ApplyMeld(int seat, const std::string& action, const std::vector<Tile>& client_tiles, int from_seat,
                              Tile claimed_tile);
   // v1.6（自理杠）：ankan / kakan 只在本家打牌窗口；补摸 1 张后重开打牌窗口
-  exec::task<void> ApplySelfKan(int seat, const std::string& action, const std::vector<Tile>& client_tiles);
-  exec::task<void> EndRoundWithWin(int winner_seat, int from_seat, Tile winning_tile, bool tsumo);
-  exec::task<void> EndRoundWithDraw();
+  stdexec::task<void> ApplySelfKan(int seat, const std::string& action, const std::vector<Tile>& client_tiles);
+  stdexec::task<void> EndRoundWithWin(int winner_seat, int from_seat, Tile winning_tile, bool tsumo);
+  stdexec::task<void> EndRoundWithDraw();
   // v1.6（C7 局终 → 场终）：totals 累加 → 连庄/轮庄 → game_end → RecordMatch（C10）→
   // 场终 match_end，否则 kRoundEnd + 武装 C6 推进令牌（C5：co_return，推进走定时消息）。
-  exec::task<void> AdvanceAfterRound(Settlement& settlement, const ScoreResult& score);
+  stdexec::task<void> AdvanceAfterRound(Settlement& settlement, const ScoreResult& score);
   // v1.6（C7）：match_end + kMatchEnd；只在场终调用
-  exec::task<void> FinishMatch();
+  stdexec::task<void> FinishMatch();
   // B3：match_end.rankings 的 rank（并列跳号），场终快照与 match_end 同源。
   std::array<int, kSeatCount> ComputeFinalRanks() const;
 
   // ---- client frame handlers --------------------------------------------------------
-  exec::task<void> HandleDiscard(int seat, json::Value frame);
-  exec::task<void> HandleAction(int seat, json::Value frame);
+  stdexec::task<void> HandleDiscard(int seat, json::Value frame);
+  stdexec::task<void> HandleAction(int seat, json::Value frame);
 
   // ---- helpers ----------------------------------------------------------------------
   uint64_t Transition();
@@ -421,8 +421,8 @@ class RoomActor {
   bool ScheduleAiAction(int64_t delay_ms);
   // The automated seat's own-window decision (self-draw win or tile-efficiency discard).
   // Returns false when the game ended and there is nothing left to pump.
-  exec::task<bool> PlayAutomatedDiscard();
-  exec::task<bool> BotDeclaresTsumo(int seat);
+  stdexec::task<bool> PlayAutomatedDiscard();
+  stdexec::task<bool> BotDeclaresTsumo(int seat);
   // Fills in the answers of the automated claim recipients that were deferred.
   void ResolveAutomatedClaimAnswers();
   // A human recipient already declared `win`: no pending bot answer can change that outcome.
@@ -431,14 +431,14 @@ class RoomActor {
   // 天和 has no draw record, so the largest tile of the hand stands in for it.
   Tile TsumoWinningTile(int seat) const;
   void OpenWindowTimer();
-  exec::task<void> ReplyError(int seat, std::string_view code, std::string_view message);
+  stdexec::task<void> ReplyError(int seat, std::string_view code, std::string_view message);
   // Tells the room's owner the game is over, exactly once (PROTOCOL.md §1.4.5).
   void NotifyFinished(const Settlement& settlement);
-  exec::task<void> ReplyFrame(int seat, std::string frame);
+  stdexec::task<void> ReplyFrame(int seat, std::string frame);
   // One seat's share of a broadcast: empty frames and empty endpoints are skipped. Deliver
   // awaits exactly four of these in parallel, so the arity is fixed rather than looped.
-  exec::task<void> DeliverSeat(int seat, std::string frame);
-  exec::task<void> Deliver(std::array<std::string, kSeatCount> frames);
+  stdexec::task<void> DeliverSeat(int seat, std::string frame);
+  stdexec::task<void> Deliver(std::array<std::string, kSeatCount> frames);
   // v1.6（N1 两版缓存）：普通广播用打码版（他家 ankan.tiles = []，仅暗杠持有者额外渲染一份
   // 替换自身项，次数 = 持有者数）；局终前最后一份 state_sync 用揭示版（所有 ankan 补全 4 张）。
   std::array<std::string, kSeatCount> StateSyncFrames() const;
@@ -457,11 +457,11 @@ class RoomActor {
   std::string BuildStateSync(int for_seat) const;
   // PROTOCOL v1.7 §5.16：独立 `tenpai` 帧（仅发本家、tenpai_seq 独立单调、不参与 room.seq）。
   json::Value BuildTenpaiFrame(int seat) const;
-  exec::task<void> DeliverTenpai(int seat);
+  stdexec::task<void> DeliverTenpai(int seat);
   std::string BuildGameStart(int for_seat) const;
   std::string BuildGameEnd(const Settlement& settlement) const;
   std::string BuildMatchEnd() const;
-  exec::task<void> BroadcastSettlement(const Settlement& settlement);
+  stdexec::task<void> BroadcastSettlement(const Settlement& settlement);
 
   // ---- state ------------------------------------------------------------------------
   std::string room_id_;

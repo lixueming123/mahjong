@@ -24,13 +24,13 @@ void DbLibraryShutdown() {}
 
 DbActor::DbActor(DbConfig config) : config_(std::move(config)) {}
 
-exec::task<bool> DbActor::Initialize() {
+stdexec::task<bool> DbActor::Initialize() {
   spdlog::warn("db: built without MySQL support; accounts are disabled, the game itself is unaffected");
   available_ = false;
   co_return false;
 }
 
-exec::task<void> DbActor::Login(std::string /*username*/, std::string /*password*/,
+stdexec::task<void> DbActor::Login(std::string /*username*/, std::string /*password*/,
                                 ex_actor::ActorRef<PlayerActor> reply) {
   if (!reply.IsEmpty()) {
     ActorSendScope().spawn(reply.SendLocal<&PlayerActor::Dispatch>(
@@ -39,7 +39,7 @@ exec::task<void> DbActor::Login(std::string /*username*/, std::string /*password
   co_return;
 }
 
-exec::task<void> DbActor::Register(std::string /*username*/, std::string /*password*/, std::string /*nickname*/,
+stdexec::task<void> DbActor::Register(std::string /*username*/, std::string /*password*/, std::string /*nickname*/,
                                    ex_actor::ActorRef<PlayerActor> reply) {
   if (!reply.IsEmpty()) {
     ActorSendScope().spawn(reply.SendLocal<&PlayerActor::Dispatch>(
@@ -48,7 +48,7 @@ exec::task<void> DbActor::Register(std::string /*username*/, std::string /*passw
   co_return;
 }
 
-exec::task<void> DbActor::FetchStats(uint64_t /*account_id*/, ex_actor::ActorRef<PlayerActor> reply) {
+stdexec::task<void> DbActor::FetchStats(uint64_t /*account_id*/, ex_actor::ActorRef<PlayerActor> reply) {
   if (!reply.IsEmpty()) {
     ActorSendScope().spawn(
         reply.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::OnStatsResult(StatsOutcome {})));
@@ -56,14 +56,14 @@ exec::task<void> DbActor::FetchStats(uint64_t /*account_id*/, ex_actor::ActorRef
   co_return;
 }
 
-exec::task<void> DbActor::RecordMatch(MatchRecord /*record*/) {
+stdexec::task<void> DbActor::RecordMatch(MatchRecord /*record*/) {
   co_return;  // nothing to write to, and a lost row is not a game error (§4.6)
 }
 
-exec::task<void> DbActor::RecordMatchResult(MatchResultRecord /*record*/) {
+stdexec::task<void> DbActor::RecordMatchResult(MatchResultRecord /*record*/) {
   co_return;  // nothing to write to (§2.3 降级语义与 RecordMatch 相同)
 }
 
-exec::task<void> DbActor::Stop() { co_return; }
+stdexec::task<void> DbActor::Stop() { co_return; }
 
 }  // namespace mahjong

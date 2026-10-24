@@ -127,7 +127,7 @@ class SeatEndpoint {
 
   // The single door (see the file comment). Implementations take their own AsyncGate first when
   // they can suspend; PlayerActor's arms never suspend, so it takes the gate and runs.
-  virtual exec::task<void> Dispatch(PlayerEnvelope envelope) = 0;
+  virtual stdexec::task<void> Dispatch(PlayerEnvelope envelope) = 0;
 };
 
 }  // namespace mahjong

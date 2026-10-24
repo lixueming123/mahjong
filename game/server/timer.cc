@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "ex_actor/api.h"
+#include "ex_actor/internal/platform.h"
 
 namespace mahjong {
 
@@ -58,7 +59,7 @@ void WindowTimer::Stop() {
 }
 
 void WindowTimer::Run() {
-  ex_actor::internal::util::SetThreadName("win-timer");
+  ex_actor::internal::SetThreadName("win-timer");
   std::vector<Action> due;
   while (true) {
     {

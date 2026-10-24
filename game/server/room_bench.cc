@@ -170,7 +170,7 @@ class AutoClient : public mj::SeatEndpoint {
   // The room's ref, delivered after both actors exist (PlayerActor has the same handshake).
   void SetRoom(ex_actor::ActorRef<mj::RoomActor> room) { room_ = std::move(room); }
 
-  exec::task<void> Dispatch(mj::PlayerEnvelope envelope) override {
+  stdexec::task<void> Dispatch(mj::PlayerEnvelope envelope) override {
     // A room only ever delivers a seat frame or a seat error (seat_endpoint.h); the connection's
     // own kinds are not this client's business.
     const std::string* payload = nullptr;
@@ -683,21 +683,21 @@ void PrintBaselines(ex_actor::ActorRef<CounterActor> counter, std::shared_ptr<st
   {
     // The room's gate, uncontended: what the whole "one handler at a time" guarantee costs per
     // message. A bare task of the same shape is measured first, because `co_await` on an
-    // exec::task has a fixed cost of its own and the gate number is meaningless without it.
+    // stdexec::task has a fixed cost of its own and the gate number is meaningless without it.
     constexpr long kN = 200000;
     const Clock::time_point nop_start = Clock::now();
-    ex::sync_wait([&]() -> exec::task<void> {
+    ex::sync_wait([&]() -> stdexec::task<void> {
       for (long i = 0; i < kN; ++i) {
-        co_await []() -> exec::task<void> { co_return; }();
+        co_await []() -> stdexec::task<void> { co_return; }();
       }
     }());
     const Clock::time_point nop_end = Clock::now();
-    printf("  %-44s %9.1f ns\n", "  (a bare nested exec::task, for comparison)",
+    printf("  %-44s %9.1f ns\n", "  (a bare nested stdexec::task, for comparison)",
            std::chrono::duration<double, std::nano>(nop_end - nop_start).count() / static_cast<double>(kN));
 
     static mj::AsyncGate gate;
     const Clock::time_point start = Clock::now();
-    ex::sync_wait([&]() -> exec::task<void> {
+    ex::sync_wait([&]() -> stdexec::task<void> {
       for (long i = 0; i < kN; ++i) {
         mj::AsyncGate::Guard guard = co_await gate.Acquire();
       }

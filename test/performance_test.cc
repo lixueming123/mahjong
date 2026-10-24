@@ -36,7 +36,7 @@ class PerfTest : public testing::Test {
 };
 
 TEST_F(PerfTest, ActorCreation) {
-  auto test = []() -> exec::task<void> {
+  auto test = []() -> stdexec::task<void> {
     auto start = std::chrono::high_resolution_clock::now();
 
     const int kActorCount = 10000;
@@ -57,7 +57,7 @@ TEST_F(PerfTest, ActorCreation) {
 }
 
 TEST_F(PerfTest, MessagePassingLatency) {
-  auto test = []() -> exec::task<void> {
+  auto test = []() -> stdexec::task<void> {
     auto actor = co_await ex_actor::Spawn<PingActor>();
 
     const int kIterations = 10000;
@@ -80,7 +80,7 @@ TEST_F(PerfTest, MessagePassingLatency) {
 }
 
 TEST_F(PerfTest, MessageThroughput) {
-  auto test = []() -> exec::task<void> {
+  auto test = []() -> stdexec::task<void> {
     auto actor = co_await ex_actor::Spawn<PingActor>();
 
     const int kIterations = 100000;
@@ -103,7 +103,7 @@ TEST_F(PerfTest, MessageThroughput) {
 }
 
 TEST_F(PerfTest, ConcurrentActors) {
-  auto test = []() -> exec::task<void> {
+  auto test = []() -> stdexec::task<void> {
     const int kActorCount = 100;
     const int kIterations = 1000;
 
@@ -137,7 +137,7 @@ TEST_F(PerfTest, ConcurrentActors) {
 }
 
 TEST_F(PerfTest, RequestResponse) {
-  auto test = []() -> exec::task<void> {
+  auto test = []() -> stdexec::task<void> {
     auto actor = co_await ex_actor::Spawn<PingActor>();
 
     const int kIterations = 10000;
@@ -161,7 +161,7 @@ TEST_F(PerfTest, RequestResponse) {
 }
 
 TEST_F(PerfTest, ManyToMany) {
-  auto test = []() -> exec::task<void> {
+  auto test = []() -> stdexec::task<void> {
     const int kSenderCount = 50;
     const int kReceiverCount = 50;
     const int kMessagesPerSender = 100;
