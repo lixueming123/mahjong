@@ -675,8 +675,8 @@ std::string RoomActor::BuildMatchEnd() const {
 }
 
 std::string RoomActor::BuildGameEnd(const Settlement& settlement) const {
-  json::Value frame = json::Value::Obj(8);  // type, reason, round_index, dealer, renchan_count,
-                                            // match_will_continue, results (+ win)
+  json::Value frame = json::Value::Obj(9);  // type, reason, round_index, dealer, renchan_count,
+                                            // match_will_continue, interlude_ms, results (+ win)
   frame.Set("type", json::Value::Str("game_end"));
   frame.Set("reason", json::Value::Str(settlement.reason));
   // v1.6 新增顶层字段：场次进度（game_end 是低频帧，state_sync 不带这些，§5.9 性能注）
@@ -684,6 +684,9 @@ std::string RoomActor::BuildGameEnd(const Settlement& settlement) const {
   frame.Set("dealer", json::Value::Int(settlement.dealer));
   frame.Set("renchan_count", json::Value::Int(settlement.renchan_count));
   frame.Set("match_will_continue", json::Value::Bool(settlement.match_will_continue));
+  // v1.8（SETTLEMENT_BROADCAST_RULINGS §2.1）：本房间生效的局间窗口（播报窗 + 阅读窗）。
+  // **每一份 game_end 都带**——荒庄与场终那一局也不例外（客户端按它算播报预算与倒计时）。
+  frame.Set("interlude_ms", json::Value::Int(inter_hand_delay_ms_));
 
   json::Value results = json::Value::Arr(kSeatCount);
   for (int seat = 0; seat < kSeatCount; ++seat) {
@@ -788,6 +791,7 @@ exec::task<void> RoomActor::StartMatch() {
   dealer_hands_ = {};  // B3：坐庄手数随场次清零
   tenpai_seq_ = {};    // v1.7 §5.16：tenpai_seq 从 1 起；跨局不重置，新场次才归零
   dealer_ = 0;  // 首局庄家 = seat 0（GAME_DESIGN v1.10 §3.3）
+  match_end_pending_ = false;
   co_await StartRound();
 }
 
@@ -1467,6 +1471,21 @@ exec::task<void> RoomActor::AdvanceAfterRound(Settlement& settlement, const Scor
     timeout_scheduler_(inter_hand_delay_ms_, MakeRoundAdvanceToken(seq_));
     co_return;
   }
+  // v1.8（SETTLEMENT_BROADCAST_RULINGS §2.1 / C8）：场终也走**同一段播报窗**——match_end 不许
+  // 抢在结算播报前面到（客户端不缓存权威帧，只能靠服务端延迟）。**禁止 sleep_for / 阻塞
+  // actor 线程**：复用既有 timeout_scheduler_ + 独立令牌位（kMatchEndTokenBit），与局间推进
+  // 同款「arm 在 Transition() 之后」。`kRoundEnd` 是两条延迟共用的相位，靠 pending 位区分。
+  if (inter_hand_delay_ms_ > 0 && static_cast<bool>(timeout_scheduler_)) {
+    phase_ = Phase::kRoundEnd;
+    Transition();
+    match_end_pending_ = true;
+    timeout_scheduler_(inter_hand_delay_ms_, MakeMatchEndToken(seq_));
+    co_return;
+  }
+  if (inter_hand_delay_ms_ > 0) {
+    // 无调度器时不能停在一局终等一条永远不会来的消息（t31 的同款回退）：立即场终。
+    spdlog::error("room {}: no timeout scheduler for the match-end delay; finishing inline", room_id_);
+  }
   co_await FinishMatch();
 }
 
@@ -1474,6 +1493,7 @@ exec::task<void> RoomActor::FinishMatch() {
   // v1.6（C7 场终）：match_end 广播 + kMatchEnd；之后只剩 §1.4.5 的 30s 回收（C10）。
   phase_ = Phase::kMatchEnd;
   round_advance_pending_ = false;
+  match_end_pending_ = false;
   const std::string match_end = BuildMatchEnd();
   std::array<std::string, kSeatCount> frames;
   for (int seat = 0; seat < kSeatCount; ++seat) {
@@ -1519,11 +1539,13 @@ exec::task<void> RoomActor::OnWindowTimeout(uint64_t token) {
   // (kRoundAdvanceTokenBit). **判据顺序固定（C6，不得调换）**：
   const bool ai_pacing = IsAiPacingToken(token);
   const bool round_advance = IsRoundAdvanceToken(token);
+  const bool match_end = IsMatchEndToken(token);
   const uint64_t window_seq = WindowSeqOfToken(token);
   // ① seq 已作废 ⇒ 一律丢弃（含上一局最后窗口的 timeout —— 它带旧 seq，永远进不了后面）。
   if (window_seq != seq_) {
     spdlog::debug("room {}: stale {} for window {} (current {}) dropped", room_id_,
-                  ai_pacing ? "AI pacing deadline" : (round_advance ? "round advance" : "timeout"),
+                  ai_pacing ? "AI pacing deadline"
+                            : (round_advance ? "round advance" : (match_end ? "match-end delay" : "timeout")),
                   window_seq, seq_);
     co_return;
   }
@@ -1553,6 +1575,17 @@ exec::task<void> RoomActor::OnWindowTimeout(uint64_t token) {
       spdlog::info("room {}: inter-hand delay elapsed, starting round {} (dealer={})", room_id_, round_index_,
                    dealer_);
       co_await StartRound();
+    }
+    co_return;
+  }
+  // ③′ 场终延迟令牌（v1.8 / RULINGS §2.1 C8）：播报窗走完才下发 match_end。相位与局间推进
+  // **相同**（kRoundEnd），只能靠各自的 pending 位区分——用 round-advance 位会静默失效。
+  if (match_end) {
+    if (phase_ == Phase::kRoundEnd && match_end_pending_) {
+      match_end_pending_ = false;
+      spdlog::info("room {}: broadcast window elapsed, finishing match (rounds={}, hands_played={})",
+                   room_id_, round_index_, hands_played_);
+      co_await FinishMatch();
     }
     co_return;
   }

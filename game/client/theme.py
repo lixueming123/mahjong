@@ -61,6 +61,17 @@ BTN_WIN = (168, 124, 32)
 BTN_WIN_HOVER = (200, 152, 48)
 MASK = (0, 0, 0, 150)
 
+# 结算播报（RULINGS v1.2 §2.3）：**只新增这 4 个 token，既有配色一个都不改**
+# （涨跌色仍为得分正 POS 绿 / 负 NEG 红，见 `score_color`）。
+#: 播报期舞台底（盖住四卡 / 战绩块 / 手牌所在区域）
+BC_ZONE = (14, 22, 20, 150)
+#: 当前高亮行的底色（α40，非 30：对比度 5.5:1）
+BC_ACTIVE_BG = (255, 200, 64, 40)
+#: 字幕条底
+BC_CAPTION_BG = (0, 0, 0, 120)
+#: 封顶格的「被砍」填充
+BC_CAP_FILL = (255, 200, 64, 40)
+
 COLORS = {
     "BG": BG,
     "BG_LOGIN": BG_LOGIN,
@@ -92,6 +103,10 @@ COLORS = {
     "BTN_WIN": BTN_WIN,
     "BTN_WIN_HOVER": BTN_WIN_HOVER,
     "MASK": MASK,
+    "BC_ZONE": BC_ZONE,
+    "BC_ACTIVE_BG": BC_ACTIVE_BG,
+    "BC_CAPTION_BG": BC_CAPTION_BG,
+    "BC_CAP_FILL": BC_CAP_FILL,
 }
 
 # ---------------------------------------------------------------- §1.3 字体
@@ -367,6 +382,17 @@ FS_TILE_Z_RIVER_SIDE = 17
 FS_TILE_Z_MELD = 19
 FS_TILE_Z_RESULT = 56
 FS_TILE_Z_RESULT_HAND = 28
+
+
+def score_color(delta: int | None) -> tuple:
+    """涨跌色（RULINGS C10 v1.1 撤回整页改色）：**取值就是页面现状**。
+
+    得分正 = `POS` 绿、负 = `NEG` 红、0（或缺失）= `ZERO_SCORE` 灰。
+    收敛成一个函数只为日后一处切换（U3 待用户拍板），当前行为与 v2.0 逐像素一致。
+    """
+    if not isinstance(delta, int) or delta == 0:
+        return ZERO_SCORE
+    return POS if delta > 0 else NEG
 
 
 def lobby_room_row_rect(index: int) -> tuple[int, int, int, int]:

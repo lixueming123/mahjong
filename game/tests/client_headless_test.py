@@ -1421,12 +1421,24 @@ def main() -> int:
           f"D-4: 番种明细按 §9.2 形状渲染（含合计番/分）：{detail}")
     check("已封顶" not in detail, f"D-4: 未封顶不得出现「已封顶」：{detail}")
     capped = dict(win)
-    capped["han_breakdown"] = {"base": 5, "tsumo": 0, "dealer": 1, "total": 6}
+    # F7：封顶判据是 `base + dealer > 6`（真被砍），**不是** `total >= 6`（打满 6 番不算被砍）
+    capped["han_breakdown"] = {"base": 6, "tsumo": 0, "dealer": 1, "total": 6}
     capped["multiplier"] = 64
     capped["han"] = 6
     capped_detail = result_view._yaku_detail(capped)
     check("已封顶" in capped_detail and "（64 分）已封顶" in capped_detail,
           f"D-4: 封顶提示必须是「（N 分）已封顶」句式：{capped_detail}")
+    exact = dict(win)
+    exact["han_breakdown"] = {"base": 5, "tsumo": 0, "dealer": 1, "total": 6}  # 恰 6 番 = 打满
+    exact["multiplier"] = 64
+    exact["han"] = 6
+    check("已封顶" not in result_view._yaku_detail(exact),
+          f"F7: base+dealer == 6 是「打满 6 番」，不得显示已封顶：{result_view._yaku_detail(exact)}")
+    # F6：`yaku` 键缺失 ≠ 0 番（L2「明细不可用」）
+    missing = dict(win)
+    missing.pop("yaku", None)
+    check(result_view._yaku_detail(missing) == "番种明细不可用",
+          f"F6: yaku 键缺失必须显示明细不可用，got {result_view._yaku_detail(missing)!r}")
     check("无番（0 番）" == result_view._yaku_detail({"yaku": []}), "无番和牌文案 = 无番（0 番）（§9.2）")
     check("平和" not in result_view._yaku_detail({"yaku": []}), "无番文案不得再用「平和」")
     # D-3（§9.2 收付文案末行）：按 match_total 取领先者，并列时「并列领先」
@@ -1792,6 +1804,211 @@ def main() -> int:
     check(not misc_app.feel.flights, "state_sync ⇒ 动画 snap（§7 R2 / F-AN-03）")
     played_screen: list[str] = []
     misc_app.close_socket("杂项用例结束")
+
+    # --- 结算播报（SETTLEMENT_BROADCAST_RULINGS v1.2 §2.3 / §2.5）---
+    # 阶段 A 整幅舞台、六段同帧铺满、高亮逐条推进、跳过不发帧、阶段 A ≤56 次 draw、
+    # 倒计时读 interlude_ms 而不是硬编码 5 s。
+    from client import broadcast as bc_mod
+    from client.render import broadcast as bc_render
+
+    def broadcast_app(game_end_frame: dict) -> tuple[GameApp, list[tuple]]:
+        app = make_app()
+        sent_frames: list[tuple] = []
+        app.send_frame = lambda ftype, **fields: (sent_frames.append((ftype, fields)) or True)
+        app.connected = True
+        app._on_frame({"type": "login_ok", "player_id": "p-3f2a1c", "name": "玩家_"}, time.monotonic())
+        app._on_frame(dict(ROOM_JOINED), time.monotonic())
+        app._on_frame(dict(GAME_START), time.monotonic())
+        app._on_frame(dict(STATE_SYNC), time.monotonic())
+        sent_frames.clear()          # 只统计局间的出站帧
+        app._on_frame(game_end_frame, time.monotonic())
+        app.now = time.monotonic()
+        return app, sent_frames
+
+    bc_app, bc_sent = broadcast_app(dict(GAME_END, interlude_ms=12000))
+    plan = bc_app.bc.plan
+    check(bc_app.bc.running, "interlude 12000 ⇒ 播报起播（budget 10500 ≥ 6200 档）")
+    check(plan is not None and plan.budget_ms == 10500 and plan.level == "L0",
+          f"budget = clamp(12000-1500,4200,10500) = 10500，解析 L0：{plan and (plan.level, plan.budget_ms)}")
+    tl = bc_app.bc.timeline
+    check(tl is not None and tl.total_ms <= tl.budget_ms,
+          f"TOTAL ≤ budget：{tl and (tl.total_ms, tl.budget_ms)}")
+    # 语音驱动（RULINGS v1.3 §2.1）：逐条停留 = max(1200, 该句实测 + 150)，句首与步切换同时刻
+    check(tl.voice, "budget ≥ 6200 档 ⇒ 时间轴走语音驱动")
+    check(all(step.dur_ms >= 1200 for step in tl.steps if step.focus and step.focus[0] == "yaku"),
+          f"番种步停留 ≥1200 ms：{[(s.focus, s.dur_ms) for s in tl.steps]}")
+    check(len(tl.cues) >= 4 and all(c.at_ms <= tl.end_ms for c in tl.cues),
+          f"语音队列落在 [0, end] 内：{[(c.at_ms, c.cue) for c in tl.cues]}")
+    first_cue_per_step: dict[int, int] = {}
+    for cue in tl.cues:
+        if cue.step_index >= 0:
+            first_cue_per_step.setdefault(cue.step_index, cue.at_ms)
+    check(
+        all(abs(at - tl.steps[index].at_ms) <= 120 for index, at in first_cue_per_step.items()),
+        f"每步首句与步切换时刻差 ≤120 ms："
+        f"{[(i, at, tl.steps[i].at_ms) for i, at in sorted(first_cue_per_step.items())]}",
+    )
+    check(not tl.deleted, f"该局装得下、不删句：{tl.deleted}")
+    # §2.8 短局地板（v1.6 定稿）：**只保底、不拉伸** ——
+    # `total = max(自然, min(8000, budget-40))`，自然 > 8000 的局一律不动；荒庄豁免。
+    natural_ms = tl.total_ms - tl.padded_ms
+    floor_ms = max(natural_ms, min(bc_mod.BC_PAD_FLOOR_MS, tl.budget_ms - bc_mod.BC_END_SLACK_MS))
+    check(tl.total_ms <= tl.budget_ms, f"总长硬卡 ≤ budget：{tl.total_ms} / {tl.budget_ms}")
+    check(tl.total_ms == floor_ms,
+          f"短局地板：自然 {natural_ms} → 实际 {tl.total_ms}（应 {floor_ms}，补 {tl.padded_ms}）")
+
+    # 语音 id 自检（team-lead 要求，比听感可靠）：`voice_cues()` 产出的每个 id
+    # 必须在 `client/assets/vo/` 里真有一个 `.wav`，且必须在时长表里（否则时长为 0）。
+    from client import vo_durations as vo_mod
+
+    def _ge(yaku: list, base: int, dealer: int, total: int, mult: int, per: int, tsumo: bool) -> dict:
+        return {
+            "type": "game_end", "reason": "win_tsumo" if tsumo else "win_ron",
+            "round_index": 0, "dealer": 0, "renchan_count": 0, "match_will_continue": True,
+            "interlude_ms": 12000,
+            "results": [{"seat": i, "delta_score": 0, "match_total": 0} for i in range(4)],
+            "win": {"seat": 1, "tile": "1m", "from_seat": None if tsumo else 0, "tsumo": tsumo,
+                    "tags": [], "multiplier": mult, "per_payer": per,
+                    "total": per * 3 if tsumo else per,
+                    "yaku": [{"id": yid, "han": h} for yid, h in yaku], "han": total,
+                    "han_breakdown": {"base": base, "tsumo": 0, "dealer": dealer, "total": total},
+                    "dealer_bonus": dealer == 1},
+        }
+
+    probes: list[dict] = []
+    for yid in bc_mod.YAKU_LABEL:
+        for h in ((1, 2, 3) if yid == "yakuhai" else (1,)):
+            probes.append(_ge([(yid, h)], h, 0, min(6, h), 1 << min(6, h), 1, False))
+    for han in range(7):
+        probes.append(_ge([("menzen", 1)], han, 0, han, 1 << han, 1, False))
+    for mult in (1, 2, 4, 8, 16, 32, 64):
+        probes.append(_ge([("menzen", 1)], 1, 0, 1, mult, mult, False))
+    for per in (1, 2, 4, 8, 16, 32, 64, 128):
+        probes.append(_ge([("menzen", 1)], 1, 0, 1, per, per, per != 1))
+    probes.append(_ge([("menzen", 1)], 8, 1, 6, 64, 128, True))          # 封顶(8+1>6) + 庄家
+    probes.append({"type": "game_end", "reason": "draw_exhausted", "round_index": 0, "dealer": 0,
+                   "renchan_count": 0, "match_will_continue": True, "interlude_ms": 12000,
+                   "results": [{"seat": i, "delta_score": 0, "match_total": 0} for i in range(4)],
+                   "win": None})
+    emitted: set[str] = set()
+    for frame in probes:
+        emitted.update(bc_mod.voice_cues(bc_mod.plan_for(frame)))
+    absent = sorted(cue for cue in emitted
+                    if not os.path.isfile(os.path.join(GAME_DIR, "client", "assets", "vo", f"{cue}.wav")))
+    check(not absent, f"voice_cues() 产出的 {len(emitted)} 个 id 全部有 wav：缺 {absent}")
+    check(all(cue in vo_mod.VOICE_MS for cue in emitted),
+          f"全部 id 在时长表里（否则时长为 0）：{sorted(emitted - set(vo_mod.VOICE_MS))}")
+    check(not any(cue.startswith("vo_yaku_sum_") for cue in emitted),
+          "S-2 裁决 B：逐条路径不出现摘要句 vo_yaku_sum_*")
+    ui_bc = bc_app.build_ui()
+    check(bc_render.is_broadcasting(ui_bc), "阶段 A 判据 = 播报正在跑（不是 plan 存在）")
+    check(ui_bc.bc is not None and ui_bc.bc.caption, f"字幕条首句非空：{ui_bc.bc and ui_bc.bc.caption!r}")
+
+    # 六段同帧铺满：plan 的六个区块数据都在（S1 番种 / S2 牌型番 / S3 加成+合计 / S4 封顶 /
+    # S5 倍率 / S6 四户 delta）
+    check(len(plan.yaku_rows) >= 1 and plan.base is not None and plan.total_han is not None
+          and plan.cap_state in (bc_mod.CAP_NONE, bc_mod.CAP_EXACT, bc_mod.CAP_CAPPED)
+          and plan.mult is not None and len(plan.delta) == 4,
+          "六段数据齐备（S1 番种 / S2 牌型番 / S3 合计 / S4 封顶 / S5 倍率 / S6 四户）")
+
+    # 高亮逐条推进：把时钟往前推，字幕必须随段变化、focus 必须前移
+    # （v1.3：逐条停留 ≥1200 ms，所以每轮推进 0.9 s、共 6 轮 ⇒ 走到第 4 步）
+    captions: list[str] = []
+    focuses: list[object] = []
+    for step in range(6):
+        bc_app.now = time.monotonic()
+        bc_app.bc.update(bc_app.now)
+        view = bc_app.bc.view()
+        captions.append(view.caption)
+        focuses.append(view.focus)
+        bc_app.bc._t0 -= 0.9           # 纯逻辑推进（不 sleep）
+    check(len({c for c in captions if c}) >= 2, f"字幕随段变化：{captions}")
+    check(len({f for f in focuses if f}) >= 2, f"高亮逐条推进：{focuses}")
+
+    # 阶段 A 最坏帧 ≤56 次 draw（RULINGS §2.3 硬约束 2）：8 槽全填 + 当前行高亮
+    worst_end = dict(GAME_END, interlude_ms=12000)
+    worst_end["win"] = dict(GAME_END["win"])
+    worst_end["win"]["yaku"] = [
+        {"id": yid, "han": 1} for yid in
+        ("menzen", "tanyao", "pinfu", "iipeikou", "yakuhai", "rinshan", "sanshoku_doujun", "ittsuu")
+    ]
+    worst_end["win"]["han_breakdown"] = {"base": 8, "tsumo": 0, "dealer": 1, "total": 6}
+    worst_end["win"]["han"] = 6
+    worst_end["win"]["multiplier"] = 64
+    worst_end["win"]["per_payer"] = 8
+    worst_end["win"]["total"] = 24
+    worst_app, _worst_sent = broadcast_app(worst_end)
+    check(len(worst_app.bc.plan.yaku_rows) == 8, f"8 槽全填：{len(worst_app.bc.plan.yaku_rows)}")
+    draw_calls = {"n": 0}
+    _orig_draw, _orig_blit = bc_render._draw, bc_render._blit_panel
+    _orig_rect, _orig_line = pygame.draw.rect, pygame.draw.line
+
+    def _count_draw(*args, **kwargs):
+        draw_calls["n"] += 1
+        return _orig_draw(*args, **kwargs)
+
+    def _count_blit(*args, **kwargs):
+        draw_calls["n"] += 1
+        return _orig_blit(*args, **kwargs)
+
+    def _count_rect(*args, **kwargs):
+        draw_calls["n"] += 1
+        return _orig_rect(*args, **kwargs)
+
+    def _count_line(*args, **kwargs):
+        draw_calls["n"] += 1
+        return _orig_line(*args, **kwargs)
+
+    bc_render._draw, bc_render._blit_panel = _count_draw, _count_blit
+    pygame.draw.rect, pygame.draw.line = _count_rect, _count_line
+    try:
+        worst_app.now = time.monotonic()
+        worst_app.bc._t0 -= 0.30       # 让第 0 槽成为「当前」（含高亮条 + 当前行底）
+        worst_app.bc.update(worst_app.now)
+        # 只计**阶段 A 自己**的 draw：牌桌快照 / 蒙层 / 主面板是既有渲染，不计入本预算
+        stage_surface = pygame.Surface((T.LOGICAL_W, T.LOGICAL_H))
+        bc_render.render_round_end(stage_surface, worst_app.build_ui())
+    finally:
+        bc_render._draw, bc_render._blit_panel = _orig_draw, _orig_blit
+        pygame.draw.rect, pygame.draw.line = _orig_rect, _orig_line
+    check(draw_calls["n"] <= 56, f"阶段 A 最坏帧 draw 次数 ≤56：{draw_calls['n']}")
+
+    # 跳过：起播 100ms 内不响应；之后一次走完；**全程不发任何帧**
+    early = make_app()
+    early.bc.start({"type": "game_end", "reason": "win_ron", "interlude_ms": 12000}, time.monotonic())
+    check(not early.bc.skip(time.monotonic()), "起播 100ms 内不响应跳过（防连点穿透）")
+    early_sent: list[tuple] = []
+    early.send_frame = lambda ftype, **fields: (early_sent.append((ftype, fields)) or True)
+    early.connected = True
+    time.sleep(0.12)                    # 用例自身等 100ms 门槛；产品代码里没有 sleep
+    skipped = early.bc.skip(time.monotonic())
+    check(skipped and early.bc.view().fast_forward, "起播 100ms 后空格/回车/ESC/左键可跳过")
+    early.now = time.monotonic()
+    early.render_frame(present=False)
+    check(early.bc.state == bc_mod.STATE_RUNNING and not early_sent,
+          f"跳过期间与跳过之后出站帧必须为 0：{early_sent}")
+    early.bc.update(time.monotonic() + 0.5)
+    check(early.bc.finished, "180ms 快进 + 220ms 收束后进入 DONE/SKIPPED")
+    check(not bc_render.is_broadcasting(early.build_ui()) and not early_sent,
+          "播完回到阶段 B（v2.0 静态页），且仍未发帧")
+
+    # 倒计时：播完按 interlude_ms 剩余续算（12 s 档 ⇒ 约 12 → 0），不是硬编码 5
+    early.state.result_at = time.monotonic()
+    left = result_view._seconds_to_next_round(early.state, early.state.result_at)
+    check(left == 12, f"倒计时读 interlude_ms（12000 ⇒ 12 秒），got {left}")
+    left_later = result_view._seconds_to_next_round(early.state, early.state.result_at + 9.4)
+    check(left_later == 3, f"播完（9.4 s）后剩余约 3 秒，got {left_later}")
+
+    # 三档门槛：interlude 0（既有 gtest/e2e 的 0/300）⇒ 完全不播报，退 v2.0 静态页
+    quiet_app, quiet_sent = broadcast_app(dict(GAME_END, interlude_ms=0))
+    check(not quiet_app.bc.running and quiet_app.bc.plan is not None
+          and not quiet_app.bc.plan.broadcast and not quiet_sent,
+          "interlude 0 ⇒ 不播报（budget 4200 < 5100 档），且不发帧")
+    check(bc_app.state.screen == SCREEN_RESULT, "播报期停在局终页")
+    bc_app.close_socket("播报用例结束")
+    worst_app.close_socket("播报用例结束")
+    early.close_socket("播报用例结束")
+    quiet_app.close_socket("播报用例结束")
 
     # 两个大厅版面落盘（账号会话带战绩 / 游客会话无战绩）
     for label, account in (("client_lobby.png", True), ("client_lobby_guest.png", False)):

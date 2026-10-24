@@ -125,7 +125,10 @@ constexpr int kDefaultAiDelayMs = 900;
 constexpr int kMaxAiDelayMs = 5000;
 
 // v1.6（一场四局）: the pause between two rounds of one match (game_end -> next game_start).
-constexpr int kDefaultInterHandDelayMs = 5000;
+// v1.8（SETTLEMENT_BROADCAST_RULINGS §2.1 / C2）: 5000 -> **12000** = 播报窗 9000 + 阅读窗 3000.
+// The same value gates the *last* round too: `FinishMatch()` (match_end) is armed on the same
+// delay, so the final settlement gets the same broadcast window as every other round.
+constexpr int kDefaultInterHandDelayMs = 12000;
 constexpr int kMaxInterHandDelayMs = 60000;
 
 // Encoding of a scheduled-message token. A window deadline carries the plain envelope seq; an
@@ -146,8 +149,17 @@ inline uint64_t MakeRoundAdvanceToken(uint64_t window_seq) {
   return window_seq | kRoundAdvanceTokenBit;
 }
 inline bool IsRoundAdvanceToken(uint64_t token) { return (token & kRoundAdvanceTokenBit) != 0; }
+
+// v1.8（SETTLEMENT_BROADCAST_RULINGS §2.1 / C8）: the **match-end** deadline carries its own bit.
+// The round-advance bit cannot be reused: its handler requires `phase_ == kRoundEnd &&
+// round_advance_pending_` and only starts the next round — a match-end delay armed on that bit
+// would silently do nothing (the "静默失效" trap). Same arm-after-Transition() ordering applies:
+// the token must hold the post-round seq so the last window's timeout cannot collide with it.
+constexpr uint64_t kMatchEndTokenBit = 1ull << 61;
+inline uint64_t MakeMatchEndToken(uint64_t window_seq) { return window_seq | kMatchEndTokenBit; }
+inline bool IsMatchEndToken(uint64_t token) { return (token & kMatchEndTokenBit) != 0; }
 inline uint64_t WindowSeqOfToken(uint64_t token) {
-  return token & ~(kAiPacingTokenBit | kRoundAdvanceTokenBit);
+  return token & ~(kAiPacingTokenBit | kRoundAdvanceTokenBit | kMatchEndTokenBit);
 }
 
 // Process-wide pacing values, set once by main() from --ai-delay-ms / --inter-hand-delay-ms.
@@ -483,6 +495,10 @@ class RoomActor {
 
   // v1.6（C6 局间推进令牌）：true = 本局的推进消息已武装，等定时到达
   bool round_advance_pending_ = false;
+  // v1.8（播报窗）：true = 场终（match_end）的延迟消息已武装，等定时到达。与
+  // `round_advance_pending_` 分开是因为场终那条走独立的令牌位（kMatchEndTokenBit），
+  // 两者判据的 phase 相同（kRoundEnd），只能靠各自的 pending 位区分。
+  bool match_end_pending_ = false;
   // v1.6（自理杠补牌记录）：杠后打开的打牌窗口里自摸且和牌张 == 它 ⇒ 杠上开花（B1 ScoreContext 接线）
   std::optional<Tile> kong_draw_tile_;
 

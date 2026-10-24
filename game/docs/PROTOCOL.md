@@ -619,8 +619,9 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | `renchan_count` | int | 本场累计**连庄次数**，**含本局的累计值（post-increment）**——这是使 §5.15「`match_end.renchan_count` 与最后一次 `game_end` 同值」恒成立的唯一口径（C15 连庄上限触发的场终尤其如此）。首次开局为 0；庄家和牌或荒庄则计入一次（见 `RULESET.md` §7） |
 | `match_will_continue` | bool | `true` = 本场还有下一局（服务端稍后会下发新的 `game_start`）；`false` = 本场结束，随后下发 **`match_end`**（§5.15） |
 | `results[].match_total` | int | 该座位在**本场**的累计得失分（含本局）：`Σ 本场各局 delta_score`，四家之和恒为 0 |
+| `interlude_ms` | int | **v1.8**：本房间生效的**局间窗口**（毫秒）= 播报窗 + 阅读窗（缺省 `12000` = 9000 + 3000）。**每一份 `game_end` 都带**（荒庄与场终那一局也不例外）。客户端用它算结算播报预算（`clamp(interlude_ms − 3000, 4200, 9000)`）与「下一局即将开始（N 秒）」的剩余秒数；`0` 是合法值（服务端立即推进 ⇒ 不播报）。场终的 `match_end` 也被延迟同样的时长（服务端延迟，客户端**不得**缓存 `match_end`） |
 | `win.yaku` | array | 番种明细：`[{"id":<string>,"han":<int>}, …]`。**顺序 = `RULESET.md` 番种表的冻结判定序**（即结算页渲染序）；**每个 `id` 至多出现一条**（`yakuhai` 命中 n 组也合并为一条、`han = n`）。`Σ yaku[].han == win.han_breakdown.base`。荒庄/他家无此字段 |
-| `win.han_breakdown` | object | 番数四段式：`{"base":<int>,"tsumo":<int>,"dealer":<int>,"total":<int>}`。`base` = 牌型番合计（= Σ `yaku[].han`）；`tsumo` = 自摸加成（0/1）；`dealer` = 庄家加成（0/1）；`total` = `min(base + tsumo + dealer, 6)`（**封顶 6 番**）。荒庄/他家无此字段 |
+| `win.han_breakdown` | object | 番数四段式：`{"base":<int>,"tsumo":<int>,"dealer":<int>,"total":<int>}`。`base` = 牌型番合计（= Σ `yaku[].han`）；`dealer` = 庄家加成（0/1）；`total` = `min(base + dealer, 6)`（**封顶 6 番**）。**`tsumo` 恒 0，仅作兼容占位，客户端 MUST NOT 渲染**（自摸不是番种，`RULESET.md` §6 B1.1 裁决）。荒庄/他家无此字段 |
 | `win.han` | int | **= `win.han_breakdown.total`**（合计番数，含加成、封顶 6）。保留作单值便利字段，与 `han_breakdown.total` 恒等。荒庄/他家无此字段 |
 | `win.dealer_bonus` | bool | **派生便利字段**：等价于 `win.han_breakdown.dealer == 1`。荒庄/他家无此字段 |
 | `win.rinshan` | bool | **派生便利字段**：等价于 `win.yaku[]` 含 `id == "rinshan"`。荒庄/他家无此字段 |
@@ -630,7 +631,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 `menzen`（门前清）→ `tanyao`（断幺九）→ `pinfu`（平和）→ `iipeikou`（一杯口）→ `yakuhai`（箭刻）→ `rinshan`（杠上开花）→ `sanshoku_doujun`（三色同顺）→ `ittsuu`（一气通贯）→ `toitoi`（对对和）→ `sanankou`（三暗刻）→ `honitsu`（混一色）→ `shousangen`（小三元）→ `seven_pairs`（七对子）→ `pure_one_suit`（清一色）。
 
 - 这 14 个 id 是**线协议词汇**（客户端按 id 渲染中文标签），因此在此冻结；**每个 id 的番值与判定条件以 `RULESET.md` 番种表为唯一权威**，本文不重复其数值，避免两处漂移。
-- `tsumo`（自摸 +1）与庄家加成（+1）**不是** `yaku[]` 元素：自摸已由 `win.tsumo` 表达，庄家是身份加成不是牌型，两者只出现在 `win.han_breakdown` 的对应字段里。客户端必须把"番种明细 + 自摸 + 庄家 = 合计"渲染成一段可加和的式子。
+- **自摸不加番**（`SETTLEMENT_BROADCAST_RULINGS` C9 定稿）：`han_breakdown.tsumo` **恒 0**，是兼容占位而非番值；客户端的加和式只有两项 —— 「牌型番 + 庄家加成 = 合计」，**屏上不得出现任何自摸加成项**。庄家加成是身份加成不是牌型，两者都只出现在 `win.han_breakdown` 的对应字段里，不进 `yaku[]`。
 - 旧 id `seven_pairs` / `pure_one_suit` 的**字符串与语义均不变**（七对子仍是七对子；清一色仍是"零字牌"），因此旧客户端的标签映射继续可用。
 
 - **`game_end` 不携带 `seq`**，不参与 `seq` 比较（H5）。
@@ -650,7 +651,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
         "han":3,"dealer_bonus":false,"rinshan":false,
         "multiplier":R,"per_payer":R,"total":R}}
 ```
-> `N`/`R` 是**占位符**：番值、支付公式与封顶口径由 `RULESET.md` 番种表与算分节冻结（本文只冻结**字段形状、顺序、子集关系与零和约束**）。要点：①`Σ yaku[].han == han_breakdown.base`；②`han_breakdown.total = min(base+tsumo+dealer, 6)`；③`win.han == han_breakdown.total`；④`tags ⊆ yaku[].id`；⑤`match_total` 与 `delta_score` 在首局相等，从第 2 局起分化。
+> `N`/`R` 是**占位符**：番值、支付公式与封顶口径由 `RULESET.md` 番种表与算分节冻结（本文只冻结**字段形状、顺序、子集关系与零和约束**）。要点：①`Σ yaku[].han == han_breakdown.base`；②`han_breakdown.total = min(base + dealer, 6)`（`tsumo` 恒 0，不参与加法）；③`win.han == han_breakdown.total`；④`tags ⊆ yaku[].id`；⑤`match_total` 与 `delta_score` 在首局相等，从第 2 局起分化。
 
 ### 5.11 `pong`
 
@@ -1094,7 +1095,7 @@ S→C match_end{hands_played:5,renchan_count:1,
 - [ ] 断言：`login_ok.player_id` 非空、`game_start.hand` 长度 13/14、至少一次 `draw` 与 `discard_event`、`game_end.results` 长度 4、`Σ delta_score == 0`、全程零 `error`
 - [ ] **v1.6 场次级断言**：`game_end` 次数 == `match_end.hands_played`（4..8）；`hands_played <= match_end.renchan_count + 4`；`match_end` 恰好 1 次且 `Σ final_score == 0`；`rankings` 覆盖 4 个座位且 `rank` 并列跳号；`round_index` 单调不减且连庄处相等；`seq` 跨局严格递增（§6.2 第 5 条）
 - [ ] **v1.6 暗杠断言**：他家视角 `ankan.tiles` 恒 `[]`，局终揭示后被补全；杠后 `remaining` 递减且牌数守恒（`remaining + 各家手牌 + 副露 + 牌河 == 136`）
-- [ ] **v1.6 番数断言**（对齐 `GAME_DESIGN` A13–A15）：①`yaku[]` 严格按冻结判定序、**每 id 至多一条**、`tags ⊆ yaku[].id`；②`Σ yaku[].han == han_breakdown.base`、`han_breakdown.total == min(base+tsumo+dealer, 6)`、`win.han == han_breakdown.total`、`dealer_bonus == (dealer==1)`、`rinshan == (yaku 含 rinshan)`；③同一手牌判番 1000 次、且打乱输入顺序后逐字段相同（确定性回归）
+- [ ] **v1.6 番数断言**（对齐 `GAME_DESIGN` A13–A15）：①`yaku[]` 严格按冻结判定序、**每 id 至多一条**、`tags ⊆ yaku[].id`；②`Σ yaku[].han == han_breakdown.base`、`han_breakdown.total == min(base + dealer, 6)`（`tsumo` 恒 0、不得参与加法）、`win.han == han_breakdown.total`、`dealer_bonus == (dealer==1)`、`rinshan == (yaku 含 rinshan)`；③同一手牌判番 1000 次、且打乱输入顺序后逐字段相同（确定性回归）
 - [ ] **v1.7 听牌断言**：①`tenpai` **只发本家**（他家连接收不到任何 `tenpai`）；②本家每帧 `is_tenpai == false` 时 `waits == []`（MUST，且"未听牌必须发帧"）；③`waits[]` 按 §2.2 牌序且同面不重复；④`waits[].remaining == 4 − 本家手牌 − 本家副露 − 三家**公开**副露 − 四家牌河`（**他家 `ankan` 计 0**；**不得**用牌山真值；**不得**统计任何跨局数据）；⑤`tenpai_seq` 严格递增、与 `room.seq` 无可比关系；⑥单帧 < 1024 字节（PB-2）
 - [ ] **v1.7 事件断言**：①`action_event{action:"ankan"}` 的 `tiles` 恒为 `[]`（对所有座位）；②`kakan` 的 `tiles` 恒为 `[T]`；③`seq` 在连庄（`round_index` 不变）前后仍严格递增
 
@@ -1312,7 +1313,7 @@ remaining(tile) = 4
 | `action_event` | S→C | `seat`, `action`, `tiles[]`（**`ankan` 恒 `[]`**，v1.7 §11.5）, `from_seat?`（`ankan`/`kakan`/自摸 不带） | ✅ |
 | `state_sync` | S→C | `hand`, `melds[]`（5 种 type）, `seats[]`（他家 `ankan.tiles` 为 `[]`）, `remaining`, `current_seat` | ✅ |
 | `tenpai` | S→C | **仅本家（v1.7）**：`tenpai_seq`, `is_tenpai`, `waits[]{tile,remaining}` | ❌（走 `tenpai_seq`） |
-| `game_end` | S→C | **局终**：`reason`, `results[4]`（+`match_total`）, `win`（+`yaku[]`/`han_breakdown{base,tsumo,dealer,total}`/`han`/`dealer_bonus`/`rinshan`；`tags` 保持旧语义）, `round_index`, `dealer`, `renchan_count`, `match_will_continue`（后四个 v1.6） | ❌ |
+| `game_end` | S→C | **局终**：`reason`, `results[4]`（+`match_total`）, `win`（+`yaku[]`/`han_breakdown{base,tsumo,dealer,total}`/`han`/`dealer_bonus`/`rinshan`；`tags` 保持旧语义）, `round_index`, `dealer`, `renchan_count`, `match_will_continue`（后四个 v1.6）, `interlude_ms`（v1.8） | ❌ |
 | `match_end` | S→C | **场终（v1.6）**：`hands_played`, `renchan_count`, `rankings[]{seat,final_score,rank}` | ❌ |
 | `stats` | S→C | `games`, `wins`, `draws`, `net_score`, `recent[]` | ❌ |
 | `pong` | S→C | — | — |

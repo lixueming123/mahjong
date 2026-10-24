@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .broadcast import BroadcastView
 from .game_state import GameState
 from .theme import FontBook
 
@@ -72,3 +73,6 @@ class UiView:
     toast_alpha: int = 0
     extra_notes: list[str] = field(default_factory=list)
     pending_flash: bool = False
+    # 结算播报（`client/broadcast.py`）的**只读**快照：渲染层只读它，不推进状态。
+    # `None` / `plan is None` ⇒ 本局没有结算页内容（或播报从未起播）。
+    bc: BroadcastView | None = None

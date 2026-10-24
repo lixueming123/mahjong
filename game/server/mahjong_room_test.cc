@@ -337,6 +337,38 @@ class TestRoom {
     return true;
   }
 
+  // v1.8（播报窗 / RULINGS §2.1 C8）：场终延迟令牌的测试驱动（与 TakeRoundAdvance 同型）。
+  // 场终那一条走**独立令牌位**（kMatchEndTokenBit）：与局间推进的相位相同（kRoundEnd），
+  // 只能靠各自的 pending 位区分。
+  uint64_t TakeMatchEnd() {
+    for (size_t i = scheduled_.size(); i > 0; --i) {
+      if (IsMatchEndToken(scheduled_[i - 1].second)) {
+        const uint64_t token = scheduled_[i - 1].second;
+        scheduled_.erase(scheduled_.begin() + static_cast<std::ptrdiff_t>(i - 1));
+        return token;
+      }
+    }
+    return 0;
+  }
+
+  bool MatchEndScheduled() const {
+    for (const std::pair<int64_t, uint64_t>& entry : scheduled_) {
+      if (IsMatchEndToken(entry.second)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool FireMatchEnd() {
+    const uint64_t token = TakeMatchEnd();
+    if (token == 0) {
+      return false;
+    }
+    Send(RoomEnvelope::WindowTimeout(token));
+    return true;
+  }
+
   int DiscardsBy(int seat) const {
     int count = 0;
     for (const json::Value& frame : history_) {
@@ -453,7 +485,11 @@ class TestRoom {
     }
     // v1.6（C5/C6）：局终后由推进令牌驱动下一局（一次一步，从不循环推进）。
     if (room_->round_finished()) {
-      return FireRoundAdvance();
+      if (FireRoundAdvance()) {
+        return true;
+      }
+      // v1.8：场终的 match_end 也走延迟令牌（播报窗），只有它能结束整场
+      return FireMatchEnd();
     }
     if (AnswerWindow()) {
       return true;
@@ -1598,8 +1634,6 @@ TEST_F(RoomActorTest, FullGamesSatisfyProtocolInvariants) {
 // melds 更新（ankan 追加 / kakan 就地升级组序不变）、补摸 1 张（remaining 派生）、
 // 重开打牌窗口、action_event 无 from_seat、张数公式逐字不变。
 // ---------------------------------------------------------------------------
-// M8 缺省值（A1_ACCEPTANCE §七）：局间隔冻结默认 5000 ms（--inter-hand-delay-ms 缺省口径）。
-// 相对时序观察在 e2e（E2/M8 时序观察）里用短配值跑，这里只钉死缺省常量。
 // v1.6 局种子（用户 blocker）：**同一场连续两局的牌山与四家起手牌必须不同**。
 // 连庄场（dealer 不变，只有 hand_index 在变）是这一层最容易漏的情形，必须覆盖到；
 // 轮庄场也一并覆盖。
@@ -1696,11 +1730,57 @@ TEST(MahjongRules, RoundSeedIsPureAndPerHand) {
 
 
 // ---------------------------------------------------------------------------
-// M8 缺省值（A1_ACCEPTANCE §七）：局间隔冻结默认 5000 ms（--inter-hand-delay-ms 缺省口径）。
+// M8 缺省值（A1_ACCEPTANCE §七 / SETTLEMENT_BROADCAST_RULINGS v1.2 §2.1）：局间隔冻结默认
+// **12000 ms** = 播报窗 9000 + 阅读窗 3000（`--inter-hand-delay-ms` 缺省口径）。
 // 相对时序观察在 e2e（E2 主体脚本）里用短配值跑，这里只钉死缺省常量。
 TEST(MahjongRules, InterHandDelayDefaultIsFrozen) {
-  EXPECT_EQ(mahjong::kDefaultInterHandDelayMs, 5000);
+  EXPECT_EQ(mahjong::kDefaultInterHandDelayMs, 12000);
   EXPECT_EQ(mahjong::kMaxInterHandDelayMs, 60000);
+}
+
+// v1.8（SETTLEMENT_BROADCAST_RULINGS §2.1 / C8）：
+// ① 每份 `game_end` 都带**本房间生效值** `interlude_ms`（荒庄 / 场终那一局也一样）；
+// ② 场终 `match_end` 也走同一段播报窗——延迟令牌带独立位，走完才场终。
+TEST_F(RoomActorTest, GameEndCarriesInterludeAndMatchEndWaitsForIt) {
+  constexpr int kInterlude = 12000;
+  TestRoom test_room(20251023, kDefaultTimeoutMs, /*ai_delay_ms=*/0, /*smart_discard=*/false,
+                     /*install_scheduler=*/true, /*all_human=*/false, /*inter_hand_delay_ms=*/kInterlude);
+  test_room.Ready();
+  int rounds = 0;
+  while (!test_room.room()->game_finished() && rounds < 12) {
+    ASSERT_TRUE(test_room.PlayFullRound()) << "第 " << rounds + 1 << " 局未走到局终";
+    ++rounds;
+    if (test_room.FireRoundAdvance()) {
+      continue;  // 还有下一局
+    }
+    break;       // 场终：match_end 必须等播报窗走完
+  }
+  ASSERT_TRUE(test_room.room()->round_finished());
+  EXPECT_GE(rounds, 4) << "一场至少 4 局";
+  // ② 场终尚未下发，且延迟令牌已武装、延迟值 = 本房间生效值
+  EXPECT_FALSE(test_room.room()->game_finished()) << "match_end 不得抢在播报窗之前下发";
+  EXPECT_EQ(CountOfType(test_room.history(), "match_end"), 0);
+  ASSERT_TRUE(test_room.MatchEndScheduled()) << "场终必须武装延迟令牌（走 scheduler，禁 sleep）";
+  for (const std::pair<int64_t, uint64_t>& entry : test_room.scheduled()) {
+    if (IsMatchEndToken(entry.second)) {
+      EXPECT_EQ(entry.first, kInterlude);
+      // 独立令牌位：不得与局间推进位重叠（否则 on 场终静默失效）
+      EXPECT_FALSE(IsRoundAdvanceToken(entry.second));
+      EXPECT_FALSE(IsAiPacingToken(entry.second));
+    }
+  }
+  // ① 每份 game_end 都带 interlude_ms
+  const std::vector<const json::Value*> ends = FramesOfType(test_room.history(), "game_end");
+  ASSERT_EQ(static_cast<int>(ends.size()), rounds);
+  for (const json::Value* end : ends) {
+    ASSERT_NE(end->Find("interlude_ms"), nullptr) << "每份 game_end 都必须带 interlude_ms（含荒庄/场终局）";
+    EXPECT_EQ(IntOf(*end, "interlude_ms"), kInterlude);
+  }
+  // 令牌到达 ⇒ match_end 恰好一份
+  ASSERT_TRUE(test_room.FireMatchEnd());
+  EXPECT_TRUE(test_room.room()->game_finished());
+  test_room.PendingRequest();
+  EXPECT_EQ(CountOfType(test_room.history(), "match_end"), 1);
 }
 
 // ---------------------------------------------------------------------------

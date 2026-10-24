@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import time
 
@@ -19,6 +20,7 @@ import pygame
 
 from . import theme as T
 from .audio import AudioEngine
+from .broadcast import VOICE_ENABLED, Broadcast
 from .feel import Feel
 from .game_state import (SCREEN_LOGIN, SCREEN_LOBBY, SCREEN_RESULT, SCREEN_TABLE, WINDOW_CLAIM, WINDOW_DISCARD,
                          GameState)
@@ -51,6 +53,9 @@ ERROR_STRIP_DURATION = 4.0
 # 「再来一局」撞上服务端还没释放账号时的短重试（UI_UX_SPEC §9.5 第 7 条）。
 REMATCH_RETRY_LIMIT = 5
 REMATCH_RETRY_DELAY = 0.3
+# 结算播报的时间轴诊断开关（`MAHJONG_BC_TRACE=1`）：逐帧打印「第几步在什么时刻被触发」。
+# 默认关，不影响任何逻辑；出问题时开它就能看到 S0→S7 的真实时间戳。
+BROADCAST_TRACE = os.environ.get("MAHJONG_BC_TRACE") == "1"
 
 ERROR_TEXT = {
     "INVALID_NAME": "昵称非法：需 1..16 个字符，且不含换行或控制字符",
@@ -88,6 +93,9 @@ class GameApp:
         self.fullscreen = fullscreen
         # B 批（FEEL_SPEC §6 F-AN-06）：`--no-feel` ⇒ 不播任何动画，直接按终态绘制。
         self.feel = Feel(animations_enabled=not no_feel)
+        # 结算播报 S1（RULINGS §2.5）：`--no-feel` 完全不播报，退 v2.0 静态页。
+        # 时间轴只吃 `time.monotonic()` 的**绝对时间**（不消费 dt、不调 `feel.scaled()`）。
+        self.bc = Broadcast(enabled=not no_feel)
         pygame.init()
         try:
             pygame.font.init()
@@ -103,6 +111,9 @@ class GameApp:
         self._turn_start_announced = False
         self._last_countdown_bucket: int | None = None
         self._was_tenpai = False
+        # 播报语音：`_voice_live` 记录「上一帧有语音在响」，用于一次性收声（不每帧 stop）
+        self._voice_live = False
+        self._bc_trace_step: int | None = None
         self.running = True
         self.now = time.monotonic()
 
@@ -309,6 +320,9 @@ class GameApp:
             if T.rect_contains(overlays.DISCONNECT_BTN, pos):
                 self.return_to_login()
             return
+        # 播报期左键任意位置 = 跳过（RULINGS §2.5）。**不发任何帧**（局间出站帧必须为 0）。
+        if self._broadcast_skippable() and self.bc.skip(time.monotonic()):
+            return
         if self.banner_action:
             btn = overlays.banner_button_rect(self._bar_visible())
             if btn is not None and T.rect_contains(btn, pos):
@@ -355,6 +369,12 @@ class GameApp:
         elif self.state.screen == SCREEN_TABLE:
             self._table_key(event)
         elif self.state.screen == SCREEN_RESULT:
+            # 播报期：SPACE / RETURN / ESC 一律是「跳过播报」，且**不发任何帧**（RULINGS §2.5）。
+            if self._broadcast_skippable() and event.key in (
+                pygame.K_SPACE, pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_ESCAPE,
+            ):
+                if self.bc.skip(time.monotonic()):
+                    return
             # Enter 是最常用的那个（再来一局），ESC 走「返回大厅」（§9.5）。
             # D-1 守卫（§9.5 v2.0）：出口只在**场终页**可用——键盘与鼠标同规则，
             # 局终页（match_end 未到）按 Enter/ESC 不得触发任何出口。
@@ -534,6 +554,11 @@ class GameApp:
         self._auto_retry(now)
         self._pump_sfx(now)
         self.feel.update(now)
+        # 播报状态机（ARCH §4.1）：唯一的时间驱动点，只吃绝对 `now`，不 sleep、不发帧。
+        self.bc.update(now)
+        # 播报语音（S2 批）：取到点的句子交给 VOICE 通道，并维护 WIN duck。
+        # **解码在启动期已做完**，这里只有 `Channel.play()`，没有 `Sound()`。
+        self._pump_voice(now)
         self._countdown_tick(now)
         if self.toast_until and now >= self.toast_until:
             self.toast_text = ""
@@ -747,6 +772,9 @@ class GameApp:
             self._was_tenpai = False
             self.feel.snap_all()          # F-TP-12：跨局隔离，动画状态一并清
             self.feel.tenpai_anim = None
+            # 播报在此**直接终止**（RULINGS C8：不缓冲权威帧，`game_start` 到达即切屏）
+            self.bc.abort("game_start")
+            self.bc.clear()
         elif ftype == "draw":
             tile = frame.get("tile")
             if frame.get("seat") == self.state.my_seat:
@@ -776,6 +804,14 @@ class GameApp:
             self._clear_banner()
             self.state.window = None
             self.feel.snap_all()
+            # 结算播报（RULINGS §2.1）：`game_end` 到达即起播；能否播由 `budget` 三档决定，
+            # 不播报时 `view().plan` 仍在（阶段 B 静态页照常渲染）。
+            self.bc.start(
+                frame,
+                time.monotonic(),
+                name_of=self.state.name_of,
+                rel_label=self.state.rel_label,
+            )
             # F-AU-11 荒庄 / F-AU-15 局终（互斥：`draw_exhausted` 走收束音，不走「一局结束」音）
             reason = frame.get("reason")
             if reason == "draw_exhausted":
@@ -791,6 +827,9 @@ class GameApp:
             self._clear_banner()
             self.state.window = None
             self.feel.snap_all()
+            # 播报不缓存 `match_end`（RULINGS C8）：终局由服务端延迟，客户端照帧即切场终页
+            self.bc.abort("match_end")
+            self.bc.clear()
             self._sfx_later(120.0, "match_end")
         elif ftype == "action_request":
             # F-AU-12：本家打牌窗口**首次**出现 ⇒ 操作栏显示后 80 ms 才落声
@@ -1001,6 +1040,7 @@ class GameApp:
         self.login_stage = "IDLE"
         self.logged_in = False
         self.last_ping = None
+        self.bc.abort(f"closed:{reason}")   # 断线 = 播报终态（不发帧、不缓冲）
         if self.state.result is not None:
             # §8.4：断线前已收到 game_end → 不显示断线蒙层，直接停留在结算页
             self.disconnect_reason = None
@@ -1127,9 +1167,75 @@ class GameApp:
         for _at, sound_id, seq in due:
             self._sfx(sound_id, seq)
 
+    def _pump_voice(self, now: float) -> None:
+        """播报语音：取出到点的句子、维护 WIN duck、终态时收声。
+
+        **缺资产 ⇒ `play_voice` 返回 False**，这里不做任何补偿（不重试、不等待），
+        所以「`assets/vo/` 整个改名」与「有 wav」两种状态下，时间轴与画面完全一致。
+        """
+        live = VOICE_ENABLED and self.bc.running and not self.bc.fast_forward
+        if live:
+            for cue in self.bc.collect_voice(now):
+                self.audio.play_voice(cue, now)
+                if BROADCAST_TRACE:
+                    print(f"[BC] cue {cue}", flush=True)
+            self.audio.update(now, self.bc.next_voice_in(now))
+            self._voice_live = True
+        else:
+            if self._voice_live:
+                self.audio.stop_voice()      # 跳过 / 播完 / 打断：一次收声
+                self._voice_live = False
+            self.audio.update(now, None)
+        if BROADCAST_TRACE:
+            self._trace_broadcast(now)
+
+    def _trace_broadcast(self, now: float) -> None:
+        """`MAHJONG_BC_TRACE=1` 时打印播报进度（t0 / end_at / 第几步 / 每步实际触发时刻）。"""
+        bc = self.bc
+        timeline = bc.timeline
+        if not bc.running:
+            if self._bc_trace_step is not None:
+                elapsed = (now - bc.started_at) * 1000.0
+                print(f"[BC] 终态 {bc.state} t=+{elapsed:.1f}ms", flush=True)
+                self._bc_trace_step = None
+            return
+        if timeline is None:
+            return
+        if self._bc_trace_step is None:
+            self._bc_trace_step = -1
+            cues = timeline.cues
+            print(
+                f"[BC] 起播 t0={bc.started_at:.3f} end_at={bc.end_at:.3f} "
+                f"TOTAL={timeline.end_ms}ms budget={timeline.budget_ms}ms "
+                f"语音={len(cues)}句 删句={list(timeline.deleted)}",
+                flush=True,
+            )
+        view = bc.view()
+        if view.step_index == self._bc_trace_step:
+            return
+        self._bc_trace_step = view.step_index
+        elapsed = (now - bc.started_at) * 1000.0
+        if view.step_index < 0:
+            print(f"[BC] step=-1（S0 开场）t=+{elapsed:.1f}ms", flush=True)
+            return
+        step = timeline.steps[view.step_index]
+        print(
+            f"[BC] step={view.step_index:2d}/{len(timeline.steps)} t=+{elapsed:7.1f}ms "
+            f"计划={step.at_ms:5d}ms 差={elapsed - step.at_ms:+6.1f}ms "
+            f"focus={step.focus} caption={step.caption!r}",
+            flush=True,
+        )
+
     def _countdown_tick(self, now: float) -> None:
-        """F-AU-13：倒计时进入最后 3 秒，每秒一次（默认关，`N` 键打开）。"""
+        """F-AU-13：倒计时进入最后 3 秒，每秒一次（默认关，`N` 键打开）。
+
+        播报期一律不播（RULINGS §2.5：播报期倒计时行只写「播报中…」）。
+        """
         if not self.feel.countdown_on:
+            self._last_countdown_bucket = None
+            return
+        if self.bc.plan is not None:
+            # 结算页（含播报期）不滴答：倒计时在播报期是暂停的，滴答会与语音打架
             self._last_countdown_bucket = None
             return
         if self.state.screen != SCREEN_TABLE:
@@ -1151,6 +1257,9 @@ class GameApp:
         """F-AU-26：任何屏切换 ⇒ 三条通道全部 `fadeout(40 ms)`。"""
         if before != after:
             self.audio.stop_all()
+            # 播报只在结算页有意义：离开结算页（切屏）即终态，不缓冲任何帧（ARCH §3.7 X3）
+            if after != SCREEN_RESULT:
+                self.bc.abort(f"screen:{after}")
 
     def _feel_toggles_help(self) -> str:
         return "T 听牌 H 提示 M 静音 N 计时"
@@ -1368,6 +1477,17 @@ class GameApp:
     def _bar_visible(self) -> bool:
         return actionbar.bar_visible(self.state)
 
+    def _broadcast_skippable(self) -> bool:
+        """播报期是否可跳（RULINGS §2.5）：只在局终页、且播报正在跑。
+
+        `match_end` 已到（场终页）时不可跳——场终页没有任何播报内容。
+        """
+        return (
+            self.state.screen == SCREEN_RESULT
+            and self.state.match_end is None
+            and self.bc.running
+        )
+
     def _remaining_ms(self) -> float | None:
         return self.state.remaining_ms(self.now, time.time() * 1000.0)
 
@@ -1574,6 +1694,8 @@ class GameApp:
             toast_alpha=toast_alpha,
             extra_notes=notes,
             pending_flash=self.now < self.pending_flash_until,
+            # 结算播报的只读快照（`Broadcast.view()` 是纯读取，不含写接口）
+            bc=self.bc.view(),
         )
 
     def _seated_in_lobby(self) -> bool:

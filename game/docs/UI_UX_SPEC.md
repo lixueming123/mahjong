@@ -911,7 +911,7 @@ y 轴刻度 ┌─────────────────────�
 │  （牌桌最后一帧画面，MASK alpha 150 覆盖，保持只读）                          │
 │  ┌────────────────────────────────────────────────────────────────────────┐  │ 40
 │  │ 第 2/4 局 · 连庄 0 · 荣和                              −16            │  │
-│  │ 明细：门前清 1番 · 七对子 2番 ｜ 自摸 +0 · 庄家 +1 ｜ 合计 4 番（16 分）│  │
+│  │ 明细：门前清 1番 · 七对子 2番 ｜ 庄家 +1 ｜ 合计 4 番（16 分）           │  │
 │  │ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐                    │  │ 130
 │  │ │自家 玩家_│ │下家 AI-1 │ │对家 AI-2 │ │上家 AI-3 │                    │  │
 │  │ │   −32    │ │   +96    │ │   −32    │ │   −32    │  ← 和牌者金框      │  │
@@ -938,7 +938,7 @@ y 轴刻度 ┌─────────────────────�
 | 蒙层 | `(0,0,1280,720)` | `MASK` 覆盖牌桌快照（牌桌元素保留在原坐标，只读、无高亮、无操作栏） | 最后一帧 `state_sync` + `discard_event`/`action_event` 的本地状态 |
 | 主面板 | `(140,40,1000,640)` | `PANEL`（alpha 245）+ `PANEL_EDGE` 2px + 圆角 8 | 静态 |
 | 标题行 | `(164,60,952,44)` | 左：「第 `X`/4 局 · 连庄 `N` · 」+「自摸」/「荣和」/「荒庄（牌山摸尽）」H1 40px（**v2.0**：`X` = `round_index + 1`，0 基换算；`N` = `renchan_count`）；右：`delta_score`（和牌者 `+n`，`POS`）H1 | `game_end.round_index/dealer/renchan_count`、`game_end.reason`、`win.tsumo`、`results[win.seat].delta_score` |
-| **番种明细行（v2.0，取代旧「牌型行」）** | `(164,106,952,24)` | ① 番种明细：按 `win.yaku[]` **顺序**逐个「中文名 `N`番」（id → 中文映射表见 §9.4）；② 追加「自摸 +`tsumo` · 庄家 +`dealer`」（取自 `han_breakdown`，为 0 的项不显示）；③ 结尾「合计 `han_breakdown.total` 番（`multiplier` 分）」，`total == 6` 时追加「已封顶」。**无番和牌显示「无番（0 番）」——「平和」文案 v2.0 作废**（GAME_DESIGN §6.5；「平和」现在是 1 番番种名）。荒庄时本行显示「本局不计分；庄家连庄」 | `win.yaku[]`、`win.han_breakdown{base,tsumo,dealer,total}`、`win.multiplier`、`reason`；`win.tags` **不用于新渲染**（仅旧客户端兼容字段） |
+| **番种明细行（v2.0，取代旧「牌型行」）** | `(164,106,952,24)` | ① 番种明细：按 `win.yaku[]` **顺序**逐个「中文名 `N`番」（id → 中文映射表见 §9.4）；② 追加「庄家 +`dealer`」（取自 `han_breakdown.dealer`，为 0 时不显示；**`tsumo` 恒 0，恒不渲染——本行不得出现任何自摸加成项**，`SETTLEMENT_BROADCAST_RULINGS` C9/V6）；③ 结尾「合计 `han_breakdown.total` 番（`multiplier` 分）」，`base + dealer > 6` 时追加「已封顶」（打满 6 番不是被封顶）。**无番和牌显示「无番（0 番）」——「平和」文案 v2.0 作废**（GAME_DESIGN §6.5；「平和」现在是 1 番番种名）。荒庄时本行显示「本局不计分；庄家连庄」 | `win.yaku[]`、`win.han_breakdown{base,dealer,total}`、`win.multiplier`、`reason`；`win.tags` **不用于新渲染**（仅旧客户端兼容字段） |
 | 四座位结果卡片 | `y=130,h=96`；`x=164/404/644/884`，`w=220` | 卡片内含：方位标签（自家/下家/对家/上家）+ 昵称（+ `（断线托管）`）+ `delta_score`（H1 32px，正绿负红 0 灰）+ **第二行「累计 `match_total`」**（small 15px，同色规则；**v2.0**） | `results[].seat/delta_score/match_total` + `room_joined.seats[].name` + `state_sync.seats[].disconnected` |
 | 和牌者高亮 | 卡片 3px `SELECT` 描边 + 卡片底提亮 | 和牌者席位描边高亮（取代牌桌的当前行动座位高亮） | `win.seat`；荒庄（`win == null`）时四张卡片均无描边 |
 | 和牌张 | `(500,246,120,120)` | 放大牌（100×120）居中于该框 | `win.tile` |
@@ -997,7 +997,7 @@ y 轴刻度 ┌─────────────────────�
 | 局号与庄家、连庄次数（**v2.0**） | 标题行左段 | `round_index`（显示 +1）/ `dealer` / `renchan_count` |
 | 四座位结果列表（方位/昵称/带符号 delta + **累计分**） | 卡片区 | `results[].seat/delta_score/match_total`、`room_joined.seats[].name` |
 | 和牌者高亮 | 卡片 3px 金框 | `win.seat` |
-| **番种明细（v2.0，取代旧「和牌牌型」）** | 番种明细行 | `win.yaku[]`（有序）+ `win.han_breakdown{tsumo,dealer,total}` + `win.multiplier`；**`win.tags` 不再用于新渲染** |
+| **番种明细（v2.0，取代旧「和牌牌型」）** | 番种明细行 | `win.yaku[]`（有序）+ `win.han_breakdown{base,dealer,total}` + `win.multiplier`（`tsumo` 恒 0，不得渲染）；**`win.tags` 不再用于新渲染** |
 | 和牌方式（自摸/荣和） | 标题行 | `win.tsumo` / `reason` |
 | 和牌张放大 | `(500,246,120,120)` | `win.tile` |
 | 和牌者手牌（14+杠，含副露分组） | 手牌区 | `results[win.seat].hand` + `state_sync.seats[].melds` |

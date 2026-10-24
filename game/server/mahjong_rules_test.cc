@@ -1755,6 +1755,26 @@ TEST(MahjongRules, BonusTsumoAndDealerBonus) {  // 2 个加成：自摸 +1、庄
 // ---------------------------------------------------------------------------
 // R3：零和 / 回归锚点 / 0 番
 // ---------------------------------------------------------------------------
+// F3（SETTLEMENT_BROADCAST_RULINGS v1.2 §4）：**0 番 × 庄家 × 自摸** 的交叉用例。
+// 三件事必须同时成立，缺一个就会让结算页的「合计番数」与「倍率」对不上：
+//   ① 自摸不是番种（tsumo 恒 0）⇒ 番数只由 base 与庄家加成决定：0 + 1 = **1**；
+//   ② R = 2^total = **2**；
+//   ③ 自摸每家付 2R = **4**，和牌者收 3×4 = **12**，四家 delta = {12, −4, −4, −4}。
+TEST(MahjongRules, ZeroHanDealerTsumoCrossesToHanOneMultiplierTwo) {
+  const std::vector<Meld> pong = {Pong({"9s", "9s", "9s"})};
+  std::vector<Tile> zero_han = H({"1m", "2m", "3m", "4p", "5p", "6p", "7p", "8p", "9p", "2m", "2m"});
+  ASSERT_TRUE(CanWinExact(zero_han, pong));
+  const ScoreResult score = ScoreHand(zero_han, pong, *ParseTile("2m"), Ctx(2, -1, /*dealer=*/true));
+  EXPECT_TRUE(score.yaku.empty()) << "0 番手牌不得凭空生成番种";
+  EXPECT_EQ(score.han, 1);           // base 0 + dealer 1（自摸 +0）
+  EXPECT_EQ(score.dealer_bonus, 1);
+  EXPECT_EQ(score.multiplier, 2);    // R = 2^1
+  EXPECT_EQ(score.per_payer, 4);     // 自摸 = 2R
+  EXPECT_EQ(score.total, 12);        // 3 × 2R
+  EXPECT_EQ(score.delta, (std::array<int, 4>{-4, -4, 12, -4}));  // seat 2 自摸且为庄家
+  EXPECT_EQ(Sum(score.delta), 0);
+}
+
 // N3（A1_ACCEPTANCE §七 / RULESET §10.3 S3）：**0 番自摸恰好 −2/+6** 的绝对值锚——
 // 不是关系式（total == 3×per_payer），是逐字段冻结数字：R=1 ⇒ 三家各 −2、和牌者 +6。
 TEST(MahjongRules, ZeroHanTsumoIsExactlyMinusTwoPlusSix) {

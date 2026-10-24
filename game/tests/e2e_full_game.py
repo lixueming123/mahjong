@@ -758,6 +758,15 @@ def tile_total_of(sync: dict) -> int:
     return total
 
 
+def broadcast_budget_ms(interlude_ms: int) -> int:
+    """结算播报窗（SETTLEMENT_BROADCAST_RULINGS v1.3 §2.1，与客户端同一公式）。
+
+    `budget = clamp(interlude − 1500, 4200, 10500)`；`budget < 5100` ⇒ 三档门槛①，不播报（返回 0）。
+    """
+    budget = max(4200, min(10500, interlude_ms - 1500))
+    return budget if budget >= 5100 else 0
+
+
 def assert_match(starts: list, ends: list, match_end: dict, stats: dict,
                  inter_hand_delay_ms: int) -> dict:
     """E3/P3：一场的全部场次级断言（M 组 / 番数组 / 暗杠组 / P5/P9/P12 / M7/M8 / C）。"""
@@ -810,13 +819,18 @@ def assert_match(starts: list, ends: list, match_end: dict, stats: dict,
         if not renchan > 4:
             raise Failure(f"C15: 场终时 round_index 终值 {expected_round} 既非 4 也未触发连庄闸")
 
-    # M8：局间间隔 ≥ 配置的 --inter-hand-delay-ms（容差 50ms；上限 2s 防呆）。
-    floor_ms = max(0.0, inter_hand_delay_ms - 50.0)
+    # M8（SETTLEMENT_BROADCAST_RULINGS v1.3 §2.1）：局间间隔 = 服务端的 `--inter-hand-delay-ms`，
+    # 且必须**装得下结算播报**。两个方向都断言：
+    #   下限 = 播报窗（budget = clamp(interlude − 1500, 4200, 10500)；budget < 5100 时不播报 ⇒ 0）
+    #   上限 = 参数值 + 2s 防呆（间隔不得明显超过配置，否则是服务端卡住而不是播报）
+    broadcast_ms = float(broadcast_budget_ms(inter_hand_delay_ms))
     for index, gap_ms in enumerate(stats["inter_hand_gaps_ms"]):
-        if gap_ms < floor_ms:
-            raise Failure(f"M8: 第 {index + 1} 个局间隔 {gap_ms:.0f}ms < {inter_hand_delay_ms}ms")
         if gap_ms > 2000.0 + inter_hand_delay_ms:
             raise Failure(f"M8: 第 {index + 1} 个局间隔 {gap_ms:.0f}ms 异常长（>{2000 + inter_hand_delay_ms}ms）")
+        if gap_ms < broadcast_ms:
+            raise Failure(
+                f"M8: 第 {index + 1} 个局间隔 {gap_ms:.0f}ms < 播报窗 {broadcast_ms:.0f}ms（播报会被 game_start 打断）"
+            )
 
     # P5：action_request.seq 整场严格递增（跨局不重置）。
     for prev, cur in zip(stats["request_seqs"], stats["request_seqs"][1:]):

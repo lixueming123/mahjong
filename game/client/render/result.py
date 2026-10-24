@@ -3,8 +3,9 @@
 调用约定：`app` 先绘制牌桌快照，再调用本模块（蒙层 + 中央面板）。
 
 - **局终页**（`game_end` 后，一场最多 8 次）：标题带局号/连庄、番种明细（`win.yaku[]`
-  顺序渲染）、卡片累计分（`match_total`）、下一局 5 s 倒计时提示；**无出口按钮**
-  （§9.5：出口只在场终页，局终页发帧会撞服务端 BAD_REQUEST）。
+  顺序渲染）、卡片累计分（`match_total`）、下一局倒计时提示（剩余秒数由 `interlude_ms`
+  续算）；**无出口按钮**（§9.5：出口只在场终页，局终页发帧会撞服务端 BAD_REQUEST）。
+  播报进行中时本页由 `render/broadcast.py`（阶段 A）接管，播完回到本模块（阶段 B）。
 - **场终页**（`match_end` 后，每场 1 次）：`rankings[]` 排名表（数组序直渲、并列跳号）
   + 两出口按钮；不渲染局终页遗留状态（金框/番种明细/收付/手牌）。
 """
@@ -15,10 +16,12 @@ import logging
 
 import pygame
 
+from .. import broadcast as BC
 from .. import theme as T
 from ..game_state import GameState
 from ..tiles import multiset_remove
 from ..view import UiView
+from . import broadcast as broadcast_view
 from . import stats as stats_view
 from . import widgets as W
 
@@ -49,8 +52,8 @@ YAKU_LABEL = {
     "pure_one_suit": "清一色",
 }
 
-# 下一局倒计时时长（§9.2 下一局提示行：N 由 5 递减；与服务端 --inter-hand-delay-ms 默认同源）
-NEXT_ROUND_SECONDS = 5.0
+# 下一局倒计时时长：**不再硬编码 5 s**，读 `game_end.interlude_ms`（缺省 12000，RULINGS C2）；
+# 旧常量 `NEXT_ROUND_SECONDS = 5.0` 已删（ARCH §3.8：它本身就是「数到 0 再卡住」的 bug）。
 # v2.0（§9.2）：局终页下一局提示行（占用场终页「再来一局」按钮的位置）
 R_NEXT_ROUND_HINT = (430, 604, 420, 52)
 # v2.0（§9.6）：场终页排名表（行高 32、行首 y=250，按 rankings[] 数组序直渲）
@@ -83,11 +86,14 @@ def _yaku_detail(win_diff: dict | None) -> str:
 
     - ① 按 `win.yaku[]` 顺序逐个「中文名 `N`番」；
     - ② 「庄家 +`dealer`」（为 0 不显示；**自摸 +tsumo 恒 0，恒不显示**——自摸不是番种，B1.1）；
-    - ③ 结尾「合计 `total` 番（`multiplier` 分）」，`total == 6` 时追加「已封顶」；
+    - ③ 结尾「合计 `total` 番（`multiplier` 分）」，`base + dealer > 6` 时追加「已封顶」；
     - 无番和牌显示「无番（0 番）」（UX-15 冻结文案；「平和」只作 1 番番种名）。
     """
     if not isinstance(win_diff, dict):
         return "本局不计分"
+    # F6（RULINGS §2.6）：「`yaku` 键缺失」≠「0 番」——只有键**存在**且为空数组才是真的无番。
+    if "yaku" not in win_diff:
+        return "番种明细不可用"
     yaku = [y for y in (win_diff.get("yaku") or []) if isinstance(y, dict) and isinstance(y.get("id"), str)]
     if not yaku:
         return "无番（0 番）"
@@ -107,16 +113,21 @@ def _yaku_detail(win_diff: dict | None) -> str:
     breakdown = win_diff.get("han_breakdown")
     total = base
     multiplier = None
+    dealer = 0
     if isinstance(breakdown, dict):
-        total = breakdown.get("total") if isinstance(breakdown.get("total"), int) else base
-        dealer = breakdown.get("dealer")
-        if isinstance(dealer, int) and dealer > 0:
+        if isinstance(breakdown.get("total"), int):
+            total = breakdown["total"]
+        if isinstance(breakdown.get("base"), int):
+            base = breakdown["base"]
+        dealer = breakdown.get("dealer") if isinstance(breakdown.get("dealer"), int) else 0
+        if dealer > 0:
             text += f" ｜ 庄家 +{dealer}"
     multiplier = win_diff.get("multiplier")
     if not isinstance(multiplier, int) or multiplier <= 0:
         multiplier = 1 << total  # = 2^total（§9.4：R = 2^番）
     text += f" ｜ 合计 {total} 番（{multiplier} 分）"
-    if total >= 6:
+    # F7：封顶判据是 `base + dealer > 6`，**不是** `total >= 6`——「打满 6 番」不是「被砍」。
+    if base + dealer > 6:
         text += "已封顶"
     return text
 
@@ -206,18 +217,41 @@ def _next_dealer(state: GameState) -> int | None:
     return (dealer + 1) % 4
 
 
+def interlude_ms_of(state: GameState) -> int:
+    """本局局间窗口（`game_end.interlude_ms`，缺省 12000 / RULINGS C2）。"""
+    result = state.result or {}
+    value = result.get("interlude_ms")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return BC.BC_DEFAULT_INTERLUDE_MS
+    return value
+
+
 def _seconds_to_next_round(state: GameState, now: float) -> int:
+    """播完之后的剩余秒数：由 `interlude_ms` 的**剩余**续算（约 3 秒），不重置成 5（RULINGS §2.5）。"""
+    total_s = interlude_ms_of(state) / 1000.0
     if state.result_at is None:
-        return int(NEXT_ROUND_SECONDS)
-    left = NEXT_ROUND_SECONDS - max(0.0, now - state.result_at)
-    return max(0, int(left + 0.999))  # 由 5 递减到 0 的整数秒
+        return int(total_s + 0.999)
+    left = total_s - max(0.0, now - state.result_at)
+    return max(0, int(left + 0.999))  # 向上取整，由 N 递减到 0
+
+
+# ---------------------------------------------------------------- 蒙层（F5：每帧一张 1280×720）
+
+_MASK_SURFACE: pygame.Surface | None = None
+
+
+def mask_surface() -> pygame.Surface:
+    """整屏蒙层缓存：`theme.R_RESULT_MASK` 的尺寸，一次性填充（现 60 fps 曾分配 221 MB/s）。"""
+    global _MASK_SURFACE
+    if _MASK_SURFACE is None:
+        _MASK_SURFACE = pygame.Surface((T.R_RESULT_MASK[2], T.R_RESULT_MASK[3]), pygame.SRCALPHA)
+        _MASK_SURFACE.fill(T.MASK)
+    return _MASK_SURFACE
 
 
 def render(surface: pygame.Surface, ui: UiView) -> None:
     state, fonts = ui.state, ui.fonts
-    mask = pygame.Surface((T.LOGICAL_W, T.LOGICAL_H), pygame.SRCALPHA)
-    mask.fill(T.MASK)
-    surface.blit(mask, (0, 0))
+    surface.blit(mask_surface(), (T.R_RESULT_MASK[0], T.R_RESULT_MASK[1]))
 
     W.draw_panel(surface, T.R_RESULT_PANEL, fill=(24, 32, 30, 245), edge=T.PANEL_EDGE, radius=8, width=2)
 
@@ -234,6 +268,12 @@ def _render_round_end(surface: pygame.Surface, ui: UiView) -> None:
     state, fonts = ui.state, ui.fonts
     result = state.result or {}
     win = result.get("win") if isinstance(result.get("win"), dict) else None
+
+    # RULINGS v1.2 §2.3 两阶段：播报进行中 ⇒ 阶段 A 整幅舞台（render/broadcast.py），
+    # 播报结束 / 不播报 ⇒ 阶段 B，即下面这份 v2.0 现状，**一行不改**。
+    if broadcast_view.is_broadcasting(ui):
+        broadcast_view.render_round_end(surface, ui)
+        return
 
     # 标题行：局号 + 连庄 + 和牌方式
     W.draw_text(surface, f"{_round_prefix(state)}{_title(state)}", fonts.get(T.FS_H1, bold=True), T.TEXT, T.R_RESULT_TITLE)
