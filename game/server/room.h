@@ -125,7 +125,7 @@ constexpr int kDefaultAiDelayMs = 900;
 constexpr int kMaxAiDelayMs = 5000;
 
 // v1.6（一场四局）: the pause between two rounds of one match (game_end -> next game_start).
-// v1.8（SETTLEMENT_BROADCAST_RULINGS §2.1 / C2）: 5000 -> **12000** = 播报窗 9000 + 阅读窗 3000.
+// v1.8（SETTLEMENT_BROADCAST_RULINGS §2.1 / C2）: 5000 -> **12000** = 播报窗 10500 + 阅读窗 1500.
 // The same value gates the *last* round too: `FinishMatch()` (match_end) is armed on the same
 // delay, so the final settlement gets the same broadcast window as every other round.
 constexpr int kDefaultInterHandDelayMs = 12000;
