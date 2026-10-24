@@ -23,54 +23,76 @@ If you have your own ideas:
 
 ## Understand the code structure
 
-It's AI Era bro, we recommend you use AI tools like [Ask DeepWiki](https://deepwiki.com/ex-actor/ex-actor), or ask chat bot like ChatGPT&Gemini directly, which really helps.
+For quick glance without cloning the code, you can use [Ask DeepWiki](https://deepwiki.com/ex-actor/ex-actor) (might not be up-to-date).
 
-When coding, we also highly recommend you to use AI coding tools like Cursor, VSCode Copilot, Claude Code etc, which can help you ramp up much faster.
+For deeper dive we recommend you to use AI coding tools like [Cursor](https://cursor.com/) and [VSCode Copilot](https://code.visualstudio.com/docs/copilot/overview), which can help you ramp up very fast.
 
 **If AI is not smart enough to help you, feel free to ask in [discussions](https://github.com/ex-actor/ex-actor/discussions), we're pleased to help you :-).**
 
 ## How to build from source
 
-### Linux
+This project requires C++20. The following compilers are tested in CI:
+
+| Compiler | Tested versions |
+|----------|-----------------|
+| GCC      | 11 - 14         |
+| Clang    | 16 - 18         |
+| MSVC     | 14.50 / `_MSC_VER` 1950 (VS 2026) |
 
 ```bash
 cd ex-actor
 
-# If it fails due to network issues, just retry it.
-# In this script I set the cache dir for CPM; previously successful downloads will be cached.
-./scripts/regen_build_dir.sh
+# Generate the build directory (requires python3, CMake, and Ninja)
+# It might take several minutes the first time, mostly downloading dependencies from GitHub.
+# If it fails or blocks due to network issues, just retry it.
+# Previously downloaded dependencies are kept in ~/.cache/CPM, so they won't be downloaded again.
+python3 scripts/regen_build_dir.py
 
-pushd build
+cd build
+
 # Build
-cmake --build . --config Debug
-
+cmake --build . --config Release
 # Run all tests
-ctest -C Debug --output-on-failure
+ctest -C Release --output-on-failure
+# Run a specific test
+ctest -C Release --output-on-failure -R basic_api_test
 
-# Run specific test
-# option 1, handy for test without arguments
-./test/Debug/basic_api_test
-# option 2, for test with arguments/wrapper script
-ctest -C Debug --output-on-failure -R multi_process_test
-
-# Format code
-./scripts/format.sh
+# Format code (Linux/macOS only, requires clang-format and buildifier)
+python3 scripts/format.py
 ```
 
-### Windows
 
-```powershell
-cd ex-actor
-cmake -S . -B build -G "Visual Studio 17 2022"
-cmake --build build --config Debug
+## Miscellaneous
 
-# Run all tests
-ctest -C Debug --output-on-failure
-```
+### Locate the dependency source code
 
-## Clangd related
+This project uses [CPM.cmake](https://github.com/cpm-cmake/CPM.cmake) to manage C++ dependencies, you can locate the source code of a dependency the following methods:
 
-`regen_build_dir.sh` will generate `compile_commands.json` for you automatically.
+* **From `compile_commands.json`:** grep the package name to find its include path, e.g. `grep -o '[^ ]*stdexec[^ ]*' compile_commands.json | head -1`.
+* **With `regen_build_dir.py`:** sources are cached under `~/.cache/CPM/<package>/<hash>/`.
+* **With plain CMake (no `CPM_SOURCE_CACHE`):** sources fall back to `build/_deps/<package>-src/`. Setting `CPM_SOURCE_CACHE` is recommended to avoid re-downloads.
+
+### Using Ninja on Windows
+
+By default, the build script uses the Visual Studio generator on Windows. If you prefer Ninja (faster incremental builds, `compile_commands.json` support), you need to run from a **Developer Command Prompt** or **Developer PowerShell** so that `cl.exe` is on PATH:
+
+1. Open **"Developer PowerShell for VS"** (search in Start menu), or run the following in a regular terminal:
+   ```powershell
+   # Example for VS2026(18) Community
+   Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+   & "${env:ProgramFiles}\Microsoft Visual Studio\18\Community\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64
+   ```
+
+2. Then generate the build directory with Ninja:
+   ```bash
+   python scripts/regen_build_dir.py -G Ninja
+   ```
+
+Without the developer environment, CMake will fail with `No CMAKE_C_COMPILER could be found` because the Ninja generator cannot locate MSVC on its own.
+
+### Clangd related
+
+`regen_build_dir.py` will generate `compile_commands.json` for you automatically.
 
 You should also add `--compile-commands-dir=<ex_actor_root_folder>` to your `clangd` configuration so that headers in external
 folders can be parsed correctly. See <https://clangd.llvm.org/faq#how-do-i-fix-errors-i-get-when-opening-headers-outside-of-my-project-directory>

@@ -15,146 +15,254 @@
 #pragma once
 
 #include <atomic>
-#include <chrono>
+#include <condition_variable>
+#include <cstddef>
 #include <cstdint>
-#include <exception>
 #include <functional>
-#include <latch>
+#include <list>
+#include <memory>
+#include <queue>
+#include <random>
+#include <string>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
-#include <exec/async_scope.hpp>
-#include <exec/task.hpp>
-#include <zmq.hpp>
-#include <zmq_addon.hpp>
-
+#include "ex_actor/3rd_lib/cppzmq/zmq.hpp"
+#include "ex_actor/internal/basic_actor_ref.h"
 #include "ex_actor/internal/constants.h"
+#include "ex_actor/internal/message.h"
 #include "ex_actor/internal/util.h"
 
 namespace ex_actor {
-struct NodeInfo {
-  uint32_t node_id = 0;
-  std::string address;
+
+namespace zmq = ::ex_actor::embedded_3rd::zmq;
+
+struct NetworkConfig {
+  /// How long (ms) should we consider a node dead if we haven't received any messages from it
+  uint64_t heartbeat_timeout_ms = internal::kDefaultHeartbeatTimeoutMs;
+  /// Interval (ms) at which gossip messages are sent.
+  uint64_t gossip_interval_ms = internal::kDefaultGossipIntervalMs;
+  /// Number of peers to propagate each gossip message to per round.
+  size_t gossip_fanout = internal::kDefaultGossipFanout;
 };
+
+struct ClusterConfig {
+  std::string listen_address;
+  std::string contact_node_address;
+  NetworkConfig network_config;
+  // Optional user-defined name for this node. Free-form, not required to be unique.
+  // Surfaced on NodeInfo so users can identify nodes in WaitClusterState predicates.
+  std::string node_name;
+};
+
+struct NodeInfo {
+  uint64_t node_id = 0;
+  std::string address;
+  std::string node_name;
+};
+
+// now it only has one field, but we keep it as a separate struct for future extensibility
+struct ClusterState {
+  std::vector<NodeInfo> nodes;
+};
+
+/// Thrown when a remote operation fails due to the target node being
+/// unreachable (dead, timed-out heartbeat, connection refused, etc.),
+/// or when a network send operation cannot complete without blocking.
+struct NetworkError : public std::runtime_error {
+  uint64_t remote_node_id;
+
+  explicit NetworkError(uint64_t remote_node_id, const std::string& message)
+      : std::runtime_error(message), remote_node_id(remote_node_id) {}
+};
+
+struct WaitClusterStateResult {
+  ClusterState cluster_state;
+  bool condition_met = false;
+};
+
 }  // namespace ex_actor
 
-namespace ex_actor::internal::network {
-using ByteBufferType = zmq::message_t;
+namespace ex_actor::internal {
 
-enum class MessageFlag : uint8_t { kNormal = 0, kQuit, kHeartbeat };
-
-struct Identifier {
-  uint32_t request_node_id;
-  uint32_t response_node_id;
-  uint64_t request_id_in_node;
-  MessageFlag flag;
+struct ClusterStateWaiter {
+  explicit ClusterStateWaiter(uint64_t deadline_ms) : sem(1), deadline_ms(deadline_ms) {}
+  ex_actor::Semaphore sem;
+  uint64_t deadline_ms;
+  bool condition_met = false;
+  std::function<bool(const ClusterState&)> predicate;
 };
 
-struct HeartbeatConfig {
-  std::chrono::milliseconds heartbeat_timeout = kDefaultHeartbeatTimeout;
-  std::chrono::milliseconds heartbeat_interval = kDefaultHeartbeatInterval;
-};
-
-class MessageBroker {
+/**
+ * @brief Pulls messages from a ZMQ recv socket on a dedicated thread and invokes a callback.
+ */
+class RecvSocketPuller {
  public:
-  explicit MessageBroker(std::vector<NodeInfo> node_list, uint32_t this_node_id,
-                         std::function<void(uint64_t received_request_id, ByteBufferType data)> request_handler,
-                         HeartbeatConfig heartbeat_config = {});
-  ~MessageBroker();
+  using Callback = std::function<void(ByteBuffer)>;
 
-  void ClusterAlignedStop();
-
-  // -------- std::execution sender adaption start--------
-  struct TypeErasedSendOperation {
-    virtual ~TypeErasedSendOperation() = default;
-    virtual void Complete(ByteBufferType /*response_data*/) {
-      EXA_THROW << "TypeErasedOperation::Complete should not be called";
-    }
-    TypeErasedSendOperation(Identifier identifier, ByteBufferType data, MessageBroker* message_broker)
-        : identifier(identifier), data(std::move(data)), message_broker(message_broker) {}
-    Identifier identifier;
-    ByteBufferType data;
-    MessageBroker* message_broker {};
-  };
-  template <ex::receiver R>
-  struct SendRequestOperation : TypeErasedSendOperation {
-    SendRequestOperation(Identifier identifier, ByteBufferType data, MessageBroker* message_broker, R receiver)
-        : TypeErasedSendOperation(identifier, std::move(data), message_broker), receiver(std::move(receiver)) {}
-    R receiver;
-    std::atomic_bool started = false;
-    void start() noexcept {
-      bool expected = false;
-      bool changed = started.compare_exchange_strong(expected, true);
-      if (!changed) [[unlikely]] {
-        logging::Critical("MessageBroker Operation already started");
-        std::terminate();
-      }
-      message_broker->PushOperation(this);
-    }
-    void Complete(ByteBufferType response_data) override { receiver.set_value(std::move(response_data)); }
-  };
-  struct SendRequestSender : ex::sender_t {
-    using completion_signatures = ex::completion_signatures<ex::set_value_t(ByteBufferType)>;
-    Identifier identifier;
-    ByteBufferType data;
-    MessageBroker* message_broker;
-    template <ex::receiver R>
-    SendRequestOperation<R> connect(R receiver) {
-      return SendRequestOperation<R>(identifier, std::move(data), message_broker, std::move(receiver));
-    }
-  };
-  // -------- std::execution sender adaption end--------
-
-  /**
-   * @brief Send buffer to the remote node.
-   * @return A sender containing raw response buffer.
-   */
-  SendRequestSender SendRequest(uint32_t to_node_id, ByteBufferType data, MessageFlag flag = MessageFlag::kNormal);
-
-  void ReplyRequest(uint64_t received_request_id, ByteBufferType data);
+  RecvSocketPuller(zmq::socket_t recv_socket, Callback callback);
+  ~RecvSocketPuller();
+  void Stop();
 
  private:
-  void EstablishConnections();
-  void PushOperation(TypeErasedSendOperation* operation);
-  void SendProcessLoop(const std::stop_token& stop_token);
-  void ReceiveProcessLoop(const std::stop_token& stop_token);
-  void HandleReceivedMessage(zmq::multipart_t multi);
-  void CheckHeartbeat();
-  void SendHeartbeat();
+  void Loop(const std::stop_token& stop_token);
 
-  struct ReplyOperation {
-    Identifier identifier;
-    ByteBufferType data;
-  };
-
-  std::vector<NodeInfo> node_list_;
-  uint32_t this_node_id_;
-  std::function<void(uint64_t received_request_id, ByteBufferType data)> request_handler_;
-  HeartbeatConfig heartbeat_;
-  std::atomic_uint64_t send_request_id_counter_ = 0;
-  std::atomic_uint64_t received_request_id_counter_ = 0;
-
-  zmq::context_t context_ {/*io_threads_=*/1};
-  util::LockGuardedMap<uint32_t, zmq::socket_t> node_id_to_send_socket_;
-  zmq::socket_t recv_socket_ {context_, zmq::socket_type::dealer};
-
-  util::LinearizableUnboundedMpscQueue<TypeErasedSendOperation*> pending_send_operations_;
-  util::LockGuardedMap<uint64_t, TypeErasedSendOperation*> send_request_id_to_operation_;
-  util::LinearizableUnboundedMpscQueue<ReplyOperation> pending_reply_operations_;
-  util::LockGuardedMap<uint64_t, Identifier> received_request_id_to_identifier_;
-
-  std::jthread send_thread_;
-  std::jthread recv_thread_;
+  zmq::socket_t recv_socket_;
+  Callback callback_;
+  std::jthread thread_;
   std::atomic_bool stopped_ = false;
-  std::latch quit_latch_;
-  exec::async_scope async_scope_;
-
-  using TimePoint = std::chrono::time_point<std::chrono::steady_clock>;
-  TimePoint last_heartbeat_;
-  std::unordered_map<uint32_t, TimePoint> last_seen_;
 };
 
-}  // namespace ex_actor::internal::network
+/**
+ * @brief Runs periodic tasks on a dedicated thread. The tasks are expected to execute quickly, won't block for too
+ * long. Or the time will be not accurate.
+ *
+ * Tasks are kept in a min-heap ordered by next_run_ms so the thread sleeps
+ * exactly until the earliest task is due.
+ */
+class PeriodicalTaskScheduler {
+ public:
+  PeriodicalTaskScheduler();
+  ~PeriodicalTaskScheduler();
 
-namespace ex_actor {
-using internal::network::HeartbeatConfig;
-}  // namespace ex_actor
+  void Register(std::function<void()> fn, uint64_t interval_ms);
+  void Stop();
+
+ private:
+  struct Task {
+    std::function<void()> fn;
+    uint64_t interval_ms;
+    uint64_t next_run_ms;
+
+    bool operator>(const Task& other) const { return next_run_ms > other.next_run_ms; }
+  };
+
+  void Loop(const std::stop_token& stop_token);
+
+  std::priority_queue<Task, std::vector<Task>, std::greater<>> tasks_;
+  std::mutex tasks_mutex_;
+  std::condition_variable cv_;
+  std::jthread thread_;
+  std::atomic_bool stopped_ = false;
+};
+
+/**
+ * @brief The network message broker, designed to be used as an Actor, so no locks are needed for the state.
+ */
+class MessageBroker {
+  friend class MessageBrokerTestHelper;
+
+ public:
+  using RequestHandler = std::function<ex::task<ByteBuffer>(ByteBuffer)>;
+
+  explicit MessageBroker(uint64_t this_node_id, ClusterConfig cluster_config);
+  ~MessageBroker();
+
+  /**
+   * @brief Called by the framework after the actor is spawned to inject the self actor ref.
+   */
+  void ExActorOnSpawned(const BasicActorRuntimeInfo<MessageBroker>& runtime_info);
+
+  /**
+   * @brief Start the recv socket puller and periodical task scheduler.
+   * @param request_handler Called to process incoming network requests and produce a response.
+   */
+  void Start(RequestHandler request_handler);
+
+  /**
+   * @brief Stop the RecvSocketPuller and PeriodicalTaskScheduler, then wait for all in-flight tasks to complete.
+   */
+  ex::task<void> Stop();
+
+  /** @copydoc ex_actor::WaitClusterState */
+  ex::task<WaitClusterStateResult> WaitClusterState(std::function<bool(const ClusterState&)> predicate,
+                                                    uint64_t timeout_ms);
+
+  /**
+   * @brief Send buffer to the remote node and get a response.
+   * @return A task containing raw response buffer.
+   */
+  ex::task<ByteBuffer> SendRequest(uint64_t to_node_id, ByteBuffer data);
+
+  // Called by RecvSocketPuller
+  ex::task<void> DispatchReceivedMessage(ByteBuffer raw);
+
+  // ------------- periodical tasks scheduled in PeriodicalTaskScheduler -------------
+  void BroadcastGossip();
+  void CheckHeartbeatTimeout();
+  void CheckClusterStateWaiterTimeout();
+
+ private:
+  void StartRecvSocketPuller();
+  void StartPeriodicalTaskScheduler();
+  void ConnectContactSendSocket();
+
+  std::vector<uint64_t> GetRandomPeers(size_t fanout);
+
+  void HandleRepliedResponse(BrokerTwoWayMessage response_msg);
+  ex::task<void> HandleIncomingRequest(BrokerTwoWayMessage request_msg);
+  void HandleGossipMessage(const BrokerGossipMessage& gossip_message);
+
+  void OnNodeAlive(uint64_t node_id);
+  void OnNodeConnectionLost(uint64_t node_id);
+
+  std::vector<NodeInfo> BuildAliveNodeInfoList() const;
+  void EvaluateClusterStateWaiters();
+
+  uint64_t SendTwoWayMessage(uint64_t node_id, ByteBuffer data);
+  void SendReply(uint64_t request_node_id, uint64_t request_id, ByteBuffer data);
+
+  struct OutstandingRequest {
+    Semaphore sem;
+    ByteBuffer response_bytes;
+    std::exception_ptr exception_ptr;
+    uint64_t response_node_id {};
+    OutstandingRequest() : sem(1) {}
+  };
+
+  struct ReplyOperation {
+    uint64_t request_node_id;
+    uint64_t request_id;
+    ByteBuffer data;
+  };
+
+  uint64_t this_node_id_;
+  ClusterConfig cluster_config_;
+  uint64_t send_request_id_counter_ = 0;
+
+  // pending replies to peers that are not yet discovered.
+  std::unordered_map</*node_id*/ uint64_t, std::vector<ReplyOperation>> deferred_replies_;
+  std::unordered_map</*request_id*/ uint64_t, OutstandingRequest> outstanding_requests_;
+
+  bool stopped_ = false;
+
+  std::unordered_map<uint64_t, NodeState> node_id_to_state_;
+  std::list<ClusterStateWaiter> cluster_state_waiters_;
+  std::mt19937_64 rng_ {std::random_device {}()};
+
+  zmq::context_t zmq_context_ {/*io_threads_=*/1};
+  // Connected at start and used for bootstrapping the network. On macOS we've observed
+  // that a DEALER connect() racing with the peer's bind() can finish the TCP handshake
+  // but silently skip the ZMTP handshake, leaving the socket stuck in a "connected but
+  // handshake never completes" state where outbound gossip is never delivered. See
+  // BroadcastGossip() for the recovery path.
+  zmq::socket_t contact_node_send_socket_;
+  // Timestamp of the last (re)build of `contact_node_send_socket_`. Rebuilds are
+  // rate-limited so ZMQ has enough time to finish its own reconnect + handshake before we
+  // wipe the socket. Set by ConnectContactSendSocket().
+  uint64_t contact_node_send_socket_last_build_ms_ = 0;
+  // Whether a NodeState whose address matches `cluster_config_.contact_node_address` has
+  // been observed. Maintained by OnNodeAlive / OnNodeConnectionLost, consulted by
+  // BroadcastGossip to decide whether to rebuild `contact_node_send_socket_`.
+  bool contact_node_discovered_ = false;
+  std::unordered_map<uint64_t, zmq::socket_t> node_id_to_send_socket_;
+
+  BasicActorRef<MessageBroker> self_actor_ref_;
+  RequestHandler request_handler_;
+  ex::simple_counting_scope async_scope_;
+  std::unique_ptr<RecvSocketPuller> recv_socket_puller_;
+  std::unique_ptr<PeriodicalTaskScheduler> periodical_task_scheduler_;
+};
+
+}  // namespace ex_actor::internal

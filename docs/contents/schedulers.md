@@ -101,10 +101,10 @@ struct TestActor {
   void Foo() {}
 };
 
-exec::task<void> MainCoroutine() {
+stdexec::task<void> MainCoroutine() {
   ex_actor::PriorityThreadPool thread_pool(1);
   ex_actor::Init(thread_pool.GetScheduler());
-  auto actor = co_await ex_actor::Spawn<TestActor>(ex_actor::ActorConfig {
+  auto actor = co_await ex_actor::Spawn<TestActor>().WithConfig({
     .priority = 1 // smaller number means higher priority
   });
   ex_actor::Shutdown();
@@ -123,6 +123,37 @@ In practice it's used to prioritize downstream actors in some high-throughput sy
 Even though this scheduler takes priority into account, the actor scheduling is still cooperative. Which means a thread can't be interrupted and switch to higher priority actors when executing an actor's message.
 If you do have some very high-priority actors, consider using the [`SchedulerUnion`](#scheduler-union) scheduler to put them in a dedicated thread pool.
 
+### Core-Bound Thread Pool
+
+<!-- doc test start -->
+```cpp
+#include "ex_actor/api.h"
+
+struct TestActor {
+  void Foo() {}
+};
+
+stdexec::task<void> MainCoroutine() {
+  ex_actor::CorePinnedThreadPool thread_pool(/*thread_count=*/4);
+  ex_actor::Init(thread_pool.GetScheduler());
+
+  // Create an actor and bind it to CPU core 0
+  auto actor = co_await ex_actor::Spawn<TestActor>().WithConfig({
+    .core_index = 0
+  });
+
+  ex_actor::Shutdown();
+}
+
+int main() { stdexec::sync_wait(MainCoroutine()); }
+```
+<!-- doc test end -->
+
+This scheduler is suitable for compute-heavy tasks or low-latency systems where CPU core affinity is crucial for cache locality. 
+It consists of $N$ threads, where each thread is pinned to a specific CPU core using CPU affinity system calls (e.g., `pthread_setaffinity_np` on Linux).
+
+Unlike other thread pools, each thread in `CorePinnedThreadPool` maintains its own local queue. When an actor is spawned, you can configure its target CPU core via `.core_index`. The scheduler will dispatch all operations of this actor to the corresponding thread queue (`core_index % thread_count`), ensuring that they always run on the same CPU core.
+
 ### Scheduler Union
 
 <!-- doc test start -->
@@ -134,19 +165,17 @@ struct TestActor {
   uint64_t GetThreadId() { return std::hash<std::thread::id>{}(std::this_thread::get_id()); }
 };
 
-exec::task<void> MainCoroutine() {
+stdexec::task<void> MainCoroutine() {
   // 1. create two thread pools
   ex_actor::WorkSharingThreadPool thread_pool1(1);
-  ex_actor::WorkSharingThreadPool thread_pool2(1);
+  ex_actor::PriorityThreadPool thread_pool2(1);
   // 2. create a scheduler union, union two schedulers into one.
-  ex_actor::SchedulerUnion scheduler_union(std::vector<ex_actor::WorkSharingThreadPool::Scheduler> {
-    thread_pool1.GetScheduler(), thread_pool2.GetScheduler()
-  });
+  ex_actor::SchedulerUnion scheduler_union(thread_pool1.GetScheduler(), thread_pool2.GetScheduler());
   // 3. initialize the runtime with the scheduler union
   ex_actor::Init(scheduler_union.GetScheduler());
-  // 4. create two actors, specify the scheduler index in ActorConfig.
-  auto actor1 = co_await ex_actor::Spawn<TestActor>(ex_actor::ActorConfig {.scheduler_index = 0});
-  auto actor2 = co_await ex_actor::Spawn<TestActor>(ex_actor::ActorConfig {.scheduler_index = 1});
+  // 4. create two actors, specify the scheduler index using .WithConfig().
+  auto actor1 = co_await ex_actor::Spawn<TestActor>().WithConfig({.scheduler_index = 0});
+  auto actor2 = co_await ex_actor::Spawn<TestActor>().WithConfig({.scheduler_index = 1});
 
   uint64_t thread_id1 = co_await actor1.Send<&TestActor::GetThreadId>();
   uint64_t thread_id2 = co_await actor2.Send<&TestActor::GetThreadId>();

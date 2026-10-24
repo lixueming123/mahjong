@@ -1,47 +1,63 @@
+#include <algorithm>
 #include <cassert>
-#include <cstdlib>
+#include <string>
 
 #include "ex_actor/api.h"
+#include "ex_actor/internal/logging.h"
 
-namespace logging = ex_actor::internal::logging;
-
+namespace {
+namespace logging = ex_actor::internal::log;
 class PingWorker {
  public:
   explicit PingWorker(std::string name) : name_(std::move(name)) {}
 
-  // You can also put this outside the class if you don't want to modify your class
-  static PingWorker FactoryCreate(std::string name) { return PingWorker(std::move(name)); }
+  static PingWorker CreateFn(std::string name) { return PingWorker(std::move(name)); }
 
   std::string Ping(const std::string& message) { return "ack from " + name_ + ", msg got: " + message; }
 
  private:
   std::string name_;
 };
+EXA_REMOTE(&PingWorker::CreateFn, &PingWorker::Ping);
 
-// 1. Register the class & methods using EXA_REMOTE
-EXA_REMOTE(&PingWorker::FactoryCreate, &PingWorker::Ping);
+// Usage: <binary> <listen_address> <node_name> <peer_node_name> [contact_address]
+stdexec::task<void> MainCoroutine(int argc, char** argv) {
+  EXA_THROW_CHECK(argc >= 4) << "Usage: <binary> <listen_address> <node_name> <peer_node_name> [contact_address]";
+  auto shared_pool = std::make_shared<ex_actor::WorkSharingThreadPool>(4);
+  std::string listen_address = argv[1];
+  std::string node_name = argv[2];
+  std::string peer_node_name = argv[3];
+  std::string contact_address = (argc > 4) ? argv[4] : "";
+  ex_actor::ClusterConfig cluster_config {
+      .listen_address = listen_address,
+      .contact_node_address = contact_address,
+      .network_config = {.heartbeat_timeout_ms = 5000},
+      .node_name = node_name,
+  };
+  ex_actor::Init(shared_pool->GetScheduler());
+  co_await ex_actor::StartOrJoinCluster(cluster_config);
+  ex_actor::HoldResource(shared_pool);
 
-namespace {
-exec::task<void> MainCoroutine(uint32_t this_node_id, size_t total_nodes) {
-  uint32_t remote_node_id = (this_node_id + 1) % total_nodes;
+  auto [cluster_state, condition_met] = co_await ex_actor::WaitClusterState(
+      [&](const auto& state) {
+        return std::ranges::any_of(state.nodes, [&](const auto& n) { return n.node_name == peer_node_name; });
+      },
+      /*timeout_ms=*/5000);
+  EXA_THROW_CHECK(condition_met) << "Cannot find peer node with name " << peer_node_name;
 
-  // 2. Specify the factory function in registry.CreateActor
-  auto ping_worker = co_await ex_actor::Spawn<PingWorker, &PingWorker::FactoryCreate>(
-      ex_actor::ActorConfig {.node_id = remote_node_id}, /*name=*/"Alice");
+  auto it = std::ranges::find_if(cluster_state.nodes, [&](const auto& n) { return n.node_name == peer_node_name; });
+  EXA_THROW_CHECK(it != cluster_state.nodes.end()) << "Cannot find peer node with name " << peer_node_name;
+  auto remote_node_id = it->node_id;
+
+  auto ping_worker = co_await ex_actor::Spawn<&PingWorker::CreateFn>(/*name=*/"Alice").ToNode(remote_node_id);
   std::string ping_res = co_await ping_worker.Send<&PingWorker::Ping>("hello");
   assert(ping_res == "ack from Alice, msg got: hello");
-  (void)ping_res;  // clang-tidy false positive
+  (void)ping_res;
+
+  logging::Info("All work done");
+  co_await ex_actor::WaitOsExitSignal();
+  ex_actor::Shutdown();
 }
 }  // namespace
 
-int main(int /*argc*/, char** argv) {
-  auto shared_pool = std::make_shared<ex_actor::WorkSharingThreadPool>(4);
-  uint32_t this_node_id = std::atoi(argv[1]);
-  std::vector<ex_actor::NodeInfo> cluster_node_info = {{.node_id = 0, .address = "tcp://127.0.0.1:5301"},
-                                                       {.node_id = 1, .address = "tcp://127.0.0.1:5302"}};
-  ex_actor::Init(shared_pool->GetScheduler(), this_node_id, cluster_node_info);
-  ex_actor::HoldResource(shared_pool);
-  stdexec::sync_wait(MainCoroutine(this_node_id, cluster_node_info.size()));
-  logging::Info("main exit, node id: {}", this_node_id);
-  ex_actor::Shutdown();
-}
+int main(int argc, char** argv) { stdexec::sync_wait(MainCoroutine(argc, argv)); }

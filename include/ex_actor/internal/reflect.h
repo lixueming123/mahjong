@@ -14,15 +14,17 @@
 
 #pragma once
 
+#include <concepts>
 #include <cstddef>
 #include <tuple>
 #include <type_traits>
 
-#include <exec/task.hpp>
 #include <rfl/Tuple.hpp>
 #include <stdexec/execution.hpp>
 
-namespace ex_actor::internal::reflect {
+#include "ex_actor/internal/alias.h"  // IWYU pragma: keep
+
+namespace ex_actor::internal {
 
 template <typename T>
 struct Signature;
@@ -70,7 +72,7 @@ template <class T>
 struct ExTaskTraits;
 
 template <class T>
-struct ExTaskTraits<exec::task<T>> {
+struct ExTaskTraits<ex::task<T>> {
   using InnerType = T;
 };
 
@@ -91,66 +93,17 @@ consteval std::optional<size_t> GetIndexInParamPack() {
 template <size_t kIndex, class... Ts>
 using ParamPackElement = std::tuple_element_t<kIndex, std::tuple<Ts...>>;
 
-// ---------------- Actor Methods Related ----------------
-#ifndef EXA_ACTOR_METHODS_KEYWORD
-#define EXA_ACTOR_METHODS_KEYWORD kActorMethods
-#endif
-
-template <class T>
-constexpr std::tuple EXA_ACTOR_METHODS_KEYWORD = {};
-
-template <typename, typename = void>
-struct HasStaticMemberActorMethods : std::false_type {};
-template <typename T>
-struct HasStaticMemberActorMethods<T, std::void_t<decltype(T::EXA_ACTOR_METHODS_KEYWORD)>> : std::true_type {};
-template <typename T>
-inline constexpr bool kHasStaticMemberActorMethods = HasStaticMemberActorMethods<T>::value;
-
-template <class UserClass>
-consteval auto GetActorMethodsTuple() {
-  if constexpr (kHasStaticMemberActorMethods<UserClass>) {
-    return UserClass::EXA_ACTOR_METHODS_KEYWORD;
-  } else {
-    return EXA_ACTOR_METHODS_KEYWORD<UserClass>;
-  }
-}
-
-template <class T>
-concept HasActorMethods = (std::tuple_size_v<decltype(GetActorMethodsTuple<T>())> > 0);
-
-template <class UserClass>
-consteval void CheckHasActorMethods() {
-  static_assert(HasActorMethods<UserClass>,
-                "Actor class must define constexpr static member `kActorMethods`, which is a std::tuple contains "
-                "method pointers to your actor methods.");
-}
-
-template <auto kFunc, size_t kIndex = 0>
-  requires std::is_member_function_pointer_v<decltype(kFunc)>
-consteval std::optional<uint64_t> GetActorMethodIndex() {
-  using ClassType = Signature<decltype(kFunc)>::ClassType;
-  constexpr auto kActorMethodsTuple = GetActorMethodsTuple<ClassType>();
-  if constexpr (std::tuple_size_v<decltype(kActorMethodsTuple)> == 0) {
-    return std::nullopt;
-  } else if constexpr (IsSameMemberFn<std::get<kIndex>(kActorMethodsTuple), kFunc>()) {
-    return kIndex;
-  } else if constexpr (kIndex + 1 < std::tuple_size_v<decltype(kActorMethodsTuple)>) {
-    return GetActorMethodIndex<kFunc, kIndex + 1>();
-  }
-  return std::optional<uint64_t> {};
-};
-
-template <stdexec::sender Sender>
+template <ex::sender Sender>
 using CoAwaitType =
-    decltype(std::declval<exec::task<void>::promise_type>().await_transform(std::declval<Sender>()).await_resume());
+    decltype(std::declval<ex::task<void>::promise_type>().await_transform(std::declval<Sender>()).await_resume());
 
-template <class Awaitable, class T>
-concept AwaitableOf = std::is_same_v<CoAwaitType<Awaitable>, T>;
+template <class Sender, class... Ts>
+concept SenderOf = ex::sender_of<Sender, ex::set_value_t(Ts...)>;
 
 template <auto kMethod>
 constexpr auto UnwrapReturnSenderIfNested() {
   using ReturnType = Signature<decltype(kMethod)>::ReturnType;
-  constexpr bool kIsNested = stdexec::sender<ReturnType>;
+  constexpr bool kIsNested = ex::sender<ReturnType>;
   if constexpr (kIsNested) {
     return std::type_identity<CoAwaitType<ReturnType>> {};
   } else {
@@ -158,14 +111,81 @@ constexpr auto UnwrapReturnSenderIfNested() {
   }
 }
 
+template <typename T>
+constexpr std::string_view GetTypeName() {
+#if defined(_MSC_VER)
+  return __FUNCSIG__;
+#elif defined(__clang__)
+  return __PRETTY_FUNCTION__;
+#elif defined(__GNUC__)
+  return __PRETTY_FUNCTION__;
+#else
+  static_assert(false, "unsupported compiler.");
+#endif
+}
+
+constexpr uint64_t FnvHash(std::string_view s) {
+  uint64_t hash = 14695981039346656037ULL;
+  for (char c : s) {
+    hash ^= static_cast<uint64_t>(static_cast<unsigned char>(c));
+    hash *= 1099511628211ULL;
+  }
+  return hash;
+}
+
+// Boost-style hash combiner, adapted to 64-bit. The constant 0x9e3779b97f4a7c15ULL is the 64-bit
+// fractional part of the golden ratio (2^64 / φ); its irrational bit pattern seeds the mix so
+// every input bit influences many output bits and combining symmetric inputs doesn't collapse
+// to 0.
+constexpr uint64_t HashCombine(uint64_t seed, uint64_t value) {
+  return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
+}
+
 template <auto kFunc>
 std::string GetUniqueNameForFunction() {
-  // TODO: according to the standard, typeid().name() is not guaranteed to be unique, but in modern gcc&clang,
-  // it's an unique mangled name. So it works now, maybe replace it with a more robust way in the future.
-  return typeid(kFunc).name();
+  // The compiler-provided function signature string embeds the actual NTTP value
+  // (the fully-qualified function pointer name), making it unique per distinct
+  // function pointer — unlike typeid().name() which only reflects the *type*.
+#if defined(_MSC_VER)
+  return __FUNCSIG__;
+#else
+  return __PRETTY_FUNCTION__;
+#endif
 }
-}  // namespace ex_actor::internal::reflect
 
-namespace ex_actor::reflect {
-using ::ex_actor::internal::reflect::EXA_ACTOR_METHODS_KEYWORD;
-}  // namespace ex_actor::reflect
+// Compute the remote method handler key by mixing the actor's type hash with the hash of the
+// method's unique function signature. The resulting uint64_t is the on-the-wire identifier used
+// by both `ActorRef::SendRemote` and the handler registry, so collisions between methods that
+// share the same name across unrelated actor types are avoided.
+template <auto kMethod>
+uint64_t ComputeRemoteMethodHandlerKey(uint64_t actor_type_hash) {
+  uint64_t fn_hash = FnvHash(GetUniqueNameForFunction<kMethod>());
+  return HashCombine(actor_type_hash, fn_hash);
+}
+
+template <auto kFn>
+using FnReturnType = std::decay_t<typename Signature<decltype(kFn)>::ReturnType>;
+
+template <class T, class... Ts>
+constexpr bool kContainedIn = (std::is_same_v<T, Ts> || ...);
+
+// Compute the set-union of two completion_signatures types.
+template <class Merged, class Remaining>
+struct CompletionSignaturesUnionImpl;
+
+template <class... Merged>
+struct CompletionSignaturesUnionImpl<ex::completion_signatures<Merged...>, ex::completion_signatures<>> {
+  using Type = ex::completion_signatures<Merged...>;
+};
+
+template <class... Merged, class Head, class... Tail>
+struct CompletionSignaturesUnionImpl<ex::completion_signatures<Merged...>, ex::completion_signatures<Head, Tail...>>
+    : CompletionSignaturesUnionImpl<
+          std::conditional_t<kContainedIn<Head, Merged...>, ex::completion_signatures<Merged...>,
+                             ex::completion_signatures<Merged..., Head>>,
+          ex::completion_signatures<Tail...>> {};
+
+template <class SigsA, class SigsB>
+using CompletionSignaturesUnion = typename CompletionSignaturesUnionImpl<SigsA, SigsB>::Type;
+
+}  // namespace ex_actor::internal

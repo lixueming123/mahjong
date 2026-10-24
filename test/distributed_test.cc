@@ -1,6 +1,15 @@
+#include <algorithm>
+#include <array>
+#include <barrier>
 #include <exception>
+#include <list>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <string>
 #include <thread>
+#include <tuple>
+#include <variant>
 #include <vector>
 
 #include <gmock/gmock-matchers.h>
@@ -14,7 +23,7 @@ using testing::HasSubstr;
 using testing::Property;
 using testing::Throws;
 
-namespace logging = ex_actor::internal::logging;
+namespace logging = ex_actor::internal::log;
 
 class A {
  public:
@@ -63,20 +72,30 @@ class Error {
 };
 EXA_REMOTE(&Error::Create);
 
+class Echoer;
+
+struct ComplexContainers {
+  std::list<ex_actor::ActorRef<Echoer>> list_refs;
+  std::array<ex_actor::ActorRef<Echoer>, 1> array_refs;
+  std::map<std::string, ex_actor::ActorRef<Echoer>> map_refs;
+  std::tuple<ex_actor::ActorRef<Echoer>, int> tuple_refs;
+  std::variant<ex_actor::ActorRef<Echoer>, std::string> variant_refs;
+};
+
 class Echoer {
  public:
   static Echoer Create() { return Echoer(); }
 
   std::string Echo(const std::string& message) { return message; }
 
-  exec::task<std::string> Proxy(const std::string& message, const ex_actor::ActorRef<Echoer>& other) {
+  stdexec::task<std::string> Proxy(const std::string& message, const ex_actor::ActorRef<Echoer>& other) {
     auto sender = other.Send<&Echoer::Echo>(message);
     auto result = co_await std::move(sender);
     co_return result;
   }
 
-  exec::task<std::vector<std::string>> ProxyTwoActor(const std::string& message,
-                                                     const std::vector<ex_actor::ActorRef<Echoer>>& echoers) {
+  stdexec::task<std::vector<std::string>> ProxyTwoActor(const std::string& message,
+                                                        const std::vector<ex_actor::ActorRef<Echoer>>& echoers) {
     std::vector<std::string> strs;
     for (const auto& echoer : echoers) {
       auto sender = echoer.Send<&Echoer::Echo>(message);
@@ -85,13 +104,22 @@ class Echoer {
     }
     co_return strs;
   }
+
+  ex_actor::ActorRef<Echoer> ReturnActorRef(ex_actor::ActorRef<Echoer> ref) { return ref; }
+
+  std::vector<ex_actor::ActorRef<Echoer>> ReturnActorRefVector(std::vector<ex_actor::ActorRef<Echoer>> refs) {
+    return refs;
+  }
+
+  ComplexContainers ReturnComplexContainers(ComplexContainers container) { return container; }
 };
-EXA_REMOTE(&Echoer::Create, &Echoer::Echo, &Echoer::Proxy, &Echoer::ProxyTwoActor);
+EXA_REMOTE(&Echoer::Create, &Echoer::Echo, &Echoer::Proxy, &Echoer::ProxyTwoActor, &Echoer::ReturnActorRef,
+           &Echoer::ReturnActorRefVector, &Echoer::ReturnComplexContainers);
 
 struct ProxyEchoer {
   ex_actor::ActorRef<Echoer> echoer;
 
-  exec::task<std::string> Echo(const std::string& str) const {
+  stdexec::task<std::string> Echo(const std::string& str) const {
     auto sender = echoer.Send<&Echoer::Echo>(str);
     auto reply = co_await std::move(sender);
     co_return reply;
@@ -104,90 +132,146 @@ EXA_REMOTE(&ProxyEchoer::Create, &ProxyEchoer::Echo);
 struct RetVoid {
   static RetVoid Create() { return {}; }
   void ReturnVoid() {}
-  exec::task<void> CoroutineReturnVoid() { co_return; }
+  stdexec::task<void> CoroutineReturnVoid() { co_return; }
 };
 EXA_REMOTE(&RetVoid::Create, &RetVoid::ReturnVoid, &RetVoid::CoroutineReturnVoid);
 
+class NonMovableActor {
+ public:
+  NonMovableActor(const NonMovableActor&) = delete;
+  NonMovableActor& operator=(const NonMovableActor&) = delete;
+  NonMovableActor(NonMovableActor&&) = delete;
+  NonMovableActor& operator=(NonMovableActor&&) = delete;
+
+  static NonMovableActor Create(std::string name) { return NonMovableActor(std::move(name)); }
+
+  std::string GetName() const { return name_; }
+
+ private:
+  explicit NonMovableActor(std::string name) : name_(std::move(name)) {}
+  std::string name_;
+};
+EXA_REMOTE(&NonMovableActor::Create, &NonMovableActor::GetName);
+
 TEST(DistributedTest, ConstructionInDistributedModeWithDefaultScheduler) {
-  auto node_main = [](uint32_t this_node_id) -> exec::task<void> {
-    std::vector<ex_actor::NodeInfo> cluster_node_info = {{.node_id = 0, .address = "tcp://127.0.0.1:5301"},
-                                                         {.node_id = 1, .address = "tcp://127.0.0.1:5302"}};
+  std::barrier bar {2};
+  auto node_main = [&bar](size_t index) -> stdexec::task<void> {
+    std::vector<std::string> addresses = {"tcp://127.0.0.1:5301", "tcp://127.0.0.1:5302"};
+    ex_actor::ClusterConfig cluster_config {
+        .listen_address = addresses.at(index),
+        .contact_node_address = (index == 0) ? "" : addresses.at(0),
+        .network_config = {.heartbeat_timeout_ms = 5000},
+    };
+    ex_actor::ActorRegistry registry(/*thread_pool_size=*/4);
+    co_await registry.StartOrJoinCluster(cluster_config);
 
-    ex_actor::ActorRegistry registry(/*thread_pool_size=*/4,
-                                     /*this_node_id=*/this_node_id, cluster_node_info);
+    auto [cluster_state, condition_met] =
+        co_await registry.WaitClusterState([](const auto& state) { return state.nodes.size() >= 2; },
+                                           /*timeout_ms=*/5000);
+    EXPECT_TRUE(condition_met);
+    EXPECT_GE(cluster_state.nodes.size(), 2U);
+    if (cluster_state.nodes.size() < 2U) {
+      bar.arrive_and_wait();
+      co_return;
+    }
 
-    uint32_t remote_node_id = (this_node_id + 1) % cluster_node_info.size();
-    auto ping_worker = co_await registry.CreateActor<PingWorker, &PingWorker::Create>(
-        ex_actor::ActorConfig {.node_id = remote_node_id},
-        /*name=*/"Alice");
+    std::string remote_address = addresses.at(1 - index);
+    auto it = std::ranges::find_if(cluster_state.nodes, [&](const auto& n) { return n.address == remote_address; });
+    EXPECT_NE(it, cluster_state.nodes.end());
+    if (it == cluster_state.nodes.end()) {
+      bar.arrive_and_wait();
+      co_return;
+    }
+    auto remote_node_id = it->node_id;
+
+    auto ping_worker = co_await registry.Spawn<&PingWorker::Create>(/*name=*/"Alice").ToNode(remote_node_id);
     auto ping = ping_worker.Send<&PingWorker::Ping>("hello");
     auto ping_res = co_await std::move(ping);
     EXPECT_EQ(ping_res, "ack from Alice, msg got: hello");
+    bar.arrive_and_wait();
   };
   std::jthread node_0([&] { stdexec::sync_wait(node_main(0)); });
   std::jthread node_1([&] { stdexec::sync_wait(node_main(1)); });
 }
 
 TEST(DistributedTest, ConstructionInDistributedMode) {
-  auto node_main = [](uint32_t this_node_id) -> exec::task<void> {
+  std::barrier bar {2};
+  auto node_main = [&bar](size_t index) -> stdexec::task<void> {
     ex_actor::WorkSharingThreadPool thread_pool(4);
-    std::vector<ex_actor::NodeInfo> cluster_node_info = {{.node_id = 0, .address = "tcp://127.0.0.1:5301"},
-                                                         {.node_id = 1, .address = "tcp://127.0.0.1:5302"}};
-    ex_actor::ActorRegistry registry(thread_pool.GetScheduler(),
-                                     /*this_node_id=*/this_node_id, cluster_node_info);
+    std::vector<std::string> addresses = {"tcp://127.0.0.1:5301", "tcp://127.0.0.1:5302"};
+    ex_actor::ClusterConfig cluster_config {
+        .listen_address = addresses.at(index),
+        .contact_node_address = (index == 0) ? "" : addresses.at(0),
+        .network_config = {.heartbeat_timeout_ms = 5000},
+    };
+    ex_actor::ActorRegistry registry(thread_pool.GetScheduler());
+    co_await registry.StartOrJoinCluster(cluster_config);
 
     // test local creation
-    auto local_a = co_await registry.CreateActor<A>();
-    auto local_b = co_await registry.CreateActor<B>();
-    auto local_a2 = co_await registry.CreateActor<A>(ex_actor::ActorConfig {.node_id = this_node_id});
+    auto local_a = co_await registry.Spawn<A>();
+    auto local_b = co_await registry.Spawn<B>();
+    auto local_a2 = co_await registry.Spawn<A>();
 
     // test remote creation
-    uint32_t remote_node_id = (this_node_id + 1) % cluster_node_info.size();
+    auto [cluster_state, condition_met] =
+        co_await registry.WaitClusterState([](const auto& state) { return state.nodes.size() >= 2; },
+                                           /*timeout_ms=*/5000);
+    EXPECT_TRUE(condition_met);
+    EXPECT_GE(cluster_state.nodes.size(), 2U);
+    if (cluster_state.nodes.size() < 2U) {
+      bar.arrive_and_wait();
+      co_return;
+    }
 
-    logging::Info("node {} creating remote actor A", this_node_id);
-    /*
-    before gcc 13, we can't use heap-allocated temp variable after co_await, or there will be a double free error.
-    here actor_name is heap allocated. so when using ActorConfig with actor_name, we should define it explicitly.
+    std::string this_address = addresses.at(index);
+    std::string remote_address = addresses.at(1 - index);
+    auto self_it = std::ranges::find_if(cluster_state.nodes, [&](const auto& n) { return n.address == this_address; });
+    auto remote_it =
+        std::ranges::find_if(cluster_state.nodes, [&](const auto& n) { return n.address == remote_address; });
+    EXPECT_NE(self_it, cluster_state.nodes.end());
+    EXPECT_NE(remote_it, cluster_state.nodes.end());
+    if (self_it == cluster_state.nodes.end() || remote_it == cluster_state.nodes.end()) {
+      bar.arrive_and_wait();
+      co_return;
+    }
+    auto this_node_id = self_it->node_id;
+    auto remote_node_id = remote_it->node_id;
 
-    i.e. you can't `co_await CreateActor<X>(ActorConfig {.actor_name = "A"})`, instead, you should do this:
-    ```cpp
+    // test ToNode with this_node_id (spawn "remotely" on self)
+    logging::Info("node {} creating actor on self via ToNode", index);
+    auto self_a = co_await registry.Spawn<&A::Create>().ToNode(this_node_id);
+    auto self_ping = co_await registry.Spawn<&PingWorker::Create>(/*name=*/"Self").ToNode(this_node_id);
+    auto self_reply = co_await self_ping.Send<&PingWorker::Ping>("hi");
+    EXPECT_EQ(self_reply, "ack from Self, msg got: hi");
+
+    logging::Info("node {} creating remote actor A", index);
+    // GCC < 13 workaround: assign configs with heap-allocated fields to named variables before co_await.
+    // See docs/contents/installation.md "Known Issues: GCC before 13".
     ex_actor::ActorConfig a_config {.actor_name = "A"};
-    auto remote_a = co_await registry.CreateActor<A, &A::Create>(a_config);
-    ```
+    auto remote_a = co_await registry.Spawn<&A::Create>().ToNode(remote_node_id).WithConfig(a_config);
 
-    see https://gcc.gnu.org/pipermail/gcc-bugs/2022-October/800402.html
-    */
-    ex_actor::ActorConfig a_config {.node_id = remote_node_id, .actor_name = "A"};
-    auto remote_a = co_await registry.CreateActor<A, &A::Create>(a_config);
-
-    logging::Info("node {} creating remote actor B", this_node_id);
-    ex_actor::ActorConfig b_config {.node_id = remote_node_id};
-    auto remote_b = co_await registry.CreateActor<B, &B::Create>(b_config, 1, "asd", std::make_unique<int>());
+    logging::Info("node {} creating remote actor B", index);
+    auto remote_b = co_await registry.Spawn<&B::Create>(1, "asd", std::make_unique<int>()).ToNode(remote_node_id);
 
     logging::Info("creating remote actor C without registering with EXA_REMOTE");
-    auto do_create = [&]() -> void {
-      stdexec::sync_wait(registry.CreateActor<C, &C::Create>(ex_actor::ActorConfig {.node_id = remote_node_id}));
-    };
+    auto do_create = [&]() -> void { stdexec::sync_wait(registry.Spawn<&C::Create>().ToNode(remote_node_id)); };
     EXPECT_THAT(do_create, Throws<std::exception>(
                                Property(&std::exception::what, HasSubstr("forgot to register it with EXA_REMOTE"))));
 
     logging::Info("creating remote actor D without static create function");
     EXPECT_THAT(
-        [&]() { stdexec::sync_wait(registry.CreateActor<D>(ex_actor::ActorConfig {.node_id = remote_node_id})); },
+        [&]() { stdexec::sync_wait(registry.Spawn<D>().ToNode(remote_node_id)); },
         Throws<std::exception>(Property(&std::exception::what, HasSubstr("can only be used to create local actor"))));
 
     // test remote creation error propagation
     auto do_create_error = [&]() -> void {
-      stdexec::sync_wait(
-          registry.CreateActor<Error, &Error::Create>(ex_actor::ActorConfig {.node_id = remote_node_id}));
+      stdexec::sync_wait(registry.Spawn<&Error::Create>().ToNode(remote_node_id));
     };
     EXPECT_THAT(do_create_error, Throws<std::exception>(Property(&std::exception::what, HasSubstr("Just an error"))));
 
     // test remote call
     logging::Info("creating remote actor PingWorker");
-    auto ping_worker = co_await registry.CreateActor<PingWorker, &PingWorker::Create>(
-        ex_actor::ActorConfig {.node_id = remote_node_id},
-        /*name=*/"Alice");
+    auto ping_worker = co_await registry.Spawn<&PingWorker::Create>(/*name=*/"Alice").ToNode(remote_node_id);
     logging::Info("calling PingWorker::Ping");
     auto sender = ping_worker.Send<&PingWorker::Ping>("hello");
     auto reply = co_await std::move(sender);
@@ -207,9 +291,10 @@ TEST(DistributedTest, ConstructionInDistributedMode) {
 
     // test remote call with void as return value
     logging::Info("calling RetVoid::ReturnVoid and Retvoid::CoroutineReturnVoid");
-    auto empty_actor = co_await registry.CreateActor<RetVoid, &RetVoid::Create>({.node_id = remote_node_id});
+    auto empty_actor = co_await registry.Spawn<&RetVoid::Create>().ToNode(remote_node_id);
     co_await empty_actor.Send<&RetVoid::ReturnVoid>();
     co_await empty_actor.Send<&RetVoid::CoroutineReturnVoid>();
+    bar.arrive_and_wait();
   };
 
   std::jthread node_0([&] { stdexec::sync_wait(node_main(0)); });
@@ -220,16 +305,38 @@ TEST(DistributedTest, ConstructionInDistributedMode) {
 }
 
 TEST(DistributedTest, ActorLookUpInDistributeMode) {
-  auto node_main = [](uint32_t this_node_id) -> exec::task<void> {
+  std::barrier bar {2};
+  auto node_main = [&bar](size_t index) -> stdexec::task<void> {
     ex_actor::WorkSharingThreadPool thread_pool(4);
-    std::vector<ex_actor::NodeInfo> cluster_node_info = {{.node_id = 0, .address = "tcp://127.0.0.1:5301"},
-                                                         {.node_id = 1, .address = "tcp://127.0.0.1:5302"}};
-    ex_actor::ActorRegistry registry(thread_pool.GetScheduler(),
-                                     /*this_node_id=*/this_node_id, cluster_node_info);
+    std::vector<std::string> addresses = {"tcp://127.0.0.1:5301", "tcp://127.0.0.1:5302"};
+    ex_actor::ClusterConfig cluster_config {
+        .listen_address = addresses.at(index),
+        .contact_node_address = (index == 0) ? "" : addresses.at(0),
+        .network_config = {.heartbeat_timeout_ms = 5000},
+    };
+    ex_actor::ActorRegistry registry(thread_pool.GetScheduler());
+    co_await registry.StartOrJoinCluster(cluster_config);
 
-    uint32_t remote_node_id = (this_node_id + 1) % cluster_node_info.size();
-    ex_actor::ActorConfig echoer_config {.node_id = remote_node_id, .actor_name = "Alice"};
-    auto remote_actor = co_await registry.CreateActor<Echoer, &Echoer::Create>(echoer_config);
+    auto [cluster_state, condition_met] =
+        co_await registry.WaitClusterState([](const auto& state) { return state.nodes.size() >= 2; },
+                                           /*timeout_ms=*/5000);
+    EXPECT_TRUE(condition_met);
+    EXPECT_GE(cluster_state.nodes.size(), 2U);
+    if (cluster_state.nodes.size() < 2U) {
+      bar.arrive_and_wait();
+      co_return;
+    }
+
+    std::string remote_address = addresses.at(1 - index);
+    auto it = std::ranges::find_if(cluster_state.nodes, [&](const auto& n) { return n.address == remote_address; });
+    EXPECT_NE(it, cluster_state.nodes.end());
+    if (it == cluster_state.nodes.end()) {
+      bar.arrive_and_wait();
+      co_return;
+    }
+    auto remote_node_id = it->node_id;
+    ex_actor::ActorConfig echoer_config {.actor_name = "Alice"};
+    auto remote_actor = co_await registry.Spawn<&Echoer::Create>().ToNode(remote_node_id).WithConfig(echoer_config);
     auto lookup_result = co_await registry.GetActorRefByName<Echoer>(remote_node_id, "Alice");
     auto lookup_error = co_await registry.GetActorRefByName<Echoer>(remote_node_id, "A");
 
@@ -242,6 +349,7 @@ TEST(DistributedTest, ActorLookUpInDistributeMode) {
     auto sender = actor.Send<&Echoer::Echo>(msg);
     auto reply_msg = co_await std::move(sender);
     EXPECT_EQ(reply_msg, msg);
+    bar.arrive_and_wait();
   };
 
   std::jthread node_0([&] { stdexec::sync_wait(node_main(0)); });
@@ -252,21 +360,43 @@ TEST(DistributedTest, ActorLookUpInDistributeMode) {
 }
 
 TEST(DistributedTest, ActorRefSerializationTest) {
-  auto node_main = [](uint32_t this_node_id) -> exec::task<void> {
+  std::barrier bar {2};
+  auto node_main = [&bar](size_t index) -> stdexec::task<void> {
     ex_actor::WorkSharingThreadPool thread_pool(4);
-    std::vector<ex_actor::NodeInfo> cluster_node_info = {{.node_id = 0, .address = "tcp://127.0.0.1:5301"},
-                                                         {.node_id = 1, .address = "tcp://127.0.0.1:5302"}};
-    ex_actor::ActorRegistry registry(thread_pool.GetScheduler(),
-                                     /*this_node_id=*/this_node_id, cluster_node_info);
+    std::vector<std::string> addresses = {"tcp://127.0.0.1:5301", "tcp://127.0.0.1:5302"};
+    ex_actor::ClusterConfig cluster_config {
+        .listen_address = addresses.at(index),
+        .contact_node_address = (index == 0) ? "" : addresses.at(0),
+        .network_config = {.heartbeat_timeout_ms = 5000},
+    };
+    ex_actor::ActorRegistry registry(thread_pool.GetScheduler());
+    co_await registry.StartOrJoinCluster(cluster_config);
 
-    uint32_t remote_node_id = (this_node_id + 1) % cluster_node_info.size();
+    auto [cluster_state, condition_met] =
+        co_await registry.WaitClusterState([](const auto& state) { return state.nodes.size() >= 2; },
+                                           /*timeout_ms=*/5000);
+    EXPECT_TRUE(condition_met);
+    EXPECT_GE(cluster_state.nodes.size(), 2U);
+    if (cluster_state.nodes.size() < 2U) {
+      bar.arrive_and_wait();
+      co_return;
+    }
 
-    auto local_actor_a = co_await registry.CreateActor<Echoer>();
-    auto local_actor_b = co_await registry.CreateActor<Echoer>();
-    ex_actor::ActorConfig echoer_config_a {.node_id = remote_node_id, .actor_name = "Alice"};
-    ex_actor::ActorConfig echoer_config_b {.node_id = remote_node_id, .actor_name = "Bob"};
-    auto remote_actor_a = co_await registry.CreateActor<Echoer, &Echoer::Create>(echoer_config_a);
-    auto remote_actor_b = co_await registry.CreateActor<Echoer, &Echoer::Create>(echoer_config_b);
+    std::string remote_address = addresses.at(1 - index);
+    auto it = std::ranges::find_if(cluster_state.nodes, [&](const auto& n) { return n.address == remote_address; });
+    EXPECT_NE(it, cluster_state.nodes.end());
+    if (it == cluster_state.nodes.end()) {
+      bar.arrive_and_wait();
+      co_return;
+    }
+    auto remote_node_id = it->node_id;
+
+    auto local_actor_a = co_await registry.Spawn<Echoer>();
+    auto local_actor_b = co_await registry.Spawn<Echoer>();
+    ex_actor::ActorConfig echoer_config_a {.actor_name = "Alice"};
+    ex_actor::ActorConfig echoer_config_b {.actor_name = "Bob"};
+    auto remote_actor_a = co_await registry.Spawn<&Echoer::Create>().ToNode(remote_node_id).WithConfig(echoer_config_a);
+    auto remote_actor_b = co_await registry.Spawn<&Echoer::Create>().ToNode(remote_node_id).WithConfig(echoer_config_b);
     std::string msg = "hi";
 
     // Pass the local actor to remote actor
@@ -287,11 +417,11 @@ TEST(DistributedTest, ActorRefSerializationTest) {
     EXPECT_EQ(vec_reply, expected_vec_reply);
 
     // Pass a local actor to the constructor of remote actor
-    auto proxy_echoer = co_await registry.CreateActor<ProxyEchoer, &ProxyEchoer::Create>(
-        ex_actor::ActorConfig {.node_id = remote_node_id}, local_actor_a);
+    auto proxy_echoer = co_await registry.Spawn<&ProxyEchoer::Create>(local_actor_a).ToNode(remote_node_id);
     auto proxy_echoer_sender = proxy_echoer.Send<&ProxyEchoer::Echo>(msg);
     auto proxy_echoer_reply = co_await std::move(proxy_echoer_sender);
     EXPECT_EQ(proxy_echoer_reply, msg);
+    bar.arrive_and_wait();
   };
 
   std::jthread node_0([&] { stdexec::sync_wait(node_main(0)); });
@@ -299,4 +429,218 @@ TEST(DistributedTest, ActorRefSerializationTest) {
 
   node_0.join();
   node_1.join();
+}
+
+TEST(DistributedTest, DestroyRemoteActor) {
+  std::barrier bar {2};
+  auto node_main = [&bar](size_t index) -> stdexec::task<void> {
+    ex_actor::WorkSharingThreadPool thread_pool(4);
+    std::vector<std::string> addresses = {"tcp://127.0.0.1:5301", "tcp://127.0.0.1:5302"};
+    ex_actor::ClusterConfig cluster_config {
+        .listen_address = addresses.at(index),
+        .contact_node_address = (index == 0) ? "" : addresses.at(0),
+        .network_config = {.heartbeat_timeout_ms = 5000},
+    };
+    ex_actor::ActorRegistry registry(thread_pool.GetScheduler());
+    co_await registry.StartOrJoinCluster(cluster_config);
+
+    auto [cluster_state, condition_met] =
+        co_await registry.WaitClusterState([](const auto& state) { return state.nodes.size() >= 2; },
+                                           /*timeout_ms=*/5000);
+    EXPECT_TRUE(condition_met);
+    EXPECT_GE(cluster_state.nodes.size(), 2U);
+    if (cluster_state.nodes.size() < 2U) {
+      bar.arrive_and_wait();
+      co_return;
+    }
+
+    std::string remote_address = addresses.at(1 - index);
+    auto it = std::ranges::find_if(cluster_state.nodes, [&](const auto& n) { return n.address == remote_address; });
+    EXPECT_NE(it, cluster_state.nodes.end());
+    if (it == cluster_state.nodes.end()) {
+      bar.arrive_and_wait();
+      co_return;
+    }
+    auto remote_node_id = it->node_id;
+
+    // Spawn a named remote actor, verify it works, destroy it, then verify it's gone
+    ex_actor::ActorConfig config {.actor_name = "ToDestroy"};
+    auto remote_actor =
+        co_await registry.Spawn<&PingWorker::Create>(/*name=*/"Destroyable").ToNode(remote_node_id).WithConfig(config);
+
+    auto reply = co_await remote_actor.Send<&PingWorker::Ping>("before_destroy");
+    EXPECT_EQ(reply, "ack from Destroyable, msg got: before_destroy");
+
+    co_await registry.DestroyActor(remote_actor);
+
+    // After destroying, calling the actor should fail
+    EXPECT_THAT([&]() -> void { stdexec::sync_wait(remote_actor.Send<&PingWorker::Ping>("after_destroy")); },
+                Throws<std::exception>(Property(&std::exception::what, HasSubstr("maybe it's already destroyed"))));
+
+    // After destroying, looking up the actor by name should return empty
+    auto lookup = co_await registry.GetActorRefByName<PingWorker>(remote_node_id, "ToDestroy");
+    EXPECT_FALSE(lookup.has_value());
+
+    // Destroying the same actor again should fail
+    EXPECT_THAT([&]() -> void { stdexec::sync_wait(registry.DestroyActor(remote_actor)); },
+                Throws<std::exception>(Property(&std::exception::what, HasSubstr("not found"))));
+
+    bar.arrive_and_wait();
+  };
+
+  std::jthread node_0([&] { stdexec::sync_wait(node_main(0)); });
+  std::jthread node_1([&] { stdexec::sync_wait(node_main(1)); });
+
+  node_0.join();
+  node_1.join();
+}
+
+struct DistributedBase {
+  virtual std::string Foo() { return "DistributedBase::Foo"; }
+  virtual ~DistributedBase() = default;
+};
+
+struct DistributedDerived : DistributedBase {
+  std::string Foo() override { return "DistributedDerived::Foo"; }
+  static DistributedDerived Create() { return DistributedDerived(); }
+};
+EXA_REMOTE(&DistributedDerived::Create, &DistributedDerived::Foo, &DistributedBase::Foo);
+
+TEST(DistributedTest, ActorCanBePolymorphic) {
+  std::barrier bar {2};
+  auto node_main = [&bar](size_t index) -> stdexec::task<void> {
+    std::vector<std::string> addresses = {"tcp://127.0.0.1:5301", "tcp://127.0.0.1:5302"};
+    ex_actor::ClusterConfig cluster_config {
+        .listen_address = addresses.at(index),
+        .contact_node_address = (index == 0) ? "" : addresses.at(0),
+        .network_config = {.heartbeat_timeout_ms = 5000},
+    };
+    ex_actor::ActorRegistry registry(/*thread_pool_size=*/4);
+    co_await registry.StartOrJoinCluster(cluster_config);
+
+    auto [cluster_state, condition_met] =
+        co_await registry.WaitClusterState([](const auto& state) { return state.nodes.size() >= 2; },
+                                           /*timeout_ms=*/5000);
+    EXPECT_TRUE(condition_met);
+    EXPECT_GE(cluster_state.nodes.size(), 2U);
+    if (cluster_state.nodes.size() < 2U) {
+      bar.arrive_and_wait();
+      co_return;
+    }
+
+    std::string remote_address = addresses.at(1 - index);
+    auto it = std::ranges::find_if(cluster_state.nodes, [&](const auto& n) { return n.address == remote_address; });
+    EXPECT_NE(it, cluster_state.nodes.end());
+    if (it == cluster_state.nodes.end()) {
+      bar.arrive_and_wait();
+      co_return;
+    }
+    auto remote_node_id = it->node_id;
+
+    ex_actor::ActorRef<DistributedBase> derived =
+        co_await registry.Spawn<&DistributedDerived::Create>().ToNode(remote_node_id);
+    std::string foo_reply = co_await derived.Send<&DistributedBase::Foo>();
+    EXPECT_EQ(foo_reply, "DistributedDerived::Foo");
+
+    ex_actor::ActorRef<DistributedBase> base = derived;
+    EXPECT_EQ(base.GetActorId(), derived.GetActorId());
+    EXPECT_EQ(base.GetNodeId(), derived.GetNodeId());
+    bar.arrive_and_wait();
+  };
+  std::jthread node_0([&] { stdexec::sync_wait(node_main(0)); });
+  std::jthread node_1([&] { stdexec::sync_wait(node_main(1)); });
+}
+
+// Verifies that a non-movable actor can be spawned via a factory function.
+// The lambda is never invoked; it only needs to compile, which forces the
+// full Spawn -> Actor template chain to be instantiated for NonMovableActor.
+TEST(DistributedTest, NonMovableActorCompiles) {
+  [[maybe_unused]] auto unused = [](ex_actor::ActorRegistry& registry) {
+    return registry.Spawn<&NonMovableActor::Create>(/*name=*/"Bob").ToNode(0);
+  };
+}
+
+TEST(DistributedTest, RemoteMethodReturnsActorRefTest) {
+  std::barrier bar {2};
+  auto node_main = [&bar](size_t index) -> stdexec::task<void> {
+    ex_actor::WorkSharingThreadPool thread_pool(4);
+    std::vector<std::string> addresses = {"tcp://127.0.0.1:5301", "tcp://127.0.0.1:5302"};
+    ex_actor::ClusterConfig cluster_config {
+        .listen_address = addresses.at(index),
+        .contact_node_address = (index == 0) ? "" : addresses.at(0),
+        .network_config = {.heartbeat_timeout_ms = 5000},
+    };
+    ex_actor::ActorRegistry registry(thread_pool.GetScheduler());
+    co_await registry.StartOrJoinCluster(cluster_config);
+
+    auto [cluster_state, condition_met] =
+        co_await registry.WaitClusterState([](const auto& state) { return state.nodes.size() >= 2; },
+                                           /*timeout_ms=*/5000);
+    EXPECT_TRUE(condition_met);
+    if (!condition_met) {
+      bar.arrive_and_wait();
+      co_return;
+    }
+
+    std::string remote_address = addresses.at(1 - index);
+    auto it = std::ranges::find_if(cluster_state.nodes, [&](const auto& n) { return n.address == remote_address; });
+    auto remote_node_id = it->node_id;
+
+    auto local_actor = co_await registry.Spawn<Echoer>();
+    auto remote_actor = co_await registry.Spawn<&Echoer::Create>().ToNode(remote_node_id);
+
+    // Call remote method that returns an ActorRef.
+    // If the bug exists, the deserialization of the return value in actor_ref.h will not pass
+    // the context, so the returned ActorRef's broker_actor_ref_ will be empty, making it broken.
+    auto returned_ref = co_await remote_actor.Send<&Echoer::ReturnActorRef>(remote_actor);
+
+    // Let's try sending a message to the returned_ref.
+    // Since it's fixed, it should succeed.
+    auto reply = co_await returned_ref.Send<&Echoer::Echo>("test");
+    EXPECT_EQ(reply, "test");
+
+    // Now test std::vector<ActorRef>
+    std::vector<ex_actor::ActorRef<Echoer>> vec = {remote_actor};
+    auto returned_vec = co_await remote_actor.Send<&Echoer::ReturnActorRefVector>(vec);
+    EXPECT_EQ(returned_vec.size(), 1);
+
+    auto reply_vec = co_await returned_vec[0].Send<&Echoer::Echo>("test");
+    EXPECT_EQ(reply_vec, "test");
+
+    // Now test ComplexContainers (std::list, std::array, std::map, std::tuple, std::variant)
+    ComplexContainers container;
+    container.list_refs.push_back(remote_actor);
+    container.array_refs[0] = remote_actor;
+    container.map_refs["test_key"] = remote_actor;
+    container.tuple_refs = std::make_tuple(remote_actor, 123);
+    container.variant_refs = remote_actor;
+
+    auto returned_container = co_await remote_actor.Send<&Echoer::ReturnComplexContainers>(container);
+
+    // Verify list element
+    auto reply_list = co_await returned_container.list_refs.front().Send<&Echoer::Echo>("test_list");
+    EXPECT_EQ(reply_list, "test_list");
+
+    // Verify array element
+    auto reply_array = co_await returned_container.array_refs[0].Send<&Echoer::Echo>("test_array");
+    EXPECT_EQ(reply_array, "test_array");
+
+    // Verify map element
+    auto reply_map = co_await returned_container.map_refs.at("test_key").Send<&Echoer::Echo>("test_map");
+    EXPECT_EQ(reply_map, "test_map");
+
+    // Verify tuple element
+    auto reply_tuple = co_await std::get<0>(returned_container.tuple_refs).Send<&Echoer::Echo>("test_tuple");
+    EXPECT_EQ(reply_tuple, "test_tuple");
+
+    // Verify variant element
+    auto reply_variant = co_await std::get<ex_actor::ActorRef<Echoer>>(returned_container.variant_refs)
+                             .Send<&Echoer::Echo>("test_variant");
+    EXPECT_EQ(reply_variant, "test_variant");
+
+    bar.arrive_and_wait();
+  };
+
+  std::jthread node_0([&] { stdexec::sync_wait(node_main(0)); });
+  std::jthread node_1([&] { stdexec::sync_wait(node_main(1)); });
 }

@@ -15,6 +15,7 @@ docs/contents/contributing.md
 Testing/
 core.*
 *.log
+vcpkg
 
 # 本地/生成物
 .workbuddy/

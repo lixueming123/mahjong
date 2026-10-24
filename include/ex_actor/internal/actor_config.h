@@ -18,30 +18,36 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <variant>
+#include <vector>
 
 #include <stdexec/execution.hpp>
 
+#include "ex_actor/internal/alias.h"  // IWYU pragma: keep
+
 namespace ex_actor {
+
+struct UnboundedMailbox {};
+struct BoundedMailbox {
+  // Actual capacity will be rounded up to the next power of 2 by BoundedMpscQueue.
+  size_t capacity;
+};
+struct UnsafeOneSlotMailbox {};
+using MailboxConfig = std::variant<UnboundedMailbox, BoundedMailbox, UnsafeOneSlotMailbox>;
+
 struct ActorConfig {
   size_t max_message_executed_per_activation = 100;
-  uint32_t node_id = 0;
+
+  // If empty, one default UnboundedMailbox will be used.
+  // Otherwise, the size of this vector is the number of mailboxes the actor has.
+  std::vector<MailboxConfig> mailbox_configs;
 
   /**
    * @brief Actor's name, should be unique within one node.
    *
-   * @note Before gcc 13, we can't use heap-allocated temp variable after co_await, or there will be a double free
-   * error. here actor_name is heap allocated. so when using ActorConfig with actor_name, we should define it
-   * explicitly.
-   *
-   * i.e. you can't `co_await CreateActor<X>(ActorConfig {.actor_name = "xxx"})` directly, instead, you
-   * should define a separate named variable for the config, and pass it to CreateActor(), like this:
-   *
-   * @code
-   * ex_actor::ActorConfig config {.actor_name = "xxx"};
-   * auto actor = co_await CreateActor<X>(config);
-   * @endcode
-   *
-   * see gcc's bug report: https://gcc.gnu.org/pipermail/gcc-bugs/2022-October/800402.html
+   * @note GCC < 13 has a coroutine bug that double-frees temporaries containing heap-allocated fields
+   * (like this std::optional<std::string>) in co_await expressions. Assign to a named variable first.
+   * See docs/contents/installation.md "Known Issues: GCC before 13" for details and workarounds.
    */
   std::optional<std::string> actor_name;
 
@@ -52,7 +58,9 @@ struct ActorConfig {
   // used in SchedulerUnion
   size_t scheduler_index = 0;
   // used in PriorityThreadPool
-  uint32_t priority = UINT32_MAX;
+  uint32_t priority = 0;
+  // used in CorePinnedThreadPool
+  size_t core_index = 0;
 };
 
 struct get_priority_t {
@@ -60,10 +68,10 @@ struct get_priority_t {
     if constexpr (requires { prop.query(get_priority_t {}); }) {
       return prop.query(get_priority_t {});
     } else {
-      return UINT32_MAX;
+      return 0;
     }
   }
-  constexpr auto query(stdexec::forwarding_query_t) const noexcept -> bool { return true; }
+  constexpr auto query(ex::forwarding_query_t) const noexcept -> bool { return true; }
 };
 
 struct get_scheduler_index_t {
@@ -74,9 +82,19 @@ struct get_scheduler_index_t {
       return 0;
     }
   }
-  constexpr auto query(stdexec::forwarding_query_t) const noexcept -> bool { return true; }
+  constexpr auto query(ex::forwarding_query_t) const noexcept -> bool { return true; }
 };
-
+struct get_core_index_t {
+  constexpr size_t operator()(const auto& prop) const noexcept {
+    if constexpr (requires { prop.query(get_core_index_t {}); }) {
+      return prop.query(get_core_index_t {});
+    } else {
+      return 0;
+    }
+  }
+  constexpr auto query(ex::forwarding_query_t) const noexcept -> bool { return true; }
+};
+constexpr inline get_core_index_t get_core_index {};
 constexpr inline get_priority_t get_priority {};
 constexpr inline get_scheduler_index_t get_scheduler_index {};
 }  // namespace ex_actor

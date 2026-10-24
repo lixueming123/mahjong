@@ -15,97 +15,197 @@
 #pragma once
 
 #include <concepts>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <map>
+#include <span>
 #include <type_traits>
-#include <vector>
 
+#include <capnp/serialize-packed.h>
 #include <rfl/capnproto.hpp>
 #include <spdlog/spdlog.h>
 
-#include "ex_actor/internal/actor_config.h"
-#include "ex_actor/internal/actor_ref_serialization/actor_ref_deserialization_info.h"
-#include "ex_actor/internal/actor_ref_serialization/actor_ref_serialization_reader.h"
+#include "ex_actor/3rd_lib/absl/container/inlined_vector.h"
 #include "ex_actor/internal/logging.h"
-#include "ex_actor/internal/reflect.h"
 
-namespace ex_actor::internal::serde {
+// ===================================================
+// Add external context support to rfl::capnproto
+// ===================================================
+
+namespace rfl {
+namespace capnproto {
+template <class Ctx>
+class ReaderWithContext : public Reader {
+ public:
+  const Ctx& ctx;
+  explicit ReaderWithContext(const Ctx& ctx) : ctx(ctx) {}
+
+  template <class VariantType, class UnionReaderType>
+  Result<VariantType> read_union(const InputUnionType& u) const noexcept {
+    const auto opt_pair = identify_discriminant(u);
+    if (!opt_pair) {
+      return error("Could not get the discriminant.");
+    }
+    const auto& [field, disc] = *opt_pair;
+    return UnionReaderType::read(*this, disc, InputVarType {u.val_.get(field)});
+  }
+
+  std::optional<std::pair<capnp::StructSchema::Field, size_t>> identify_discriminant(
+      const InputUnionType& _union) const noexcept {
+    size_t ix = 0;
+    for (auto field : _union.val_.getSchema().getFields()) {
+      if (_union.val_.has(field)) {
+        return std::make_pair(field, ix);
+      }
+      ++ix;
+    }
+    return std::optional<std::pair<capnp::StructSchema::Field, size_t>>();
+  }
+};
+
+template <class T, class Ctx, class... Ps>
+auto read(const InputVarType& _obj, const Ctx& ctx) {
+  const ReaderWithContext r {ctx};
+  return rfl::parsing::Parser<ReaderWithContext<Ctx>, Writer, T, Processors<SnakeCaseToCamelCase, Ps...>>::read(r,
+                                                                                                                _obj);
+}
+
+template <class T, class Ctx, class... Ps>
+Result<internal::wrap_in_rfl_array_t<T>> read(const concepts::ByteLike auto* bytes, size_t size,
+                                              const Schema<T>& schema, const Ctx& ctx) {
+  const auto array_ptr = kj::ArrayPtr<const kj::byte>(internal::ptr_cast<const kj::byte*>(bytes), size);
+  auto input_stream = kj::ArrayInputStream(array_ptr);
+  auto message_reader = capnp::PackedMessageReader(input_stream);
+  const auto root_name = get_root_name<std::remove_cv_t<T>, Ps...>();
+  const auto root_schema = schema.value().getNested(root_name.c_str());
+  const auto input_var = InputVarType {message_reader.getRoot<capnp::DynamicStruct>(root_schema.asStruct())};
+  return read<T, Ctx, Ps...>(input_var, ctx);
+}
+}  // namespace capnproto
+};  // namespace rfl
+
+// ===================================================
+// Custom Parser for absl::InlinedVector<std::byte, kN> → capnproto Data.
+// Bypasses Writer entirely: no intermediate Bytestring allocation, zero-copy write.
+// Covers both capnproto::Reader and ReaderWithContext<Ctx> (which inherits Reader).
+// ===================================================
+
+namespace rfl::parsing {
+
+template <class R, class W, size_t kN, class ProcessorsType>
+  requires(std::is_base_of_v<rfl::capnproto::Reader, R> && std::is_same_v<W, rfl::capnproto::Writer>)
+struct Parser<R, W, ex_actor::embedded_3rd::absl::InlinedVector<std::byte, kN>, ProcessorsType> {
+  using InputVarType = typename rfl::capnproto::Reader::InputVarType;
+  using ParentType = Parent<rfl::capnproto::Writer>;
+
+  static rfl::Result<ex_actor::embedded_3rd::absl::InlinedVector<std::byte, kN>> read(
+      const R& /*_r*/, const InputVarType& _var) noexcept {
+    if (_var.val_.getType() != capnp::DynamicValue::DATA) {
+      return rfl::error("Expected DATA type for InlinedVector<byte>");
+    }
+    const auto data = _var.val_.as<capnp::Data>();
+    const auto* begin = reinterpret_cast<const std::byte*>(data.begin());
+    return ex_actor::embedded_3rd::absl::InlinedVector<std::byte, kN>(begin, begin + data.size());
+  }
+
+  template <class P>
+  static void write(const rfl::capnproto::Writer& /*_w*/,
+                    const ex_actor::embedded_3rd::absl::InlinedVector<std::byte, kN>& _sv, const P& _parent) {
+    using PType = std::remove_cvref_t<P>;
+    const auto arr = kj::ArrayPtr<const kj::byte>(reinterpret_cast<const kj::byte*>(_sv.data()), _sv.size());
+    const capnp::Data::Reader data_reader(arr);
+    if constexpr (std::is_same_v<PType, typename ParentType::Object>) {
+      _parent.obj_->val_.set(kj::StringPtr(_parent.name_.data(), _parent.name_.size()), data_reader);
+    } else if constexpr (std::is_same_v<PType, typename ParentType::Array>) {
+      _parent.arr_->val_.set(_parent.arr_->ix_++, data_reader);
+    } else if constexpr (std::is_same_v<PType, typename ParentType::Union<rfl::capnproto::Writer::OutputUnionType>>) {
+      const auto field = _parent.union_->val_.getSchema().getFields()[_parent.index_];
+      _parent.union_->val_.set(field, data_reader);
+    }
+    // Root: ByteBuffer as a standalone root message is not used in ex_actor
+  }
+
+  static schema::Type to_schema(std::map<std::string, schema::Type>*) {
+    return schema::Type {schema::Type::Bytestring {}};
+  }
+};
+
+}  // namespace rfl::parsing
+
+// ===================================================
+// ex_actor's own serialization related code
+// ===================================================
+namespace ex_actor::internal {
+
+using ByteBuffer =
+    ex_actor::embedded_3rd::absl::InlinedVector<std::byte, 512>;  // SBO: no heap alloc for messages <= 512 bytes
+
+constexpr size_t kBuilderBufferSize = 65536;
+
+struct ThreadLocalMessageBuilderBuffer {
+  static constexpr size_t kSize = kBuilderBufferSize;
+  std::array<capnp::word, kSize / sizeof(capnp::word)> buffer;
+};
+
+inline ThreadLocalMessageBuilderBuffer& GetThreadLocalBuilderBuffer() {
+  thread_local ThreadLocalMessageBuilderBuffer buffer;
+  return buffer;
+}
 
 template <class T>
-static auto GetCachedSchema() {
+auto GetCachedSchema() {
   thread_local auto schema = rfl::capnproto::to_schema<T>();
   return schema;
 }
 
 template <class T>
-std::vector<char> Serialize(const T& obj) {
-  return rfl::capnproto::write(obj, GetCachedSchema<T>());
+void SerializeTo(const T& obj, capnp::DynamicStruct::Builder* root) {
+  const auto writer = rfl::capnproto::Writer(root);
+  rfl::capnproto::Parser<T, rfl::Processors<rfl::SnakeCaseToCamelCase>>::write(
+      writer, obj, typename rfl::parsing::Parent<rfl::capnproto::Writer>::Root {});
 }
 
 template <class T>
-T Deserialize(const uint8_t* data, size_t size) {
-  return rfl::capnproto::read<T>(data, size, GetCachedSchema<T>()).value();
+ByteBuffer Serialize(const T& obj) {
+  const auto& schema = GetCachedSchema<T>();
+  const auto root_name = rfl::capnproto::get_root_name<T>();
+  const auto root_schema = schema.value().getNested(root_name.c_str());
+
+  // Thread-local buffer is reused across calls. MallocMessageBuilder automatically allocates
+  // additional heap segments if the message exceeds the pre-allocated buffer size.
+  auto& tls_buffer = GetThreadLocalBuilderBuffer();
+
+  capnp::MallocMessageBuilder message_builder(
+      kj::ArrayPtr<capnp::word>(tls_buffer.buffer.data(), tls_buffer.buffer.size()));
+  auto root = message_builder.initRoot<capnp::DynamicStruct>(root_schema.asStruct());
+
+  SerializeTo(obj, &root);
+
+  size_t size_in_words = capnp::computeSerializedSizeInWords(message_builder);
+  size_t size_in_bytes = size_in_words * sizeof(capnp::word);
+  // Packed worst case: 1 tag byte per 8 data bytes on top of unpacked size.
+  size_t max_packed_size = size_in_bytes + ((size_in_bytes + 7) / 8) + 32;
+
+  ByteBuffer result(max_packed_size);
+  kj::ArrayOutputStream output_stream(kj::ArrayPtr<uint8_t>(reinterpret_cast<uint8_t*>(result.data()), result.size()));
+  capnp::writePackedMessage(output_stream, message_builder);
+
+  result.resize(output_stream.getArray().size());
+
+  return result;
 }
 
 template <class T>
-T Deserialize(const uint8_t* data, size_t size, const ActorRefDeserializationInfo& info) {
-  return rfl::capnproto::read<T>(data, size, GetCachedSchema<T>(), info).value();
+T Deserialize(std::span<const std::byte> data) {
+  return rfl::capnproto::read<T>(reinterpret_cast<const char*>(data.data()), data.size(), GetCachedSchema<T>()).value();
 }
 
-enum class NetworkRequestType : uint8_t {
-  kActorCreationRequest = 0,
-  kActorMethodCallRequest,
-  kActorLookUpRequest,
-};
-
-enum class NetworkReplyType : uint8_t {
-  kActorCreationReturn = 0,
-  kActorCreationError,
-  kActorMethodCallReturn,
-  kActorMethodCallError,
-  kActorLookUpReturn,
-  kActorLookUpError,
-
-};
-
-template <class Tuple>
-struct ActorCreationArgs {
-  ActorConfig actor_config;
-  Tuple args_tuple;
-};
-
-struct ActorCreationError {
-  std::string error;
-};
-
-template <class Tuple>
-struct ActorMethodCallArgs {
-  Tuple args_tuple;
-};
-
-template <class T>
-struct ActorMethodReturnValue {
-  T return_value;
-};
-
-struct ActorMethodReturnError {
-  std::string error;
-};
-
-template <>
-struct ActorMethodReturnValue<void> {};
-
-struct ActorLookUpRequest {
-  std::string actor_name;
-};
-
-template <auto kFn>
-auto DeserializeFnArgs(const uint8_t* data, size_t size, const ActorRefDeserializationInfo& info) {
-  using Sig = reflect::Signature<decltype(kFn)>;
-  if constexpr (std::is_member_function_pointer_v<decltype(kFn)>) {
-    return Deserialize<ActorMethodCallArgs<typename Sig::DecayedArgsTupleType>>(data, size, info);
-  } else {
-    return Deserialize<ActorCreationArgs<typename Sig::DecayedArgsTupleType>>(data, size, info);
-  }
+template <class T, class Ctx>
+T Deserialize(std::span<const std::byte> data, const Ctx& ctx) {
+  return rfl::capnproto::read<T, Ctx>(reinterpret_cast<const char*>(data.data()), data.size(), GetCachedSchema<T>(),
+                                      ctx)
+      .value();
 }
 
 struct MemoryBuf : std::streambuf {
@@ -177,6 +277,9 @@ class BufferWriter {
     offset_ += size;
   }
   void CopyFrom(const char* data, size_t size) { CopyFrom(reinterpret_cast<const uint8_t*>(data), size); }
+  void CopyFrom(std::span<const std::byte> data) {
+    CopyFrom(reinterpret_cast<const uint8_t*>(data.data()), data.size());
+  }
 
   const B& GetBuffer() const { return buffer_; }
 
@@ -203,4 +306,4 @@ inline std::string BufferToHex(const uint8_t* data, size_t size) {
 inline std::string BufferToHex(const char* data, size_t size) {
   return BufferToHex(reinterpret_cast<const uint8_t*>(data), size);
 }
-}  // namespace ex_actor::internal::serde
+}  // namespace ex_actor::internal

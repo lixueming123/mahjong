@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -28,12 +29,10 @@
 #include "ex_actor/internal/logging.h"
 #include "ex_actor/internal/network.h"
 #include "ex_actor/internal/reflect.h"
-#include "ex_actor/internal/scheduler.h"
+#include "ex_actor/internal/scheduler/all.h"  // IWYU pragma: keep
 #include "ex_actor/internal/serialization.h"
-#include "ex_actor/internal/util.h"
 
 namespace ex_actor::internal {
-
 /**
  * @brief An actor wrapper of the most functions of ActorRegistry. Bootstraps itself as an actor, so it can reuse the
  * core functionality of Actors like mailboxes, schedulers, etc.
@@ -41,97 +40,78 @@ namespace ex_actor::internal {
  */
 class ActorRegistryBackend {
  public:
-  explicit ActorRegistryBackend(std::unique_ptr<TypeErasedActorScheduler> scheduler, uint32_t this_node_id,
-                                const std::vector<NodeInfo>& cluster_node_info, network::MessageBroker* message_broker);
+  explicit ActorRegistryBackend(std::unique_ptr<TypeErasedActorScheduler> user_actor_scheduler, uint64_t this_node_id,
+                                BasicActorRef<MessageBroker> broker_actor_ref);
 
-  exec::task<void> AsyncDestroyAllActors();
+  ex::task<void> AsyncDestroyAllActors();
 
   /**
-   * @brief Create actor at current node using default config.
+   * @brief Spawn a local actor with config.
    */
-  template <class UserClass, auto kCreateFn = nullptr, class... Args>
-  exec::task<ActorRef<UserClass>> CreateActor(Args... args) {
-    return CreateActor<UserClass, kCreateFn>(ActorConfig {.node_id = this_node_id_}, std::move(args)...);
+  template <class UserClass, class... Args>
+  ActorRef<UserClass> SpawnWithClass(uint64_t node_id, ActorConfig config, Args... args) {
+    if (node_id != this_node_id_) {
+      EXA_THROW << "Spawn<UserClass> can only be used to create local actor, to create remote actor, use "
+                   "Spawn<&CreateFn> to provide a fixed signature for remote actor creation. node_id="
+                << node_id << ", this_node_id=" << this_node_id_ << ", actor_type=" << typeid(UserClass).name();
+    }
+    return SpawnLocal<UserClass>(node_id, std::move(config), std::move(args)...);
   }
 
   /**
-   * @brief Create an actor with a manually specified config.
+   * @brief Spawn an actor (local or remote) using a factory function, with config.
    */
-  template <class UserClass, auto kCreateFn = nullptr, class... Args>
-  exec::task<ActorRef<UserClass>> CreateActor(ActorConfig config, Args... args) {
-    if constexpr (kCreateFn != nullptr) {
-      static_assert(std::is_invocable_v<decltype(kCreateFn), Args...>,
-                    "Class can't be created by given args and create function");
-    }
-    if (is_distributed_mode_) {
-      EXA_THROW_CHECK(node_id_to_address_.contains(config.node_id)) << "Invalid node id: " << config.node_id;
+  template <auto kCreateFn, class... Args>
+  ex::task<ActorRef<FnReturnType<kCreateFn>>> SpawnWithCreateFn(uint64_t node_id, ActorConfig config, Args... args) {
+    using UserClass = FnReturnType<kCreateFn>;
+    if (node_id == this_node_id_) {
+      co_return SpawnLocal<UserClass, kCreateFn>(node_id, std::move(config), std::move(args)...);
     }
 
-    // local actor, create directly
-    if (config.node_id == this_node_id_) {
-      auto actor_id = GenerateRandomActorId();
-      auto actor = std::make_unique<Actor<UserClass, kCreateFn>>(scheduler_->Clone(), config, std::move(args)...);
-      auto handle = ActorRef<UserClass>(this_node_id_, config.node_id, actor_id, actor.get(), message_broker_);
-      if (config.actor_name.has_value()) {
-        std::string& name = *config.actor_name;
-        EXA_THROW_CHECK(!actor_name_to_id_.contains(name))
-            << "An actor with the same name already exists, name=" << name;
-        actor_name_to_id_[name] = actor_id;
-      }
-      actor_id_to_actor_[actor_id] = std::move(actor);
-      co_return handle;
+    EXA_THROW_CHECK(!broker_actor_ref_.IsEmpty()) << "Broker actor not set";
+
+    using CreateFnSig = Signature<decltype(kCreateFn)>;
+
+    typename CreateFnSig::DecayedArgsTupleType args_tuple {std::move(args)...};
+    ActorCreationArgs<typename CreateFnSig::DecayedArgsTupleType> actor_creation_args {config, std::move(args_tuple)};
+
+    NetworkRequest request {ActorCreationRequest {
+        .handler_key = GetUniqueNameForFunction<kCreateFn>(),
+        .serialized_args = Serialize(actor_creation_args),
+    }};
+
+    ByteBuffer response_buf =
+        co_await broker_actor_ref_.SendLocal<&MessageBroker::SendRequest>(node_id, Serialize(request));
+    auto reply = Deserialize<NetworkReply>(response_buf);
+
+    auto& ret = std::get<ActorCreationReply>(reply.variant);
+    if (!ret.success) {
+      EXA_THROW << "Got actor creation error from remote node:" << ret.error;
     }
-
-    if constexpr (kCreateFn == nullptr) {
-      EXA_THROW << "CreateActor<UserClass> can only be used to create local actor, to create remote actor, use "
-                   "CreateActor<UserClass, kCreateFn> to provide a fixed signature for remote actor creation. node_id="
-                << config.node_id << ", this_node_id=" << this_node_id_ << ", actor_type=" << typeid(UserClass).name();
-    }
-
-    if constexpr (kCreateFn != nullptr) {
-      using CreateFnSig = reflect::Signature<decltype(kCreateFn)>;
-
-      // protocol: [message_type][handler_key_len][handler_key][ActorCreationArgs]
-      typename CreateFnSig::DecayedArgsTupleType args_tuple {std::move(args)...};
-      serde::ActorCreationArgs<typename CreateFnSig::DecayedArgsTupleType> actor_creation_args {config,
-                                                                                                std::move(args_tuple)};
-      std::vector<char> serialized = serde::Serialize(actor_creation_args);
-      std::string handler_key = reflect::GetUniqueNameForFunction<kCreateFn>();
-      serde::BufferWriter buffer_writer(network::ByteBufferType {
-          serialized.size() + sizeof(uint64_t) + handler_key.size() + sizeof(serde::NetworkRequestType)});
-      buffer_writer.WritePrimitive(serde::NetworkRequestType::kActorCreationRequest);
-      buffer_writer.WritePrimitive(handler_key.size());
-      // TODO optimize the copy here
-      buffer_writer.CopyFrom(handler_key.data(), handler_key.size());
-      buffer_writer.CopyFrom(serialized.data(), serialized.size());
-      EXA_THROW_CHECK(buffer_writer.EndReached()) << "Buffer writer not ended";
-
-      // send to remote
-      auto response_buffer =
-          co_await message_broker_->SendRequest(config.node_id, std::move(buffer_writer).MoveBufferOut());
-      serde::BufferReader reader(std::move(response_buffer));
-      auto type = reader.template NextPrimitive<serde::NetworkReplyType>();
-      if (type == serde::NetworkReplyType::kActorCreationError) {
-        EXA_THROW << "Got actor creation error from remote node:"
-                  << serde::Deserialize<serde::ActorCreationError>(reader.Current(), reader.RemainingSize()).error;
-      }
-      auto actor_id = reader.template NextPrimitive<uint64_t>();
-      co_return ActorRef<UserClass>(this_node_id_, config.node_id, actor_id, nullptr, message_broker_);
-    }
+    co_return DeserializeActorRef<UserClass>(ret.serialized_actor_ref);
   }
 
   template <class UserClass>
-  exec::task<void> DestroyActor(const ActorRef<UserClass>& actor_ref) {
+  ex::task<void> DestroyActor(const ActorRef<UserClass>& actor_ref) {
     auto actor_id = actor_ref.GetActorId();
-    EXA_THROW_CHECK(actor_id_to_actor_.contains(actor_id)) << "Actor with id " << actor_id << " not found";
-    auto actor = std::move(actor_id_to_actor_.at(actor_id));
-    actor_id_to_actor_.erase(actor_id);
+    auto node_id = actor_ref.GetNodeId();
 
-    auto actor_name = actor->GetActorConfig().actor_name;
-    if (actor_name.has_value()) {
-      actor_name_to_id_.erase(actor_name.value());
+    if (node_id == this_node_id_) {
+      co_await DestroyLocalActor(actor_id);
+      co_return;
     }
-    co_await actor->AsyncDestroy();
+
+    EXA_THROW_CHECK(!broker_actor_ref_.IsEmpty()) << "Trying to destroy a remote actor, but not in distributed mode";
+
+    NetworkRequest request {ActorDestroyRequest {.actor_id = actor_id}};
+    ByteBuffer response_buf =
+        co_await broker_actor_ref_.SendLocal<&MessageBroker::SendRequest>(node_id, Serialize(request));
+    auto reply = Deserialize<NetworkReply>(response_buf);
+
+    auto& ret = std::get<ActorDestroyReply>(reply.variant);
+    if (!ret.success) {
+      EXA_THROW << "Got actor destroy error from remote node: " << ret.error;
+    }
   }
 
   template <class UserClass>
@@ -139,61 +119,177 @@ class ActorRegistryBackend {
     if (actor_name_to_id_.contains(name)) {
       const auto actor_id = actor_name_to_id_.at(name);
       const auto& actor = actor_id_to_actor_.at(actor_id);
-      return ActorRef<UserClass>(this_node_id_, this_node_id_, actor_id, actor.get(), message_broker_);
+      return ActorRef<UserClass>(this_node_id_, this_node_id_, actor_id, actor.get(), broker_actor_ref_);
     }
     return std::nullopt;
   }
 
   template <class UserClass>
-  exec::task<std::optional<ActorRef<UserClass>>> GetActorRefByName(const uint32_t& node_id,
-                                                                   const std::string& name) const {
+  ex::task<std::optional<ActorRef<UserClass>>> GetActorRefByName(const uint64_t& node_id,
+                                                                 const std::string& name) const {
     if (node_id == this_node_id_) {
       co_return GetActorRefByName<UserClass>(name);
     }
 
-    std::vector<char> serialized = serde::Serialize(serde::ActorLookUpRequest {name});
-    serde::BufferWriter<network::ByteBufferType> writer(
-        network::ByteBufferType(sizeof(serde::NetworkRequestType) + serialized.size()));
-    writer.WritePrimitive(serde::NetworkRequestType::kActorLookUpRequest);
-    writer.CopyFrom(serialized.data(), serialized.size());
+    EXA_THROW_CHECK(!broker_actor_ref_.IsEmpty()) << "Broker actor not set";
 
-    auto response_buffer =
-        co_await message_broker_->SendRequest(node_id, network::ByteBufferType {std::move(writer).MoveBufferOut()});
+    NetworkRequest request {ActorLookUpRequest {.actor_name = name}};
+    ByteBuffer response_buf =
+        co_await broker_actor_ref_.SendLocal<&MessageBroker::SendRequest>(node_id, Serialize(request));
+    auto reply = Deserialize<NetworkReply>(response_buf);
 
-    std::optional<uint64_t> actor_id = std::nullopt;
-    serde::BufferReader<network::ByteBufferType> reader(std::move(response_buffer));
-    auto type = reader.NextPrimitive<serde::NetworkReplyType>();
-    if (type == serde::NetworkReplyType::kActorLookUpReturn) {
-      actor_id = reader.NextPrimitive<uint64_t>();
+    auto& ret = std::get<ActorLookUpReply>(reply.variant);
+    if (ret.success) {
+      co_return DeserializeActorRef<UserClass>(ret.serialized_actor_ref);
     }
-
-    if (actor_id.has_value()) {
-      co_return ActorRef<UserClass>(this_node_id_, node_id, actor_id.value(), nullptr, message_broker_);
-    }
-
     co_return std::nullopt;
   }
 
-  exec::task<void> HandleNetworkRequest(uint64_t received_request_id, network::ByteBufferType request_buffer);
+  /**
+   * @brief Update the broker actor ref. Called when switching to distributed mode after init.
+   */
+  void SetBrokerActorRef(BasicActorRef<MessageBroker> broker_actor_ref);
+
+  /**
+   * @brief Handle a network request. Returns the serialized reply data.
+   */
+  ex::task<ByteBuffer> HandleNetworkRequest(ByteBuffer request_buffer);
+
+  ex::task<void> DestroyLocalActor(uint64_t actor_id);
 
  private:
-  bool is_distributed_mode_ = false;
-  std::mt19937 random_num_generator_;
-  std::unique_ptr<TypeErasedActorScheduler> scheduler_;
-  uint32_t this_node_id_ = 0;
-  std::unordered_map<uint32_t, std::string> node_id_to_address_;
-  network::MessageBroker* message_broker_ = nullptr;
+  // Workaround: reflect-cpp's capnp get_root_name() doesn't account for
+  // rfl::Reflector<T> types, so Serialize/Deserialize<ActorRef<U>> fails with
+  // "no such nested declaration". We go through the ReflType manually instead.
+  template <class UserClass>
+  ActorRef<UserClass> DeserializeActorRef(const ByteBuffer& serialized_actor_ref) const {
+    auto refl = Deserialize<typename rfl::Reflector<ActorRef<UserClass>>::ReflType>(serialized_actor_ref);
+    auto actor_ref = rfl::Reflector<ActorRef<UserClass>>::to(refl);
+    if (!actor_ref.IsEmpty()) {
+      auto it = actor_id_to_actor_.find(actor_ref.GetActorId());
+      auto* actor = it != actor_id_to_actor_.end() ? it->second.get() : nullptr;
+      actor_ref.SetLocalRuntimeInfo(this_node_id_, actor, broker_actor_ref_);
+    }
+    return actor_ref;
+  }
+
+  template <class UserClass, auto kCreateFn = nullptr, class... Args>
+  ActorRef<UserClass> SpawnLocal(uint64_t node_id, ActorConfig config, Args... args) {
+    auto actor_id = GenerateRandomActorId();
+    auto actor =
+        std::make_unique<Actor<UserClass, kCreateFn>>(user_actor_scheduler_->Clone(), config, std::move(args)...);
+    auto handle = ActorRef<UserClass>(this_node_id_, node_id, actor_id, actor.get(), broker_actor_ref_);
+    NotifyExActorOnSpawned<UserClass>(actor.get(), handle);
+    if (config.actor_name.has_value()) {
+      std::string& name = *config.actor_name;
+      EXA_THROW_CHECK(!actor_name_to_id_.contains(name)) << "An actor with the same name already exists, name=" << name;
+      actor_name_to_id_[name] = actor_id;
+    }
+    actor_id_to_actor_[actor_id] = std::move(actor);
+    // Workaround: see DeserializeActorRef comment.
+    actor_id_to_serialized_ref_[actor_id] = Serialize(rfl::Reflector<ActorRef<UserClass>>::from(handle));
+    return handle;
+  }
+
+  std::mt19937_64 random_num_generator_ {std::random_device {}()};
+  std::unique_ptr<TypeErasedActorScheduler> user_actor_scheduler_;
+  uint64_t this_node_id_ = 0;
+  BasicActorRef<MessageBroker> broker_actor_ref_;
   std::unordered_map<uint64_t, std::unique_ptr<TypeErasedActor>> actor_id_to_actor_;
+  // Serialized ActorRef bytes for each actor, captured at creation time with the concrete type known.
+  // Used to return correctly-typed ActorRef from remote GetActorRefByName without knowing UserClass.
+  std::unordered_map</*actor_id*/ uint64_t, ByteBuffer> actor_id_to_serialized_ref_;
   std::unordered_map<std::string, std::uint64_t> actor_name_to_id_;
 
-  void InitRandomNumGenerator();
   uint64_t GenerateRandomActorId();
-  void ValidateNodeInfo(const std::vector<NodeInfo>& cluster_node_info);
-  serde::NetworkRequestType ParseMessageType(const network::ByteBufferType& buffer);
-  void ReplyError(uint64_t received_request_id, serde::NetworkReplyType reply_type, std::string error_msg);
-  void HandleActorCreationRequest(uint64_t received_request_id, serde::BufferReader<network::ByteBufferType> reader);
-  exec::task<void> HandleActorMethodCallRequest(uint64_t received_request_id,
-                                                serde::BufferReader<network::ByteBufferType> reader);
+  ByteBuffer SerializeReply(const NetworkReply& reply);
+  void HandleActorCreationRequest(ActorCreationRequest msg, ByteBuffer& reply_out);
+  ex::task<ByteBuffer> HandleActorMethodCallRequest(ActorMethodCallRequest msg);
+  ex::task<ByteBuffer> HandleActorDestroyRequest(ActorDestroyRequest msg);
+};
+
+// -----------SpawnBuilder: a builder-style sender for actor spawning-----------
+
+/**
+ * @brief A builder-style sender returned by Spawn(). It is itself a sender (satisfying the std::execution sender
+ * concept), so it can be directly co_await-ed or composed with other senders. Call .ToNode() to target a specific
+ * node, and .WithConfig() to attach an ActorConfig before awaiting.
+ *
+ * @code
+ * // Default (local node, default config):
+ * auto ref = co_await ex_actor::Spawn<Foo>(p1, p2);
+ *
+ * // Spawn on a remote node:
+ * auto ref = co_await ex_actor::Spawn<&Foo::Create>(p1, p2).ToNode(remote_node_id);
+ *
+ * // Spawn on a remote node with extra config:
+ * auto ref = co_await ex_actor::Spawn<&Foo::Create>(p1).ToNode(remote_node_id).WithConfig({.actor_name = "foo"});
+ * @endcode
+ *
+ * @tparam UserClass The actor class to spawn.
+ * @tparam kCreateFn Factory function pointer, or nullptr for direct construction.
+ * @tparam Args Constructor / factory argument types.
+ */
+template <class UserClass, auto kCreateFn, class... Args>
+class SpawnBuilder : public ex::sender_t {
+ public:
+  using completion_signatures = ex::completion_signatures<ex::set_value_t(ActorRef<UserClass>),
+                                                          ex::set_error_t(std::exception_ptr), ex::set_stopped_t()>;
+
+  explicit SpawnBuilder(BasicActorRef<ActorRegistryBackend> backend_ref, Args... args)
+      : backend_ref_(std::move(backend_ref)), args_(std::move(args)...) {}
+
+  SpawnBuilder& ToNode(uint64_t node_id) & {
+    node_id_ = node_id;
+    return *this;
+  }
+
+  SpawnBuilder&& ToNode(uint64_t node_id) && {
+    node_id_ = node_id;
+    return std::move(*this);
+  }
+
+  SpawnBuilder& WithConfig(ActorConfig config) & {
+    config_ = std::move(config);
+    return *this;
+  }
+
+  SpawnBuilder&& WithConfig(ActorConfig config) && {
+    config_ = std::move(config);
+    return std::move(*this);
+  }
+
+  template <ex::receiver Receiver>
+    requires(std::copyable<Args> && ...)
+  auto connect(Receiver receiver) & {
+    return ex::connect(MakeSender(node_id_, config_, args_), std::move(receiver));
+  }
+
+  template <ex::receiver Receiver>
+  auto connect(Receiver receiver) && {
+    return ex::connect(MakeSender(node_id_, std::move(config_), std::move(args_)), std::move(receiver));
+  }
+
+ private:
+  template <class Config, class Tuple>
+  auto MakeSender(uint64_t node_id, Config&& config, Tuple&& args) {
+    return std::apply(
+        [this, node_id, config = std::forward<Config>(config)](auto&&... a) mutable {
+          if constexpr (kCreateFn == nullptr) {
+            return backend_ref_.template SendLocal<&ActorRegistryBackend::SpawnWithClass<UserClass, Args...>>(
+                node_id, std::move(config), std::forward<decltype(a)>(a)...);
+          } else {
+            return backend_ref_.template SendLocal<&ActorRegistryBackend::SpawnWithCreateFn<kCreateFn, Args...>>(
+                node_id, std::move(config), std::forward<decltype(a)>(a)...);
+          }
+        },
+        std::forward<Tuple>(args));
+  }
+
+  BasicActorRef<ActorRegistryBackend> backend_ref_;
+  uint64_t node_id_ = 0;
+  ActorConfig config_ {};
+  std::tuple<Args...> args_;
 };
 
 /**
@@ -203,222 +299,88 @@ class ActorRegistryBackend {
 class ActorRegistry {
  public:
   /**
-   * @brief Construct in single-node mode, use the default work-sharing thread pool as the scheduler.
+   * @brief Construct with the default work-sharing thread pool as the scheduler.
    */
-  explicit ActorRegistry(uint32_t thread_pool_size)
-      : ActorRegistry(thread_pool_size, /*scheduler=*/nullptr, /*this_node_id=*/0, /*cluster_node_info=*/ {},
-                      /*heartbeat_config=*/ {}) {}
+  explicit ActorRegistry(uint32_t thread_pool_size) : ActorRegistry(thread_pool_size, /*scheduler=*/nullptr) {}
 
   /**
-   * @brief Construct in single-node mode, use specified scheduler.
+   * @brief Construct with a user-specified scheduler.
    */
   template <ex::scheduler Scheduler>
   explicit ActorRegistry(Scheduler scheduler)
-      : ActorRegistry(/*thread_pool_size=*/0, std::make_unique<AnyStdExecScheduler<Scheduler>>(scheduler),
-                      /*this_node_id=*/0, /*cluster_node_info=*/ {}, /*heartbeat_config=*/ {}) {}
-
-  /**
-   * @brief Construct in distributed mode, use the default work-sharing thread pool as the scheduler.
-   */
-  explicit ActorRegistry(uint32_t thread_pool_size, uint32_t this_node_id,
-                         const std::vector<NodeInfo>& cluster_node_info, network::HeartbeatConfig heartbeat_config = {})
-      : ActorRegistry(thread_pool_size, /*scheduler=*/nullptr, this_node_id, cluster_node_info, heartbeat_config) {}
-
-  /**
-   * @brief Construct in distributed mode, use specified scheduler.
-   */
-  template <ex::scheduler Scheduler>
-  explicit ActorRegistry(Scheduler scheduler, uint32_t this_node_id, const std::vector<NodeInfo>& cluster_node_info,
-                         network::HeartbeatConfig heartbeat_config = {})
-      : ActorRegistry(/*thread_pool_size=*/0, std::make_unique<AnyStdExecScheduler<Scheduler>>(scheduler), this_node_id,
-                      cluster_node_info, heartbeat_config) {}
+      : ActorRegistry(/*thread_pool_size=*/0, std::make_unique<AnyStdExecScheduler<Scheduler>>(scheduler)) {}
 
   ~ActorRegistry();
 
-  /**
-   * @brief Create actor at current node using default config.
-   */
-  template <class UserClass, auto kCreateFn = nullptr, class... Args>
-  reflect::AwaitableOf<ActorRef<UserClass>> auto CreateActor(Args... args) {
-    // resolve overload ambiguity
-    constexpr exec::task<ActorRef<UserClass>> (ActorRegistryBackend::*kProcessFn)(Args...) =
-        &ActorRegistryBackend::CreateActor<UserClass, kCreateFn, Args...>;
-
-    return util::WrapSenderWithInlineScheduler(backend_actor_ref_.SendLocal<kProcessFn>(std::move(args)...));
+  /** @copydoc ex_actor::Spawn */
+  template <class UserClass, class... Args>
+  SenderOf<ActorRef<UserClass>> auto Spawn(Args... args)
+    requires(std::is_constructible_v<UserClass, Args...>)
+  {
+    return SpawnBuilder<UserClass, /*kCreateFn=*/nullptr, Args...>(backend_actor_ref_, std::move(args)...)
+        .ToNode(this_node_id_);
   }
 
-  /**
-   * @brief Create an actor with a manually specified config.
-   */
-  template <class UserClass, auto kCreateFn = nullptr, class... Args>
-  reflect::AwaitableOf<ActorRef<UserClass>> auto CreateActor(ActorConfig config, Args... args) {
-    // resolve overload ambiguity
-    constexpr exec::task<ActorRef<UserClass>> (ActorRegistryBackend::*kProcessFn)(ActorConfig, Args...) =
-        &ActorRegistryBackend::CreateActor<UserClass, kCreateFn, Args...>;
-
-    return util::WrapSenderWithInlineScheduler(backend_actor_ref_.SendLocal<kProcessFn>(config, std::move(args)...));
+  /** @copydoc ex_actor::Spawn */
+  template <auto kCreateFn, class... Args>
+  SenderOf<ActorRef<FnReturnType<kCreateFn>>> auto Spawn(Args... args)
+    requires(std::is_invocable_v<decltype(kCreateFn), Args...>)
+  {
+    return SpawnBuilder<FnReturnType<kCreateFn>, kCreateFn, Args...>(backend_actor_ref_, std::move(args)...)
+        .ToNode(this_node_id_);
   }
 
   template <class UserClass>
-  reflect::AwaitableOf<void> auto DestroyActor(const ActorRef<UserClass>& actor_ref) {
-    return util::WrapSenderWithInlineScheduler(
-        backend_actor_ref_.SendLocal<&ActorRegistryBackend::DestroyActor<UserClass>>(actor_ref));
+  SenderOf<> auto DestroyActor(const ActorRef<UserClass>& actor_ref) {
+    return backend_actor_ref_.SendLocal<&ActorRegistryBackend::DestroyActor<UserClass>>(actor_ref);
   }
 
-  /**
-   * @brief Find the actor by name at current node.
-   */
+  /** @copydoc ex_actor::GetActorRefByName */
   template <class UserClass>
-  reflect::AwaitableOf<std::optional<ActorRef<UserClass>>> auto GetActorRefByName(const std::string& name) const {
+  SenderOf<std::optional<ActorRef<UserClass>>> auto GetActorRefByName(const std::string& name) const {
     // resolve overload ambiguity
     constexpr std::optional<ActorRef<UserClass>> (ActorRegistryBackend::*kProcessFn)(const std::string& name) const =
         &ActorRegistryBackend::GetActorRefByName<UserClass>;
 
-    return util::WrapSenderWithInlineScheduler(backend_actor_ref_.SendLocal<kProcessFn>(name));
+    return backend_actor_ref_.SendLocal<kProcessFn>(name);
   }
 
-  /**
-   * @brief Find the actor by name at remote node.
-   */
+  /** @copydoc ex_actor::GetActorRefByName */
   template <class UserClass>
-  reflect::AwaitableOf<std::optional<ActorRef<UserClass>>> auto GetActorRefByName(const uint32_t& node_id,
-                                                                                  const std::string& name) const {
+  SenderOf<std::optional<ActorRef<UserClass>>> auto GetActorRefByName(const uint64_t& node_id,
+                                                                      const std::string& name) const {
     // resolve overload ambiguity
-    constexpr exec::task<std::optional<ActorRef<UserClass>>> (ActorRegistryBackend::*kProcessFn)(
-        const uint32_t& node_id, const std::string& name) const = &ActorRegistryBackend::GetActorRefByName<UserClass>;
+    constexpr ex::task<std::optional<ActorRef<UserClass>>> (ActorRegistryBackend::*kProcessFn)(
+        const uint64_t& node_id, const std::string& name) const = &ActorRegistryBackend::GetActorRefByName<UserClass>;
 
-    return util::WrapSenderWithInlineScheduler(backend_actor_ref_.SendLocal<kProcessFn>(node_id, name));
+    return backend_actor_ref_.SendLocal<kProcessFn>(node_id, name);
   }
+
+  SenderOf<WaitClusterStateResult> auto WaitClusterState(std::function<bool(const ClusterState&)> predicate,
+                                                         uint64_t timeout_ms) {
+    EXA_THROW_CHECK(!broker_actor_ref_.IsEmpty())
+        << "WaitClusterState requires distributed mode, call StartOrJoinCluster() after Init() to enable it.";
+    return broker_actor_ref_.SendLocal<&MessageBroker::WaitClusterState>(std::move(predicate), timeout_ms);
+  }
+
+  /** @copydoc ex_actor::StartOrJoinCluster */
+  ex::task<void> StartOrJoinCluster(const ClusterConfig& cluster_config);
+
+  /** @copydoc ex_actor::GetNodeId */
+  uint64_t GetNodeId() const { return this_node_id_; }
 
  private:
-  bool is_distributed_mode_;
-  uint32_t this_node_id_;
+  uint64_t this_node_id_;
   WorkSharingThreadPool default_work_sharing_thread_pool_;
-  std::unique_ptr<TypeErasedActorScheduler> scheduler_;
-  std::unique_ptr<network::MessageBroker> message_broker_;
+  WorkSharingThreadPool system_actor_thread_pool_;
+  std::unique_ptr<TypeErasedActorScheduler> system_actor_scheduler_;
+  std::unique_ptr<TypeErasedActorScheduler> user_actor_scheduler_;
+  std::unique_ptr<Actor<MessageBroker>> broker_actor_;
+  BasicActorRef<MessageBroker> broker_actor_ref_;
   Actor<ActorRegistryBackend> backend_actor_;
-  ActorRef<ActorRegistryBackend> backend_actor_ref_;
-  exec::async_scope async_scope_;
+  BasicActorRef<ActorRegistryBackend> backend_actor_ref_;
 
-  explicit ActorRegistry(uint32_t thread_pool_size, std::unique_ptr<TypeErasedActorScheduler> scheduler,
-                         uint32_t this_node_id, const std::vector<NodeInfo>& cluster_node_info,
-                         network::HeartbeatConfig heartbeat_config = {});
+  explicit ActorRegistry(uint32_t thread_pool_size, std::unique_ptr<TypeErasedActorScheduler> scheduler);
 };
+
 }  // namespace ex_actor::internal
-
-// ----------------Global Default Registry--------------------------
-
-namespace ex_actor::internal {
-ActorRegistry& GetGlobalDefaultRegistry();
-void AssignGlobalDefaultRegistry(std::unique_ptr<ActorRegistry> registry);
-bool IsGlobalDefaultRegistryInitialized();
-void SetupGlobalHandlers();
-}  // namespace ex_actor::internal
-
-namespace ex_actor {
-using ex_actor::internal::ActorRegistry;
-
-/**
- * @brief Init the global default registry in single-node mode, use the default work-sharing thread pool as the
- * scheduler. Not thread-safe.
- */
-void Init(uint32_t thread_pool_size);
-
-/**
- * @brief Init the global default registry in single-node mode, use specified scheduler. Not thread-safe.
- */
-template <ex::scheduler Scheduler>
-void Init(Scheduler scheduler);
-
-/**
- * @brief Init the global default registry in distributed mode, use the default work-sharing thread pool as the
- * scheduler. Not thread-safe.
- */
-void Init(uint32_t thread_pool_size, uint32_t this_node_id, const std::vector<NodeInfo>& cluster_node_info);
-
-/**
- * @brief Init the global default registry in distributed mode, use specified scheduler. Not thread-safe.
- */
-template <ex::scheduler Scheduler>
-void Init(Scheduler scheduler, uint32_t this_node_id, const std::vector<NodeInfo>& cluster_node_info);
-
-/**
- * @brief Ask ex_actor to hold a resource, the resource won't be released until runtime is shut down.
- * Often used to hold an execution resource when using custom scheduler. This API is not thread-safe.
- * @param resource The resource to hold. Can pass any `unique_ptr` or `shared_ptr`.
- */
-void HoldResource(std::shared_ptr<void> resource);
-
-/**
- * @brief Shutdown the global default registry. Must be called explicitly before `main` exits. Not thread-safe.
- */
-void Shutdown();
-
-/**
- * @brief Create actor at current node using default config.
- */
-template <class UserClass, auto kCreateFn = nullptr, class... Args>
-internal::reflect::AwaitableOf<ActorRef<UserClass>> auto Spawn(Args... args) {
-  return internal::GetGlobalDefaultRegistry().CreateActor<UserClass, kCreateFn, Args...>(std::move(args)...);
-}
-
-/**
- * @brief Create an actor with a manually specified config.
- */
-template <class UserClass, auto kCreateFn = nullptr, class... Args>
-internal::reflect::AwaitableOf<ActorRef<UserClass>> auto Spawn(ActorConfig config, Args... args) {
-  return internal::GetGlobalDefaultRegistry().CreateActor<UserClass, kCreateFn, Args...>(config, std::move(args)...);
-}
-
-/**
- * @brief Destroy an actor.
- */
-template <class UserClass>
-internal::reflect::AwaitableOf<void> auto DestroyActor(const ActorRef<UserClass>& actor_ref) {
-  return internal::GetGlobalDefaultRegistry().DestroyActor<UserClass>(actor_ref);
-}
-
-/**
- * @brief Find the actor by name at current node.
- */
-template <class UserClass>
-internal::reflect::AwaitableOf<std::optional<ActorRef<UserClass>>> auto GetActorRefByName(const std::string& name) {
-  return internal::GetGlobalDefaultRegistry().GetActorRefByName<UserClass>(name);
-}
-
-/**
- * @brief Find the actor by name at specified node.
- */
-template <class UserClass>
-internal::reflect::AwaitableOf<std::optional<ActorRef<UserClass>>> auto GetActorRefByName(const uint32_t& node_id,
-                                                                                          const std::string& name) {
-  return internal::GetGlobalDefaultRegistry().GetActorRefByName<UserClass>(node_id, name);
-}
-
-/**
- * @brief Configure the logging of ex_actor. Not thread-safe, please call it only when no logs are printing.
- */
-void ConfigureLogging(const logging::LogConfig& config = {});
-}  // namespace ex_actor
-
-// -----------template function implementations-------------
-
-namespace ex_actor {
-template <ex::scheduler Scheduler>
-void Init(Scheduler scheduler) {
-  internal::logging::Info("Initializing ex_actor in single-node mode with custom scheduler.");
-  EXA_THROW_CHECK(!internal::IsGlobalDefaultRegistryInitialized()) << "Already initialized.";
-  AssignGlobalDefaultRegistry(std::make_unique<ActorRegistry>(std::move(scheduler)));
-  internal::SetupGlobalHandlers();
-}
-
-template <ex::scheduler Scheduler>
-void Init(Scheduler scheduler, uint32_t this_node_id, const std::vector<NodeInfo>& cluster_node_info) {
-  internal::logging::Info(
-      "Initializing ex_actor in distributed mode with custom scheduler. this_node_id={}, total_nodes={}", this_node_id,
-      cluster_node_info.size());
-  EXA_THROW_CHECK(!internal::IsGlobalDefaultRegistryInitialized()) << "Already initialized.";
-  AssignGlobalDefaultRegistry(std::make_unique<ActorRegistry>(std::move(scheduler), this_node_id, cluster_node_info));
-  internal::SetupGlobalHandlers();
-}
-}  // namespace ex_actor

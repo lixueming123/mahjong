@@ -1,0 +1,18 @@
+github_checks:
+  annotations: true
+
+coverage:
+  status:
+    project:
+      default:
+        target: 80
+        informational: true
+    patch:
+      default:
+        target: 80
+        informational: true
+
+ignore:
+  - "test/**"
+  - "include/ex_actor/3rd_lib/**"
+  - "src/ex_actor/3rd_lib/**"

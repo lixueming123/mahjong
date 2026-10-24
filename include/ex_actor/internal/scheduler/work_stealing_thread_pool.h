@@ -1,4 +1,4 @@
-// Copyright 2025 The ex_actor Authors.
+// Copyright 2026 The ex_actor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,13 +14,14 @@
 
 #pragma once
 
-#include "ex_actor/internal/actor.h"
-#include "ex_actor/internal/network.h"
+#include <exec/static_thread_pool.hpp>
 
-namespace ex_actor::internal {
-struct ActorRefDeserializationInfo {
-  uint32_t this_node_id = 0;
-  std::function<TypeErasedActor*(uint64_t)> actor_look_up_fn;
-  network::MessageBroker* message_broker = nullptr;
+namespace ex_actor {
+
+class WorkStealingThreadPool : public exec::static_thread_pool {
+ public:
+  using exec::static_thread_pool::static_thread_pool;
+  auto GetScheduler() { return get_scheduler(); }
 };
-}  // namespace ex_actor::internal
+
+}  // namespace ex_actor

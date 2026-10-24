@@ -1,7 +1,12 @@
 cmake_minimum_required(VERSION 3.25.0 FATAL_ERROR)
+# CMake 4.x errors on cmake_minimum_required(VERSION < 3.5). Clamp to 3.5 for old deps like libzmq.
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 4.0)
+  set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+endif()
 project(ex_actor VERSION 0.1)
 include(cmake/CPM.cmake)
 include(CMakePackageConfigHelpers)
+include(CheckLibraryExists)
 
 # ------------------- global setups -------------------
 set(CMAKE_CXX_STANDARD 20)
@@ -9,11 +14,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   add_compile_options(-fdiagnostics-color=always)
 endif()
+if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+  add_compile_options(-fexperimental-library)
+endif()
 set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS 1 CACHE INTERNAL "")
 if(MSVC)
   add_compile_options(/EHsc)
   add_compile_options(/bigobj)
+  # Match the Linux default of 8 MB stack per thread.
+  # stdexec operation-state objects can be large; the Windows default (1 MB)
+  # is too small for deeply composed sender chains and causes stack overflows
+  # that manifest as SEGFAULT on tests such as skynet_test and distributed_test.
+  add_link_options(/STACK:8388608)
 endif()
+
 # ------------------- dependencies -------------------
 
 # When C++26 is ready, I'll add a build option to switch to the real std::execution in C++26,
@@ -21,9 +35,10 @@ endif()
 CPMAddPackage(
   NAME stdexec
   GITHUB_REPOSITORY NVIDIA/stdexec
-  GIT_TAG 770f7959142c2446319f642c82aed8b07aea3f86
+  GIT_TAG 73559e8963dab7a4ece32ede22f6472c9a815032
   OPTIONS "BUILD_TESTING OFF"
   OPTIONS "STDEXEC_BUILD_EXAMPLES OFF"
+  OPTIONS "STDEXEC_INSTALL ON"
 )
 
 # reflect-cpp with Cap'n Proto for actor message serialization
@@ -44,14 +59,14 @@ CPMAddPackage(
 CPMAddPackage(
   NAME reflectcpp
   GITHUB_REPOSITORY getml/reflect-cpp
-  GIT_TAG 2b1cd836776c55646d1bc92204da1362ed652bda
+  GIT_TAG 30e9b927c2c8309fe12e0b1450816420422701f9
   OPTIONS "REFLECTCPP_BUILD_BENCHMARKS OFF"
   OPTIONS "REFLECTCPP_JSON OFF"
   OPTIONS "REFLECTCPP_CAPNPROTO ON"
   OPTIONS "REFLECTCPP_INSTALL ON"
 )
 
-# libzmq + cppzmq for message passing in distributed mode
+# libzmq for message passing in distributed mode (cppzmq headers bundled in 3rd_lib)
 CPMAddPackage(
   NAME libzmq
   GITHUB_REPOSITORY zeromq/libzmq
@@ -63,12 +78,6 @@ CPMAddPackage(
   OPTIONS "WITH_LIBSODIUM OFF"
   OPTIONS "WITH_GSSAPI OFF"
 )
-CPMAddPackage(
-  NAME cppzmq
-  GITHUB_REPOSITORY zeromq/cppzmq
-  GIT_TAG v4.11.0
-  OPTIONS "CPPZMQ_BUILD_TESTS OFF"
-)
 
 CPMAddPackage(
   NAME spdlog
@@ -78,12 +87,11 @@ CPMAddPackage(
 )
 
 # ------------------- targets -------------------
+file(GLOB_RECURSE EX_ACTOR_SOURCES CONFIGURE_DEPENDS "src/*.cc")
 add_library(
   ex_actor
   STATIC
-  src/ex_actor/internal/network.cc
-  src/ex_actor/internal/actor_registry.cc
-  src/ex_actor/internal/logging.cc
+  ${EX_ACTOR_SOURCES}
 )
 target_include_directories(ex_actor PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -94,16 +102,18 @@ target_link_libraries(
   PUBLIC
   STDEXEC::stdexec
   reflectcpp::reflectcpp
-  cppzmq-static
+  libzmq-static
   spdlog::spdlog
 )
 # Link libatomic for 128-bit atomic operations (required by MPSC_queue's Tagged_ptr)
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+# Some platforms (e.g. macOS) do not provide a standalone libatomic.
+check_library_exists(atomic __atomic_compare_exchange_16 "" EX_ACTOR_HAS_LIBATOMIC_16)
+if(EX_ACTOR_HAS_LIBATOMIC_16)
   target_link_libraries(ex_actor PUBLIC atomic)
 endif()
-# to suppress subobject linkage warnings in stdexec
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-  target_compile_options(ex_actor INTERFACE -Wno-subobject-linkage)
+  # stdexec's warnings, not our fault
+  target_compile_options(ex_actor PUBLIC -Wno-subobject-linkage)
 endif()
 add_library(ex_actor::ex_actor ALIAS ex_actor)
 
@@ -124,21 +134,31 @@ if(EX_ACTOR_BUILD_TESTS)
 endif()
 
 # ------------------- install -------------------
-install(TARGETS ex_actor EXPORT ex_actor-targets)
-install(DIRECTORY include/ DESTINATION include)
-install(
-  EXPORT ex_actor-targets
-  NAMESPACE ex_actor::
-  DESTINATION lib/cmake/ex_actor
-)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  set(EX_ACTOR_IS_TOPLEVEL ON)
+else()
+  set(EX_ACTOR_IS_TOPLEVEL OFF)
+endif()
 
-configure_package_config_file(
-  cmake/ex_actor-config.cmake.in
-  ${CMAKE_CURRENT_BINARY_DIR}/ex_actor-config.cmake
-  INSTALL_DESTINATION lib/cmake/ex_actor
-)
+option(EX_ACTOR_INSTALL "Enable installation of ex_actor" ${EX_ACTOR_IS_TOPLEVEL})
 
-install(
-  FILES ${CMAKE_CURRENT_BINARY_DIR}/ex_actor-config.cmake
-  DESTINATION lib/cmake/ex_actor
-)
+if(EX_ACTOR_INSTALL)
+  install(TARGETS ex_actor EXPORT ex_actor-targets)
+  install(DIRECTORY include/ DESTINATION include)
+  install(
+    EXPORT ex_actor-targets
+    NAMESPACE ex_actor::
+    DESTINATION lib/cmake/ex_actor
+  )
+
+  configure_package_config_file(
+    cmake/ex_actor-config.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/ex_actor-config.cmake
+    INSTALL_DESTINATION lib/cmake/ex_actor
+  )
+
+  install(
+    FILES ${CMAKE_CURRENT_BINARY_DIR}/ex_actor-config.cmake
+    DESTINATION lib/cmake/ex_actor
+  )
+endif()

@@ -16,41 +16,70 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <type_traits>
 #include <utility>
+#include <variant>
 
-#include "ex_actor/internal/actor.h"
+#include "ex_actor/internal/basic_actor_ref.h"
 #include "ex_actor/internal/logging.h"
+#include "ex_actor/internal/message.h"
 #include "ex_actor/internal/network.h"
 #include "ex_actor/internal/reflect.h"
 #include "ex_actor/internal/serialization.h"
+#include "ex_actor/internal/util.h"
 
 namespace ex_actor::internal {
-template <class UserClass>
-class ActorRef {
- public:
-  ActorRef() : is_empty_(true) {}
 
-  ActorRef(uint32_t this_node_id, uint32_t node_id, uint64_t actor_id, TypeErasedActor* actor,
-           network::MessageBroker* message_broker)
-      : is_empty_(false),
+struct ActorRefSerdeContext {
+  uint64_t this_node_id = 0;
+  std::function<TypeErasedActor*(uint64_t)> actor_look_up_fn;
+  BasicActorRef<MessageBroker> broker_actor_ref;
+};
+
+template <class UserClass>
+class ActorRef : public BasicActorRef<UserClass> {
+ public:
+  ActorRef() : BasicActorRef<UserClass>() {}
+
+  ActorRef(uint64_t this_node_id, uint64_t node_id, uint64_t actor_id, TypeErasedActor* actor,
+           const BasicActorRef<MessageBroker>& broker_actor_ref)
+      : BasicActorRef<UserClass>(actor_id, actor),
         this_node_id_(this_node_id),
         node_id_(node_id),
-        actor_id_(actor_id),
-        type_erased_actor_(actor),
-        message_broker_(message_broker) {}
+        broker_actor_ref_(broker_actor_ref) {}
+
+  ActorRef(uint64_t this_node_id, uint64_t node_id, uint64_t actor_id, uint64_t actor_type_hash, TypeErasedActor* actor,
+           const BasicActorRef<MessageBroker>& broker_actor_ref)
+      : BasicActorRef<UserClass>(actor_id, actor, actor_type_hash),
+        this_node_id_(this_node_id),
+        node_id_(node_id),
+        broker_actor_ref_(broker_actor_ref) {}
 
   friend bool operator==(const ActorRef& lhs, const ActorRef& rhs) {
-    if (lhs.is_empty_ && rhs.is_empty_) {
+    if (lhs.is_empty_ != rhs.is_empty_) {
+      return false;
+    }
+    if (lhs.is_empty_) {
       return true;
     }
-    return lhs.node_id_ == rhs.node_id_ && lhs.actor_id_ == rhs.actor_id_;
+    return lhs.node_id_ == rhs.node_id_ && lhs.actor_id_ == rhs.actor_id_ &&
+           lhs.actor_type_hash_ == rhs.actor_type_hash_;
   }
 
-  void SetLocalRuntimeInfo(uint32_t this_node_id, TypeErasedActor* actor, network::MessageBroker* message_broker) {
+  void SetLocalRuntimeInfo(uint64_t this_node_id, TypeErasedActor* actor,
+                           const BasicActorRef<MessageBroker>& broker_actor_ref) {
     this_node_id_ = this_node_id;
-    type_erased_actor_ = actor;
-    message_broker_ = message_broker;
+    this->type_erased_actor_ = actor;
+    broker_actor_ref_ = broker_actor_ref;
+  }
+
+  void SetLocalRuntimeInfo(uint64_t this_node_id, uint64_t actor_type_hash, TypeErasedActor* actor,
+                           const BasicActorRef<MessageBroker>& broker_actor_ref) {
+    this_node_id_ = this_node_id;
+    this->actor_type_hash_ = actor_type_hash;
+    this->type_erased_actor_ = actor;
+    broker_actor_ref_ = broker_actor_ref;
   }
 
   friend rfl::Reflector<ActorRef<UserClass>>;
@@ -58,123 +87,172 @@ class ActorRef {
   template <class U>
   friend class ActorRef;
 
+  /**
+   * @brief A builder targeting a specific mailbox queue. Obtained via Mailbox(index).
+   * Extends BasicActorRef::SendBuilder with Send() for remote-capable refs.
+   */
+  class SendBuilder : public BasicActorRef<UserClass>::SendBuilder {
+   public:
+    SendBuilder(const ActorRef* ref, size_t mailbox_index)
+        : BasicActorRef<UserClass>::SendBuilder(ref, mailbox_index), actor_ref_(ref) {}
+
+    /**
+     * @brief Send message to a specific mailbox queue. Returns a sender carrying the result.
+     * @note Same serialization requirements as ActorRef::Send().
+     */
+    template <auto kMethod, class... Args>
+    [[nodiscard]] ex::sender auto Send(Args... args) const
+      requires(std::is_invocable_v<decltype(kMethod), UserClass*, Args...>)
+    {
+      using LocalSenderType =
+          decltype(std::declval<const SendBuilder*>()->template SendLocal<kMethod>(std::declval<Args>()...));
+      using RemoteSenderType =
+          decltype(actor_ref_->template SendRemote<kMethod>(std::declval<size_t>(), std::declval<Args>()...));
+
+      actor_ref_->CheckNotEmpty();
+
+      using VariantType = std::variant<LocalSenderType, RemoteSenderType>;
+      VariantType chosen_sender =
+          (actor_ref_->node_id_ == actor_ref_->this_node_id_)
+              ? VariantType(this->template SendLocal<kMethod>(std::move(args)...))
+              : VariantType(actor_ref_->template SendRemote<kMethod>(this->mailbox_index_, std::move(args)...));
+
+      return SenderVariant {std::move(chosen_sender)};
+    }
+
+   private:
+    const ActorRef* actor_ref_;
+  };
+
+  /**
+   * @brief Returns a SendBuilder targeting a specific mailbox queue of this actor.
+   * Usage: actor_ref.Mailbox(index).Send<&Method>(args...)
+   */
+  SendBuilder Mailbox(size_t index) const { return SendBuilder(this, index); }
+
   // Converting constructor from ActorRef<U> where U* is convertible to UserClass*
-  template <class U>
-    requires std::is_convertible_v<U*, UserClass*>
+  template <class Other>
+    requires std::is_convertible_v<Other*, UserClass*>
   // NOLINTNEXTLINE(google-explicit-constructor) - implicit conversion is intentional for polymorphism support
-  ActorRef(const ActorRef<U>& other)
-      : is_empty_(other.is_empty_),
+  ActorRef(const ActorRef<Other>& other)
+      : BasicActorRef<UserClass>(other),
         this_node_id_(other.this_node_id_),
         node_id_(other.node_id_),
-        actor_id_(other.actor_id_),
-        type_erased_actor_(other.type_erased_actor_),
-        message_broker_(other.message_broker_) {}
+        broker_actor_ref_(other.broker_actor_ref_) {}
 
   // Converting assignment operator - delegates to converting constructor
-  template <class U>
-    requires std::is_convertible_v<U*, UserClass*>
-  ActorRef& operator=(const ActorRef<U>& other) {
-    *this = ActorRef(other);
+  template <class Other>
+    requires std::is_convertible_v<Other*, UserClass*>
+  ActorRef<UserClass>& operator=(const ActorRef<Other>& other) {
+    *this = ActorRef<UserClass>(other);
     return *this;
   }
 
   /**
-   * @brief Send message to an actor. Returns a coroutine carrying the result.
+   * @brief Send message to an actor. Returns a sender carrying the result.
    * @note This method requires your args and return value can be serialized by reflect-cpp, if you met compile errors
    * like "Unsupported type", refer https://rfl.getml.com/concepts/custom_classes/ to add a serializer for it. Or if you
    * can confirm it's a local actor, use SendLocal() instead, which doesn't require your args to be serializable.
-   * @note Dynamic memory allocation will happen due to the use of coroutine. If you can confirm it's a local actor,
-   * consider using SendLocal() instead, which has better performance.
-   * @note The returned coroutine is not copyable. please use `co_await std::move(coroutine)`.
    */
   template <auto kMethod, class... Args>
-  [[nodiscard]] auto Send(Args... args) const {
-    // Add a fallback inline_scheduler for it.
-    return util::WrapSenderWithInlineScheduler(SendInternal<kMethod>(std::move(args)...));
+  [[nodiscard]] ex::sender auto Send(Args... args) const
+    requires(std::is_invocable_v<decltype(kMethod), UserClass*, Args...>)
+  {
+    return Mailbox(0).template Send<kMethod>(std::move(args)...);
   }
 
   /**
    * @brief Send message to a local actor. Has better performance than the generic Send(). No heap allocation.
    */
   template <auto kMethod, class... Args>
-  [[nodiscard]] ex::sender auto SendLocal(Args... args) const {
-    static_assert(std::is_invocable_v<decltype(kMethod), UserClass*, Args...>,
-                  "method is not invocable with the provided arguments");
-    if (IsEmpty()) [[unlikely]] {
-      throw std::runtime_error("Empty ActorRef, cannot call method on it.");
-    }
+  [[nodiscard]] ex::sender auto SendLocal(Args... args) const
+    requires(std::is_invocable_v<decltype(kMethod), UserClass*, Args...>)
+  {
     EXA_THROW_CHECK_EQ(node_id_, this_node_id_) << "Cannot call remote actor using SendLocal, use Send instead.";
-    return type_erased_actor_->template CallActorMethod<kMethod>(std::move(args)...);
+    return Mailbox(0).template SendLocal<kMethod>(std::move(args)...);
   }
 
-  bool IsEmpty() const { return is_empty_; }
-
-  uint32_t GetNodeId() const { return node_id_; }
-  uint64_t GetActorId() const { return actor_id_; }
+  uint64_t GetNodeId() const { return node_id_; }
 
  private:
-  bool is_empty_;
-  uint32_t this_node_id_ = 0;
-  uint32_t node_id_ = 0;
-  uint64_t actor_id_ = 0;
-  TypeErasedActor* type_erased_actor_ = nullptr;
-  network::MessageBroker* message_broker_ = nullptr;
-
   template <auto kMethod, class... Args>
-  [[nodiscard]] auto SendInternal(Args... args) const
-      -> exec::task<typename decltype(reflect::UnwrapReturnSenderIfNested<kMethod>())::type> {
-    static_assert(std::is_invocable_v<decltype(kMethod), UserClass*, Args...>,
-                  "method is not invocable with the provided arguments");
-    if (IsEmpty()) [[unlikely]] {
-      throw std::runtime_error("Empty ActorRef, cannot call method on it.");
-    }
-    if (node_id_ == this_node_id_) {
-      co_return co_await SendLocal<kMethod>(std::move(args)...);
-    }
-
-    // remote call
-    EXA_THROW_CHECK(message_broker_ != nullptr) << "Message broker not set";
-    using Sig = reflect::Signature<decltype(kMethod)>;
-    serde::ActorMethodCallArgs<typename Sig::DecayedArgsTupleType> method_call_args {
+  [[nodiscard]] ex::sender auto SendRemote(size_t mailbox_index, Args... args) const {
+    using UnwrappedType = typename decltype(UnwrapReturnSenderIfNested<kMethod>())::type;
+    using Sig = Signature<decltype(kMethod)>;
+    EXA_THROW_CHECK(!broker_actor_ref_.IsEmpty()) << "Broker actor not set";
+    ActorMethodCallArgs<typename Sig::DecayedArgsTupleType> method_call_args {
         .args_tuple = typename Sig::DecayedArgsTupleType(std::move(args)...)};
-    auto serialized_args = serde::Serialize(method_call_args);
-    std::string handler_key = reflect::GetUniqueNameForFunction<kMethod>();
-    serde::BufferWriter buffer_writer(network::ByteBufferType {sizeof(serde::NetworkRequestType) + sizeof(uint64_t) +
-                                                               sizeof(handler_key.size()) + handler_key.size() +
-                                                               sizeof(actor_id_) + serialized_args.size()});
-    // protocol: [request_type][handler_key_len][handler_key][actor_id][ActorMethodCallArgs]
 
-    buffer_writer.WritePrimitive(serde::NetworkRequestType::kActorMethodCallRequest);
-    buffer_writer.WritePrimitive(handler_key.size());
-    buffer_writer.CopyFrom(handler_key.data(), handler_key.size());
-    buffer_writer.WritePrimitive(actor_id_);
-    buffer_writer.CopyFrom(serialized_args.data(), serialized_args.size());
+    NetworkRequest request {ActorMethodCallRequest {
+        .handler_key = ComputeRemoteMethodHandlerKey<kMethod>(this->actor_type_hash_),
+        .actor_id = this->actor_id_,
+        .mailbox_index = mailbox_index,
+        .serialized_args = Serialize(method_call_args),
+    }};
 
-    using UnwrappedType = decltype(reflect::UnwrapReturnSenderIfNested<kMethod>())::type;
-    network::ByteBufferType response_buffer =
-        co_await message_broker_->SendRequest(node_id_, std::move(buffer_writer).MoveBufferOut());
-    serde::BufferReader reader {std::move(response_buffer)};
-    auto type = reader.NextPrimitive<serde::NetworkReplyType>();
-    if (type == serde::NetworkReplyType::kActorMethodCallError) {
-      auto res = serde::Deserialize<serde::ActorMethodReturnError>(reader.Current(), reader.RemainingSize());
-      EXA_THROW << res.error;
-    }
-    if constexpr (std::is_void_v<UnwrappedType>) {
-      co_return;
-    } else {
-      auto res =
-          serde::Deserialize<serde::ActorMethodReturnValue<UnwrappedType>>(reader.Current(), reader.RemainingSize());
-      co_return res.return_value;
-    }
+    return broker_actor_ref_.template SendLocal<&MessageBroker::SendRequest>(node_id_, Serialize(request)) |
+           ex::then([node_id = node_id_, this_node_id = this_node_id_,
+                     broker = broker_actor_ref_](ByteBuffer response_buf) -> UnwrappedType {
+             ActorRefSerdeContext context {.this_node_id = this_node_id,
+                                           .actor_look_up_fn = [](uint64_t) -> TypeErasedActor* { return nullptr; },
+                                           .broker_actor_ref = broker};
+             auto reply = Deserialize<NetworkReply>(std::move(response_buf), context);
+             auto& ret = std::get<ActorMethodCallReply>(reply.variant);
+             if (!ret.success) {
+               EXA_THROW << "Got error from remote actor on node " << node_id << ": " << ret.error;
+             }
+             if constexpr (std::is_void_v<UnwrappedType>) {
+               return;
+             } else {
+               auto res = Deserialize<ActorMethodReturnValue<UnwrappedType>>(ret.serialized_result, context);
+               return std::move(res.return_value);
+             }
+           });
   }
-};
 
+  uint64_t this_node_id_ = 0;
+  uint64_t node_id_ = 0;
+  BasicActorRef<MessageBroker> broker_actor_ref_;
+};
 }  // namespace ex_actor::internal
 
+// ==============================
+// Publicly exposed types
+// ==============================
 namespace ex_actor {
 using internal::ActorRef;
+
+/**
+ * @brief Passed to ExActorOnSpawned hook. Provides access to the actor's self reference and pending message count.
+ * The struct is copyable and can be stored as a member variable inside the user class.
+ * pending_message_count points to the actor's internal atomic counter; it remains valid for the actor's lifetime.
+ */
+template <class UserClass>
+struct ActorRuntimeInfo {
+  ActorRef<UserClass> self_actor_ref;
+  const std::atomic_size_t* pending_message_count = nullptr;
+};
 }  // namespace ex_actor
 
+// ==============================
+// ExActorOnSpawned hook
+// ==============================
+namespace ex_actor::internal {
+template <class UserClass>
+void NotifyExActorOnSpawned(TypeErasedActor* actor, const ActorRef<UserClass>& self_ref) {
+  if constexpr (requires(UserClass& user_class, const ActorRuntimeInfo<UserClass>& info) {
+                  user_class.ExActorOnSpawned(info);
+                }) {
+    ActorRuntimeInfo<UserClass> runtime_info {.self_actor_ref = self_ref,
+                                              .pending_message_count = &actor->GetPendingMessageCountRef()};
+    static_cast<UserClass*>(actor->GetUserClassInstanceAddress())->ExActorOnSpawned(runtime_info);
+  }
+}
+};  // namespace ex_actor::internal
+
+// ==============================
+// std::hash support
+// ==============================
 namespace std {
 template <class UserClass>
 struct hash<ex_actor::ActorRef<UserClass>> {
@@ -182,7 +260,85 @@ struct hash<ex_actor::ActorRef<UserClass>> {
     if (ref.IsEmpty()) {
       return ex_actor::internal::kEmptyActorRefHashVal;
     }
-    return std::hash<uint64_t>()(ref.GetActorId()) ^ std::hash<uint32_t>()(ref.GetNodeId());
+    uint64_t h = std::hash<uint64_t>()(ref.GetNodeId());
+    h = ex_actor::internal::HashCombine(h, std::hash<uint64_t>()(ref.GetActorId()));
+    h = ex_actor::internal::HashCombine(h, std::hash<uint64_t>()(ref.GetActorTypeHash()));
+    return h;
   }
 };
 }  // namespace std
+
+// ==============================
+// rfl serialization support
+// ==============================
+
+namespace rfl {
+template <typename U>
+struct Reflector<ex_actor::internal::ActorRef<U>> {
+  struct ReflType {
+    bool is_empty {};
+    uint64_t node_id {};
+    uint64_t actor_id {};
+    uint64_t actor_type_hash {};
+    uint64_t adjusted_ptr_addr {};
+  };
+
+  static ex_actor::internal::ActorRef<U> to(const ReflType& rfl_type) noexcept {
+    if (rfl_type.is_empty) {
+      return ex_actor::internal::ActorRef<U>();
+    }
+    // this_node_id(0) and TypeErasedActor*(nullptr) are placeholders;
+    // filled later in the Parser::read below.
+    ex_actor::internal::ActorRef<U> actor(/*this_node_id=*/0, rfl_type.node_id, rfl_type.actor_id,
+                                          rfl_type.actor_type_hash, /*actor=*/nullptr,
+                                          /*broker_actor_ref=*/ {});
+    // Restore the already-adjusted pointer from the sender side.
+    // This is only valid for local actors; remote actors never use adjusted_ptr_.
+    // NOLINTNEXTLINE(performance-no-int-to-ptr)
+    actor.adjusted_ptr_ = reinterpret_cast<U*>(rfl_type.adjusted_ptr_addr);
+    return actor;
+  }
+
+  static ReflType from(const ex_actor::internal::ActorRef<U>& actor_ref) {
+    return {
+        .is_empty = actor_ref.is_empty_,
+        .node_id = actor_ref.node_id_,
+        .actor_id = actor_ref.actor_id_,
+        .actor_type_hash = actor_ref.actor_type_hash_,
+        .adjusted_ptr_addr = reinterpret_cast<uint64_t>(actor_ref.adjusted_ptr_),
+    };
+  }
+};
+
+namespace parsing {
+template <class ProcessorsType, class U>
+struct Parser<capnproto::ReaderWithContext<ex_actor::internal::ActorRefSerdeContext>, capnproto::Writer,
+              ex_actor::internal::ActorRef<U>, ProcessorsType> {
+  using Reader = capnproto::ReaderWithContext<ex_actor::internal::ActorRefSerdeContext>;
+  using InputVarType = typename Reader::InputVarType;
+
+  static Result<ex_actor::internal::ActorRef<U>> read(const Reader& reader, const InputVarType& var) noexcept {
+    using Type = typename Reflector<ex_actor::internal::ActorRef<U>>::ReflType;
+    auto parse_res =
+        Parser<capnproto::Reader, capnproto::Writer, ex_actor::internal::ActorRef<U>, ProcessorsType>::read(reader,
+                                                                                                            var);
+    if (!parse_res) {
+      return Unexpected {parse_res.error()};
+    }
+    auto actor_ref = parse_res.value();
+    const auto& ctx = reader.ctx;
+    actor_ref.SetLocalRuntimeInfo(ctx.this_node_id, actor_ref.GetActorTypeHash(),
+                                  ctx.actor_look_up_fn(actor_ref.GetActorId()), ctx.broker_actor_ref);
+
+    return actor_ref;
+  }
+
+  template <class Parent>
+  static void write(const capnproto::Writer& w, const ex_actor::internal::ActorRef<U>& ref, const Parent& parent) {
+    Parser<capnproto::Reader, capnproto::Writer, ex_actor::internal::ActorRef<U>, ProcessorsType>::write(w, ref,
+                                                                                                         parent);
+  }
+};
+
+}  // namespace parsing
+}  // namespace rfl
