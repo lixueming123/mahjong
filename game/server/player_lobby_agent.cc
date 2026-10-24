@@ -17,19 +17,19 @@
 namespace mahjong {
 
 void HandleListRooms(const PlayerServices& services, json::Value) {
-  ActorSendScope().spawn(services.lobby.SendLocal<&LobbyActor::ListRooms>(services.self));
+  ActorSendScope().spawn(services.lobby.Send<&LobbyActor::ListRooms>(services.self));
 }
 
 void HandleCreateRoom(const PlayerServices& services, json::Value) {
-  ActorSendScope().spawn(services.lobby.SendLocal<&LobbyActor::CreateRoom>(services.self, services.session.Info()));
+  ActorSendScope().spawn(services.lobby.Send<&LobbyActor::CreateRoom>(services.self, services.session.Info()));
 }
 
 void HandleReady(const PlayerServices& services, json::Value) {
-  ActorSendScope().spawn(services.lobby.SendLocal<&LobbyActor::Ready>(services.self, services.session.Info()));
+  ActorSendScope().spawn(services.lobby.Send<&LobbyActor::Ready>(services.self, services.session.Info()));
 }
 
 void HandleSync(const PlayerServices& services, json::Value) {
-  ActorSendScope().spawn(services.lobby.SendLocal<&LobbyActor::Sync>(services.self, services.session.Info()));
+  ActorSendScope().spawn(services.lobby.Send<&LobbyActor::Sync>(services.self, services.session.Info()));
 }
 
 void HandleJoinRoom(const PlayerServices& services, json::Value frame) {
@@ -39,7 +39,7 @@ void HandleJoinRoom(const PlayerServices& services, json::Value frame) {
     services.player.ReplyParseError(parse_error);
     return;
   }
-  ActorSendScope().spawn(services.lobby.SendLocal<&LobbyActor::JoinRoom>(services.self, services.session.Info(),
+  ActorSendScope().spawn(services.lobby.Send<&LobbyActor::JoinRoom>(services.self, services.session.Info(),
                                                                         std::move(intent->room_id)));
 }
 

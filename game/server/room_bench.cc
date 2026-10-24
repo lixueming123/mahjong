@@ -250,7 +250,7 @@ class AutoClient : public mj::SeatEndpoint {
     }
     // Fire-and-forget, never awaited: see the file comment.
     mj::ActorSendScope().spawn(
-        room_.SendLocal<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::GameFrame(player_, std::move(*frame))));
+        room_.Send<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::GameFrame(player_, std::move(*frame))));
     co_return;
   }
 
@@ -348,14 +348,14 @@ void StartPoker() {
       if (g_poker_stop.load()) {
         break;
       }
-      mj::ActorSendScope().spawn(g_poker.SendLocal<&CounterActor::Bump>());
+      mj::ActorSendScope().spawn(g_poker.Send<&CounterActor::Bump>());
       if (g_poke_rooms) {
         std::lock_guard<std::mutex> lock(g_rooms_mutex);
         for (const ex_actor::ActorRef<mj::RoomActor>& room : g_rooms) {
           // A seat the room does not know: SeatOf() returns -1 and the handler returns without
           // touching any state. A pure "is the room still running messages" probe.
           mj::ActorSendScope().spawn(
-              room.SendLocal<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::PlayerDisconnected(nobody)));
+              room.Send<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::PlayerDisconnected(nobody)));
         }
       }
     }
@@ -410,7 +410,7 @@ void DumpStalled(const std::vector<RoomRun>& runs, const Batch& batch) {
     before.push_back(run.stats.empty() ? 0 : run.stats.front()->frames.load(std::memory_order_relaxed));
     for (const mj::PlayerInfo& player : run.wired_players) {
       mj::ActorSendScope().spawn(
-          run.room.SendLocal<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::Sync(player)));
+          run.room.Send<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::Sync(player)));
     }
   }
   std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -487,28 +487,26 @@ RoomRun SpawnRoom(const std::string& room_id, uint64_t seed, Shape shape, std::s
   if (g_trace) {
     fprintf(stderr, "    spawn room (%d wired seats)\n", wired);
   }
-  run.room = std::get<0>(
-      ex::sync_wait(ex_actor::Spawn<mj::RoomActor>(room_id, seed, action_timeout_ms, std::move(seats), nullptr, 0))
-          .value());
+  // No window deadlines: the client replies immediately, and a timer that never fires keeps the
+  // run deterministic. The room only needs a scheduler to exist (ai_delay_ms = 0 means no bot
+  // pacing either), otherwise OpenWindowTimer logs an error per human window. Both seams are
+  // constructor arguments now: a spawned room would install the production scheduler itself,
+  // but the benchmark deliberately replaces it with a no-op.
+  if (g_trace) {
+    fprintf(stderr, "    spawn room\n");
+  }
+  run.room = std::get<0>(ex::sync_wait(ex_actor::Spawn<mj::RoomActor>(
+                                        room_id, seed, action_timeout_ms, std::move(seats), nullptr, 0, -1,
+                                        ex_actor::ActorRef<mj::RoomOwner> {},
+                                        mj::TimeoutScheduler([](int64_t, uint64_t) {}),
+                                        mj::RoomFinishedCallback([batch](const mj::GameSettlement&) { batch->OnFinished(); })))
+                                    .value());
   for (const ex_actor::ActorRef<AutoClient>& client : clients) {
     if (g_trace) {
       fprintf(stderr, "    setroom\n");
     }
-    ex::sync_wait(client.SendLocal<&AutoClient::SetRoom>(run.room));
+    ex::sync_wait(client.Send<&AutoClient::SetRoom>(run.room));
   }
-  // No window deadlines: the client replies immediately, and a timer that never fires keeps the
-  // run deterministic. The room only needs a scheduler to exist (ai_delay_ms = 0 means no bot
-  // pacing either), otherwise OpenWindowTimer logs an error per human window.
-  if (g_trace) {
-    fprintf(stderr, "    install scheduler\n");
-  }
-  ex::sync_wait(run.room.SendLocal<&mj::RoomActor::Dispatch>(
-      mj::RoomEnvelope::InstallTimeoutScheduler([](int64_t, uint64_t) {})));
-  if (g_trace) {
-    fprintf(stderr, "    install finished callback\n");
-  }
-  ex::sync_wait(run.room.SendLocal<&mj::RoomActor::Dispatch>(
-      mj::RoomEnvelope::InstallFinishedCallback([batch](const mj::GameSettlement&) { batch->OnFinished(); })));
   return run;
 }
 
@@ -555,7 +553,7 @@ std::optional<RunResult> RunRound(Shape shape, int rooms, uint64_t base_seed, in
   }
   for (const RoomRun& run : runs) {
     mj::ActorSendScope().spawn(
-        run.room.SendLocal<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::Ready(run.ready_player)));
+        run.room.Send<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::Ready(run.ready_player)));
   }
   // A game takes tens of milliseconds at ai_delay 0, so a quarter of a minute is ~300x the
   // expected time: if it has not finished by then it never will, and the dump below is the
@@ -712,7 +710,7 @@ void PrintBaselines(ex_actor::ActorRef<CounterActor> counter, std::shared_ptr<st
     constexpr long kN = 20000;
     const Clock::time_point start = Clock::now();
     for (long i = 0; i < kN; ++i) {
-      ex::sync_wait(counter.SendLocal<&CounterActor::Bump>());
+      ex::sync_wait(counter.Send<&CounterActor::Bump>());
     }
     const Clock::time_point end = Clock::now();
     printf("  %-44s %9.1f ns\n", "one actor message, awaited round trip",
@@ -725,7 +723,7 @@ void PrintBaselines(ex_actor::ActorRef<CounterActor> counter, std::shared_ptr<st
     count->store(0);
     const Clock::time_point start = Clock::now();
     for (long i = 0; i < kN; ++i) {
-      mj::ActorSendScope().spawn(counter.SendLocal<&CounterActor::Bump>());
+      mj::ActorSendScope().spawn(counter.Send<&CounterActor::Bump>());
     }
     ex::sync_wait(mj::ActorSendScope().on_empty());
     const Clock::time_point end = Clock::now();

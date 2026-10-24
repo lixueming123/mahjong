@@ -33,7 +33,7 @@ stdexec::task<bool> DbActor::Initialize() {
 stdexec::task<void> DbActor::Login(std::string /*username*/, std::string /*password*/,
                                 ex_actor::ActorRef<PlayerActor> reply) {
   if (!reply.IsEmpty()) {
-    ActorSendScope().spawn(reply.SendLocal<&PlayerActor::Dispatch>(
+    ActorSendScope().spawn(reply.Send<&PlayerActor::Dispatch>(
         PlayerEnvelope::OnLoginResult(AuthOutcome {AuthStatus::kUnavailable, AccountRow {}})));
   }
   co_return;
@@ -42,7 +42,7 @@ stdexec::task<void> DbActor::Login(std::string /*username*/, std::string /*passw
 stdexec::task<void> DbActor::Register(std::string /*username*/, std::string /*password*/, std::string /*nickname*/,
                                    ex_actor::ActorRef<PlayerActor> reply) {
   if (!reply.IsEmpty()) {
-    ActorSendScope().spawn(reply.SendLocal<&PlayerActor::Dispatch>(
+    ActorSendScope().spawn(reply.Send<&PlayerActor::Dispatch>(
         PlayerEnvelope::OnRegisterResult(AuthOutcome {AuthStatus::kUnavailable, AccountRow {}})));
   }
   co_return;
@@ -51,7 +51,7 @@ stdexec::task<void> DbActor::Register(std::string /*username*/, std::string /*pa
 stdexec::task<void> DbActor::FetchStats(uint64_t /*account_id*/, ex_actor::ActorRef<PlayerActor> reply) {
   if (!reply.IsEmpty()) {
     ActorSendScope().spawn(
-        reply.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::OnStatsResult(StatsOutcome {})));
+        reply.Send<&PlayerActor::Dispatch>(PlayerEnvelope::OnStatsResult(StatsOutcome {})));
   }
   co_return;
 }

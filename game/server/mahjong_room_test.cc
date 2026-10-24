@@ -247,13 +247,17 @@ class TestRoom {
       sinks_[kSeat0] = human_sink_;
     }
     human_ = seats.front().player;
-    room_ = std::make_unique<RoomActor>("r-0001", seed, action_timeout_ms, std::move(seats), nullptr, ai_delay_ms,
-                                        inter_hand_delay_ms);
+    // The scheduler is a constructor seam now: a room spawned into the actor world installs
+    // the production one in ExActorOnSpawned, but this fixture constructs it directly and needs
+    // to capture what the room scheduled.
+    TimeoutScheduler scheduler;
     if (install_scheduler) {
-      Send(RoomEnvelope::InstallTimeoutScheduler([this](int64_t delay_ms, uint64_t window_seq) {
+      scheduler = [this](int64_t delay_ms, uint64_t window_seq) {
         scheduled_.emplace_back(delay_ms, window_seq);
-      }));
+      };
     }
+    room_ = std::make_unique<RoomActor>("r-0001", seed, action_timeout_ms, std::move(seats), nullptr, ai_delay_ms,
+                                        inter_hand_delay_ms, ex_actor::ActorRef<RoomOwner> {}, std::move(scheduler));
   }
 
   RoomActor* room() { return room_.get(); }
@@ -266,9 +270,10 @@ class TestRoom {
   // on this thread — the same synchronous behaviour the old direct handler call had.
   void Send(RoomEnvelope envelope) { stdexec::sync_wait(room_->Dispatch(std::move(envelope))); }
 
-  // Models the callback LobbyActor installs after Spawn (PROTOCOL §1.4.5).
+  // Models the LobbyActor's per-round notification (PROTOCOL §1.4.5); a spawned room sends it
+  // as a message to its owner, while this direct-construction fixture captures it.
   void InstallFinishedCallback(RoomFinishedCallback callback) {
-    Send(RoomEnvelope::InstallFinishedCallback(std::move(callback)));
+    room_->SetFinishedCallbackForTest(std::move(callback));
   }
 
   const PlayerInfo& human() const { return human_; }

@@ -235,7 +235,7 @@ void Gateway::AcceptClients() {
     }
     // The address the actor needs for the asynchronous account results. The fd is not in the
     // poll set yet (poll_fds is built before accept), so no frame can overtake this message.
-    ActorSendScope().spawn(actor.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::SetSelfRef(actor)));
+    ActorSendScope().spawn(actor.Send<&PlayerActor::Dispatch>(PlayerEnvelope::SetSelfRef(actor)));
 
     Client client;
     client.conn = std::move(conn);
@@ -433,7 +433,7 @@ RateLimitDecision Gateway::CheckRateLimit(Client& client) {
 void Gateway::DispatchFrame(Client& client, std::string frame) {
   try {
     ActorSendScope().spawn(
-        client.actor.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::OnFrame(std::move(frame))));
+        client.actor.Send<&PlayerActor::Dispatch>(PlayerEnvelope::OnFrame(std::move(frame))));
     ++dispatched_frames_;
   } catch (const std::exception& e) {
     spdlog::error("gateway: failed to dispatch a frame to conn#{}: {}", client.conn->id(), e.what());
@@ -474,7 +474,7 @@ void Gateway::CheckTimers() {
       try {
         // PROTOCOL.md §1.6: the lobby drops idle lobby connections, rooms keep the seat
         // entrusted instead.
-        ActorSendScope().spawn(client.actor.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::OnIdleTimeout()));
+        ActorSendScope().spawn(client.actor.Send<&PlayerActor::Dispatch>(PlayerEnvelope::OnIdleTimeout()));
       } catch (const std::exception& e) {
         spdlog::error("gateway: failed to dispatch the idle timeout for conn#{}: {}", client.conn->id(), e.what());
       }
@@ -489,7 +489,7 @@ void Gateway::CloseClient(Client& client, const std::string& reason) {
   client.dead = true;
   client.conn->MarkClosed();
   try {
-    ActorSendScope().spawn(client.actor.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::OnClosed(reason)));
+    ActorSendScope().spawn(client.actor.Send<&PlayerActor::Dispatch>(PlayerEnvelope::OnClosed(reason)));
   } catch (const std::exception& e) {
     spdlog::error("gateway: failed to notify conn#{} about the close: {}", client.conn->id(), e.what());
   }

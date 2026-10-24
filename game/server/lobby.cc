@@ -1,6 +1,8 @@
 #include "lobby.h"
 
+#include <cassert>
 #include <exception>
+#include <random>
 #include <string>
 #include <utility>
 
@@ -13,6 +15,37 @@ namespace ex = stdexec;
 
 namespace mahjong {
 namespace {
+
+// Room ids must stay unique across server restarts and across processes sharing one database
+// (ACCOUNT_DESIGN.md §4: `match_results` is keyed by (room_id, account_id), so a reused id
+// would make a fresh match look like a duplicate write and be dropped). A process-local
+// counter cannot promise that, so each LobbyActor draws a random tag once and every id packs
+// that tag with the lobby's sequence number:
+//     64 bits = 36-bit tag | 28-bit sequence
+// 13 base-36 digits always cover 64 bits and keep the id at 15 characters, inside the
+// VARCHAR(16) of both match tables. Within one lobby the sequence alone keeps ids apart
+// (2^28 rooms); across restarts and processes the tag does, with a collision chance of 2^-36.
+constexpr uint64_t kRoomTagMask = (1ull << 36) - 1;
+constexpr unsigned kRoomSequenceBits = 28;
+constexpr uint64_t kRoomSequenceMask = (1ull << kRoomSequenceBits) - 1;
+constexpr size_t kRoomIdDigits = 13;  // ceil(64 / log2(36)) == 13
+constexpr char kBase36Digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+
+uint64_t DrawRoomTag() {
+  std::random_device device;
+  return ((static_cast<uint64_t>(device()) << 32) | device()) & kRoomTagMask;
+}
+
+std::string FormatRoomId(uint64_t tag, uint64_t sequence) {
+  uint64_t value = ((tag & kRoomTagMask) << kRoomSequenceBits) | (sequence & kRoomSequenceMask);
+  std::string id = "r-";
+  id.append(kRoomIdDigits, '0');
+  for (size_t i = 0; i < kRoomIdDigits; ++i) {
+    id[id.size() - 1 - i] = kBase36Digits[value % 36];
+    value /= 36;
+  }
+  return id;
+}
 
 // The four seats of a fresh room (PROTOCOL.md §4.2, GAME_DESIGN §2.2 ③): seat 0 is the human
 // that owns the room and carries the wire, seats 1..3 are the server-side AI seats.
@@ -60,8 +93,14 @@ LobbyActor::LobbyActor(uint64_t seed, int action_timeout_ms, std::shared_ptr<Win
     : seed_(seed),
       action_timeout_ms_(action_timeout_ms),
       game_end_reclaim_ms_(game_end_reclaim_ms),
+      room_tag_(DrawRoomTag()),
       timer_(std::move(timer)),
-      db_(std::move(db)) {}
+      db_(std::move(db)) {
+  // The rooms hold this actor as ActorRef<RoomOwner> and the framework casts the instance
+  // pointer to the method's class without checking, which is only correct while RoomOwner is
+  // the first base (room.h). Fail loudly if a base is ever added in front of it.
+  assert(static_cast<void*>(static_cast<RoomOwner*>(this)) == static_cast<void*>(this));
+}
 
 // Seat-facing replies. The lobby never touches a Connection any more: it messages the seat's
 // PlayerActor and the frame lands in that connection's outbox (PROTOCOL §7.2's quota is
@@ -71,7 +110,7 @@ stdexec::task<void> LobbyActor::ReplyFrame(const ex_actor::ActorRef<SeatEndpoint
   if (conn.IsEmpty()) {
     co_return;  // no wire (the unit test's seatless players)
   }
-  co_await conn.SendLocal<&SeatEndpoint::Dispatch>(PlayerEnvelope::SeatFrame(std::move(frame)));
+  co_await conn.Send<&SeatEndpoint::Dispatch>(PlayerEnvelope::SeatFrame(std::move(frame)));
 }
 
 stdexec::task<void> LobbyActor::ReplyError(const ex_actor::ActorRef<SeatEndpoint>& conn, std::string_view code,
@@ -80,7 +119,7 @@ stdexec::task<void> LobbyActor::ReplyError(const ex_actor::ActorRef<SeatEndpoint
     co_return;
   }
   const QuotaKind quota = code == protocol::kCodeBadRequest ? QuotaKind::kBadFrame : QuotaKind::kNone;
-  co_await conn.SendLocal<&SeatEndpoint::Dispatch>(
+  co_await conn.Send<&SeatEndpoint::Dispatch>(
       PlayerEnvelope::SeatError(protocol::ErrorFrame(code, message), quota));
 }
 
@@ -90,9 +129,9 @@ stdexec::task<void> LobbyActor::SetSelfRef(ex_actor::ActorRef<LobbyActor> self) 
 }
 
 std::string LobbyActor::NextRoomId() {
-  char buffer[16];
-  std::snprintf(buffer, sizeof(buffer), "r-%04u", next_room_number_++);
-  return std::string(buffer);
+  // The sequence keeps the seed derivation (a pure function of the creation order) and the
+  // id in lockstep: both advance once per room.
+  return FormatRoomId(room_tag_, static_cast<uint64_t>(next_room_number_++));
 }
 
 const LobbyActor::PlayerState* LobbyActor::FindPlayer(const std::string& player_id) const {
@@ -113,9 +152,7 @@ stdexec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn
   uint64_t room_seed = 0;
   std::vector<RoomSeat> seats;
   std::shared_ptr<WindowTimer> timer;
-  DbService db;
   ex_actor::ActorRef<LobbyActor> self;
-  int reclaim_ms = 0;
   enum class Reject { kNone, kAlready, kNoSelf };
   Reject reject = Reject::kNone;
   {
@@ -125,7 +162,7 @@ stdexec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn
       reject = Reject::kAlready;
     } else if (self_ref_.IsEmpty()) {
       // Without the way back the room could be spawned but never reclaimed: the reclaim's
-      // SendLocal would throw on the timer thread. main() always installs the ref before the
+      // Send would throw on the timer thread. main() always installs the ref before the
       // gateway starts, so this only fires in a misconfigured process.
       reject = Reject::kNoSelf;
     } else {
@@ -138,9 +175,7 @@ stdexec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn
       seats = BuildInitialSeats(player, conn);
       creating_[player.player_id] = room_id;
       timer = timer_;
-      db = db_;
       self = self_ref_;
-      reclaim_ms = game_end_reclaim_ms_;
     }
   }
   if (reject == Reject::kAlready) {
@@ -156,7 +191,9 @@ stdexec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn
   ex_actor::ActorRef<RoomActor> room;
   std::string spawn_error;
   try {
-    room = co_await ex_actor::Spawn<RoomActor>(room_id, room_seed, action_timeout_ms_, seats, timer);
+    // The room gets the lobby's ref up front: it reports finished rounds by message, and it
+    // installs its own timeout scheduler in ExActorOnSpawned (nothing serializable to send).
+    room = co_await ex_actor::Spawn<RoomActor>(room_id, room_seed, action_timeout_ms_, seats, timer, -1, -1, self);
   } catch (const std::exception& e) {
     // Answering happens below: a `co_await` is not allowed inside a catch handler.
     spawn_error = e.what();
@@ -191,71 +228,62 @@ stdexec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn
     co_return;
   }
 
-  // Install the window timeout scheduler: the delayed message carries the window seq and is
-  // posted back into the room (PROTOCOL.md §0.5). Enqueued before any client frame can reach
-  // the room, because room_joined is only sent below.
-  ActorSendScope().spawn(room.SendLocal<&RoomActor::Dispatch>(
-      RoomEnvelope::InstallTimeoutScheduler(TimeoutScheduler([room, timer](int64_t delay_ms, uint64_t window_seq) {
-        if (timer == nullptr) {
-          return;
-        }
-        timer->Schedule(delay_ms, [room, window_seq]() {
-          ActorSendScope().spawn(room.SendLocal<&RoomActor::Dispatch>(RoomEnvelope::WindowTimeout(window_seq)));
-        });
-      }))));
-
-  // PROTOCOL.md §1.4.5 (v1.6): the callback fires once per ROUND; the per-round match records
-  // are written every time, but the reclaim is armed only when the match is over (game_end no
-  // longer ends the room — the room survives across the rounds of one match, §0.4).
-  ActorSendScope().spawn(room.SendLocal<&RoomActor::Dispatch>(RoomEnvelope::InstallFinishedCallback(
-      RoomFinishedCallback([self, timer, room_id, reclaim_ms, db](const GameSettlement& settlement) {
-        // ACCOUNT_DESIGN.md §4.1: one row per account-backed human seat, posted to DbActor and
-        // then forgotten. The room promises this runs exactly once per round, and it never
-        // retries, so a lost write can only cost a row, not a duplicate.
-        if (!db.IsEmpty()) {
-          for (const SettledSeat& seat : settlement.seats) {
-            if (seat.is_bot || seat.player.account_id == 0) {
-              continue;  // guests and bots have no history to keep (§4.2)
-            }
-            ActorSendScope().spawn(db.RecordMatch(MatchRecord {
-                seat.player.account_id, settlement.room_id, settlement.reason, seat.delta_score, seat.winner}));
-          }
-        }
-        // ACCOUNT_DESIGN.md v1.3 §4 item 7: the match summary is written ONCE per match (at
-        // match_over), one row per account-backed seat — bots and guests have no history to
-        // keep (§4.2). Fire-and-forget; a lost row is never a game error.
-        if (settlement.match_over && !db.IsEmpty()) {
-          for (const SettledSeat& seat : settlement.seats) {
-            if (seat.is_bot || seat.player.account_id == 0) {
-              continue;
-            }
-            const int seat_index = static_cast<int>(&seat - settlement.seats.data());
-            MatchResultRecord result;
-            result.account_id = seat.player.account_id;
-            result.room_id = settlement.room_id;
-            result.hands_played = settlement.hands_played;
-            result.dealer_hands = settlement.dealer_hands[static_cast<size_t>(seat_index)];
-            result.final_score = settlement.totals[static_cast<size_t>(seat_index)];
-            result.final_rank = settlement.final_rank[static_cast<size_t>(seat_index)];
-            ActorSendScope().spawn(db.RecordMatchResult(std::move(result)));
-          }
-        }
-        // C10：局终（game_end）不回收；match_over（match_end 已下发）才 arm 30s 回收。
-        if (!settlement.match_over || timer == nullptr) {
-          return;
-        }
-        timer->Schedule(reclaim_ms,
-                        [self, room_id]() { ActorSendScope().spawn(self.SendLocal<&LobbyActor::ReapRoom>(room_id)); });
-      }))));
-
   spdlog::info("lobby: created room {} (wall seed {}) for player {} ({})", room_id, room_seed, player.player_id,
                player.name);
   if (!conn.IsEmpty()) {
     // Hand the connection its room first: from here gameplay frames go straight to the room
     // instead of back through this actor (player_actor.cc RouteGameFrame).
-    co_await conn.SendLocal<&SeatEndpoint::Dispatch>(PlayerEnvelope::SetRoom(room));
+    co_await conn.Send<&SeatEndpoint::Dispatch>(PlayerEnvelope::SetRoom(room));
     co_await ReplyFrame(conn, BuildRoomJoinedFrame(room_id, 0, seats));
   }
+}
+
+// PROTOCOL.md §1.4.5 (v1.6): the room reports once per ROUND; the per-round match records are
+// written every time, but the reclaim is armed only when the match is over (game_end no longer
+// ends the room — it survives across the rounds of one match, §0.4).
+//
+// No gate: this handler touches no registry state. It reads the members main() set before the
+// gateway opened (and the room cannot exist before self_ref_ was installed).
+stdexec::task<void> LobbyActor::OnRoomFinished(GameSettlement settlement) {
+  // ACCOUNT_DESIGN.md §4.1: one row per account-backed human seat, posted to DbActor and then
+  // forgotten. The room sends this exactly once per round, and it never retries, so a lost
+  // write can only cost a row, not a duplicate.
+  if (!db_.IsEmpty()) {
+    for (const SettledSeat& seat : settlement.seats) {
+      if (seat.is_bot || seat.player.account_id == 0) {
+        continue;  // guests and bots have no history to keep (§4.2)
+      }
+      ActorSendScope().spawn(db_.RecordMatch(
+          MatchRecord {seat.player.account_id, settlement.room_id, settlement.reason, seat.delta_score, seat.winner}));
+    }
+  }
+  // ACCOUNT_DESIGN.md v1.3 §4 item 7: the match summary is written ONCE per match (at
+  // match_over), one row per account-backed seat — bots and guests have no history to keep
+  // (§4.2). Fire-and-forget; a lost row is never a game error.
+  if (settlement.match_over && !db_.IsEmpty()) {
+    for (size_t seat_index = 0; seat_index < settlement.seats.size(); ++seat_index) {
+      const SettledSeat& seat = settlement.seats[seat_index];
+      if (seat.is_bot || seat.player.account_id == 0) {
+        continue;
+      }
+      MatchResultRecord result;
+      result.account_id = seat.player.account_id;
+      result.room_id = settlement.room_id;
+      result.hands_played = settlement.hands_played;
+      result.dealer_hands = settlement.dealer_hands[seat_index];
+      result.final_score = settlement.totals[seat_index];
+      result.final_rank = settlement.final_rank[seat_index];
+      ActorSendScope().spawn(db_.RecordMatchResult(std::move(result)));
+    }
+  }
+  // C10：局终（game_end）不回收；match_over（match_end 已下发）才 arm 30s 回收。
+  if (!settlement.match_over || timer_ == nullptr) {
+    co_return;
+  }
+  const std::string room_id = settlement.room_id;
+  ex_actor::ActorRef<LobbyActor> self = self_ref_;
+  timer_->Schedule(game_end_reclaim_ms_,
+                   [self, room_id]() { ActorSendScope().spawn(self.Send<&LobbyActor::ReapRoom>(room_id)); });
 }
 
 stdexec::task<void> LobbyActor::ListRooms(ex_actor::ActorRef<SeatEndpoint> conn) {
@@ -355,9 +383,8 @@ stdexec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, 
     co_return;
   }
 
-  auto accepted = std::make_shared<bool>(false);
-  co_await room.SendLocal<&RoomActor::Dispatch>(RoomEnvelope::TakeSeat(claimed, accepted));
-  if (!*accepted) {
+  const bool accepted = co_await room.Send<&RoomActor::TakeSeat>(claimed);
+  if (!accepted) {
     {
       AsyncGate::Guard guard = co_await gate_.Acquire();
       players_.erase(player.player_id);
@@ -374,7 +401,7 @@ stdexec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, 
     co_await ReplyError(conn, protocol::kCodeRoomNotFound, "room already started");
     co_return;
   }
-  co_await conn.SendLocal<&SeatEndpoint::Dispatch>(PlayerEnvelope::SetRoom(room));
+  co_await conn.Send<&SeatEndpoint::Dispatch>(PlayerEnvelope::SetRoom(room));
   co_await ReplyFrame(conn, BuildRoomJoinedFrame(room_id, claimed.seat, snapshot));
 }
 
@@ -402,7 +429,7 @@ stdexec::task<void> LobbyActor::Ready(ex_actor::ActorRef<SeatEndpoint> conn, Pla
     co_await ReplyError(conn, protocol::kCodeRoomNotFound, error);
     co_return;
   }
-  ActorSendScope().spawn(room.SendLocal<&RoomActor::Dispatch>(RoomEnvelope::Ready(std::move(player))));
+  ActorSendScope().spawn(room.Send<&RoomActor::Dispatch>(RoomEnvelope::Ready(std::move(player))));
 }
 
 stdexec::task<void> LobbyActor::Sync(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player) {
@@ -424,7 +451,7 @@ stdexec::task<void> LobbyActor::Sync(ex_actor::ActorRef<SeatEndpoint> conn, Play
     co_await ReplyError(conn, protocol::kCodeRoomNotFound, error);
     co_return;
   }
-  ActorSendScope().spawn(room.SendLocal<&RoomActor::Dispatch>(RoomEnvelope::Sync(std::move(player))));
+  ActorSendScope().spawn(room.Send<&RoomActor::Dispatch>(RoomEnvelope::Sync(std::move(player))));
 }
 
 stdexec::task<void> LobbyActor::OnConnectionClosed(PlayerInfo player) {
@@ -446,7 +473,7 @@ stdexec::task<void> LobbyActor::OnConnectionClosed(PlayerInfo player) {
   if (room_started_[room_id]) {
     if (!room.IsEmpty()) {
       // PROTOCOL.md §8.5: during a game the seat becomes entrusted and the round keeps going.
-      ActorSendScope().spawn(room.SendLocal<&RoomActor::Dispatch>(RoomEnvelope::PlayerDisconnected(player)));
+      ActorSendScope().spawn(room.Send<&RoomActor::Dispatch>(RoomEnvelope::PlayerDisconnected(player)));
     }
     spdlog::info("lobby: player {} disconnected mid-game, room {} keeps playing (seat entrusted)", player.player_id,
                  room_id);
@@ -470,7 +497,7 @@ stdexec::task<void> LobbyActor::OnConnectionClosed(PlayerInfo player) {
     bot.player.name = "AI-" + std::to_string(seat_index);
     roster->second[static_cast<size_t>(seat_index)] = bot;
     if (!room.IsEmpty()) {
-      ActorSendScope().spawn(room.SendLocal<&RoomActor::Dispatch>(RoomEnvelope::TakeSeat(bot, nullptr)));
+      ActorSendScope().spawn(room.Send<&RoomActor::TakeSeat>(bot) | ex_actor::DiscardResult());
     }
     spdlog::info("lobby: player {} left room {} before it started", player.player_id, room_id);
     co_return;
@@ -514,7 +541,7 @@ stdexec::task<void> LobbyActor::ReapRoom(std::string room_id) {
   // holding is of any use. Dropping the last ActorRef also destroys the RoomActor and its
   // state; the connections are asked to close so the gateway frees the sockets.
   for (const ex_actor::ActorRef<SeatEndpoint>& conn : closing) {
-    co_await conn.SendLocal<&SeatEndpoint::Dispatch>(PlayerEnvelope::Close("room reclaimed after game_end"));
+    co_await conn.Send<&SeatEndpoint::Dispatch>(PlayerEnvelope::Close("room reclaimed after game_end"));
   }
   spdlog::info("lobby: reclaimed room {} after game_end ({} connection(s) closed)", room_id, closing.size());
 }
@@ -534,12 +561,12 @@ stdexec::task<void> LobbyActor::OnIdleTimeout(ex_actor::ActorRef<SeatEndpoint> c
     }
   }
   if (drop_connection) {
-    co_await conn.SendLocal<&SeatEndpoint::Dispatch>(PlayerEnvelope::Close("idle timeout in lobby"));
+    co_await conn.Send<&SeatEndpoint::Dispatch>(PlayerEnvelope::Close("idle timeout in lobby"));
     co_return;
   }
   if (!room.IsEmpty()) {
     // In game the connection stays open and the seat becomes entrusted (§1.6/§6.4).
-    ActorSendScope().spawn(room.SendLocal<&RoomActor::Dispatch>(RoomEnvelope::IdleTimeout(std::move(player))));
+    ActorSendScope().spawn(room.Send<&RoomActor::Dispatch>(RoomEnvelope::IdleTimeout(std::move(player))));
   }
 }
 

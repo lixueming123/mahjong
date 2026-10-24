@@ -31,7 +31,7 @@ bool HasRoom(const PlayerServices& services) {
 }
 
 void ForwardToRoom(const PlayerServices& services, json::Value frame) {
-  ActorSendScope().spawn(services.room.SendLocal<&RoomActor::Dispatch>(
+  ActorSendScope().spawn(services.room.Send<&RoomActor::Dispatch>(
       RoomEnvelope::GameFrame(services.session.Info(), std::move(frame))));
 }
 

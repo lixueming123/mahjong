@@ -14,6 +14,7 @@
 #include <chrono>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -26,6 +27,7 @@
 
 #include "connection.h"
 #include "ex_actor/api.h"
+#include "json.h"
 #include "player.h"
 #include "room.h"
 #include "timer.h"
@@ -55,6 +57,23 @@ size_t CountOccurrences(const std::string& haystack, const std::string& needle) 
     ++count;
   }
   return count;
+}
+
+// The lobby answers create_room with room_joined and keeps no public accessor for the id, so a
+// test reads the name it handed out from the wire. Room ids are random (lobby.cc: FormatRoomId),
+// which is exactly what the reconnect/restart tests need to observe.
+std::string JoinedRoomId(const std::shared_ptr<Connection>& conn) {
+  std::string outbox;
+  conn->DrainOutbox(&outbox);
+  const std::string first_frame = outbox.substr(0, outbox.find('\n'));
+  std::string error;
+  std::optional<json::Value> frame = json::Value::Parse(first_frame, &error);
+  const json::Value* room_id = frame.has_value() ? frame->Find("room_id") : nullptr;
+  if (room_id == nullptr || !room_id->IsString()) {
+    ADD_FAILURE() << "room_joined missing from the outbox: " << outbox << " (" << error << ")";
+    return std::string();
+  }
+  return room_id->AsString();
 }
 
 class LobbyTest : public ::testing::Test {
@@ -96,7 +115,7 @@ class LobbyTest : public ::testing::Test {
                                                   ex_actor::ActorRef<LobbyActor> lobby) {
     ex_actor::ActorRef<PlayerActor> connector = WaitValue(
         ex_actor::Spawn<PlayerActor>(conn, player_ids_, /*db=*/DbService {}, sessions_, lobby));
-    stdexec::sync_wait(connector.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::SetSelfRef(connector)));
+    stdexec::sync_wait(connector.Send<&PlayerActor::Dispatch>(PlayerEnvelope::SetSelfRef(connector)));
     return connector;
   }
 
@@ -111,21 +130,21 @@ class LobbyTest : public ::testing::Test {
 TEST_F(LobbyTest, ReclaimsARoomAndItsConnectionAfterMatchEnd) {
   ex_actor::ActorRef<LobbyActor> lobby =
       WaitValue(ex_actor::Spawn<LobbyActor>(/*seed=*/20251005, kFastWindowMs, timer_, kFastReclaimMs));
-  stdexec::sync_wait(lobby.SendLocal<&LobbyActor::SetSelfRef>(lobby));
+  stdexec::sync_wait(lobby.Send<&LobbyActor::SetSelfRef>(lobby));
 
   // An invalid fd: the outbox and the close request still work, and no socket is touched.
   auto conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1, /*wake_write_fd=*/-1);
   ASSERT_FALSE(conn->close_requested());
 
-  stdexec::sync_wait(lobby.SendLocal<&LobbyActor::CreateRoom>(SpawnConnector(conn, lobby), MakePlayer()));
-  ASSERT_EQ(WaitValue(lobby.SendLocal<&LobbyActor::room_count>()), 1u);
+  stdexec::sync_wait(lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(conn, lobby), MakePlayer()));
+  ASSERT_EQ(WaitValue(lobby.Send<&LobbyActor::room_count>()), 1u);
 
   // Ready starts the match; with a 1ms window every human window times out, so the whole match
   // (4..8 rounds) plays itself through the real scheduler.
   stdexec::sync_wait(
-      lobby.SendLocal<&LobbyActor::Ready>(SpawnConnector(conn, lobby), MakePlayer()));
+      lobby.Send<&LobbyActor::Ready>(SpawnConnector(conn, lobby), MakePlayer()));
 
-  const auto room_count = [&lobby]() { return WaitValue(lobby.SendLocal<&LobbyActor::room_count>()); };
+  const auto room_count = [&lobby]() { return WaitValue(lobby.Send<&LobbyActor::room_count>()); };
   // C10 专项：局终（game_end）不回收 —— 房间必须跨局存活足够久（这里等前 3 局的时间量级，
   // 房间仍在注册表里）。
   std::this_thread::sleep_for(std::chrono::milliseconds(30));
@@ -140,7 +159,7 @@ TEST_F(LobbyTest, ReclaimsARoomAndItsConnectionAfterMatchEnd) {
 TEST_F(LobbyTest, ReapRoomIsIdempotentAndLeavesOtherRoomsAlone) {
   ex_actor::ActorRef<LobbyActor> lobby =
       WaitValue(ex_actor::Spawn<LobbyActor>(/*seed=*/7, kFastWindowMs, timer_, kFastReclaimMs));
-  stdexec::sync_wait(lobby.SendLocal<&LobbyActor::SetSelfRef>(lobby));
+  stdexec::sync_wait(lobby.Send<&LobbyActor::SetSelfRef>(lobby));
 
   auto first = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1, /*wake_write_fd=*/-1);
   auto second = std::make_shared<Connection>(/*fd=*/-1, /*id=*/2, /*wake_write_fd=*/-1);
@@ -152,19 +171,73 @@ TEST_F(LobbyTest, ReapRoomIsIdempotentAndLeavesOtherRoomsAlone) {
   bob.name = "Bob";
 
   stdexec::sync_wait(
-      lobby.SendLocal<&LobbyActor::CreateRoom>(SpawnConnector(first, lobby), alice));
+      lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(first, lobby), alice));
   stdexec::sync_wait(
-      lobby.SendLocal<&LobbyActor::CreateRoom>(SpawnConnector(second, lobby), bob));
-  ASSERT_EQ(WaitValue(lobby.SendLocal<&LobbyActor::room_count>()), 2u);
+      lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(second, lobby), bob));
+  ASSERT_EQ(WaitValue(lobby.Send<&LobbyActor::room_count>()), 2u);
 
-  stdexec::sync_wait(lobby.SendLocal<&LobbyActor::ReapRoom>(std::string("r-0001")));
-  EXPECT_EQ(WaitValue(lobby.SendLocal<&LobbyActor::room_count>()), 1u);
+  const std::string first_room = JoinedRoomId(first);
+  ASSERT_FALSE(first_room.empty());
+
+  stdexec::sync_wait(lobby.Send<&LobbyActor::ReapRoom>(first_room));
+  EXPECT_EQ(WaitValue(lobby.Send<&LobbyActor::room_count>()), 1u);
   EXPECT_TRUE(first->close_requested());
   EXPECT_FALSE(second->close_requested()) << "reaping one room must not touch another";
 
-  stdexec::sync_wait(lobby.SendLocal<&LobbyActor::ReapRoom>(std::string("r-0001")));  // idempotent
-  EXPECT_EQ(WaitValue(lobby.SendLocal<&LobbyActor::room_count>()), 1u);
+  stdexec::sync_wait(lobby.Send<&LobbyActor::ReapRoom>(first_room));  // idempotent
+  EXPECT_EQ(WaitValue(lobby.Send<&LobbyActor::room_count>()), 1u);
   EXPECT_FALSE(second->close_requested());
+}
+
+// ACCOUNT_DESIGN.md §4 keys `match_results` by (room_id, account_id), so a room id that a
+// restart (or another server sharing the database) handed out a second time would make a fresh
+// match look like a duplicate write and be dropped. The lobby therefore packs a random
+// per-process tag into the id; two lobbies stand in for two server runs, and a third room in
+// the first lobby proves the per-lobby sequence also advances.
+TEST_F(LobbyTest, RoomIdsAreUniqueAcrossLobbiesAndRooms) {
+  ex_actor::ActorRef<LobbyActor> first_lobby =
+      WaitValue(ex_actor::Spawn<LobbyActor>(/*seed=*/11, kFastWindowMs, timer_, kFastReclaimMs));
+  stdexec::sync_wait(first_lobby.Send<&LobbyActor::SetSelfRef>(first_lobby));
+  ex_actor::ActorRef<LobbyActor> second_lobby =
+      WaitValue(ex_actor::Spawn<LobbyActor>(/*seed=*/12, kFastWindowMs, timer_, kFastReclaimMs));
+  stdexec::sync_wait(second_lobby.Send<&LobbyActor::SetSelfRef>(second_lobby));
+
+  auto make_player = [](std::string player_id) {
+    PlayerInfo player;
+    player.player_id = std::move(player_id);
+    player.name = "n";
+    return player;
+  };
+  auto first_conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1, /*wake_write_fd=*/-1);
+  auto second_conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/2, /*wake_write_fd=*/-1);
+  auto third_conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/3, /*wake_write_fd=*/-1);
+
+  stdexec::sync_wait(first_lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(first_conn, first_lobby),
+                                                                   make_player("p-alice")));
+  stdexec::sync_wait(second_lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(second_conn, second_lobby),
+                                                                    make_player("p-bob")));
+  stdexec::sync_wait(first_lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(third_conn, first_lobby),
+                                                                   make_player("p-carol")));
+
+  const std::string first_id = JoinedRoomId(first_conn);
+  const std::string second_id = JoinedRoomId(second_conn);
+  const std::string third_id = JoinedRoomId(third_conn);
+  ASSERT_FALSE(first_id.empty());
+  ASSERT_FALSE(second_id.empty());
+  ASSERT_FALSE(third_id.empty());
+  EXPECT_NE(first_id, second_id) << "two server runs must not hand out the same room id";
+  EXPECT_NE(first_id, third_id) << "the per-lobby sequence must advance";
+
+  // PROTOCOL §4.2's frozen shape: "r-" + 13 lowercase base-36 digits (15 chars, inside the
+  // VARCHAR(16) of both match tables).
+  for (const std::string& id : {first_id, second_id, third_id}) {
+    ASSERT_EQ(id.size(), 15u) << id;
+    ASSERT_EQ(id.rfind("r-", 0), 0u) << id;
+    for (size_t i = 2; i < id.size(); ++i) {
+      const char c = id[i];
+      EXPECT_TRUE((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')) << id;
+    }
+  }
 }
 
 // PROTOCOL §4.2 / §1.4.1: create_room claims the player before Spawn returns. The claim is the
@@ -173,14 +246,14 @@ TEST_F(LobbyTest, ReapRoomIsIdempotentAndLeavesOtherRoomsAlone) {
 TEST_F(LobbyTest, PipelinedCreateRoomKeepsOneRoomPerPlayer) {
   ex_actor::ActorRef<LobbyActor> lobby =
       WaitValue(ex_actor::Spawn<LobbyActor>(/*seed=*/99, kFastWindowMs, timer_, kFastReclaimMs));
-  stdexec::sync_wait(lobby.SendLocal<&LobbyActor::SetSelfRef>(lobby));
+  stdexec::sync_wait(lobby.Send<&LobbyActor::SetSelfRef>(lobby));
   auto conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1, /*wake_write_fd=*/-1);
 
   // Neither send is awaited, so both reach the lobby before the first room finished spawning.
-  ActorSendScope().spawn(lobby.SendLocal<&LobbyActor::CreateRoom>(SpawnConnector(conn, lobby), MakePlayer()));
-  ActorSendScope().spawn(lobby.SendLocal<&LobbyActor::CreateRoom>(SpawnConnector(conn, lobby), MakePlayer()));
+  ActorSendScope().spawn(lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(conn, lobby), MakePlayer()));
+  ActorSendScope().spawn(lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(conn, lobby), MakePlayer()));
 
-  const auto room_count = [&lobby]() { return WaitValue(lobby.SendLocal<&LobbyActor::room_count>()); };
+  const auto room_count = [&lobby]() { return WaitValue(lobby.Send<&LobbyActor::room_count>()); };
   ASSERT_TRUE(WaitFor([&room_count]() { return room_count() == 1; }));
   std::this_thread::sleep_for(std::chrono::milliseconds(200));  // let a second (wrong) room appear
   EXPECT_EQ(room_count(), 1u) << "one player must own exactly one room";
@@ -197,14 +270,14 @@ TEST_F(LobbyTest, PipelinedCreateRoomKeepsOneRoomPerPlayer) {
 TEST_F(LobbyTest, DisconnectAroundCreateRoomLeavesNoRoom) {
   ex_actor::ActorRef<LobbyActor> lobby =
       WaitValue(ex_actor::Spawn<LobbyActor>(/*seed=*/4242, kFastWindowMs, timer_, kFastReclaimMs));
-  stdexec::sync_wait(lobby.SendLocal<&LobbyActor::SetSelfRef>(lobby));
+  stdexec::sync_wait(lobby.Send<&LobbyActor::SetSelfRef>(lobby));
   auto conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1, /*wake_write_fd=*/-1);
 
-  stdexec::sync_wait(lobby.SendLocal<&LobbyActor::CreateRoom>(SpawnConnector(conn, lobby), MakePlayer()));
+  stdexec::sync_wait(lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(conn, lobby), MakePlayer()));
   stdexec::sync_wait(
-      lobby.SendLocal<&LobbyActor::OnConnectionClosed>(MakePlayer()));
+      lobby.Send<&LobbyActor::OnConnectionClosed>(MakePlayer()));
 
-  const auto room_count = [&lobby]() { return WaitValue(lobby.SendLocal<&LobbyActor::room_count>()); };
+  const auto room_count = [&lobby]() { return WaitValue(lobby.Send<&LobbyActor::room_count>()); };
   ASSERT_TRUE(WaitFor([&room_count]() { return room_count() == 0; }))
       << "the room of a disconnected owner must not stay in the registry";
 }
@@ -224,7 +297,7 @@ TEST(LobbyPerf, RegistryLock) {
     auto conn = std::make_shared<Connection>(/*fd=*/-1, id, /*wake_write_fd=*/-1);
     ex_actor::ActorRef<PlayerActor> connector =
         WaitValue(ex_actor::Spawn<PlayerActor>(conn, player_ids, /*db=*/DbService {}, sessions, lobby));
-    stdexec::sync_wait(connector.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::SetSelfRef(connector)));
+    stdexec::sync_wait(connector.Send<&PlayerActor::Dispatch>(PlayerEnvelope::SetSelfRef(connector)));
     return connector;
   };
   auto make_player = [](int id) {
@@ -236,7 +309,7 @@ TEST(LobbyPerf, RegistryLock) {
 
   ex_actor::ActorRef<LobbyActor> lobby =
       WaitValue(ex_actor::Spawn<LobbyActor>(/*seed=*/1, kFastWindowMs, timer, kFastReclaimMs));
-  stdexec::sync_wait(lobby.SendLocal<&LobbyActor::SetSelfRef>(lobby));
+  stdexec::sync_wait(lobby.Send<&LobbyActor::SetSelfRef>(lobby));
 
   std::vector<ex_actor::ActorRef<SeatEndpoint>> seats;
   seats.reserve(kRooms);
@@ -246,16 +319,16 @@ TEST(LobbyPerf, RegistryLock) {
 
   const auto started = std::chrono::steady_clock::now();
   for (int i = 0; i < kRooms; ++i) {
-    stdexec::sync_wait(lobby.SendLocal<&LobbyActor::CreateRoom>(seats[static_cast<size_t>(i)], make_player(i)));
+    stdexec::sync_wait(lobby.Send<&LobbyActor::CreateRoom>(seats[static_cast<size_t>(i)], make_player(i)));
   }
   const auto sequential_us =
       std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count();
-  ASSERT_EQ(WaitValue(lobby.SendLocal<&LobbyActor::room_count>()), static_cast<size_t>(kRooms));
+  ASSERT_EQ(WaitValue(lobby.Send<&LobbyActor::room_count>()), static_cast<size_t>(kRooms));
 
   const auto lookups_started = std::chrono::steady_clock::now();
   exec::async_scope lookups;
   for (int i = 0; i < kLookups; ++i) {
-    lookups.spawn(lobby.SendLocal<&LobbyActor::room_count>() | stdexec::then([](size_t) {}));
+    lookups.spawn(lobby.Send<&LobbyActor::room_count>() | stdexec::then([](size_t) {}));
   }
   stdexec::sync_wait(lookups.on_empty());
   const auto lookup_us =
@@ -264,7 +337,7 @@ TEST(LobbyPerf, RegistryLock) {
   // A second lobby, so the parallel creates are not queued behind the sequential ones.
   ex_actor::ActorRef<LobbyActor> parallel_lobby =
       WaitValue(ex_actor::Spawn<LobbyActor>(/*seed=*/2, kFastWindowMs, timer, kFastReclaimMs));
-  stdexec::sync_wait(parallel_lobby.SendLocal<&LobbyActor::SetSelfRef>(parallel_lobby));
+  stdexec::sync_wait(parallel_lobby.Send<&LobbyActor::SetSelfRef>(parallel_lobby));
   std::vector<ex_actor::ActorRef<SeatEndpoint>> parallel_seats;
   parallel_seats.reserve(kRooms);
   for (int i = 0; i < kRooms; ++i) {
@@ -274,13 +347,13 @@ TEST(LobbyPerf, RegistryLock) {
   const auto parallel_started = std::chrono::steady_clock::now();
   exec::async_scope creates;
   for (int i = 0; i < kRooms; ++i) {
-    creates.spawn(parallel_lobby.SendLocal<&LobbyActor::CreateRoom>(parallel_seats[static_cast<size_t>(i)],
+    creates.spawn(parallel_lobby.Send<&LobbyActor::CreateRoom>(parallel_seats[static_cast<size_t>(i)],
                                                                     make_player(kRooms + i)));
   }
   stdexec::sync_wait(creates.on_empty());
   const auto parallel_us =
       std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - parallel_started).count();
-  ASSERT_EQ(WaitValue(parallel_lobby.SendLocal<&LobbyActor::room_count>()), static_cast<size_t>(kRooms));
+  ASSERT_EQ(WaitValue(parallel_lobby.Send<&LobbyActor::room_count>()), static_cast<size_t>(kRooms));
 
   std::cout << "BENCH sequential CreateRoom x" << kRooms << ": " << (sequential_us / 1000) << " ms ("
             << (sequential_us / kRooms) << " us/op)\n";
@@ -333,7 +406,7 @@ TEST(RoomPerf, ConcurrentRooms) {
       PlayerInfo player;
       player.player_id = "p-" + std::to_string(i);
       player.name = "n";
-      stdexec::sync_wait(actors.back().SendLocal<&RoomActor::Dispatch>(RoomEnvelope::Ready(std::move(player))));
+      stdexec::sync_wait(actors.back().Send<&RoomActor::Dispatch>(RoomEnvelope::Ready(std::move(player))));
     }
 
     const auto started = std::chrono::steady_clock::now();
@@ -342,7 +415,7 @@ TEST(RoomPerf, ConcurrentRooms) {
       PlayerInfo player;
       player.player_id = "p-" + std::to_string(i);
       player.name = "n";
-      games.spawn(actors[static_cast<size_t>(i)].SendLocal<&RoomActor::Dispatch>(
+      games.spawn(actors[static_cast<size_t>(i)].Send<&RoomActor::Dispatch>(
           RoomEnvelope::PlayerDisconnected(std::move(player))));
     }
     stdexec::sync_wait(games.on_empty());
@@ -351,8 +424,8 @@ TEST(RoomPerf, ConcurrentRooms) {
 
     uint64_t seq_sum = 0;
     for (const ex_actor::ActorRef<RoomActor>& room : actors) {
-      ASSERT_TRUE(WaitValue(room.SendLocal<&RoomActor::game_finished>()));
-      seq_sum += WaitValue(room.SendLocal<&RoomActor::seq>());
+      ASSERT_TRUE(WaitValue(room.Send<&RoomActor::game_finished>()));
+      seq_sum += WaitValue(room.Send<&RoomActor::seq>());
     }
     std::cout << "BENCH " << rooms << " rooms on " << kPool << " workers: " << us << " us ("
               << (us / rooms) << " us/room, mean seq " << (seq_sum / static_cast<uint64_t>(rooms)) << ")\n";

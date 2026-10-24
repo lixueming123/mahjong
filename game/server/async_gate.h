@@ -29,7 +29,7 @@
 // its handler and was released on another thread would break this invariant — and this class.
 //
 // It is the caller's job to make the entry the *only* way in: keep the real handler private so
-// `SendLocal<&Actor::Handle>` cannot compile and the gate cannot be bypassed.
+// `Send<&Actor::Handle>` cannot compile and the gate cannot be bypassed.
 //
 // Resumption cost, accepted on purpose: `Release` resumes the next waiter inline, so that
 // handler continues on the releasing thread and consecutive waiters nest on the call stack

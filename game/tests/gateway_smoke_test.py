@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import random
+import re
 import socket
 import subprocess
 import sys
@@ -38,6 +39,8 @@ DEFAULT_BIN_CANDIDATES = (
     "build/game/Release/mahjong_server",
 )
 MAX_FRAME_BYTES = 65536
+# PROTOCOL.md §4.2: room ids are "r-" plus 13 lowercase base-36 digits.
+ROOM_ID_PATTERN = re.compile(r"r-[0-9a-z]{13}")
 
 
 class TestFailure(AssertionError):
@@ -365,8 +368,8 @@ def test_two_connections_are_isolated(port: int) -> None:
 
         alpha.send({"type": "create_room"})
         joined = alpha.expect_type("room_joined")
-        if not isinstance(joined.get("room_id"), str) or not joined["room_id"].startswith("r-"):
-            raise TestFailure(f"room_joined.room_id must look like r-0001: {joined!r}")
+        if not isinstance(joined.get("room_id"), str) or not ROOM_ID_PATTERN.fullmatch(joined["room_id"]):
+            raise TestFailure(f"room_joined.room_id must look like r-<13 base36>: {joined!r}")
         if joined.get("seat") != 0:
             raise TestFailure(f"create_room must seat the caller at 0: {joined!r}")
         seats = joined.get("seats")

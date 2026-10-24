@@ -7,13 +7,13 @@
 //   * three server-side AI seats (synchronous decisions, never awaiting another actor);
 //   * settlement through the pure rules library (game/docs/RULESET.md, H8).
 //
-// Threading model: every message arrives through `Dispatch`, which holds the actor's gate for
-// the whole handler (async_gate.h), so exactly one transition is in flight at a time and the
-// state machine needs no locks of its own. That is what the framework does not give on its own:
-// it starts the next message as soon as a handler suspends, and the room is expected to start
-// suspending (see the Deliver note in room.cc), so the gate has to be taken here. The
-// introspection getters below are deliberately outside that rule — nothing but the unit tests
-// and logging reads room state from outside.
+// Threading model: every message arrives through `Dispatch` (or the request/response
+// `TakeSeat`), each holding the actor's gate for the whole handler (async_gate.h), so exactly
+// one transition is in flight at a time and the state machine needs no locks of its own. That
+// is what the framework does not give on its own: it starts the next message as soon as a
+// handler suspends, and the room is expected to start suspending (see the Deliver note in
+// room.cc), so the gate has to be taken here. The introspection getters below are deliberately
+// outside that rule — nothing but the unit tests and logging reads room state from outside.
 
 #pragma once
 
@@ -31,6 +31,7 @@
 #include "async_gate.h"
 #include "ex_actor/api.h"
 #include "json.h"
+#include "json_rfl.h"
 #include "mahjong_rules.h"
 #include "player.h"
 #include "seat_endpoint.h"
@@ -41,8 +42,9 @@ namespace mahjong {
 inline constexpr int kSeatCount = 4;
 
 // Schedules the frozen "window timeout" message: after |delay_ms| the scheduler must call
-// RoomActor::OnWindowTimeout(|window_seq|). The actor world injects the real implementation
-// (WindowTimer + the room's own ActorRef); tests inject a capturing one.
+// RoomActor::OnWindowTimeout(|window_seq|). Production installs it in ExActorOnSpawned from the
+// window timer and the room's own ActorRef; the unit test injects a capturing one, because a
+// function cannot be serialized into a message.
 using TimeoutScheduler = std::function<void(int64_t delay_ms, uint64_t window_seq)>;
 
 // One seat's outcome of a finished round. It carries the whole identity (not just the seat) so
@@ -69,13 +71,29 @@ struct GameSettlement {
   std::array<int, kSeatCount> final_rank {};    // 1..4，并列跳号
 };
 
-// Called once per finished round (v1.6: 4..8 times per match), so its owner (LobbyActor) can
-// store the per-round match record; the §1.4.5 reclaim is armed only when
-// `settlement.match_over` is true. Installed by the lobby right after Spawn; a room created
-// without one (unit tests) simply never notifies. The callback must not re-enter this actor
-// (the lobby's implementation only arms a delayed message and hands the result to the storage
-// thread).
+// Test seam for the per-round notification: a production room sends the settlement to the
+// LobbyActor that spawned it (a message, so it can be serialized), while the unit test injects
+// this capture callback. Called once per finished round (v1.6: 4..8 times per match); the
+// §1.4.5 reclaim is armed by the lobby only when `settlement.match_over` is true.
 using RoomFinishedCallback = std::function<void(const GameSettlement& settlement)>;
+
+// The room's narrow view of its owner, exactly like SeatEndpoint is the room's view of a seat:
+// LobbyActor implements it, the room only depends on this interface, and the unit test links
+// without the lobby. LobbyActor must derive *directly* from RoomOwner (single, non-virtual
+// inheritance) so the base subobject stays at offset 0 — ActorRef casts the concrete actor
+// pointer to the method pointer's class without a runtime check (seat_endpoint.h has the same
+// rule, and LobbyActor's constructor asserts it).
+class RoomOwner {
+ public:
+  RoomOwner() = default;
+  RoomOwner(const RoomOwner&) = delete;
+  RoomOwner& operator=(const RoomOwner&) = delete;
+  virtual ~RoomOwner() = default;
+
+  // Once per finished round: writes the per-round history and, on `match_over`, arms the
+  // reclaim (PROTOCOL.md §1.4.5, ACCOUNT_DESIGN.md §4).
+  virtual stdexec::task<void> OnRoomFinished(GameSettlement settlement) = 0;
+};
 
 // Derives one room's wall seed from the server-level seed and the room's 0-based creation
 // index (RoomActor's caller, LobbyActor, passes exactly this).
@@ -180,15 +198,16 @@ struct RoomSeat {
   ex_actor::ActorRef<SeatEndpoint> endpoint;
 };
 
-// One message into RoomActor. `Dispatch` is the room's only entry point, so every caller —
-// LobbyActor's sends, the timeout scheduler, the game-end notification and the unit tests —
-// builds one of these instead of naming a handler.
+// One message into RoomActor. `Dispatch` is the room's message entry point (the only exception
+// is the request/response `TakeSeat`, room.h), so every caller — LobbyActor's sends, the
+// timeout scheduler and the unit tests — builds one of these instead of naming a handler.
 //
 // As in PlayerEnvelope (seat_endpoint.h), the kind is the variant alternative, so a message
-// carries exactly its own fields. The flat version was 360 bytes for every message: the window
-// timeout — the most frequent one — paid for a PlayerInfo, a json::Value, two std::functions
-// and a RoomSeat on each of the ~5 by-value moves into the mailbox. The variant is 160 bytes,
-// and its floor is GameFrameMsg, which really does carry a player and a frame.
+// carries exactly its own fields. The flat version paid for a PlayerInfo, a json::Value and a
+// RoomSeat on every message — the window timeout, the most frequent one, included — on each of
+// the ~5 by-value moves into the mailbox. The variant charges each message only for its own
+// payload (its floor is WindowTimeoutMsg), and every alternative is plain data, so the whole
+// envelope can be serialized.
 struct RoomEnvelope {
   struct ReadyMsg {  // lobby -> room: this player is ready; deals when the seats are full
     PlayerInfo player;
@@ -211,17 +230,6 @@ struct RoomEnvelope {
   struct IdleTimeoutMsg {
     PlayerInfo player;
   };
-  struct InstallTimeoutSchedulerMsg {
-    TimeoutScheduler scheduler;
-  };
-  struct InstallFinishedCallbackMsg {
-    RoomFinishedCallback finished;
-  };
-  // Replace one seat before the deal. |accepted| is set on the room's thread.
-  struct TakeSeatMsg {
-    RoomSeat seat_slot;
-    std::shared_ptr<bool> accepted;
-  };
 
   static RoomEnvelope Ready(PlayerInfo player) { return {ReadyMsg {std::move(player)}}; }
   static RoomEnvelope Sync(PlayerInfo player) { return {SyncMsg {std::move(player)}}; }
@@ -231,18 +239,8 @@ struct RoomEnvelope {
   static RoomEnvelope WindowTimeout(uint64_t token) { return {WindowTimeoutMsg {token}}; }
   static RoomEnvelope PlayerDisconnected(PlayerInfo player) { return {PlayerDisconnectedMsg {std::move(player)}}; }
   static RoomEnvelope IdleTimeout(PlayerInfo player) { return {IdleTimeoutMsg {std::move(player)}}; }
-  static RoomEnvelope InstallTimeoutScheduler(TimeoutScheduler scheduler) {
-    return {InstallTimeoutSchedulerMsg {std::move(scheduler)}};
-  }
-  static RoomEnvelope InstallFinishedCallback(RoomFinishedCallback callback) {
-    return {InstallFinishedCallbackMsg {std::move(callback)}};
-  }
-  static RoomEnvelope TakeSeat(RoomSeat seat, std::shared_ptr<bool> accepted) {
-    return {TakeSeatMsg {.seat_slot = std::move(seat), .accepted = std::move(accepted)}};
-  }
 
-  std::variant<ReadyMsg, SyncMsg, GameFrameMsg, WindowTimeoutMsg, PlayerDisconnectedMsg, IdleTimeoutMsg,
-               InstallTimeoutSchedulerMsg, InstallFinishedCallbackMsg, TakeSeatMsg>
+  std::variant<ReadyMsg, SyncMsg, GameFrameMsg, WindowTimeoutMsg, PlayerDisconnectedMsg, IdleTimeoutMsg>
       msg;
 };
 
@@ -250,15 +248,37 @@ class RoomActor {
  public:
   // |ai_delay_ms| < 0 means "use the process-wide value" (AiActionDelayMs()); the same applies
   // to |inter_hand_delay_ms| (InterHandDelayMs()).
+  //
+  // |owner| is the lobby that spawned this room: the room reports every finished round to it
+  // (GameSettlement) and never writes match history itself. Empty in the unit test, which
+  // passes |finished_for_test| instead. The two "for test" seams exist because a scheduler and
+  // a capture callback are process-local behavior — they cannot be part of a serializable
+  // message (the production scheduler is installed by ExActorOnSpawned from |timer|).
   RoomActor(std::string room_id, uint64_t seed, int action_timeout_ms, std::vector<RoomSeat> seats,
-            std::shared_ptr<WindowTimer> timer, int ai_delay_ms = -1,
-            int inter_hand_delay_ms = -1);
+            std::shared_ptr<WindowTimer> timer, int ai_delay_ms = -1, int inter_hand_delay_ms = -1,
+            ex_actor::ActorRef<RoomOwner> owner = {}, TimeoutScheduler timeout_scheduler = {},
+            RoomFinishedCallback finished_for_test = {});
 
-  // The room's only entry point, and the only place the gate is taken. Every handler below is
-  // private, so no caller can reach room state without passing the gate (async_gate.h explains
-  // why that matters). It is a coroutine, so a non-actor caller — the unit test drives the room
-  // directly — has to start it (stdexec::sync_wait).
+  // ex_actor hands every actor its own ref right after construction. The room needs it to post
+  // the frozen window timeout back to itself, so it installs the production scheduler here
+  // instead of receiving a std::function through a message (which could never be serialized).
+  void ExActorOnSpawned(const ex_actor::ActorRuntimeInfo<RoomActor>& info);
+
+  // The room's only message entry point, and the only place the gate is taken for messages.
+  // Every handler below is private, so no caller can reach room state without passing the gate
+  // (async_gate.h explains why that matters). It is a coroutine, so a non-actor caller — the
+  // unit test drives the room directly — has to start it (stdexec::sync_wait).
   stdexec::task<void> Dispatch(RoomEnvelope envelope);
+
+  // Pre-deal seat replacement, request/response: the outcome travels back as the return value
+  // because a `shared_ptr<bool>` reply slot is cross-thread shared state that cannot be
+  // serialized. Takes the gate like Dispatch does.
+  stdexec::task<bool> TakeSeat(RoomSeat seat);
+
+  // Test seam (the unit test installs it right after construction, before any traffic):
+  // production rooms report through |owner| instead. Deliberately not a message — a
+  // std::function cannot be serialized.
+  void SetFinishedCallbackForTest(RoomFinishedCallback callback) { finished_for_test_ = std::move(callback); }
 
   // Pure claim policy of an automated seat (exposed so it can be unit-tested directly with
   // crafted hands; RoomActor::OpenClaimWindow calls exactly this function for bots, and
@@ -309,12 +329,8 @@ class RoomActor {
 
  private:
   // Reached only through Dispatch, i.e. only while gate_ is held.
-  // LobbyActor installs the timeout scheduler right after Spawn (PROTOCOL.md §0.5).
-  void SetTimeoutScheduler(TimeoutScheduler scheduler);
-  // LobbyActor installs the game-end notification right after Spawn (PROTOCOL.md §1.4.5).
-  void SetFinishedCallback(RoomFinishedCallback callback);
   // Before the deal: take a bot seat, or put a bot back. No-op once the game has started.
-  void TakeSeat(RoomSeat seat, const std::shared_ptr<bool>& accepted);
+  bool TakeSeatLocked(RoomSeat seat);
 
   // Client intents, already shape-checked by PlayerActor and room-checked by LobbyActor.
   stdexec::task<void> Ready(PlayerInfo player);
@@ -519,7 +535,12 @@ class RoomActor {
   int claim_pending_humans_ = 0;
 
   TimeoutScheduler timeout_scheduler_;
-  RoomFinishedCallback finished_callback_;
+  // Set only by the unit test; production reports through |owner_| instead.
+  RoomFinishedCallback finished_for_test_;
+  // The lobby that spawned this room (empty in the unit test).
+  ex_actor::ActorRef<RoomOwner> owner_;
+  // Filled by ExActorOnSpawned; the scheduler posts timeouts through it.
+  ex_actor::ActorRef<RoomActor> self_ref_;
 
   std::shared_ptr<WindowTimer> timer_;
   // AI pacing (GAME_DESIGN v1.4 §5.4). A pending flag means a decision of this window is

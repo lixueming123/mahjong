@@ -135,7 +135,7 @@ void RecordMaxInside(OverlapDetector& detector, int candidate) {
 }
 
 // The actor side of the "single door" pattern: the framework can only reach `Entries` (the
-// base's member, inherited), and the real handler stays private so `SendLocal<&Actor::Handle>`
+// base's member, inherited), and the real handler stays private so `Send<&Actor::Handle>`
 // cannot compile. `OnArrived` is the hook the tests use to observe messages that are at the
 // door but not through it; it must not touch actor state.
 template <class Impl, class... Args>
@@ -309,7 +309,7 @@ TEST(AsyncGateTest, HandlersDoNotOverlapAndEntriesStayInOrder) {
     auto actor = co_await ex_actor::Spawn<SerializedActor>(detector, turnstile);
 
     for (int turn = 1; turn <= kMessages; ++turn) {
-      exec::start_detached(actor.SendLocal<&SerializedActor::Entries>(turn));
+      exec::start_detached(actor.Send<&SerializedActor::Entries>(turn));
     }
 
     // Every message reached the door, but exactly one got through it: the rest are parked on
@@ -365,7 +365,7 @@ TEST(AsyncGateTest, BurstStaysSerializedAndLosesNoWakeups) {
     auto actor = co_await ex_actor::Spawn<SerializedActor>(detector, turnstile);
 
     for (int turn = 1; turn <= kMessages; ++turn) {
-      exec::start_detached(actor.SendLocal<&SerializedActor::Entries>(turn));
+      exec::start_detached(actor.Send<&SerializedActor::Entries>(turn));
     }
     if (!WaitForOrFail([&] { return detector->arrived.load() == kMessages && OrderSize(*detector) == 1; },
                        "all 200 messages at the door and the first one inside")) {
@@ -403,12 +403,12 @@ TEST(AsyncGateTest, ParkedWaiterDoesNotHoldThePoolThread) {
     auto serialized = co_await ex_actor::Spawn<SerializedActor>(detector, turnstile);
     auto other = co_await ex_actor::Spawn<CounterActor>(count);
 
-    exec::start_detached(serialized.SendLocal<&SerializedActor::Entries>(1));
+    exec::start_detached(serialized.Send<&SerializedActor::Entries>(1));
     if (!WaitForOrFail([&] { return detector->inside.load() == 1; }, "the handler to park inside the gate")) {
       co_return;
     }
 
-    exec::start_detached(other.SendLocal<&CounterActor::Bump>());
+    exec::start_detached(other.Send<&CounterActor::Bump>());
     if (!WaitForOrFail([&] { return count->load() == 1; }, "the other actor to run while the gate is held")) {
       co_return;
     }
@@ -420,11 +420,11 @@ TEST(AsyncGateTest, ParkedWaiterDoesNotHoldThePoolThread) {
 
     // Now the other kind of waiting: a handler parked *on* the gate (not inside it). It must
     // give up the single pool thread too.
-    exec::start_detached(serialized.SendLocal<&SerializedActor::Entries>(2));
+    exec::start_detached(serialized.Send<&SerializedActor::Entries>(2));
     if (!WaitForOrFail([&] { return detector->arrived.load() == 2; }, "the second handler to park on the gate")) {
       co_return;
     }
-    exec::start_detached(other.SendLocal<&CounterActor::Bump>());
+    exec::start_detached(other.Send<&CounterActor::Bump>());
     if (!WaitForOrFail([&] { return count->load() == 2; }, "the other actor to run while a waiter is parked on the gate")) {
       co_return;
     }
@@ -462,12 +462,12 @@ TEST(AsyncGateTest, GateIsTouchedFromDifferentThreadsByHandlersOfOneActor) {
     auto first_blocker = co_await ex_actor::Spawn<BlockerActor>();
     auto second_blocker = co_await ex_actor::Spawn<BlockerActor>();
 
-    exec::start_detached(actor.SendLocal<&SerializedActor::Entries>(1));
+    exec::start_detached(actor.Send<&SerializedActor::Entries>(1));
     if (!WaitForOrFail([&] { return detector->inside.load() == 1; }, "the first handler to hold the gate")) {
       co_return;
     }
     // Parks on the gate, recording the worker that ran its activation.
-    exec::start_detached(actor.SendLocal<&SerializedActor::Entries>(2));
+    exec::start_detached(actor.Send<&SerializedActor::Entries>(2));
     if (!WaitForOrFail([&] { return detector->arrived.load() == 2; }, "the second handler to reach the gate")) {
       co_return;
     }
@@ -475,6 +475,8 @@ TEST(AsyncGateTest, GateIsTouchedFromDifferentThreadsByHandlersOfOneActor) {
     auto first_control = std::make_shared<BlockerControl>();
     auto second_control = std::make_shared<BlockerControl>();
     BlockersReleaseOnExit release_on_exit {first_control.get(), second_control.get()};
+    // Deliberately SendLocal: a BlockerControl is atomics and shared memory, i.e. process-local
+    // test scaffolding that could never be serialized. Every game message uses Send.
     exec::start_detached(first_blocker.SendLocal<&BlockerActor::Block>(first_control));
     exec::start_detached(second_blocker.SendLocal<&BlockerActor::Block>(second_control));
     if (!WaitForOrFail([&] { return first_control->started.load() && second_control->started.load(); },
@@ -530,13 +532,13 @@ TEST(AsyncGateTest, ExceptionInsideCriticalSectionStillReleasesTheGate) {
     auto detector = std::make_shared<OverlapDetector>();
     auto actor = co_await ex_actor::Spawn<ThrowingActor>(detector);
 
-    co_await actor.SendLocal<&ThrowingActor::Entries>(1);
+    co_await actor.Send<&ThrowingActor::Entries>(1);
     EXPECT_EQ(detector->finished.load(), 1);
 
     // The failure must reach the caller...
     bool threw = false;
     try {
-      co_await actor.SendLocal<&ThrowingActor::Entries>(2);
+      co_await actor.Send<&ThrowingActor::Entries>(2);
     } catch (const std::exception& error) {
       threw = true;
       EXPECT_NE(std::string(error.what()).find("boom from handler 2"), std::string::npos);
@@ -546,7 +548,7 @@ TEST(AsyncGateTest, ExceptionInsideCriticalSectionStillReleasesTheGate) {
     // ...and the gate must have been released while that coroutine unwound. If it were not,
     // #3 would park on a gate nobody ever unlocks and this test would hang until the ctest
     // timeout rather than fail an expectation.
-    co_await actor.SendLocal<&ThrowingActor::Entries>(3);
+    co_await actor.Send<&ThrowingActor::Entries>(3);
     EXPECT_EQ(detector->finished.load(), 2);
     EXPECT_EQ(detector->max_inside.load(), 1);
   };
@@ -596,9 +598,9 @@ TEST(AsyncGateTest, PinnedActorKeepsHandlerAndContinuationOnOneThread) {
     auto turnstile = std::make_shared<Turnstile>();
     auto actor = co_await ex_actor::Spawn<SerializedActor>(detector, turnstile).WithConfig({.core_index = 0});
 
-    exec::start_detached(actor.SendLocal<&SerializedActor::Entries>(1));
+    exec::start_detached(actor.Send<&SerializedActor::Entries>(1));
     if (!WaitForOrFail([&] { return detector->inside.load() == 1; }, "first handler inside")) { co_return; }
-    exec::start_detached(actor.SendLocal<&SerializedActor::Entries>(2));
+    exec::start_detached(actor.Send<&SerializedActor::Entries>(2));
     if (!WaitForOrFail([&] { return detector->arrived.load() == 2; }, "second handler arrived")) { co_return; }
 
     turnstile->PassThrough(1);
@@ -695,14 +697,14 @@ TEST(AsyncGateTest, MessagesOfOneActorNeverExecuteSimultaneously) {
     auto turnstile = std::make_shared<Turnstile>();
     auto actor = co_await ex_actor::Spawn<ProbeActor>(probe, turnstile);
 
-    exec::start_detached(actor.SendLocal<&ProbeActor::Slow>());
+    exec::start_detached(actor.Send<&ProbeActor::Slow>());
     if (!WaitForOrFail([&] { return probe->slow_at_door.load(); }, "the slow handler to reach its suspension")) {
       co_return;
     }
     // Let the activation return so the handler is genuinely suspended before it is released.
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    exec::start_detached(actor.SendLocal<&ProbeActor::Fast>());
+    exec::start_detached(actor.Send<&ProbeActor::Fast>());
     if (!WaitForOrFail([&] { return probe->fast_running.load(); }, "the second handler to run")) {
       co_return;
     }

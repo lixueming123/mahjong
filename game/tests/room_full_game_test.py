@@ -36,6 +36,7 @@ import argparse
 import json
 import os
 import random
+import re
 import socket
 import subprocess
 import sys
@@ -51,6 +52,8 @@ DEFAULT_BIN_CANDIDATES = (
     "build/game/Release/mahjong_server",
 )
 SEAT_COUNT = 4
+# PROTOCOL.md §4.2: room ids are "r-" plus 13 lowercase base-36 digits.
+ROOM_ID_PATTERN = re.compile(r"r-[0-9a-z]{13}")
 # Tile order is m < p < s < z (the frozen encoding); the exact suit order never matters for
 # the equality checks below because both sides are sorted with this same key, and the
 # "server sent them sorted" checks only assert suit grouping + ascending ranks.
@@ -734,8 +737,9 @@ def run_multi_room_scenario(binary: str, seed: int, verbose: bool, port: int | N
     """t27: every room of one server must deal a different wall, and the mapping must stay a
     pure function of (server seed, room creation order) so a fixed --seed is reproducible.
 
-    It drives the real gateway/lobby: each client creates its own room (r-0001, r-0002, ...)
-    and readies up, which yields that room's `game_start` hand.
+    It drives the real gateway/lobby: each client creates its own room and readies up, which
+    yields that room's `game_start` hand. Room ids must be globally unique — distinct within
+    one server run and never reused by a later run (PROTOCOL.md §4.2).
     """
 
     def collect(server_port: int, rooms: int) -> list[tuple[str, list[str]]]:
@@ -782,7 +786,13 @@ def run_multi_room_scenario(binary: str, seed: int, verbose: bool, port: int | N
     first = one_server(seed)
     second = one_server(seed)
 
-    check([room for room, _ in first] == ["r-0001", "r-0002", "r-0003"], f"unexpected room ids: {first}")
+    first_ids = [room for room, _ in first]
+    second_ids = [room for room, _ in second]
+    check(len(set(first_ids)) == len(first_ids), f"room ids within one server must be distinct: {first_ids}")
+    for room in first_ids:
+        check(ROOM_ID_PATTERN.fullmatch(room) is not None, f"unexpected room id format: {room!r}")
+    check(not set(first_ids) & set(second_ids),
+          f"a server restart reused a room id: {first_ids} vs {second_ids}")
     # (1) the three rooms of one server must not deal the same wall
     for i in range(len(first)):
         for j in range(i + 1, len(first)):

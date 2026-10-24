@@ -88,7 +88,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | 默认端口 | **9527**（服务端 `--port` 可覆盖） |
 | 客户端默认目标 | `127.0.0.1:9527`（`--host` / `--port` 可覆盖） |
 | 端到端脚本端口 | **19527**（避免与本机默认端口冲突） |
-| 传输 | 纯 TCP（无 TLS、无 WebSocket、无 ZeroMQ；本里程碑单进程，actor 之间用 `SendLocal`） |
+| 传输 | 纯 TCP（无 TLS、无 WebSocket、无 ZeroMQ；本里程碑单进程，actor 之间统一用 `Send`，消息体全部可序列化） |
 
 ### 1.2 编码与分帧（NDJSON）
 
@@ -270,12 +270,12 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 
 - 行为：创建房间，调用者占据 `seat = 0`；`seat = 1,2,3` 先是 AI（`is_bot = true`，昵称 `AI-1`/`AI-2`/`AI-3`）。**不**发牌、**不**把房间标成已开局。
 - 成功 → `room_joined`；已经在任意房间里 → `error{code:"BAD_REQUEST"}`（`message:"already in a room"`）；未登录 → `NOT_LOGGED_IN`。
-- `room_id` 格式：`r-####`（4 位十进制，进程内从 1 递增）。
+- `room_id` 格式：`r-` + **13 位小写 36 进制**（由进程级 36 比特随机标记与进程内 28 比特递增序号拼成，如 `r-0f3k9m2p7q1sx`）。**全局唯一**：同一进程内由序号保证；重启服务器或同库多进程由随机标记区分，**绝不复用**旧 `room_id`（账号库 `match_results` 以 `(room_id, account_id)` 为唯一键，复用会让新场次被误判成重复写入而丢弃，见 `ACCOUNT_DESIGN.md` §4）。
 
 ### 4.3 `join_room`
 
 ```json
-{"type":"join_room","room_id":"r-0001"}
+{"type":"join_room","room_id":"r-0f3k9m2p7q1sx"}
 ```
 
 - 只在目标房间**还没**收到 `ready` 时成功：把编号最小的 AI 座位换成该玩家，`seat` 为该编号。已经坐在这间房里再发一次 → 再回一帧当前的 `room_joined`，状态不变。
@@ -432,7 +432,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 ### 5.3 `room_joined`
 
 ```json
-{"type":"room_joined","room_id":"r-0001","seat":0,
+{"type":"room_joined","room_id":"r-0f3k9m2p7q1sx","seat":0,
  "seats":[{"seat":0,"name":"玩家_","is_bot":false},
           {"seat":1,"name":"AI-1","is_bot":true},
           {"seat":2,"name":"AI-2","is_bot":true},
@@ -682,7 +682,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 
 ```json
 {"type":"stats","games":12,"wins":5,"draws":3,"net_score":-14,
- "recent":[{"room_id":"r-0007","reason":"win_ron","delta_score":12,"win":true,"ended_at":1759900000}]}
+ "recent":[{"room_id":"r-7t2h4r8w1n6cz","reason":"win_ron","delta_score":12,"win":true,"ended_at":1759900000}]}
 ```
 
 | 字段 | 类型 | 说明 |
@@ -699,13 +699,13 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 ### 5.14 `room_list`（v1.5）
 
 ```json
-{"type":"room_list","rooms":[{"room_id":"r-0001","host":"小明","players":1,"seats":4}]}
+{"type":"room_list","rooms":[{"room_id":"r-0f3k9m2p7q1sx","host":"小明","players":1,"seats":4}]}
 ```
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `rooms[]` | array | 还没开局的房间；没有则为 `[]` |
-| `rooms[].room_id` | string | `r-####` |
+| `rooms[].room_id` | string | `r-` + 13 位小写 36 进制（§4.2） |
 | `rooms[].host` | string | `seat 0` 的昵称 |
 | `rooms[].players` | int | 已入座的真人数（1..4） |
 | `rooms[].seats` | int | 恒为 4 |
@@ -957,7 +957,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 C→S {"type":"login","name":"玩家_"}
 S→C {"type":"login_ok","player_id":"p-3f2a1c","name":"玩家_"}
 C→S {"type":"create_room"}
-S→C {"type":"room_joined","room_id":"r-0001","seat":0,"seats":[…]}
+S→C {"type":"room_joined","room_id":"r-0f3k9m2p7q1sx","seat":0,"seats":[…]}
 C→S {"type":"ready"}
 S→C {"type":"game_start","seat":0,"dealer":0,"hand":[14 张]}          # 庄家 = 真人
 ```
@@ -1336,6 +1336,8 @@ remaining(tile) = 4
 
 | 版本 | 内容 | 来源 |
 | --- | --- | --- |
+| **v1.10** | **实现口径（非线协议）**：§1.1 传输行由「actor 之间用 `SendLocal`」改为「统一用 `Send`，消息体全部可序列化」。为此房间的定时器改为 `ExActorOnSpawned` 自装、结算通知改为 `RoomOwner::OnRoomFinished` 消息、选座改为 `task<bool> TakeSeat` 请求/应答，`json::Value` 增加 reflect-cpp 反射。**线协议零改动**：帧形状、错误码、时序、`seq`、配额与数值全部未动 | 用户需求（统一 `Send`；为将来跨节点留出通路） |
+| **v1.9** | **房间号全局唯一**：§4.2 `room_id` 格式由 `r-####`（4 位十进制，进程内从 1 递增）改为 `r-` + **13 位小写 36 进制**（36 比特进程级随机标记 + 28 比特进程内递增序号）。重启服务器、同库多进程都不再复用旧编号——账号库 `match_results` 的 `(room_id, account_id)` 唯一键不会再把一个新场次误判为重复写入而丢弃。§5.14 `room_list.rooms[].room_id` 与 §4.3/§5.3/§5.13/§5.14/§9 的示例同步。**未改动**：帧的字段形状、消息条数、错误码、时序、`seq` 规则、配额与其余全部口径 | 用户需求（房间号需全局唯一，重启服务器也不复用） |
 | **v1.8** | **结算播报增补**：① §5.10 `game_end` **只增字段** `interlude_ms`（本房间局间窗口，缺省 `12000`；客户端据 `clamp(interlude_ms − 1500, 4200, 10500)` 算播报预算），`reason`/`results`/`win` 既有形状不变；② **番数口径澄清**（C9）：`win.han_breakdown.tsumo` **恒 0**、仅作兼容占位，封顶公式与合计均为 `min(base + dealer, 6)`，客户端**不得出现任何自摸加成项**；③ **场终延迟**（C8）：`match_end` 由服务端延迟 `interlude_ms` 后下发，客户端**不得缓存/缓冲**权威帧——`game_end` 到达即起播、`match_end` 到达即切场终页。**零新增错误码**；帧数、`seq` 规则、15 s 窗口、136/83/84/21 与零和约束全部未动 | 主理人裁决（`SETTLEMENT_BROADCAST_RULINGS.md` v1.5 §1 C8/C9、§2.1；用户需求「结算播报」） |
 | **v1.7** | **B 批增补**（手感表现的数据通路），零新增错误码：① 新增 §11「听牌提示与表现事件」整节 + **§5.16 `tenpai` 帧**（S→C **14 → 15** 条）；② `tenpai` **仅发本家**、独立低频帧，**不塞 `state_sync`**（三条理由：`state_sync` 是四家广播热路径；其 `seats` 块是"一次渲染喂四家"的共享缓存；听牌只在"本家手牌变化"时有意义，挂四家热路径语义错配）；③ **`tenpai_seq` 与 `room.seq` 解耦**（独立每座位单调计数器，跨局不重置）——若挂载 `room.seq`，"打牌后"这一刻的 seq 尚在变化中，`tenpai` 可能带出比随后 `action_request` 更大的 seq，客户端会把它当过期帧丢弃，**玩家收不到鸣牌请求、干等 15 s 超时**；④ 下发时机冻结 6 行 **T1–T6**（打牌后 / 副露后 / **`sync` 后补发** / 摸牌后**不发（已裁决定案）** / 他家动作不发 / 局终·新局·场终不发），其中 T3 是"把 `waits` 从 `state_sync` 搬出来之后必须补上的一条，否则 `sync` 的权威对齐语义被破坏"；T4 **已裁决为"不发"**（14 张口径无"听牌"定义，按"打掉刚摸那张"算等于替玩家预设打法，与 `FEEL_SPEC` §0 第 4 条相抵；`FEEL_SPEC` v1.4/v1.5 已实际删除该时机，主理人追认为定案）；⑤ `remaining` 冻结"**只减公开可见张数**"，**他家暗杠的 4 张不扣减**（扣了就能从"某面突降 4"反推出暗杠牌面，等于从 `remaining` 侧重新打开 §5.9 的打码），**牌山真值永不入帧**（会反解出三家暗手牌中某面的精确总数）；⑥ 三条性能预算 PB-1（`WaitingTiles` ≤ 200 µs，门禁）/ PB-2（`tenpai` 构建 ≤ 300 µs、帧 < 1 KB，超线先上"34 面可见计数增量表"、再退化为"仅变化时下发"）/ PB-3（零陈旧，门禁，不做缓存）；⑦ **修正 v1.6 缺陷**：`action_event{action:"ankan"}` 的 `tiles` **恒为 `[]`**（v1.6 广播 `[T]` 会把暗杠牌面泄露给三家）；⑧ §11.6 事件矩阵 E1–E13（含"连庄连续两次自摸靠 `seq` 而非 `round_index` 区分"）、§11.7 客户端四条陷阱 P1–P4（新增 P4：不得用 `room.seq` 规则处理 `tenpai`）；⑨ §6.2 第 3 条"不携带 `seq`"清单增 `tenpai`；§8.1 私有信息矩阵增「本家听牌」一行；⑩ **新增通则 H11**（§0.2）：「广播帧不得承载保密信息」——部分保密的动作只广播"发生了"（`seat`+`action`），内容走私有视角或局终揭示，**禁止**"本人真值/他家空值"的双份广播；⑪ **两个 `remaining` 显式消歧**（§5.16 对照表 + §11.3/§11.6 交叉引用）：`state_sync.remaining` = 牌山剩余（随每次摸牌 −1，全体公开），`tenpai.waits[].remaining` = 单牌面可见枚数（别人摸进暗手牌时**不变**，仅本家）——E2「他家摸牌」只用前者，并写明三条禁令（不得用 `waits[].remaining`、不得单用 `hand_count`、不新增 `draw_event`）；⑫ **同版内口径修正**：撤掉 §11.3 公式里的"− 已结算各局公开手牌"项（**每局重新洗牌 ⇒ 上一局的揭示牌与本局牌山不是同一批物理牌**，扣了会让 `remaining` 虚低），配套的"扁平手牌去重规则"一并作废，并写明实现禁令「**不得为听牌维护任何跨局可见牌集**」；`remaining` 只统计本局 4 项输入；⑬ §5.16 增**客户端禁令**（`tenpai_seq` MUST NOT 写入 `last_seq`/`current_seq`、不得因它关窗/清 PENDING），与 `UI_UX_SPEC.md` v2.2 §10.3 同口径；⑭ §11.3 增**代码侧命名要求**（`wall_remaining_` / `visible_left` 必须分开命名，禁止两者都叫 `remaining`） | captain 裁决（B 批「手感表现」需求：听牌由服务端下发、不复制规则到客户端；`FEEL_SPEC.md` v1.0 §2.1 的 `tenpai` 提案） |
 | **v1.6** | **A 批增补**（番型表 + 番数结算 + 一场四局/连庄/场次总分 + 暗杠/加杠），全部为**增补式**：① §4.6 `action` 动作词表 5 → **7**（+`ankan`、+`kakan`），合法性矩阵由 5 列扩 7 列，`tiles` 语义表增 2 行；**不新增窗口类型**（§6.1 明文，两者是 `discard` 窗口的附加 `options`）；② §5.9 `melds[].type` 3 → **5**（+`ankan`、+`kakan`），新增**暗杠私有权重**与**局终揭示时序契约**（他家 `tiles` 恒 `[]`，局终最后一份 `state_sync` 与 `game_end.results[].hand` 补全）；③ §5.4 `game_start` 增 `round_index`/`round_count`，`dealer` **不再恒为 0**；④ §5.10 `game_end` **只增字段**（`round_index`/`dealer`/`renchan_count`/`match_will_continue`/`results[].match_total`/`win.yaku[]`/`win.han_breakdown{base,tsumo,dealer,total}`/`win.han`/`win.dealer_bonus`/`win.rinshan`），`reason` 词表与既有字段形状一律不变（**`win.tags` 保持旧语义**、`results[].win_type` 保持旧形状），并澄清 `game_end` **仍只表示局终**；冻结 `win.yaku[].id` 的 14 个词汇与判定顺序（番值以 `RULESET` 为唯一权威）；⑤ 新增 §5.15 **`match_end`**（S→C 14 条），冻结 `rankings[]` 的排序与**并列跳号**口径；⑥ §6.2 第 5 条明确 **`seq` 跨局单调不重置**；⑦ §6.3 判定表增 3 行（打牌窗口回 `pass`、鸣牌窗口回 `ankan`/`kakan`、打牌窗口回鸣牌动作均 `ILLEGAL_ACTION`）；⑧ §6.4 冻结**超时/托管永不选杠**，并明确局间无窗口；⑨ §1.4 第 5 条回收时机改为**场终**（局终不回收），新增第 6 条局间契约；⑩ §0.2 **H1 重述**（按窗口 `options` 判定）、§0.4 局制改为「一场 4 局 + 连庄（max_rounds=4 / max_renchan=4）」并把抢杠列为**永久不做**、§0.6 把 136/83/84/21 标注为**每局**口径并写明杠补牌不改变上界；⑪ §8.1 私有信息矩阵增「暗杠」一行，§8.3 补暗杠/加杠重算与补牌不得由客户端触发；⑫ §9 增 §9.5（暗杠链路）与 §9.6（一场四局+连庄+场终）示例，§10 三份清单补场次级与暗杠自检项，附录 A 补 `match_end` 与字段速查。**零新增错误码（仍 14 条）**；既有 14 条错误码语义与阈值、15 s 窗口、`seq` 作废方案、136/83/84/21 数值、零和口径**全部未动**。**同版内口径修正（不升版）**：① `match_end.hands_played` 定为「本场实际手数 = `game_end` 下发次数，4..8」，早期草案的「= `round_count` 恒 4」与「`game_end` 次数 = `hands_played + renchan_count`」两条**作废**（恒等式退化为 `game_end 次数 = hands_played`，连庄由 `renchan_count` 单独承载）；② `game_end.renchan_count` 明确为**含本局的 post-increment 累计值**；③ 上游源头指针校正为 `GAME_DESIGN` v1.10 / `UI_UX_SPEC` v1.9 | captain 裁决（A 批需求评审，Q1–Q6；`hands_played` 三次裁决以 D2 终裁为准）；架构评估与改造点清单见 `A1_ARCH_ASSESSMENT.md`；实现落点提示见其 §3（C1–C15） |

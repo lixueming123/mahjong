@@ -7,7 +7,7 @@
 // Message ordering: ex_actor starts the next message as soon as the current handler suspends.
 // The registry (`players_`, `rooms_`, `creating_`, `self_ref_`) is only touched while `gate_`
 // is held, and the lock is dropped before any `co_await` that does not touch it (`Spawn`, a
-// seat `SendLocal`). `CreateRoom` reserves the player in `creating_` under the lock, spawns
+// seat `Send`). `CreateRoom` reserves the player in `creating_` under the lock, spawns
 // outside it, then commits or aborts under the lock again — a disconnect or a second
 // create_room during the spawn cannot both succeed (lobby_test.cc).
 
@@ -37,7 +37,9 @@ namespace mahjong {
 // the client disconnects first; this is how long it waits.
 inline constexpr int kGameEndReclaimMs = 30000;
 
-class LobbyActor {
+// RoomOwner is a direct, non-virtual base: ActorRef<RoomOwner> casts the concrete LobbyActor
+// pointer to the base without a runtime adjustment (room.h documents the rule).
+class LobbyActor : public RoomOwner {
  public:
   // |db| may be empty (unit tests, or a server without account support): the game then simply
   // records no match history (ACCOUNT_DESIGN.md §4).
@@ -49,7 +51,7 @@ class LobbyActor {
 
   // The lobby's own address, handed to it once by main() before the gateway accepts anything.
   // It is how the delayed "reclaim this room" message comes back (§1.4.5): an empty ref would
-  // make the reclaim's SendLocal throw on the timer thread, so CreateRoom refuses to build a
+  // make the reclaim's Send throw on the timer thread, so CreateRoom refuses to build a
   // room it could never reclaim.
   stdexec::task<void> SetSelfRef(ex_actor::ActorRef<LobbyActor> self);
 
@@ -63,6 +65,12 @@ class LobbyActor {
   // Game-end reclaim (§1.4.5): drops the room registry entry and closes the connections that
   // belonged to it. Scheduled by the room's game-end notification; idempotent.
   stdexec::task<void> ReapRoom(std::string room_id);
+
+  // A room reports every finished round here (ACCOUNT_DESIGN.md §4): the per-round match rows
+  // are written every time, and the reclaim is armed only when the match is over. This used to
+  // be a std::function the lobby installed into the room; a message keeps the room's envelope
+  // serializable and the behavior on the owner's side.
+  stdexec::task<void> OnRoomFinished(GameSettlement settlement) override;
 
   // Connection lifecycle (PROTOCOL.md §1.4, §1.6, §8.5).
   stdexec::task<void> OnConnectionClosed(PlayerInfo player);
@@ -98,6 +106,10 @@ class LobbyActor {
   uint64_t seed_;
   int action_timeout_ms_;
   int game_end_reclaim_ms_;
+  // Global-uniqueness tag for this lobby's room ids (lobby.cc: FormatRoomId). Drawn once so a
+  // restart never repeats the previous run's ids; the sequence below keeps them apart inside
+  // this process.
+  uint64_t room_tag_;
   uint32_t next_room_number_ = 1;
   std::unordered_map<std::string, PlayerState> players_;
   // player_id -> room_id reserved by a CreateRoom whose Spawn has not committed yet.

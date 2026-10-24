@@ -139,7 +139,7 @@ class DbActor {
   // Introspection for main()'s startup log; written only by Initialize()/Stop() on db_pool.
   bool available() const { return available_.load(std::memory_order_relaxed); }
 
-  // The method list ex_actor needs to resolve `SendLocal<&DbActor::X>` (reflect.h). It sits
+  // The method list ex_actor needs to resolve `Send<&DbActor::X>` (reflect.h). It sits
   // after the declarations because a static data member's initializer is not a complete-class
   // context: naming the methods before they are declared does not compile.
   constexpr static auto kActorMethods =
@@ -199,29 +199,29 @@ class DbService {
                            ex_actor::ActorRef<PlayerActor> reply) const {
     // `target` is evaluated before the arguments, so moving `username` into the call is safe.
     const ex_actor::ActorRef<DbActor> target = PickByString(username);
-    return target.SendLocal<&DbActor::Login>(std::move(username), std::move(password), std::move(reply));
+    return target.Send<&DbActor::Login>(std::move(username), std::move(password), std::move(reply));
   }
 
   [[nodiscard]] auto Register(std::string username, std::string password, std::string nickname,
                               ex_actor::ActorRef<PlayerActor> reply) const {
     const ex_actor::ActorRef<DbActor> target = PickByString(username);
-    return target.SendLocal<&DbActor::Register>(std::move(username), std::move(password), std::move(nickname),
-                                                std::move(reply));
+    return target.Send<&DbActor::Register>(std::move(username), std::move(password), std::move(nickname),
+                                           std::move(reply));
   }
 
   [[nodiscard]] auto FetchStats(uint64_t account_id, ex_actor::ActorRef<PlayerActor> reply) const {
     const ex_actor::ActorRef<DbActor> target = PickByAccount(account_id);
-    return target.SendLocal<&DbActor::FetchStats>(account_id, std::move(reply));
+    return target.Send<&DbActor::FetchStats>(account_id, std::move(reply));
   }
 
   [[nodiscard]] auto RecordMatch(MatchRecord record) const {
     const ex_actor::ActorRef<DbActor> target = PickByAccount(record.account_id);
-    return target.SendLocal<&DbActor::RecordMatch>(std::move(record));
+    return target.Send<&DbActor::RecordMatch>(std::move(record));
   }
 
   [[nodiscard]] auto RecordMatchResult(MatchResultRecord record) const {
     const ex_actor::ActorRef<DbActor> target = PickByAccount(record.account_id);
-    return target.SendLocal<&DbActor::RecordMatchResult>(std::move(record));
+    return target.Send<&DbActor::RecordMatchResult>(std::move(record));
   }
 
  private:
@@ -231,7 +231,7 @@ class DbService {
   ex_actor::ActorRef<DbActor> PickByAccount(uint64_t account_id) const {
     return Pick(std::hash<uint64_t> {}(account_id));
   }
-  // An empty result reproduces the old empty-ActorRef behaviour: SendLocal throws, and callers
+  // An empty result reproduces the old empty-ActorRef behaviour: Send throws, and callers
   // that check IsEmpty() first never get here.
   ex_actor::ActorRef<DbActor> Pick(size_t hash) const {
     if (shards_.empty()) {

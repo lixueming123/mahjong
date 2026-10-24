@@ -9,6 +9,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "actor_scope.h"
 #include "clock.h"
 #include "overloaded.h"
 #include "protocol.h"
@@ -182,17 +183,38 @@ int& InterHandDelayStorage() {
 }
 
 RoomActor::RoomActor(std::string room_id, uint64_t seed, int action_timeout_ms, std::vector<RoomSeat> seats,
-                     std::shared_ptr<WindowTimer> timer, int ai_delay_ms, int inter_hand_delay_ms)
+                     std::shared_ptr<WindowTimer> timer, int ai_delay_ms, int inter_hand_delay_ms,
+                     ex_actor::ActorRef<RoomOwner> owner, TimeoutScheduler timeout_scheduler,
+                     RoomFinishedCallback finished_for_test)
     : room_id_(std::move(room_id)),
       seed_(seed),
       action_timeout_ms_(action_timeout_ms),
       seats_(std::move(seats)),
+      timeout_scheduler_(std::move(timeout_scheduler)),
+      finished_for_test_(std::move(finished_for_test)),
+      owner_(std::move(owner)),
       timer_(std::move(timer)),
       ai_delay_ms_(ai_delay_ms < 0 ? AiActionDelayMs() : ai_delay_ms),
       inter_hand_delay_ms_(inter_hand_delay_ms < 0 ? InterHandDelayMs() : inter_hand_delay_ms) {
   // Seat number == index everywhere in this class; make that true even if the caller handed
   // the seats over in another order.
   std::sort(seats_.begin(), seats_.end(), [](const RoomSeat& lhs, const RoomSeat& rhs) { return lhs.seat < rhs.seat; });
+}
+
+void RoomActor::ExActorOnSpawned(const ex_actor::ActorRuntimeInfo<RoomActor>& info) {
+  self_ref_ = info.self_actor_ref;
+  // PROTOCOL.md §0.5: the production scheduler is the window timer plus the room's own ref.
+  // A room without a timer (the unit test) keeps whatever scheduler it was constructed with.
+  if (timer_ == nullptr || timeout_scheduler_) {
+    return;
+  }
+  std::shared_ptr<WindowTimer> timer = timer_;
+  ex_actor::ActorRef<RoomActor> self = self_ref_;
+  timeout_scheduler_ = [timer, self](int64_t delay_ms, uint64_t window_seq) {
+    timer->Schedule(delay_ms, [self, window_seq]() {
+      ActorSendScope().spawn(self.Send<&RoomActor::Dispatch>(RoomEnvelope::WindowTimeout(window_seq)));
+    });
+  };
 }
 
 void SetAiActionDelayMs(int delay_ms) { AiDelayStorage() = delay_ms; }
@@ -212,22 +234,10 @@ int RoomActor::SeatOf(const std::string& player_id) const {
   return -1;
 }
 
-namespace {
-
-// The three kinds below that only install state have no handler to await, but a `std::visit`
-// visitor has one return type and Dispatch's other arms return their handler's task — so they
-// hand back this finished task instead. It costs those three a coroutine frame they would not
-// need alone, which is why it is the price for only them: the scheduler and the finished
-// callback are installed once per room and take_seat runs once per join, while game_frame and
-// window_timeout — the hot kinds — keep exactly the frames they had before (none extra).
-stdexec::task<void> NoOp() { co_return; }
-
-}  // namespace
-
-// The room's only entry point (room.h). The gate is taken here and nowhere else, so every
-// handler below runs with the room to itself — including across a suspension, which the room
-// will start to have (see the Deliver note): the framework would otherwise hand this actor the
-// next message the moment a handler awaited something.
+// The room's message entry point (room.h; `TakeSeat` takes the same gate for its own entry).
+// Every handler below runs with the room to itself — including across a suspension, which the
+// room will start to have (see the Deliver note): the framework would otherwise hand this actor
+// the next message the moment a handler awaited something.
 //
 // The visitor returns the task Dispatch awaits rather than being a coroutine itself: a coroutine
 // per arm would allocate a frame for every message, and the handlers already are the coroutines
@@ -242,48 +252,32 @@ stdexec::task<void> RoomActor::Dispatch(RoomEnvelope envelope) {
           [this](RoomEnvelope::WindowTimeoutMsg&& m) { return OnWindowTimeout(m.token); },
           [this](RoomEnvelope::PlayerDisconnectedMsg&& m) { return OnPlayerDisconnected(std::move(m.player)); },
           [this](RoomEnvelope::IdleTimeoutMsg&& m) { return OnIdleTimeout(std::move(m.player)); },
-          [this](RoomEnvelope::InstallTimeoutSchedulerMsg&& m) {
-            SetTimeoutScheduler(std::move(m.scheduler));
-            return NoOp();
-          },
-          [this](RoomEnvelope::InstallFinishedCallbackMsg&& m) {
-            SetFinishedCallback(std::move(m.finished));
-            return NoOp();
-          },
-          [this](RoomEnvelope::TakeSeatMsg&& m) {
-            TakeSeat(std::move(m.seat_slot), m.accepted);
-            return NoOp();
-          },
       },
       std::move(envelope.msg));
 }
 
-void RoomActor::SetTimeoutScheduler(TimeoutScheduler scheduler) { timeout_scheduler_ = std::move(scheduler); }
+// The second public entry (the request/response counterpart of the removed TakeSeat message):
+// it takes the same gate, so a seat change can never interleave with a deal.
+stdexec::task<bool> RoomActor::TakeSeat(RoomSeat seat) {
+  AsyncGate::Guard guard = co_await gate_.Acquire();
+  co_return TakeSeatLocked(std::move(seat));
+}
 
-void RoomActor::SetFinishedCallback(RoomFinishedCallback callback) { finished_callback_ = std::move(callback); }
-
-void RoomActor::TakeSeat(RoomSeat seat, const std::shared_ptr<bool>& accepted) {
-  const auto mark = [&](bool ok) {
-    if (accepted) {
-      *accepted = ok;
-    }
-  };
+bool RoomActor::TakeSeatLocked(RoomSeat seat) {
   if (game_started_ || seat.seat < 0 || seat.seat >= kSeatCount) {
-    mark(false);
-    return;
+    return false;
   }
   RoomSeat& slot = seats_[static_cast<size_t>(seat.seat)];
   // A human seat can only be replaced by its own player, or turned back into a bot.
   if (!seat.is_bot && !slot.is_bot && slot.player.player_id != seat.player.player_id) {
-    mark(false);
-    return;
+    return false;
   }
   slot = std::move(seat);
-  mark(true);
+  return true;
 }
 
 void RoomActor::NotifyFinished(const Settlement& settlement) {
-  if (!finished_callback_) {
+  if (!finished_for_test_ && owner_.IsEmpty()) {
     return;
   }
   // ACCOUNT_DESIGN.md §4.2/§4.3: the owner gets the outcome per seat together with the
@@ -310,11 +304,18 @@ void RoomActor::NotifyFinished(const Settlement& settlement) {
     entry.delta_score = settlement.delta[static_cast<size_t>(seat)];
     finished.seats.push_back(std::move(entry));
   }
-  try {
-    finished_callback_(finished);
-  } catch (const std::exception& e) {
-    spdlog::error("room {}: the game-end notification failed: {}", room_id_, e.what());
+  if (finished_for_test_) {
+    try {
+      finished_for_test_(finished);
+    } catch (const std::exception& e) {
+      spdlog::error("room {}: the game-end notification failed: {}", room_id_, e.what());
+    }
+    return;
   }
+  // Fire and forget, exactly like the old synchronous callback: the lobby records the history
+  // and, on match_over, arms the reclaim. Sending it (not calling a std::function) is what lets
+  // the message be serialized if the lobby is ever on another node.
+  ActorSendScope().spawn(owner_.Send<&RoomOwner::OnRoomFinished>(std::move(finished)));
 }
 
 bool RoomActor::ScheduleAiAction(int64_t delay_ms) {
@@ -436,7 +437,7 @@ stdexec::task<void> RoomActor::DeliverSeat(int seat, std::string frame) {
   if (frame.empty() || room_seat.endpoint.IsEmpty()) {
     co_return;  // a bot, or a seat with no wire
   }
-  co_await room_seat.endpoint.SendLocal<&SeatEndpoint::Dispatch>(PlayerEnvelope::SeatFrame(std::move(frame)));
+  co_await room_seat.endpoint.Send<&SeatEndpoint::Dispatch>(PlayerEnvelope::SeatFrame(std::move(frame)));
 }
 
 stdexec::task<void> RoomActor::ReplyFrame(int seat, std::string frame) {
@@ -461,7 +462,7 @@ stdexec::task<void> RoomActor::ReplyError(int seat, std::string_view code, std::
   if (room_seat.endpoint.IsEmpty()) {
     co_return;  // no wire to answer on
   }
-  co_await room_seat.endpoint.SendLocal<&SeatEndpoint::Dispatch>(
+  co_await room_seat.endpoint.Send<&SeatEndpoint::Dispatch>(
       PlayerEnvelope::SeatError(protocol::ErrorFrame(code, message), quota));
 }
 

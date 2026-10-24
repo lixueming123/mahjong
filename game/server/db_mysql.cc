@@ -116,7 +116,7 @@ void ReplyAuth(const ex_actor::ActorRef<PlayerActor>& reply, AuthOutcome outcome
     return;  // the connection went away while the query ran; nobody is left to answer
   }
   ActorSendScope().spawn(
-      reply.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::OnLoginResult(std::move(outcome))));
+      reply.Send<&PlayerActor::Dispatch>(PlayerEnvelope::OnLoginResult(std::move(outcome))));
 }
 
 void ReplyRegister(const ex_actor::ActorRef<PlayerActor>& reply, AuthOutcome outcome) {
@@ -124,7 +124,7 @@ void ReplyRegister(const ex_actor::ActorRef<PlayerActor>& reply, AuthOutcome out
     return;
   }
   ActorSendScope().spawn(
-      reply.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::OnRegisterResult(std::move(outcome))));
+      reply.Send<&PlayerActor::Dispatch>(PlayerEnvelope::OnRegisterResult(std::move(outcome))));
 }
 
 void ReplyStats(const ex_actor::ActorRef<PlayerActor>& reply, StatsOutcome outcome) {
@@ -132,7 +132,7 @@ void ReplyStats(const ex_actor::ActorRef<PlayerActor>& reply, StatsOutcome outco
     return;
   }
   ActorSendScope().spawn(
-      reply.SendLocal<&PlayerActor::Dispatch>(PlayerEnvelope::OnStatsResult(std::move(outcome))));
+      reply.Send<&PlayerActor::Dispatch>(PlayerEnvelope::OnStatsResult(std::move(outcome))));
 }
 
 }  // namespace

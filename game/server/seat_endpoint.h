@@ -16,14 +16,14 @@
 //
 // There is deliberately ONE envelope type and ONE entry name: `Dispatch`. Two `Dispatch`
 // overloads would make `&PlayerActor::Dispatch` ambiguous the moment someone takes its
-// address for SendLocal, so the room's narrow view (frame / error+quota / close) and the
+// address for Send, so the room's narrow view (frame / error+quota / close) and the
 // connection's own messages share this envelope.
 //
 // Inside that one envelope the kind IS the type: each message has its own struct and they live
 // in `msg` as a `std::variant`, so a message carries exactly the fields it uses. The flat
 // version was 232 bytes for *every* message — a seat frame (the room's broadcast, four of them
 // per state change) paid for both ActorRefs and the auth/stats payloads on each of the ~5
-// by-value moves a message makes on its way into the mailbox (`ActorRef::SendLocal`). The
+// by-value moves a message makes on its way into the mailbox (`ActorRef::Send`). The
 // variant is 72 bytes and the seat frame inside it is one std::string.
 
 #pragma once

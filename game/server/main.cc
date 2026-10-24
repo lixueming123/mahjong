@@ -325,7 +325,7 @@ int main(int argc, char** argv) {
   // The lobby schedules its own post-game reclaim messages (PROTOCOL.md §1.4.5), so it needs
   // its own address. Enqueued before the gateway can accept anything: the room registry is
   // empty either way, so the ordering is inconsequential.
-  mahjong::ActorSendScope().spawn(lobby.SendLocal<&mahjong::LobbyActor::SetSelfRef>(lobby));
+  mahjong::ActorSendScope().spawn(lobby.Send<&mahjong::LobbyActor::SetSelfRef>(lobby));
 
   auto player_ids = std::make_shared<mahjong::PlayerIdAllocator>();
   // ACCOUNT_DESIGN.md §1.3: "one account, one live connection", enforced across all

@@ -318,7 +318,7 @@ void PlayerActor::OnClosed(std::string reason) {
   if (was_logged_in) {
     // PROTOCOL.md §1.4: only this connection's state is released; rooms of other players are
     // untouched. LobbyActor drops the room of a disconnecting owner (§8.5).
-    ActorSendScope().spawn(lobby_.SendLocal<&LobbyActor::OnConnectionClosed>(player));
+    ActorSendScope().spawn(lobby_.Send<&LobbyActor::OnConnectionClosed>(player));
   }
   // ACCOUNT_DESIGN.md §1.3: the account becomes available again for a new connection.
   if (held_account) {
@@ -329,7 +329,7 @@ void PlayerActor::OnClosed(std::string reason) {
 void PlayerActor::OnIdleTimeout() {
   // PROTOCOL.md §1.6: lobby -> close, in game -> entrusted (stay connected). The lobby owns
   // that decision because only it knows whether the player joined a room.
-  ActorSendScope().spawn(lobby_.SendLocal<&LobbyActor::OnIdleTimeout>(self_ref_, Player()));
+  ActorSendScope().spawn(lobby_.Send<&LobbyActor::OnIdleTimeout>(self_ref_, Player()));
 }
 
 }  // namespace mahjong
