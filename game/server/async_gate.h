@@ -4,7 +4,9 @@
 // message the moment the current handler suspends — `PullMailboxAndRun` is
 // `while (msg = mailbox_.TryPop()) msg->Execute();`, and a coroutine handler returns control to
 // that loop at its first suspension point. So as soon as a handler `co_await`s anything, the
-// following message starts, and the two run concurrently against the same actor state.
+// following message starts and *interleaves* with the suspended handler against the same actor
+// state — not concurrently (activations stay mutually exclusive), but with no atomicity: the
+// second handler runs while the first one's state is half-updated.
 //
 // Acquiring this gate as the first statement of the actor's *single* entry point restores
 // "one handler at a time" for that actor. The gate is not a std::mutex (that would block the
@@ -13,9 +15,18 @@
 // Three properties the design depends on:
 //   * FIFO — the lock is handed to the oldest waiter, so handler order stays mailbox order;
 //   * RAII — Guard releases in its destructor, so a handler that throws still unlocks;
-//   * no lost wakeups — `await_ready` deliberately always returns false and `await_suspend`
-//     re-checks under the lock; checking outside the lock would leave a window where the owner
-//     releases between the check and the park, and the parked waiter would never be woken.
+//   * no lost wakeups — `await_ready` deliberately always returns false, so every acquire goes
+//     through `await_suspend`'s `held_` check; a waiter that loses is parked exactly once, and
+//     the releaser that hands the lock over is the one that resumes it.
+//
+// No mutex inside, on purpose: every touch of `held_`/`waiters_` happens inside an actor message
+// handler, and ex-actor runs at most one activation per actor at a time — a suspended handler's
+// continuation is queued behind the running one, not run beside it (async_gate_test.cc,
+// MessagesOfOneActorNeverExecuteSimultaneously). That is also why the check-and-park in
+// `AcquireOrPark` cannot race a releaser. Note the guarantee is mutual exclusion, not a fixed
+// thread: activations can move between pool workers, so an owning-thread assertion would be
+// wrong as well (GateIsTouchedFromDifferentThreadsByHandlersOfOneActor). A Guard that escaped
+// its handler and was released on another thread would break this invariant — and this class.
 //
 // It is the caller's job to make the entry the *only* way in: keep the real handler private so
 // `SendLocal<&Actor::Handle>` cannot compile and the gate cannot be bypassed.
@@ -33,7 +44,6 @@
 #include <coroutine>
 #include <cstddef>
 #include <deque>
-#include <mutex>
 #include <utility>
 
 #include <exec/task.hpp>
@@ -103,19 +113,15 @@ class AsyncGate {
     co_return Guard(this);
   }
 
-  // Diagnostics for tests and for the "handlers must not overlap" assertion.
-  bool held() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return held_;
-  }
-  size_t waiting_count() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return waiters_.size();
-  }
+  // Diagnostics for tests. Call them only while no handler of the owning actor can be running
+  // (the actor-level tests do); they are plain reads now, see the "no mutex inside" note above.
+  bool held() const { return held_; }
+  size_t waiting_count() const { return waiters_.size(); }
 
  private:
+  // Called from `Awaitable::await_suspend`, i.e. inside a message handler. `return false` means
+  // the lock was free and the caller must not suspend.
   bool AcquireOrPark(std::coroutine_handle<> handle) {
-    std::lock_guard<std::mutex> lock(mutex_);
     if (!held_) {
       held_ = true;
       return false;
@@ -125,23 +131,18 @@ class AsyncGate {
   }
 
   void Release() {
-    std::coroutine_handle<> next;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      assert(held_);
-      if (waiters_.empty()) {
-        held_ = false;
-        return;
-      }
-      // Hand the lock straight to the oldest waiter: `held_` stays true, so the handoff has no
-      // window in which a new arrival could overtake the queue.
-      next = waiters_.front();
-      waiters_.pop_front();
+    assert(held_);
+    if (waiters_.empty()) {
+      held_ = false;
+      return;
     }
+    // Hand the lock straight to the oldest waiter: `held_` stays true, so the handoff has no
+    // window in which a new arrival could overtake the queue.
+    std::coroutine_handle<> next = waiters_.front();
+    waiters_.pop_front();
     next.resume();
   }
 
-  mutable std::mutex mutex_;
   std::deque<std::coroutine_handle<>> waiters_;  // FIFO
   bool held_ = false;
 };
