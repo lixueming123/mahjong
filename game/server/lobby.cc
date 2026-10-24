@@ -123,10 +123,7 @@ stdexec::task<void> LobbyActor::ReplyError(const ex_actor::ActorRef<SeatEndpoint
       PlayerEnvelope::SeatError(protocol::ErrorFrame(code, message), quota));
 }
 
-stdexec::task<void> LobbyActor::SetSelfRef(ex_actor::ActorRef<LobbyActor> self) {
-  AsyncGate::Guard guard = co_await gate_.Acquire();
-  self_ref_ = std::move(self);
-}
+void LobbyActor::SetSelfRef(ex_actor::ActorRef<LobbyActor> self) { self_ref_ = std::move(self); }
 
 std::string LobbyActor::NextRoomId() {
   // The sequence keeps the seed derivation (a pure function of the creation order) and the
@@ -145,9 +142,10 @@ ex_actor::ActorRef<RoomActor> LobbyActor::FindRoom(const std::string& room_id) c
 }
 
 stdexec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player) {
-  // Reserve the player, then drop the lock for Spawn. A second create_room sees `creating_`
-  // and is rejected; a disconnect erases the reservation so the commit below does not register
-  // a room whose owner is already gone.
+  // Reserve the player, then spawn. A second create_room sees `creating_` and is rejected; a
+  // disconnect erases the reservation so the commit below does not register a room whose owner
+  // is already gone. The reservation is the whole cross-await invariant — no lock is involved
+  // (lobby.h explains why this actor needs none).
   std::string room_id;
   uint64_t room_seed = 0;
   std::vector<RoomSeat> seats;
@@ -155,28 +153,25 @@ stdexec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn
   ex_actor::ActorRef<LobbyActor> self;
   enum class Reject { kNone, kAlready, kNoSelf };
   Reject reject = Reject::kNone;
-  {
-    AsyncGate::Guard guard = co_await gate_.Acquire();
-    const PlayerState* state = FindPlayer(player.player_id);
-    if ((state != nullptr && !state->room_id.empty()) || creating_.contains(player.player_id)) {
-      reject = Reject::kAlready;
-    } else if (self_ref_.IsEmpty()) {
-      // Without the way back the room could be spawned but never reclaimed: the reclaim's
-      // Send would throw on the timer thread. main() always installs the ref before the
-      // gateway starts, so this only fires in a misconfigured process.
-      reject = Reject::kNoSelf;
-    } else {
-      // Every room gets its own wall: the server-level seed alone would deal the very same
-      // hand in every room of this process. The derivation stays a pure function of (base
-      // seed, room index), so a fixed --seed remains fully reproducible.
-      const uint32_t room_index = next_room_number_ - 1;
-      room_id = NextRoomId();
-      room_seed = DeriveRoomSeed(seed_, room_index);
-      seats = BuildInitialSeats(player, conn);
-      creating_[player.player_id] = room_id;
-      timer = timer_;
-      self = self_ref_;
-    }
+  const PlayerState* state = FindPlayer(player.player_id);
+  if ((state != nullptr && !state->room_id.empty()) || creating_.contains(player.player_id)) {
+    reject = Reject::kAlready;
+  } else if (self_ref_.IsEmpty()) {
+    // Without the way back the room could be spawned but never reclaimed: the reclaim's
+    // Send would throw on the timer thread. main() always installs the ref before the
+    // gateway starts, so this only fires in a misconfigured process.
+    reject = Reject::kNoSelf;
+  } else {
+    // Every room gets its own wall: the server-level seed alone would deal the very same
+    // hand in every room of this process. The derivation stays a pure function of (base
+    // seed, room index), so a fixed --seed remains fully reproducible.
+    const uint32_t room_index = next_room_number_ - 1;
+    room_id = NextRoomId();
+    room_seed = DeriveRoomSeed(seed_, room_index);
+    seats = BuildInitialSeats(player, conn);
+    creating_[player.player_id] = room_id;
+    timer = timer_;
+    self = self_ref_;
   }
   if (reject == Reject::kAlready) {
     co_await ReplyError(conn, protocol::kCodeBadRequest, "already in a room");
@@ -200,19 +195,16 @@ stdexec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn
   }
 
   bool owned = false;
-  {
-    AsyncGate::Guard guard = co_await gate_.Acquire();
-    auto pending = creating_.find(player.player_id);
-    owned = pending != creating_.end() && pending->second == room_id;
-    if (owned) {
-      creating_.erase(pending);
-    }
-    if (owned && spawn_error.empty()) {
-      players_[player.player_id] = PlayerState {room_id, conn};
-      rooms_[room_id] = room;
-      room_seats_[room_id] = seats;
-      room_started_[room_id] = false;
-    }
+  auto pending = creating_.find(player.player_id);
+  owned = pending != creating_.end() && pending->second == room_id;
+  if (owned) {
+    creating_.erase(pending);
+  }
+  if (owned && spawn_error.empty()) {
+    players_[player.player_id] = PlayerState {room_id, conn};
+    rooms_[room_id] = room;
+    room_seats_[room_id] = seats;
+    room_started_[room_id] = false;
   }
   if (!spawn_error.empty()) {
     spdlog::error("lobby: failed to create a room for player {}: {}", player.player_id, spawn_error);
@@ -325,47 +317,44 @@ stdexec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, 
   std::vector<RoomSeat> snapshot;
   ex_actor::ActorRef<RoomActor> room;
   bool same_room = false;
-  {
-    AsyncGate::Guard guard = co_await gate_.Acquire();
-    const PlayerState* state = FindPlayer(player.player_id);
-    if (creating_.contains(player.player_id)) {
-      code = protocol::kCodeBadRequest;
-      message = "already in a room";
-    } else if (state != nullptr && state->room_id == room_id) {
-      same_room = true;
-      snapshot = room_seats_[room_id];
-    } else if (state != nullptr && !state->room_id.empty()) {
-      code = protocol::kCodeBadRequest;
-      message = "already in a room";
-    } else if (const auto started = room_started_.find(room_id);
-               !rooms_.contains(room_id) || (started != room_started_.end() && started->second)) {
-      // Do not use operator[]: a missing room must not be inserted as "not started".
-      const bool already_started = started != room_started_.end() && started->second;
+  const PlayerState* state = FindPlayer(player.player_id);
+  if (creating_.contains(player.player_id)) {
+    code = protocol::kCodeBadRequest;
+    message = "already in a room";
+  } else if (state != nullptr && state->room_id == room_id) {
+    same_room = true;
+    snapshot = room_seats_[room_id];
+  } else if (state != nullptr && !state->room_id.empty()) {
+    code = protocol::kCodeBadRequest;
+    message = "already in a room";
+  } else if (const auto started = room_started_.find(room_id);
+             !rooms_.contains(room_id) || (started != room_started_.end() && started->second)) {
+    // Do not use operator[]: a missing room must not be inserted as "not started".
+    const bool already_started = started != room_started_.end() && started->second;
+    code = protocol::kCodeRoomNotFound;
+    message = already_started ? "room already started" : "no such room: " + room_id;
+  } else {
+    std::vector<RoomSeat>& seats = room_seats_[room_id];
+    int free = -1;
+    for (const RoomSeat& seat : seats) {
+      if (seat.is_bot) {
+        free = seat.seat;
+        break;
+      }
+    }
+    if (free < 0) {
       code = protocol::kCodeRoomNotFound;
-      message = already_started ? "room already started" : "no such room: " + room_id;
+      message = "room is full";
     } else {
-      std::vector<RoomSeat>& seats = room_seats_[room_id];
-      int free = -1;
-      for (const RoomSeat& seat : seats) {
-        if (seat.is_bot) {
-          free = seat.seat;
-          break;
-        }
-      }
-      if (free < 0) {
-        code = protocol::kCodeRoomNotFound;
-        message = "room is full";
-      } else {
-        claimed = seats[static_cast<size_t>(free)];
-        claimed.player = player;
-        claimed.is_bot = false;
-        claimed.disconnected = false;
-        claimed.endpoint = conn;
-        seats[static_cast<size_t>(free)] = claimed;
-        players_[player.player_id] = PlayerState {room_id, conn};
-        snapshot = seats;
-        room = rooms_[room_id];
-      }
+      claimed = seats[static_cast<size_t>(free)];
+      claimed.player = player;
+      claimed.is_bot = false;
+      claimed.disconnected = false;
+      claimed.endpoint = conn;
+      seats[static_cast<size_t>(free)] = claimed;
+      players_[player.player_id] = PlayerState {room_id, conn};
+      snapshot = seats;
+      room = rooms_[room_id];
     }
   }
   if (!code.empty()) {
@@ -385,18 +374,15 @@ stdexec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, 
 
   const bool accepted = co_await room.Send<&RoomActor::TakeSeat>(claimed);
   if (!accepted) {
-    {
-      AsyncGate::Guard guard = co_await gate_.Acquire();
-      players_.erase(player.player_id);
-      std::vector<RoomSeat>& seats = room_seats_[room_id];
-      if (claimed.seat >= 0 && claimed.seat < static_cast<int>(seats.size())) {
-        RoomSeat bot;
-        bot.seat = claimed.seat;
-        bot.is_bot = true;
-        bot.player.player_id = "bot-" + std::to_string(claimed.seat);
-        bot.player.name = "AI-" + std::to_string(claimed.seat);
-        seats[static_cast<size_t>(claimed.seat)] = bot;
-      }
+    players_.erase(player.player_id);
+    std::vector<RoomSeat>& seats_now = room_seats_[room_id];
+    if (claimed.seat >= 0 && claimed.seat < static_cast<int>(seats_now.size())) {
+      RoomSeat bot;
+      bot.seat = claimed.seat;
+      bot.is_bot = true;
+      bot.player.player_id = "bot-" + std::to_string(claimed.seat);
+      bot.player.name = "AI-" + std::to_string(claimed.seat);
+      seats_now[static_cast<size_t>(claimed.seat)] = bot;
     }
     co_await ReplyError(conn, protocol::kCodeRoomNotFound, "room already started");
     co_return;
@@ -408,21 +394,18 @@ stdexec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, 
 stdexec::task<void> LobbyActor::Ready(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player) {
   std::string error;
   ex_actor::ActorRef<RoomActor> room;
-  {
-    AsyncGate::Guard guard = co_await gate_.Acquire();
-    const PlayerState* state = FindPlayer(player.player_id);
-    if (state == nullptr || state->room_id.empty()) {
-      error = "not in a room";
+  const PlayerState* state = FindPlayer(player.player_id);
+  if (state == nullptr || state->room_id.empty()) {
+    error = "not in a room";
+  } else {
+    room = FindRoom(state->room_id);
+    if (room.IsEmpty()) {
+      error = "room is gone";
     } else {
-      room = FindRoom(state->room_id);
-      if (room.IsEmpty()) {
-        error = "room is gone";
-      } else {
-        // All four seats are always occupied here, so `ready` starts the game immediately
-        // (PROTOCOL.md §4.4). From now on a disconnect entrusts the seat instead of dropping
-        // the room (§8.5).
-        room_started_[state->room_id] = true;
-      }
+      // All four seats are always occupied here, so `ready` starts the game immediately
+      // (PROTOCOL.md §4.4). From now on a disconnect entrusts the seat instead of dropping
+      // the room (§8.5).
+      room_started_[state->room_id] = true;
     }
   }
   if (!error.empty()) {
@@ -435,16 +418,13 @@ stdexec::task<void> LobbyActor::Ready(ex_actor::ActorRef<SeatEndpoint> conn, Pla
 stdexec::task<void> LobbyActor::Sync(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player) {
   std::string error;
   ex_actor::ActorRef<RoomActor> room;
-  {
-    AsyncGate::Guard guard = co_await gate_.Acquire();
-    const PlayerState* state = FindPlayer(player.player_id);
-    if (state == nullptr || state->room_id.empty()) {
-      error = "not in a room";
-    } else {
-      room = FindRoom(state->room_id);
-      if (room.IsEmpty()) {
-        error = "room is gone";
-      }
+  const PlayerState* state = FindPlayer(player.player_id);
+  if (state == nullptr || state->room_id.empty()) {
+    error = "not in a room";
+  } else {
+    room = FindRoom(state->room_id);
+    if (room.IsEmpty()) {
+      error = "room is gone";
     }
   }
   if (!error.empty()) {
@@ -455,7 +435,6 @@ stdexec::task<void> LobbyActor::Sync(ex_actor::ActorRef<SeatEndpoint> conn, Play
 }
 
 stdexec::task<void> LobbyActor::OnConnectionClosed(PlayerInfo player) {
-  AsyncGate::Guard guard = co_await gate_.Acquire();
   // A create still in Spawn has no players_ entry yet. Dropping the reservation makes that
   // commit refuse the room.
   creating_.erase(player.player_id);
@@ -509,34 +488,30 @@ stdexec::task<void> LobbyActor::OnConnectionClosed(PlayerInfo player) {
 }
 
 stdexec::task<size_t> LobbyActor::room_count() {
-  AsyncGate::Guard guard = co_await gate_.Acquire();
   co_return rooms_.size();
 }
 
 stdexec::task<void> LobbyActor::ReapRoom(std::string room_id) {
-  // Drop the registry under the lock, then close sockets without it. A close awaits the
-  // connection actor; holding the lobby lock across that would stall every other lobby message.
+  // Drop the registry in one synchronous section, then close sockets in another. The close
+  // awaits the connection actor, so it must not be folded into the registry update.
   std::vector<ex_actor::ActorRef<SeatEndpoint>> closing;
-  {
-    AsyncGate::Guard guard = co_await gate_.Acquire();
-    auto room_it = rooms_.find(room_id);
-    if (room_it == rooms_.end()) {
-      co_return;  // already reclaimed (or never registered)
-    }
-    for (auto it = players_.begin(); it != players_.end();) {
-      if (it->second.room_id != room_id) {
-        ++it;
-        continue;
-      }
-      if (!it->second.conn.IsEmpty()) {
-        closing.push_back(it->second.conn);
-      }
-      it = players_.erase(it);
-    }
-    rooms_.erase(room_it);
-    room_seats_.erase(room_id);
-    room_started_.erase(room_id);
+  auto room_it = rooms_.find(room_id);
+  if (room_it == rooms_.end()) {
+    co_return;  // already reclaimed (or never registered)
   }
+  for (auto it = players_.begin(); it != players_.end();) {
+    if (it->second.room_id != room_id) {
+      ++it;
+      continue;
+    }
+    if (!it->second.conn.IsEmpty()) {
+      closing.push_back(it->second.conn);
+    }
+    it = players_.erase(it);
+  }
+  rooms_.erase(room_it);
+  room_seats_.erase(room_id);
+  room_started_.erase(room_id);
   // PROTOCOL.md §1.4.5: the game is long over, so neither the room nor the connection it was
   // holding is of any use. Dropping the last ActorRef also destroys the RoomActor and its
   // state; the connections are asked to close so the gateway frees the sockets.
@@ -549,16 +524,13 @@ stdexec::task<void> LobbyActor::ReapRoom(std::string room_id) {
 stdexec::task<void> LobbyActor::OnIdleTimeout(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player) {
   bool drop_connection = false;
   ex_actor::ActorRef<RoomActor> room;
-  {
-    AsyncGate::Guard guard = co_await gate_.Acquire();
-    const PlayerState* state = FindPlayer(player.player_id);
-    if (state == nullptr || state->room_id.empty()) {
-      // PROTOCOL.md §1.6: in the lobby a 20s silence drops the connection. A create still in
-      // Spawn has no players_ entry yet; closing the socket makes OnConnectionClosed cancel it.
-      drop_connection = true;
-    } else {
-      room = FindRoom(state->room_id);
-    }
+  const PlayerState* state = FindPlayer(player.player_id);
+  if (state == nullptr || state->room_id.empty()) {
+    // PROTOCOL.md §1.6: in the lobby a 20s silence drops the connection. A create still in
+    // Spawn has no players_ entry yet; closing the socket makes OnConnectionClosed cancel it.
+    drop_connection = true;
+  } else {
+    room = FindRoom(state->room_id);
   }
   if (drop_connection) {
     co_await conn.Send<&SeatEndpoint::Dispatch>(PlayerEnvelope::Close("idle timeout in lobby"));

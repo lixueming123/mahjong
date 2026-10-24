@@ -4,12 +4,14 @@
 // §4.7). Gameplay intents are forwarded to the matching RoomActor; the lobby itself never
 // keeps game state.
 //
-// Message ordering: ex_actor starts the next message as soon as the current handler suspends.
-// The registry (`players_`, `rooms_`, `creating_`, `self_ref_`) is only touched while `gate_`
-// is held, and the lock is dropped before any `co_await` that does not touch it (`Spawn`, a
-// seat `Send`). `CreateRoom` reserves the player in `creating_` under the lock, spawns
-// outside it, then commits or aborts under the lock again — a disconnect or a second
-// create_room during the spawn cannot both succeed (lobby_test.cc).
+// Message ordering: ex_actor starts the next message as soon as the current handler suspends,
+// but runs at most one activation at a time, and every registry access here (`players_`,
+// `rooms_`, `creating_`, `self_ref_`) sits in a synchronous section with no `co_await` inside.
+// A gate would therefore add nothing — `AsyncGate` is only needed where a critical section
+// spans a suspension, which RoomActor's `Dispatch` does and the lobby's handlers do not. What
+// spans an await is the protocol, not a critical section: `CreateRoom` reserves the player in
+// `creating_`, spawns, then commits or aborts — a disconnect or a second create_room during
+// the spawn cannot both succeed (lobby_test.cc).
 
 #pragma once
 
@@ -21,7 +23,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include "async_gate.h"
 #include "connection.h"
 #include "db.h"
 #include "ex_actor/api.h"
@@ -46,14 +47,13 @@ class LobbyActor : public RoomOwner {
   LobbyActor(uint64_t seed, int action_timeout_ms, std::shared_ptr<WindowTimer> timer,
              int game_end_reclaim_ms = kGameEndReclaimMs, DbService db = {});
 
-  // Each handler locks `gate_` only around the registry access it actually does (async_gate.h).
   // Callers send straight to the method; there is no envelope switch in front of them.
 
   // The lobby's own address, handed to it once by main() before the gateway accepts anything.
   // It is how the delayed "reclaim this room" message comes back (§1.4.5): an empty ref would
   // make the reclaim's Send throw on the timer thread, so CreateRoom refuses to build a
   // room it could never reclaim.
-  stdexec::task<void> SetSelfRef(ex_actor::ActorRef<LobbyActor> self);
+  void SetSelfRef(ex_actor::ActorRef<LobbyActor> self);
 
   stdexec::task<void> CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player);
   stdexec::task<void> JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player, std::string room_id);
@@ -126,8 +126,6 @@ class LobbyActor : public RoomOwner {
   // Match history (ACCOUNT_DESIGN.md §4). Empty when the server runs without accounts.
   DbService db_;
   ex_actor::ActorRef<LobbyActor> self_ref_;
-  // Serializes registry access only (async_gate.h). Not held across Spawn or a seat send.
-  AsyncGate gate_;
 };
 
 // Builds the `room_joined` frame of PROTOCOL.md §5.3.
