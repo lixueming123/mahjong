@@ -15,6 +15,7 @@ import pygame
 
 from .. import theme as T
 from ..view import UiView
+from . import art
 from . import widgets as W
 
 # game_end.reason 的三个取值（PROTOCOL §5.10）→ 界面文案
@@ -88,7 +89,10 @@ def render_overlay(surface: pygame.Surface, ui: UiView) -> None:
     mask.fill(T.MASK)
     surface.blit(mask, (0, 0))
     panel = T.R_STATS_PANEL
-    W.draw_panel(surface, panel, fill=T.PANEL, edge=T.PANEL_EDGE, radius=8, width=2)
+    W.draw_panel(surface, panel, fill=(22, 32, 29, 248), edge=(120, 138, 126), radius=14, shadow=True)
+    gold = pygame.Surface((panel[2] - 48, 2), pygame.SRCALPHA)
+    gold.fill((232, 192, 104, 110))
+    surface.blit(gold, (panel[0] + 24, panel[1] + 8))
     font_body = ui.fonts.get(T.FS_BODY)
     W.draw_text(surface, "战绩", ui.fonts.get(T.FS_H3, bold=True), T.TEXT, T.R_STATS_TITLE, W.ALIGN_LEFT)
     W.draw_text(surface, "ESC 关闭", ui.fonts.get(T.FS_SMALL), T.TEXT_DIM, T.R_STATS_TITLE, W.ALIGN_RIGHT)
@@ -103,13 +107,26 @@ def render_overlay(surface: pygame.Surface, ui: UiView) -> None:
     W.draw_text(
         surface, "最近对局（新的在前）", ui.fonts.get(T.FS_SMALL), T.TEXT_DIM, T.R_STATS_HEADER, W.ALIGN_LEFT
     )
+    rule = pygame.Surface((panel[2] - 48, 1), pygame.SRCALPHA)
+    rule.fill((255, 255, 255, 24))
+    surface.blit(rule, (panel[0] + 24, T.R_STATS_HEADER[1] + T.R_STATS_HEADER[3] + 2))
 
     entries = recent_entries(stats)
     if not entries:
         W.draw_text(surface, EMPTY_TEXT, ui.fonts.get(T.FS_SMALL), T.TEXT_DIM, T.R_STATS_ROWS_Y, W.ALIGN_LEFT)
         return
+    _draw_zebra(surface, panel[0] + 16, T.R_STATS_ROWS_Y, panel[2] - 32, T.R_STATS_ROW_H, len(entries[:RECENT_LIMIT]))
     render_list(surface, ui, entries, x=panel[0] + 24, y=T.R_STATS_ROWS_Y, width=panel[2] - 48,
                 row_h=T.R_STATS_ROW_H, with_time=True)
+
+
+def _draw_zebra(surface: pygame.Surface, x: int, y: int, width: int, row_h: int, count: int) -> None:
+    """隔行淡底纹：10 行数字排下来不容易串行。"""
+    layer = pygame.Surface((width, row_h * max(0, count)), pygame.SRCALPHA)
+    for index in range(count):
+        if index % 2 == 1:
+            pygame.draw.rect(layer, (255, 255, 255, 14), (0, index * row_h, width, row_h))
+    surface.blit(layer, (x, y))
 
 
 def render_result_block(surface: pygame.Surface, ui: UiView) -> None:

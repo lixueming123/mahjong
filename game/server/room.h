@@ -365,6 +365,8 @@ class RoomActor {
     std::array<int, kSeatCount> delta {};
     int winner_seat = -1;  // -1: drawn round
     std::vector<Tile> winner_flat_hand;
+    //: v4.5：结算摊牌——四家的扁平手牌（门前 + 副露），只随 game_end 下发。
+    std::array<std::vector<Tile>, kSeatCount> flat_hands {};
     std::vector<std::string> winner_types;  // tags + "ron"/"tsumo"
     bool tsumo = false;
     Tile winning_tile {};

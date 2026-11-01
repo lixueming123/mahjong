@@ -155,6 +155,8 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | 服务端 `--action-timeout-ms` | **15000** | 动作窗口时长；合法区间 `[1000, 60000]`，越界或非数字 → 启动报错退出（fail fast） |
 | 客户端 `--host` / `--port` | 127.0.0.1 / 9527 | 目标服务器 |
 | 客户端 `--fullscreen` | 关 | 可选，非验收项 |
+| 客户端 `--no-auto-login` | 关（即默认自动登录） | **v1.11 增补**（纯客户端本地）：有本机记住的账号时只预填、不自动提交 `login`。见 `UI_UX_SPEC.md` §3.5 |
+| 客户端 `--forget-login` | 关 | **v1.11 增补**（纯客户端本地）：启动前清掉 `~/.ex_actor_mahjong/login.json` 里本服务器的条目，然后按游客界面启动 |
 
 > **不存在** `--ai-level`：AI 固定为 L1（GAME_DESIGN §7.1），无难度配置项。
 
@@ -583,12 +585,15 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 
 ```json
 {"type":"game_end","reason":"win_ron",
- "results":[{"seat":0,"delta_score":-4,"hand":[],"win_type":[]},
+ "results":[{"seat":0,"delta_score":-4,
+             "hand":["1p","2p","3p","4s","5s","6s","7z","7z","1z","2z","3z","4z","6m"],"win_type":[]},
             {"seat":1,"delta_score":4,
              "hand":["1m","1m","3m","3m","5m","5m","7m","7m","2p","2p","6p","6p","8p","8p"],
              "win_type":["seven_pairs","ron"]},
-            {"seat":2,"delta_score":0,"hand":[],"win_type":[]},
-            {"seat":3,"delta_score":0,"hand":[],"win_type":[]}],
+            {"seat":2,"delta_score":0,
+             "hand":["9m","9m","9m","5z","5z","6z","6z","7z","7z","1s","2s","3s","4s"],"win_type":[]},
+            {"seat":3,"delta_score":0,
+             "hand":["2m","3m","4m","4p","5p","6p","7s","8s","9s","2z","2z","6z","6z"],"win_type":[]}],
  "win":{"seat":1,"tile":"8p","from_seat":0,"tsumo":false,
         "tags":["seven_pairs"],"multiplier":4,"per_payer":4,"total":4}}
 ```
@@ -599,7 +604,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | `reason` | `"win_ron"` / `"win_tsumo"` / `"draw_exhausted"` 三者之一（**词表不变**） |
 | `results` | 恒 4 项，按 `seat` 升序，`seat` 覆盖 `{0,1,2,3}` 无重复 |
 | `results[].delta_score` | 整数；四家之和 **MUST 为 0**（`RULESET.md` §6） |
-| `results[].hand` | 和牌者 = **扁平数组**（门前手牌 + 副露牌面，按 §2.2 排序，含和牌张，长度 = `14 + 杠数`）；其他人 `[]`。**不替代** `melds[]`，两者并存（H4） |
+| `results[].hand` | **v4.5：四家均下发扁平数组**（门前手牌 + 副露牌面，按 §2.2 排序；和牌者含和牌张，长度 = `14/13 + 杠数`）。**不替代** `melds[]`，两者并存（H4）；仅存在于 `game_end`，不得提前泄露 |
 | `results[].win_type` | 和牌者 = `tags` + `["ron"]` 或 `["tsumo"]`（牌型 tags 在前，和牌方式在最后）；其他人 `[]` |
 | `win` | 和牌时为对象，荒庄时为 `null` |
 | `win.seat` / `win.tile` | 和牌者座位 / 和牌张（荣和 = 被和的那张；自摸 = 摸到的牌） |
@@ -915,7 +920,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | 当前行动座位 | ✅ | ✅ | `state_sync.current_seat` |
 | `options` | ✅ 仅窗内座位 | ❌ | `action_request`（只发给窗内座位） |
 | 摸到的牌 | ✅ 仅摸牌者 | ❌ | `draw`（只发给摸牌者） |
-| 和牌者手牌 | ✅ 结算公开 | ✅ 结算公开 | `game_end.results[win.seat].hand` |
+| 四家手牌（结算摊牌） | ✅ 结算公开 | ✅ 结算公开 | `game_end.results[].hand`（v4.5 起四家全下发，仅局终） |
 
 ### 8.2 H6：`seats[].hand` 必须不存在
 
@@ -1336,6 +1341,7 @@ remaining(tile) = 4
 
 | 版本 | 内容 | 来源 |
 | --- | --- | --- |
+| **v1.11** | 仅 §1.8 客户端启动参数增补两行：`--no-auto-login` / `--forget-login`——**纯客户端本地**（本机登录凭据记忆的开关与清档，存档路径 `~/.ex_actor_mahjong/login.json`）。**线协议零改动**：帧、字段形状、错误码（仍 14 条）、时序、`seq`、配额与全部数值未动 | 用户需求（「每次都要重新输入账号密码」；表现层见 `UI_UX_SPEC.md` v4.6 §3.5） |
 | **v1.10** | **实现口径（非线协议）**：§1.1 传输行由「actor 之间用 `SendLocal`」改为「统一用 `Send`，消息体全部可序列化」。为此房间的定时器改为 `ExActorOnSpawned` 自装、结算通知改为 `RoomOwner::OnRoomFinished` 消息、选座改为 `task<bool> TakeSeat` 请求/应答，`json::Value` 增加 reflect-cpp 反射。**线协议零改动**：帧形状、错误码、时序、`seq`、配额与数值全部未动 | 用户需求（统一 `Send`；为将来跨节点留出通路） |
 | **v1.9** | **房间号全局唯一**：§4.2 `room_id` 格式由 `r-####`（4 位十进制，进程内从 1 递增）改为 `r-` + **13 位小写 36 进制**（36 比特进程级随机标记 + 28 比特进程内递增序号）。重启服务器、同库多进程都不再复用旧编号——账号库 `match_results` 的 `(room_id, account_id)` 唯一键不会再把一个新场次误判为重复写入而丢弃。§5.14 `room_list.rooms[].room_id` 与 §4.3/§5.3/§5.13/§5.14/§9 的示例同步。**未改动**：帧的字段形状、消息条数、错误码、时序、`seq` 规则、配额与其余全部口径 | 用户需求（房间号需全局唯一，重启服务器也不复用） |
 | **v1.8** | **结算播报增补**：① §5.10 `game_end` **只增字段** `interlude_ms`（本房间局间窗口，缺省 `12000`；客户端据 `clamp(interlude_ms − 1500, 4200, 10500)` 算播报预算），`reason`/`results`/`win` 既有形状不变；② **番数口径澄清**（C9）：`win.han_breakdown.tsumo` **恒 0**、仅作兼容占位，封顶公式与合计均为 `min(base + dealer, 6)`，客户端**不得出现任何自摸加成项**；③ **场终延迟**（C8）：`match_end` 由服务端延迟 `interlude_ms` 后下发，客户端**不得缓存/缓冲**权威帧——`game_end` 到达即起播、`match_end` 到达即切场终页。**零新增错误码**；帧数、`seq` 规则、15 s 窗口、136/83/84/21 与零和约束全部未动 | 主理人裁决（`SETTLEMENT_BROADCAST_RULINGS.md` v1.5 §1 C8/C9、§2.1；用户需求「结算播报」） |

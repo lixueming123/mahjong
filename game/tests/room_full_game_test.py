@@ -461,7 +461,10 @@ def verify_game_end(end: dict, stats: dict, model: TableModel) -> str:
     for seat in range(SEAT_COUNT):
         if seat != winner:
             check(results[seat]["win_type"] == [], "only the winner reports win_type")
-            check(results[seat]["hand"] == [], "only the winner reports a hand")
+            # v4.5：结算摊牌——四家都下发扁平手牌，供客户端把四家牌摊开。
+            check(results[seat]["hand"], f"seat {seat} must report a hand for the showdown")
+            check(is_grouped_and_sorted(results[seat]["hand"]),
+                  f"seat {seat} flat hand must be sorted (§2.2)")
     return end["reason"]
 
 

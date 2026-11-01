@@ -27,36 +27,38 @@ import pygame
 
 from .. import broadcast as BC
 from .. import theme as T
+from . import art
 from . import widgets as W
 
 log = logging.getLogger("mahjong.client.render.broadcast")
 
 # ---------------------------------------------------------------- 坐标（RULINGS v1.2 §2.3 冻结）
 
-R_CAPTION = (164, 104, 952, 32)        # 字幕条
-R_CAPTION_BAR = (164, 104, 4, 32)      # 左侧 4 px 金竖条
-R_CAPTION_TEXT = (184, 104, 856, 32)   # 文本区（≤24 汉字，居中）
-R_STAGE = (164, 234, 952, 366)         # 舞台底
-R_S1 = (180, 240, 920, 208)            # S1 番种区（8 槽 × 行高 26，占左列以免压 S2..S5）
-R_S2 = (652, 380, 206, 44)             # 牌型番合计
-R_S3 = (874, 380, 226, 44)             # 加成 + 合计番数（`庄家 +1 = 4 番`）
-R_S4 = (758, 440, 210, 40)             # 封顶（三子态）
-R_S5 = (982, 440, 120, 40)             # 倍率
-R_S6 = (180, 540, 920, 48)             # 四户支付
-R_WIN_TILE = (982, 240, 120, 120)      # 和牌张（播报期专用位置）
-R_HINT = (430, 604, 420, 52)           # 倒计时行：播报期只显示「播报中…（空格跳过）」
+R_CAPTION = (316, 220, 648, 28)        # 字幕条（紧凑面板内）
+R_CAPTION_BAR = (316, 220, 4, 28)      # 左侧 4 px 金竖条
+R_CAPTION_TEXT = (332, 220, 616, 28)   # 文本区
+R_STAGE = (300, 210, 680, 330)         # 舞台底：只占桌心，不压左右摊牌
+R_S1 = (316, 258, 330, 208)            # S1 番种区（8 槽 × 行高 26）
+R_S2 = (660, 258, 148, 42)             # 牌型番合计
+R_S3 = (818, 258, 146, 42)             # 加成 + 合计番数
+R_S4 = (660, 308, 148, 42)             # 封顶
+R_S5 = (818, 308, 146, 42)             # 倍率
+R_S6 = (316, 470, 648, 48)             # 四户支付
+R_WIN_TILE = (818, 360, 120, 96)       # 和牌张（紧凑面板右侧空档）
+R_WIN_HAND = (340, 70, 600, 38)        # 赢家手牌条：名牌与桌面之间的空白带，不压四家摊牌
+R_HINT = (430, 546, 420, 22)           # 播报提示行（面板下方、本家手牌上方）
 
 #: S1 每一槽的左边界 / 宽度 / 行高（8×26 = 208，正好填满 R_S1 的高度）
 S1_X = R_S1[0]
-S1_W = 460            # 只占左列：右边界 640 < S2 的 652，8 行与 S2..S5 网格不重叠
+S1_W = 318
 S1_ROW_H = 26
 S1_SLOTS = 8
 S1_PAD = 14           # 文本左缩进（给高亮条让位）
-S1_FONT = T.FS_H3     # 22 px（UI v1.1 §4.2 / RULINGS §2.3；15 px 方案作废）
+S1_FONT = T.FS_BODY   # 18 px：紧凑面板下仍能放下 8 行
 
 #: 分隔线（2 条）：S1 与推导网格之间的竖线 + 推导网格与 S6 之间的横线
-DIVIDER_X = 646
-DIVIDER_Y = 500
+DIVIDER_X = 652
+DIVIDER_Y = 462
 
 #: 高亮条三态宽度（未播 0 / 当前 4 / 已播 2；「已讲完」只由条宽承载，不许把字调暗）
 BAR_W_PENDING = 0
@@ -119,9 +121,47 @@ def _alpha_panel(rect: tuple[int, int, int, int], color: tuple, radius: int = 0)
     key = (rect[2], rect[3], tuple(color), radius)
     layer = _PANEL_CACHE.get(key)
     if layer is None:
-        layer = pygame.Surface((rect[2], rect[3]), pygame.SRCALPHA)
-        pygame.draw.rect(layer, color, (0, 0, rect[2], rect[3]), border_radius=radius)
+        # v2.1：平涂换成「竖向渐变 + 顶沿高光 + 极淡描边」的玻璃皮肤。
+        # 皮肤在 `art` 层按尺寸缓存，**构建期一次性开销**，每帧仍只有 1 次 blit，
+        # 阶段 A 的 draw 预算（≤56）不受影响。
+        alpha = color[3] if len(color) > 3 else 255
+        layer = art.strip(
+            rect[2], rect[3], color,
+            edge=(255, 255, 255, 18) if alpha >= 120 else None,
+            radius=radius,
+        ).copy()
         _PANEL_CACHE[key] = layer
+    return layer
+
+
+_RULE_CACHE: dict[int, pygame.Surface] = {}
+_GLOW_CACHE: dict[tuple, pygame.Surface] = {}
+_WIN_HAND_CACHE: dict[tuple, pygame.Surface] = {}
+
+
+def _rule_surface(width: int) -> pygame.Surface:
+    """金色细线（1 px，半透明）：缓存后单次 blit。"""
+    layer = _RULE_CACHE.get(width)
+    if layer is None:
+        layer = pygame.Surface((width, 1), pygame.SRCALPHA)
+        layer.fill((232, 192, 104, 60))
+        _RULE_CACHE[width] = layer
+    return layer
+
+
+def _glow_surface(width: int, height: int) -> pygame.Surface:
+    """和牌张光晕：三层同心圆角矩形，越往外越淡。"""
+    key = (width, height)
+    layer = _GLOW_CACHE.get(key)
+    if layer is None:
+        layer = pygame.Surface((width, height), pygame.SRCALPHA)
+        for index, inset in enumerate((0, 10, 20)):
+            pygame.draw.rect(
+                layer, (232, 192, 104, 30 - index * 8),
+                (inset, inset, width - inset * 2, height - inset * 2),
+                border_radius=max(2, 20 - inset),
+            )
+        _GLOW_CACHE[key] = layer
     return layer
 
 
@@ -153,8 +193,13 @@ def render_round_end(surface: pygame.Surface, ui: object) -> None:
 
     # ① 舞台底（盖住四卡 / 战绩块 / 手牌，但不盖主面板边缘与页脚）
     _blit_panel(surface, R_STAGE, T.BC_ZONE, radius=6)
+    # ①' 舞台上下各一道鎏金细线（纯 blit，不占 draw 预算）
+    for edge_y in (R_STAGE[1] + 2, R_STAGE[1] + R_STAGE[3] - 3):
+        surface.blit(_rule_surface(R_STAGE[2] - 32), (R_STAGE[0] + 16, edge_y))
     # ② 字幕条
     _draw_caption(surface, ui, view, plan)
+    # ②' 赢家手牌条（面板上方；整条缓存后单次 blit）
+    _draw_winner_hand(surface, ui, state)
     # ③ S1 番种区（8 槽）
     _draw_yaku_slots(surface, ui, view, plan)
     # ④ S2–S5 推导网格
@@ -240,6 +285,48 @@ def _draw_payments(surface: pygame.Surface, ui: object, view, plan) -> None:
               color=T.score_color(delta), align=W.ALIGN_CENTER)
 
 
+def _draw_winner_hand(surface: pygame.Surface, ui: object, state) -> None:
+    """播报面板上方的赢家手牌条：整条预渲染缓存，每帧只 blit 一次。"""
+    result = state.result if isinstance(getattr(state, "result", None), dict) else {}
+    win = result.get("win") if isinstance(result.get("win"), dict) else None
+    if win is None:
+        return
+    seat = win.get("seat")
+    hand: list[str] = []
+    for entry in result.get("results") or []:
+        if isinstance(entry, dict) and entry.get("seat") == seat:
+            raw = entry.get("hand")
+            if isinstance(raw, list):
+                hand = [t for t in raw if isinstance(t, str)]
+            break
+    if not hand:
+        return
+    tw, th, pitch = 24, 32, 26
+    key = (tuple(hand), tw, th, pitch, win.get("tile"))
+    strip = _WIN_HAND_CACHE.get(key)
+    if strip is None:
+        width = max(1, len(hand) * pitch)
+        strip = pygame.Surface((width, th), pygame.SRCALPHA)
+        for index, face in enumerate(hand):
+            rect = (index * pitch, 0, tw, th)
+            W.draw_tile(
+                strip, ui.fonts, rect, face,
+                rank_size=T.FS_TILE_RESULT_HAND_RANK,
+                suit_size=T.FS_TILE_RESULT_HAND_SUIT,
+                honor_size=T.FS_TILE_Z_RESULT_HAND,
+            )
+        if isinstance(win.get("tile"), str):
+            last = max(i for i, t in enumerate(hand) if t == win["tile"]) if win["tile"] in hand else -1
+            if last >= 0:
+                W.draw_border_alpha(strip, (last * pitch, 0, tw, th), T.SELECT, 1.0, width=2, radius=4)
+        _WIN_HAND_CACHE[key] = strip
+    _blit_panel(surface, R_WIN_HAND, T.BC_CAPTION_BG, radius=4)
+    _draw(surface, ui.fonts, "胡牌手牌", (R_WIN_HAND[0] + 10, R_WIN_HAND[1], 84, R_WIN_HAND[3]),
+          size=T.FS_SMALL, color=T.SELECT, align=W.ALIGN_LEFT)
+    x = R_WIN_HAND[0] + 96 + max(0, (R_WIN_HAND[2] - 96 - strip.get_width()) // 2)
+    surface.blit(strip, (x, R_WIN_HAND[1] + (R_WIN_HAND[3] - th) // 2))
+
+
 def _draw_win_tile(surface: pygame.Surface, ui: object, state) -> None:
     result = state.result if isinstance(getattr(state, "result", None), dict) else {}
     win = result.get("win") if isinstance(result.get("win"), dict) else None
@@ -252,6 +339,8 @@ def _draw_win_tile(surface: pygame.Surface, ui: object, state) -> None:
         T.RESULT_TILE[0],
         T.RESULT_TILE[1],
     )
+    # 和牌张垫一层金色光晕：整幅舞台上视觉焦点必须是「胡的那张牌」
+    surface.blit(_glow_surface(R_WIN_TILE[2] + 32, R_WIN_TILE[3] + 32), (R_WIN_TILE[0] - 16, R_WIN_TILE[1] - 16))
     W.draw_tile(
         surface, ui.fonts, rect, tile,
         radius=8,

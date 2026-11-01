@@ -1,0 +1,5 @@
+Mahjong tile faces and back
+Source: https://github.com/FluffyStuff/riichi-mahjong-tiles
+Variant: Export/Regular (Front.png + face layer, pre-composed)
+License: CC0 1.0 Universal (public domain)
+Author: FluffyStuff (Kristjan)

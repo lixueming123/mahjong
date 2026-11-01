@@ -627,12 +627,15 @@ R          = 2^han                                // R ∈ {1,2,4,8,16,32,64}
   "renchan_count": 0,
   "match_will_continue": true,
   "results": [
-    {"seat": 0, "delta_score": -16, "match_total": -12, "hand": [], "win_type": []},
+    {"seat": 0, "delta_score": -16, "match_total": -12,
+     "hand": ["1p","2p","3p","4s","5s","6s","7z","7z","1z","2z","3z","4z","6m"], "win_type": []},
     {"seat": 1, "delta_score":  16, "match_total":  12,
      "hand": ["1m","1m","3m","3m","5m","5m","7m","7m","2p","2p","6p","6p","8p","8p"],
      "win_type": ["seven_pairs","ron"]},
-    {"seat": 2, "delta_score":   0, "match_total":   0, "hand": [], "win_type": []},
-    {"seat": 3, "delta_score":   0, "match_total":   0, "hand": [], "win_type": []}
+    {"seat": 2, "delta_score":   0, "match_total":   0,
+     "hand": ["9m","9m","9m","5z","5z","6z","6z","7z","7z","1s","2s","3s","4s"], "win_type": []},
+    {"seat": 3, "delta_score":   0, "match_total":   0,
+     "hand": ["2m","3m","4m","4p","5p","6p","7s","8s","9s","2z","2z","6z","6z"], "win_type": []}
   ],
   "win": {
     "seat": 1,
@@ -659,7 +662,7 @@ R          = 2^han                                // R ∈ {1,2,4,8,16,32,64}
 | `results` | 长度恒为 4，`seat` 覆盖 `{0,1,2,3}` 无重复 | 顺序按 seat 升序（**未变**） |
 | `results[i].delta_score` | 整数，四家之和为 0 | 本局得失分，见 6.1（**未变**） |
 | `results[i].match_total` | 整数，四家之和为 0（**v1.10 新增**） | 本场累计分（**含本局**） |
-| `results[i].hand` | 和牌者：全部牌张（门前手牌 + 副露牌面，按 3.1 排序，含和牌张），长度 = `14 + 该家杠数`；其他人 `[]` | **口径未变**。副露分组仍由 `state_sync.seats[].melds` 还原，元素形状扩为 `{"type":"pong"\|"chow"\|"kong"\|"ankan"\|"kakan","tiles":[tile,…]}`（`ankan` 对他家 `tiles: []`，见 §4.4） |
+| `results[i].hand` | **v4.5：四家均下发全部牌张**（门前手牌 + 副露牌面，按 3.1 排序；和牌者含和牌张），长度 = 该家 `14/13 + 杠数` | 结算摊牌用，只在 `game_end` 出现；`state_sync` 仍不泄露他家手牌。副露分组仍由 `state_sync.seats[].melds` 还原，元素形状为 `{"type":"pong"\|"chow"\|"kong"\|"ankan"\|"kakan","tiles":[tile,…]}`（`ankan` 在局终揭示后为 4 张） |
 | `results[i].win_type` | 和牌者：`tags` + `["ron"]` 或 `["tsumo"]`；其他人 `[]` | **形状未变**（仍只含 `seven_pairs`/`pure_one_suit`）。完整番种明细的唯一出口是 `win.yaku[]` |
 | `win` | 和牌时为对象；荒庄时为 `null` | **未变** |
 | `win.tile` / `win.from_seat` / `win.tsumo` | 同 v1.9 | **未变** |
@@ -904,7 +907,7 @@ cost(t) = -usefulness(t)
 | GD-B3 | 若 `reason == "draw_exhausted"`：4 个 `delta_score` 全为 0，且 `win == null` |
 | GD-B4 | 若 `reason == "win_ron"`：存在唯一 `win.seat`，`win.multiplier ∈ {1,2,4,8,16,32,64}`（且 `== 2^win.han_breakdown.total`），`win.from_seat ∈ {0,1,2,3}` 且 `from_seat != win.seat`，放炮者 `delta_score == -win.multiplier`，和牌者 `delta_score == +win.multiplier`，其余两家为 0 |
 | GD-B5 | 若 `reason == "win_tsumo"`：`win.tsumo == true`，`win.from_seat == null`，其余三家 `delta_score` 均 == `-2×win.multiplier`，和牌者 `delta_score == +6×win.multiplier`，`win.total == 6×win.multiplier` |
-| GD-B6 | 和牌者 `results[win.seat].hand` 长度 ≥ 14，且 `长度 − 14` 等于 `hand` 中「恰好 4 张同牌面」的组数（= 该家杠数；无杠时长度恰为 14）；其余三人 `hand == []` |
+| GD-B6 | **v4.5 摊牌**：四家 `results[].hand` 均为非空扁平数组并按 §3.1 排序；和牌者长度 ≥ 14 且 `长度 − 14` 等于该家杠数；其余三家长度 = `13 + 杠数`。`state_sync.seats[]` 仍不得出现 `hand` |
 | GD-B7 | `win.tags` 中每个取值 ∈ `{"seven_pairs","pure_one_suit"}` 且 `win.tags ⊆ {y.id for y in win.yaku}`；`win.yaku[]` 的 id 序列**严格按 §6.2 的序**升序出现、每个 id 至多一条；`win.han_breakdown.total == min(base+tsumo+dealer, 6)`（**番数合计，不是分数 `win.total`**；`tsumo` 恒 0）；`win.multiplier == 2^win.han_breakdown.total` |
 | GD-B8 | **v1.10 场次**：`round_index ∈ 0..3`（0 基，连庄时与上一局相同）；`results[].match_total` 四家之和为 0；`match_will_continue == false` 时**紧随其后必须收到 `match_end`**，且 `match_end.hands_played == 4`、`rankings` 长度 4、`rank = 1 + 严格大于本座位的人数`（competition ranking）、`final_score` 与最后一次 `match_total` 逐座位相等 |
 

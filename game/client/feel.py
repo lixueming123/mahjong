@@ -76,6 +76,7 @@ class Flight:
     h1: float
     started: float
     duration: float
+    side: bool = False
 
     def progress(self, now: float) -> float:
         if self.duration <= 0:
@@ -207,11 +208,15 @@ class Feel:
         self.flights = [f for f in self.flights if f.progress(now) < 1.0]
         if len(self.flights) >= MAX_FLIGHTS:
             return False  # F-AN-05：第 4 个直接落位，不排队
-        tw, th = RIVER_TILE_SIDE if side else RIVER_TILE_CENTER
+        if side:
+            tw, th = float(end_rect[2]), float(end_rect[3])
+        else:
+            tw, th = RIVER_TILE_CENTER
         self.flights.append(
             Flight(
                 seat=seat,
                 tile=tile,
+                side=side,
                 x0=start_rect[0] + start_rect[2] / 2.0,
                 y0=start_rect[1] + start_rect[3] / 2.0,
                 x1=end_rect[0] + end_rect[2] / 2.0,

@@ -10,7 +10,15 @@ import pygame
 
 from .. import theme as T
 from ..view import UiView
+from . import art
 from . import widgets as W
+
+
+def _draw_watermarks(surface: pygame.Surface, fonts) -> None:
+    """背景水印：两张淡到几乎看不见的大牌（東 / 發），给纯色底一点纵深。"""
+    surface.blit(art.fade_tile(fonts, "1z", 150, 204, 20, 12.0), (86, 402))
+    surface.blit(art.fade_tile(fonts, "6z", 150, 204, 18, -10.0), (1044, 96))
+    surface.blit(art.fade_tile(fonts, "9p", 120, 164, 14, -6.0), (170, 96))
 
 
 def _draw_input(
@@ -24,10 +32,14 @@ def _draw_input(
     counter: str = "",
     composition: str = "",
 ) -> None:
-    """一个输入框：聚焦时描边高亮，error 时红框；caret 只在聚焦时闪。"""
+    """一个输入框：聚焦时描边高亮 + 外发光，error 时红框；caret 只在聚焦时闪。"""
     edge = T.NEG if error else (T.SELECT if focused else T.PANEL_EDGE)
-    pygame.draw.rect(surface, (12, 22, 18), rect, border_radius=4)
-    pygame.draw.rect(surface, edge, rect, width=2, border_radius=4)
+    surface.blit(art.strip(rect[2], rect[3], (8, 24, 18, 232), edge=None, radius=8), (rect[0], rect[1]))
+    if focused and not error:
+        glow = pygame.Surface((rect[2] + 8, rect[3] + 8), pygame.SRCALPHA)
+        pygame.draw.rect(glow, (255, 200, 64, 46), (0, 0, rect[2] + 8, rect[3] + 8), width=4, border_radius=12)
+        surface.blit(glow, (rect[0] - 4, rect[1] - 4))
+    pygame.draw.rect(surface, edge, rect, width=2, border_radius=8)
 
     font = fonts.get(32)
     text_pos = (rect[0] + 12, rect[1] + rect[3] // 2)
@@ -60,23 +72,69 @@ def _draw_input(
 def _draw_mode_tab(surface: pygame.Surface, fonts, rect, label: str, active: bool, ui: UiView) -> None:
     hovered = T.rect_contains(rect, ui.mouse)
     if active:
-        pygame.draw.rect(surface, T.ACTIVE, rect, border_radius=4)
+        surface.blit(art.strip(rect[2], rect[3], (232, 192, 104, 255), edge=None, radius=8), (rect[0], rect[1]))
     else:
-        pygame.draw.rect(surface, (12, 22, 18), rect, border_radius=4)
-        pygame.draw.rect(surface, T.PANEL_EDGE, rect, width=2, border_radius=4)
-    if hovered and not active:
-        pygame.draw.rect(surface, T.PANEL_EDGE, rect, width=3, border_radius=4)
+        surface.blit(art.strip(rect[2], rect[3], (8, 24, 18, 210), edge=None, radius=8), (rect[0], rect[1]))
+        pygame.draw.rect(surface, T.ACTIVE if hovered else T.PANEL_EDGE, rect, width=1, border_radius=8)
     W.draw_text(
         surface, label, fonts.get(T.FS_BODY), T.BG_LOGIN if active else T.TEXT_DIM, rect, W.ALIGN_CENTER
     )
 
 
+def _draw_checkbox(
+    surface: pygame.Surface, fonts, rect: tuple[int, int, int, int], label: str, checked: bool, hovered: bool
+) -> None:
+    """「记住密码」勾选框：16px 方框 + 勾，标签 15px；勾上后标签转亮，未勾时只在悬停提亮描边。"""
+    box = pygame.Rect(rect[0], rect[1] + (rect[3] - 16) // 2, 16, 16)
+    if checked:
+        pygame.draw.rect(surface, T.ACTIVE, box, border_radius=4)
+        pygame.draw.lines(
+            surface,
+            T.BG_LOGIN,
+            False,
+            [(box.x + 3, box.y + 8), (box.x + 7, box.y + 12), (box.x + 13, box.y + 4)],
+            2,
+        )
+    else:
+        pygame.draw.rect(surface, T.ACTIVE if hovered else T.PANEL_EDGE, box, width=2, border_radius=4)
+    W.draw_text(
+        surface,
+        label,
+        fonts.get(T.FS_SMALL),
+        T.TEXT if checked else T.TEXT_DIM,
+        (rect[0] + 24, rect[1], rect[2] - 24, rect[3]),
+        W.ALIGN_LEFT,
+    )
+
+
 def render(surface: pygame.Surface, ui: UiView) -> None:
-    surface.fill(T.BG_LOGIN)
     fonts = ui.fonts
     account_mode = ui.login_mode == "account"
 
-    W.draw_panel(surface, T.L_CARD, fill=T.PANEL, edge=T.PANEL_EDGE, radius=8)
+    # 背景：竖向渐变 + 中心柔光 + 水印牌（不再是纯色平涂）
+    surface.blit(
+        art.backdrop(T.LOGICAL_W, T.LOGICAL_H, (24, 78, 58), (10, 34, 25)), (0, 0)
+    )
+    _draw_watermarks(surface, fonts)
+
+    # 卡片：先投影再玻璃面板，圆角/坐标仍用 §3.2 冻结值
+    W.draw_panel(surface, T.L_CARD, fill=T.PANEL, edge=T.PANEL_EDGE, radius=12, shadow=True)
+    # 标题下的短金线（装饰，不参与任何布局；长度只覆盖标题，不压副标题）
+    line = pygame.Surface((200, 2), pygame.SRCALPHA)
+    line.fill((232, 192, 104, 110))
+    surface.blit(line, (640 - 100, T.L_CARD[1] + 74))
+
+    if not account_mode:
+        # 游客模式的空白区补三行「这局能玩到什么」（真实功能，不是装饰文案）
+        for index, text in enumerate((
+            "· 四人一桌：1 真人 + 3 AI，吃 / 碰 / 杠 / 胡全支持",
+            "· 番种、封顶与结算播报：和牌后逐条念给你听",
+            "· 听牌提示实时显示可胡的牌与剩余枚数",
+        )):
+            W.draw_text(
+                surface, text, fonts.get(T.FS_SMALL), T.TEXT_DIM,
+                (T.L_CARD[0] + 40, 394 + index * 24, T.L_CARD[2] - 80, 20), W.ALIGN_LEFT,
+            )
 
     W.draw_text(surface, "麻将 · ex_actor", fonts.get(T.FS_H1, bold=True), T.TEXT, T.L_TITLE, W.ALIGN_CENTER)
     W.draw_text(
@@ -118,6 +176,15 @@ def render(surface: pygame.Surface, ui: UiView) -> None:
             error=ui.login_password_error,
             caret_on=ui.caret_on,
             composition=ui.ime_composition if ui.login_focus == "password" else "",
+        )
+        # 勾上 = 登录成功后把账号口令存到本机（0600），下次启动直接填回（§3.5）
+        _draw_checkbox(
+            surface,
+            fonts,
+            T.L_REMEMBER,
+            "记住密码",
+            ui.remember_password,
+            T.rect_contains(T.L_REMEMBER, ui.mouse),
         )
 
     main_rect = T.L_MAIN_BTN

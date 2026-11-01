@@ -1,8 +1,9 @@
 # 账号与战绩设计（ACCOUNT_DESIGN）
 
 - 文档 ID：ACCOUNT_DESIGN
-- 版本：**v1.3**
-- 修订：v1.3 依 captain 裁决（A 批需求评审）**新增场次汇总表 `match_results`**（一场每账号一行：`hands_played` / `dealer_hands` / `final_score` / `final_rank`），**`matches` 表一个字段都不加**（保持"一行 = 一局"语义，零回归），`stats` 帧本期**不动**（`match_results` 先只落库不展示）。既有账号模型、口令口径、身份映射、错误码、降级语义、`matches` 的写入时机与字段**一律未动**（见 §8 修订记录）
+- 版本：**v1.4**
+- 修订：v1.4 依用户需求（「登录优化一下 每次都有重新输入账号密码」）在 §5 增第 7 条**客户端本地记住登录**：账号登录成功后把账号名与口令存本机 `~/.ex_actor_mahjong/login.json`（目录 `0700` / 文件 `0600`，**明文**、按 `host:port` 分条），冷启动预填并默认自动登录一次，取消勾选即删档；**服务端与线协议零改动**（复用既有 `login{username,password}`），表现层细节见 `UI_UX_SPEC.md` v4.6 §3.5
+  v1.3 依 captain 裁决（A 批需求评审）**新增场次汇总表 `match_results`**（一场每账号一行：`hands_played` / `dealer_hands` / `final_score` / `final_rank`），**`matches` 表一个字段都不加**（保持"一行 = 一局"语义，零回归），`stats` 帧本期**不动**（`match_results` 先只落库不展示）。既有账号模型、口令口径、身份映射、错误码、降级语义、`matches` 的写入时机与字段**一律未动**（见 §8 修订记录）
   v1.2 依用户需求（本轮 actor 化重构）更正 §6.1 第 1 条的**论据**：DB 不放进 actor 的 handler，理由只有「会阻塞」——原文另举的「handler 一旦挂起就不再持有 mailbox」自 `GAME_DESIGN.md` §0.3 v1.8 起已不成立（每 actor 的 handler 由 `AsyncGate` 保证互斥，挂起不再破坏原子性）。**实现形状与 §1–§5 口径一律未动**
   v1.1 依 captain 裁决（用户需求「客户端登陆后不要立马进对局，进入大厅界面」）把战绩的主界面从结算页扩到**大厅界面**（`UI_UX_SPEC.md` §12，v1.8）：登录成功后先进大厅，那里常驻显示身份与战绩；结算页战绩块与牌桌弹窗保持不变。协议与本文件 §1–§4 的口径**一律未动**
 - 状态：**本次需求评审产物**——本文是账号功能的规格源头；`PROTOCOL.md` / `GAME_DESIGN.md` / `UI_UX_SPEC.md` 依本文做**增补式**修订（各加一行修订记录），既有冻结数值与流程一律不动
@@ -233,6 +234,12 @@ C→S stats_request → S→C stats{...}
    - **牌桌**（`UI_UX_SPEC.md` §4.12，v1.7）：HUD「战绩」按钮弹出同一份数据，随时可看。
    - **结算页**（`UI_UX_SPEC.md` §9.2/§9.6，v1.7）：按钮上方内嵌「汇总 + 最近 ≤10 局（2 列 × 5 行、不显示时间）」；收到 `game_end` 后发一次 `stats_request`。
 6. `SCREEN_LOGIN` 的坐标随账号模式扩展（`UI_UX_SPEC.md` §3.2 的修订表）；`SCREEN_LOBBY` 与 `SCREEN_RESULT` 的战绩块坐标见该文档 §12.1 与 §9.2。
+7. **本机记住登录（v1.4，`UI_UX_SPEC.md` §3.5 为其表现层定义）**：用户诉求是「每次启动都要重敲账号密码」。
+   - 存档：`~/.ex_actor_mahjong/login.json`，`{version, accounts: {"<host>:<port>": {username, password}}}`；目录 `0700`、文件 `0600`，写入走「临时文件 + `os.replace`」。
+   - 写入时机：`login_ok` 且 `player_id` 以 `u-` 开头（账号会话）**且**勾选框为勾上时；存的是**提交出去**的那一对凭据（握手期间输入框仍可编辑，不能用实时值）。
+   - 删除：取消勾选立即删该条；`main.py --forget-login` 启动前删；`MAHJONG_LOGIN_STORE=off` 让客户端全程不读不写。
+   - 冷启动：有存档 ⇒ 自动切账号模式并预填，`main.py` 默认再自动提交一次（`--no-auto-login` 只预填）；存档不合规时只预填。
+   - 取舍：**明文存储、不加密**——与 §2.2 同一取舍（单机演示、零新增依赖）；要上生产就把这一层换成系统钥匙串。明文口令照旧**不进日志、不进错误消息、不回显**；存档不参与任何协议字段，服务端无从得知。
 
 ## 6. 服务端实现约束（不可协商）
 
@@ -256,6 +263,7 @@ C→S stats_request → S→C stats{...}
 
 | 版本 | 修订内容 | 来源 | 是否改动冻结数值 |
 | --- | --- | --- | --- |
+| **v1.4** | §5 增第 7 条**客户端本地记住登录**：账号登录成功且勾着「记住密码」时，把账号名与口令存本机 `~/.ex_actor_mahjong/login.json`（目录 `0700` / 文件 `0600`，**明文**，按 `host:port` 分条），冷启动预填并默认自动登录一次，取消勾选即删档；实现落点 `game/client/login_store.py` + `app.py`，验收 `game/tests/login_memory_test.py`。**服务端与线协议零改动**（复用既有 `login{username,password}`，无新增帧/错误码） | 用户需求（「每次都要重新输入账号密码」） | **否**（账号模型、口令散列口径、身份映射、错误码、降级语义、`matches` / `match_results` **全部未动**；新增的只是客户端本机便利文件） |
 | **v1.3（口径修正）** | 同版内修正：`match_results.hands_played` 由「本场计入局数的局数（= `round_count`，恒 4；不含连庄额外手）」改为「**本场实际手数（= `game_end` 下发次数，4..8，含连庄额外手）**」；`dealer_hands` 补「恒 `<= hands_played`」。与 `PROTOCOL.md` §5.15 的 D2 终裁同批，表结构与既有字段**未动**，代码侧同一快照 | captain 裁决（D2 终裁，第三次裁决） | **否**（仅字段口径措辞，无表结构/字段/类型变化） |
 | **v1.3** | **新增场次汇总**：① §2.1 增第三张表 `match_results`（一场每账号一行：`hands_played` / `dealer_hands` / `final_score` / `final_rank`，`(room_id, account_id)` 唯一），附四条约定（键/建表方式/**加表不改表**/本期不展示）；② §0 增"局制（v1.3）"一行，说明 `matches` 仍按局一行、场次维度另表承载；③ §4 增第 7 条"场次汇总"口径与一致性约束；④ §0 数值行注明**算分数值由 `RULESET` 的 A 批修订版承载**，本文不涉及。**`matches` 表零字段变更、`StatsJob`/`RecordJob` 零改动、`stats` 帧零改动** | captain 裁决（A 批需求评审；线协议侧见 `PROTOCOL.md` v1.6 §5.15 `match_end`） | **否**（账号模型、口令口径、身份映射、错误码与配额、降级语义、`matches` 的字段与写入时机、`stats` 帧形状**全部未动**；仅新增一张表与一段口径） |
 | v1.2 | §6.1 第 1 条的**论据**更正：原文以「handler 一旦挂起就不再持有 mailbox」为理由之一；自 v1.2 起每个 actor 的 handler 由 `AsyncGate` 保证互斥（`GAME_DESIGN.md` §0.3 v1.8），挂起本身不再破坏原子性，DB 留在 actor 之外的理由收窄为「它会阻塞」。**实现形状（submit → 结果以消息回投）与 §1–§5、§6 其余约束不变** | 用户需求（本轮 actor 化重构） | **否**（账号模型、口令口径、身份映射、错误码、降级语义、战绩写入时机与字段**全部未动**；仅一处论据表述更新） |

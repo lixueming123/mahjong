@@ -24,6 +24,7 @@ from .broadcast import VOICE_ENABLED, Broadcast
 from .feel import Feel
 from .game_state import (SCREEN_LOGIN, SCREEN_LOBBY, SCREEN_RESULT, SCREEN_TABLE, WINDOW_CLAIM, WINDOW_DISCARD,
                          GameState)
+from .login_store import LoginStore
 from .net_client import NetClient
 from .render import (actionbar, lobby as lobby_view, login as login_view, overlays, result as result_view,
                      stats as stats_view, table as table_view, tenpai as tenpai_view)
@@ -87,6 +88,8 @@ class GameApp:
         auto_scale: bool = True,
         enable_display: bool = True,
         no_feel: bool = False,
+        login_store: LoginStore | None = None,
+        auto_login: bool = False,
     ) -> None:
         self.host = host
         self.port = port
@@ -189,6 +192,14 @@ class GameApp:
         self.mouse_down = False
         self.debug = False
         self._pressed_button: tuple[str, list[str]] | None = None
+
+        # 登录凭据记忆（UI_UX_SPEC §3.5）：`login_store` 由入口注入，默认 `None` = 不落盘
+        # （测试与嵌入式调用因此零副作用）。`auto_login` 只在有存档时生效。
+        self.login_store = login_store
+        self.remember_password = True
+        # 提交出去的那一对凭据。握手期间输入框仍可编辑，落盘时不能拿 `self.password` 兜底。
+        self._submitted_credentials: tuple[str, str] | None = None
+        self._restore_saved_login(auto_login)
 
     # ------------------------------------------------------------ 显示
 
@@ -387,6 +398,60 @@ class GameApp:
 
     # ------------------------------------------------------------ 登录
 
+    def _restore_saved_login(self, auto_login: bool) -> None:
+        """启动时把上次**成功登录**的账号口令填回输入框；`auto_login` 时顺带提交一次。
+
+        没存档就什么都不做（游客界面原样）。存档的长度/字符集与 §3.3 不符时（例如换了
+        版本口径）只预填不提交，避免一开机就弹一行红字。
+        """
+        if self.login_store is None:
+            return
+        saved = self.login_store.load(self.host, self.port)
+        if saved is None:
+            return
+        account, password = saved
+        self.login_mode = "account"
+        self.account = account
+        self.password = password
+        self.login_focus = "name"
+        self.login_status = f"已记住 {account}，点「登录」继续"
+        self.login_status_color = T.TEXT_DIM
+        if auto_login and self._account_credentials_valid(account, password):
+            self.submit_login()
+
+    @staticmethod
+    def _account_credentials_valid(account: str, password: str) -> bool:
+        """§3.3 的账号名/口令口径，纯判定、不写状态行（给「要不要自动登录」用）。"""
+        return (
+            ACCOUNT_NAME_MIN <= len(account) <= ACCOUNT_NAME_MAX
+            and all(c.isascii() and (c.isalnum() or c == "_") for c in account)
+            and PASSWORD_MIN <= len(password) <= PASSWORD_MAX
+            and all(0x20 <= ord(c) <= 0x7E for c in password)
+        )
+
+    def _remember_credentials(self) -> None:
+        """登录成功且勾着「记住密码」→ 落盘；取消勾选时归档已在 `_toggle_remember` 删掉。"""
+        if self.login_store is None or not self.remember_password:
+            return
+        credentials = self._submitted_credentials
+        if credentials is None:
+            return
+        self.login_store.save(self.host, self.port, credentials[0], credentials[1])
+
+    def _toggle_remember(self) -> None:
+        """「记住密码」勾选框：勾上 = 下次自动填入；取消 = 立刻删掉本机存档。"""
+        self.remember_password = not self.remember_password
+        if self.remember_password:
+            self.login_status = "已勾选：登录成功后记住账号，下次自动填入"
+            self.login_status_color = T.TEXT_DIM
+            return
+        if self.login_store is None:
+            self.login_status = "已取消：这次登录不记住账号"
+        else:
+            self.login_store.clear(self.host, self.port)
+            self.login_status = "已取消记住密码：本机存档已删除"
+        self.login_status_color = T.TEXT_DIM
+
     def _login_key(self, event: pygame.event.Event) -> None:
         # 账号模式下有两个输入框，按键按焦点路由（input_focus 到 UiView 的 login_focus）。
         field = "password" if (self.login_mode == "account" and self.login_focus == "password") else "name"
@@ -452,6 +517,9 @@ class GameApp:
             self.input_focus = True
             self.login_focus = "password"
             return
+        if self.login_mode == "account" and T.rect_contains(T.L_REMEMBER, pos):
+            self._toggle_remember()
+            return
         if T.rect_contains(T.L_QUIT, pos):
             self.running = False
             return
@@ -472,6 +540,12 @@ class GameApp:
         self.login_focus = "name"
         self.login_input_error = False
         self.login_password_error = False
+        # 切到账号模式且两个框都还空着时，把本机记住的账号填回来（§3.5）：
+        # 这样先逛了一眼游客页也不至于白填一次。
+        if mode == "account" and not self.account and not self.password and self.login_store is not None:
+            saved = self.login_store.load(self.host, self.port)
+            if saved is not None:
+                self.account, self.password = saved
         self.login_status = (
             "输入账号与密码后点击「登录」，或点「注册」创建新账号"
             if mode == "account"
@@ -532,6 +606,10 @@ class GameApp:
         if auth is None:
             return
         self.pending_auth = auth
+        # 记住的是**提交出去**的凭据：握手期间输入框仍可编辑，落盘不能用 `self.password` 兜底。
+        self._submitted_credentials = (
+            (auth[1]["username"], auth[1]["password"]) if "username" in auth[1] else None
+        )
         self.state.reset_all()
         self.stats = None
         self.stats_open = False
@@ -638,6 +716,9 @@ class GameApp:
             # 游客的 `p-` 会话在界面上不出现战绩入口。
             player_id = frame.get("player_id")
             self.has_account = isinstance(player_id, str) and player_id.startswith("u-")
+            if self.has_account:
+                # 只有**账号**登录成功才值得记：游客的 `p-` 会话下次也连不回来（§3.5）。
+                self._remember_credentials()
             self.stats = None
             self.stats_open = False
             self.login_stage = "IDLE"
@@ -895,29 +976,17 @@ class GameApp:
             return
         tile = view.discards[-1]
         rel = state.rel_index(seat)
-        # 终点：该座位牌河**最后**一个已占格（牌河已由权威帧追加，故取末格）
-        if rel == 0:
-            rects = table_view.center_river_rects(T.R_SELF_RIVER, len(view.discards))
-            side = False
-        elif rel == 2:
-            rects = table_view.center_river_rects(T.R_OPP_RIVER, len(view.discards))
-            side = False
-        elif rel == 1:
-            rects = table_view.side_river_rects(T.R_SIDE_R_RIVER, len(view.discards))
-            side = True
-        else:
-            rects = table_view.side_river_rects(T.R_SIDE_L_RIVER, len(view.discards))
-            side = True
-        if not rects:
+        side = rel in (1, 3)
+        end = table_view.discard_flight_end(state, seat, rel, len(view.discards))
+        if end is None:
             return
-        # 起点：本家打牌窗口的手牌 rect（他家无手牌 rect ⇒ 从中央牌河区起飞，视觉等价）
         if rel == 0 and state.selected_index is not None:
             layout = table_view.hand_layout(state)
             idx = min(state.selected_index, len(layout) - 1) if layout else None
             start = layout[idx] if idx is not None and idx >= 0 else T.R_SELF_HAND
         else:
-            start = T.R_CENTER
-        self.feel.start_discard(seat, tile, start, rects[-1], side=side)
+            start = table_view.discard_flight_start(state, rel)
+        self.feel.start_discard(seat, tile, start, end, side=side)
 
     def _action_toast(self, frame: dict) -> str:
         """事件提示条文案（UI_UX_SPEC v1.4 §4.10）：结构 `<座位> <动作> <牌名>`。
@@ -1668,6 +1737,7 @@ class GameApp:
             login_password_masked="●" * len(self.password),
             login_password_error=self.login_password_error,
             login_focus=self.login_focus,
+            remember_password=self.remember_password,
             login_register_enabled=self._login_register_enabled(),
             stats=self.stats,
             stats_open=self.stats_open,
@@ -1774,7 +1844,15 @@ class GameApp:
             return
         now = ui.now
         for flight in self.feel.flights:
-            table_view.draw_flight_tile(surface, ui, flight.rect(now), flight.tile)
+            table_view.draw_flight_tile(
+                surface,
+                ui,
+                flight.rect(now),
+                flight.tile,
+                side=flight.side,
+                seat=flight.seat,
+                feel=self.feel,
+            )
 
     def _present(self, surface: pygame.Surface) -> None:
         target = self.screen_surface

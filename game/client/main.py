@@ -14,8 +14,10 @@ import sys
 if __package__ in (None, ""):  # 允许 `python game/client/main.py` 直接运行
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from client.app import GameApp
+    from client.login_store import LoginStore
 else:
     from .app import GameApp
+    from .login_store import LoginStore
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9527
@@ -32,6 +34,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="关闭 B 批手感表现：不播任何动画（音效仍受 M 键控制），用于自动化与性能比对",
     )
     parser.add_argument("--log-level", default="INFO", help="日志级别（DEBUG/INFO/WARNING）")
+    # v4.6（UI_UX_SPEC §3.5）：账号口令默认记在本机，下次启动自动填入并登录一次。
+    parser.add_argument(
+        "--no-auto-login",
+        action="store_true",
+        help="有记住的账号时只预填、不自动登录（仍按「登录」即可）",
+    )
+    parser.add_argument(
+        "--forget-login",
+        action="store_true",
+        help="启动前清掉本机记住的账号口令（换账号 / 共用机器时用）",
+    )
     return parser
 
 
@@ -44,7 +57,17 @@ def cli_main(argv: list[str] | None = None) -> int:
     logging.getLogger("mahjong.client").info(
         "启动客户端：目标 %s:%s", args.host, args.port
     )
-    app = GameApp(host=args.host, port=args.port, fullscreen=args.fullscreen, no_feel=args.no_feel)
+    login_store = LoginStore()
+    if args.forget_login:
+        login_store.clear(args.host, args.port)
+    app = GameApp(
+        host=args.host,
+        port=args.port,
+        fullscreen=args.fullscreen,
+        no_feel=args.no_feel,
+        login_store=login_store,
+        auto_login=not args.no_auto_login and not args.forget_login,
+    )
     try:
         app.run()
     except KeyboardInterrupt:  # pragma: no cover - 交互式中断

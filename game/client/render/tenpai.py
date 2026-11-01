@@ -17,6 +17,7 @@ import pygame
 from .. import theme as T
 from ..tiles import tile_label
 from ..view import UiView
+from . import art
 from . import widgets as W
 
 log = logging.getLogger("mahjong.client.tenpai")
@@ -39,18 +40,13 @@ def remaining_color(remaining: int) -> tuple[int, int, int]:
     return T.NEG
 
 
-def _item_texts(item: dict) -> tuple[str, str]:
-    """`(牌名, 枚数后缀)`；`remaining == 1` 追加 `·`（§2.3）。"""
-    tile = str(item.get("tile", "?"))
-    remaining = item.get("remaining", 0)
-    suffix = f"{remaining} 枚"
-    if remaining == 1:
-        suffix += "·"
-    return tile_label(tile), suffix
-
-
 def render(surface: pygame.Surface, ui: UiView, feel) -> None:
-    """画听牌条。`feel` 提供开关（`tenpai_bar_on`）与出现/消失/更新动画进度。"""
+    """画听牌条。`feel` 提供开关（`tenpai_bar_on`）与出现/消失/更新动画进度。
+
+    v2.1：等待牌**画成真牌**（24×30 小牌）而不是牌名文字，和腾讯麻将的听牌条一致；
+    「N 枚」仍按 F-TP §2.3 着色。整条先画到透明图层再统一按 `alpha` 贴回去，
+    这样出现/消失动画对「牌面 + 文字」一起生效。
+    """
     state = ui.state
     bar_on = getattr(feel, "tenpai_bar_on", True)
     anim = getattr(feel, "tenpai_anim", None)
@@ -89,70 +85,75 @@ def render(surface: pygame.Surface, ui: UiView, feel) -> None:
     rect = T.R_TENPAI_SHIFTED if state.melds else T.R_TENPAI
     x, y, w, h = rect
     y = int(y + dy)
-    _draw_bar_bg(surface, (x, y, w, h), int(alpha))
 
     fonts = ui.fonts
     name_font = fonts.get(T.FS_SMALL)
     count_font = fonts.get(T.FS_MICRO)
-    base_y = y + h // 2
+    prefix = "听"
 
     # F-TP-04 溢出降级：多面听最多 9 面（4 面子 + 1 将），正常不触发；这里是防御
-    if len(items) > _MAX_ITEMS:
+    overflow = len(items) > _MAX_ITEMS
+    counts = [str(item.get("remaining", 0)) + " 枚" for item in items]
+    pw = name_font.size(prefix)[0]
+    item_w = [T.TENPAI_TILE_W + 3 + count_font.size(text)[0] for text in counts]
+    total = pw + T.TENPAI_PREFIX_GAP + sum(item_w) + T.TENPAI_ITEM_GAP * max(0, len(items) - 1)
+
+    # v2.1：底板收窄到「内容 + 内边距」并居中（原来是固定 800 px 的长条，
+    # 两三个听牌面时会显得空荡）；外框矩形仍是 §4.3 冻结的 R_TENPAI。
+    bar_w = w if overflow else min(w, total + 40)
+    bar_x = x + (w - bar_w) // 2
+    layer = pygame.Surface((bar_w, h), pygame.SRCALPHA)
+    layer.blit(
+        art.strip(bar_w, h, (*T.PANEL[:3], int(T.TENPAI_BG_ALPHA)), edge=T.PANEL_EDGE, radius=8),
+        (0, 0),
+    )
+
+    if overflow:
         best = max((it.get("remaining", 0) for it in items), default=0)
-        text = f"听 {len(items)} 面 · 最多 {best} 枚"
         W.draw_text(
-            surface, text, name_font, T.TEXT,
-            (x + 16, y, w - 32, h), W.ALIGN_LEFT, alpha=int(alpha),
+            layer, f"听 {len(items)} 面 · 最多 {best} 枚", name_font, T.TEXT,
+            (16, 0, bar_w - 32, h), W.ALIGN_LEFT,
         )
+        layer.set_alpha(int(alpha))
+        surface.blit(layer, (bar_x, y))
         return
 
-    cursor = T.TENPAI_ITEM_X0
-    # F-TP-05：条首固定「听」字 + 8 px 间隔
-    prefix = "听"
-    pw = name_font.size(prefix)[0]
-    W.draw_text(
-        surface, prefix, name_font, T.TEXT_DIM,
-        (cursor, y, pw + 4, h), W.ALIGN_LEFT, alpha=int(alpha),
-    )
+    cursor = max(12, (bar_w - total) // 2)
+
+    W.draw_text(layer, prefix, name_font, T.TEXT_DIM, (cursor, 0, pw + 4, h), W.ALIGN_LEFT)
     cursor += pw + T.TENPAI_PREFIX_GAP
 
-    for item in items:
-        name_text, count_text = _item_texts(item)
+    for index, item in enumerate(items):
         remaining = item.get("remaining", 0)
+        face = str(item.get("tile", "?"))
         color = remaining_color(remaining)
-        nw = name_font.size(name_text)[0]
-        cw = count_font.size(count_text)[0]
-        # F-TP-07：新增项用 WARN 底色高亮并淡出（用整条 alpha 一起衰减，不再单开计时器）
-        if name_text in new_tiles or str(item.get("tile")) in new_tiles:
-            hl = pygame.Surface((nw + cw + 6, h - 12), pygame.SRCALPHA)
-            hl.fill((*T.WARN[:3], int(90 * (alpha / T.TENPAI_BG_ALPHA))))
-            surface.blit(hl, (cursor - 3, y + 6))
-        # F-TP-03：牌名（15px TEXT）+ 空格 + 「N 枚」（12px 着色）
-        W.draw_text(
-            surface, name_text, name_font, T.TEXT if remaining != 0 else T.NEG,
-            (cursor, y, nw + 4, h), W.ALIGN_LEFT, alpha=int(alpha),
+        width = item_w[index]
+        # F-TP-07：新增项用 WARN 底色高亮并淡出（同整条一起衰减）
+        if tile_label(face) in new_tiles or face in new_tiles:
+            surface_hl = pygame.Surface((width + 6, h - 10), pygame.SRCALPHA)
+            surface_hl.fill((*T.WARN[:3], 76))
+            layer.blit(surface_hl, (cursor - 3, 5))
+        W.draw_tile(
+            layer, fonts,
+            (cursor, (h - T.TENPAI_TILE_H) // 2, T.TENPAI_TILE_W, T.TENPAI_TILE_H),
+            face,
+            radius=4,
+            rank_size=T.FS_TILE_RIVER_RANK,
+            suit_size=T.FS_TILE_RIVER_SUIT,
+            honor_size=T.FS_TILE_Z_RIVER_CENTER,
         )
-        name_x_end = cursor + nw + 4
-        cursor += nw + 4
+        count_rect = (cursor + T.TENPAI_TILE_W + 3, 0, width - T.TENPAI_TILE_W - 3, h)
         W.draw_text(
-            surface, count_text, count_font, color,
-            (cursor, y, cw + 8, h), W.ALIGN_LEFT, alpha=int(alpha),
+            layer, counts[index], count_font, color, count_rect, W.ALIGN_LEFT,
         )
         # §2.3：`remaining == 0` ⇒ 牌名加删除线（理论不该出现，属服务端异常，照画不崩）
         if remaining == 0:
             pygame.draw.line(
-                surface, T.NEG,
-                (cursor - nw - 4, base_y), (name_x_end - 4, base_y), width=1,
+                layer, T.NEG,
+                (count_rect[0], h // 2), (count_rect[0] + count_font.size(counts[index])[0], h // 2),
+                width=1,
             )
-        cursor += cw + 8 + T.TENPAI_ITEM_GAP
-        if cursor > x + w - 40:
-            break
+        cursor += width + T.TENPAI_ITEM_GAP
 
-
-def _draw_bar_bg(surface: pygame.Surface, rect: tuple[int, int, int, int], alpha: int) -> None:
-    """F-TP-02：`PANEL` 底 alpha 216 + `PANEL_EDGE` 1 px 描边 + 圆角 4。"""
-    x, y, w, h = rect
-    layer = pygame.Surface((w, h), pygame.SRCALPHA)
-    layer.fill((*T.PANEL[:3], min(255, alpha)))
-    surface.blit(layer, (x, y))
-    pygame.draw.rect(surface, T.PANEL_EDGE, (x, y, w, h), width=1, border_radius=4)
+    layer.set_alpha(int(alpha))
+    surface.blit(layer, (bar_x, y))

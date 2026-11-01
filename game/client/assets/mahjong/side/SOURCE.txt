@@ -1,0 +1,18 @@
+Side-hand mahjong tile wall sprites
+
+3D model:
+  Source: https://codeberg.org/amenoasa/mahjong_assets
+  File: production/3d/assets/tiles/riichi_default/riichi_tile_default.gltf
+  License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+  Author: amenoasa (Jikaze mahjong assets)
+
+Texture on the tile backs:
+  Source: https://github.com/FluffyStuff/riichi-mahjong-tiles
+  File: Export/Regular/Back.png
+  License: CC0 1.0 Universal (public domain)
+  Author: FluffyStuff (Kristjan)
+
+Render pipeline:
+  Blender 4.5.9 CLI imports the glTF tile, duplicates 7..18 tiles in a row,
+  applies the CC0 back texture, renders transparent PNGs, then trims alpha.
+  side_07.png .. side_18.png in this directory.

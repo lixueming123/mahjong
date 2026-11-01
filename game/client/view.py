@@ -41,6 +41,8 @@ class UiView:
     login_password_masked: str = ""
     login_password_error: bool = False
     login_focus: str = "name"  # name | password
+    # 「记住密码」勾选框（UI_UX_SPEC §3.5）：只表示勾选态，真正的凭据文件由 app 读写。
+    remember_password: bool = True
     login_register_enabled: bool = False
     login_register_label: str = "注册"
     # 战绩（ACCOUNT_DESIGN §3.4 的 `stats` 帧原样保留，渲染时才格式化）：

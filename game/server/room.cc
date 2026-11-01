@@ -696,15 +696,15 @@ std::string RoomActor::BuildGameEnd(const Settlement& settlement) const {
     entry.Set("delta_score", json::Value::Int(settlement.delta[static_cast<size_t>(seat)]));
     // v1.6：本场累计得失分（含本局），四家之和恒为 0
     entry.Set("match_total", json::Value::Int(settlement.totals[static_cast<size_t>(seat)]));
+    // v4.5：四家都下发扁平手牌（门前 + 副露），供结算播报摊牌；仍只存在于 game_end。
+    entry.Set("hand", TilesToJson(settlement.flat_hands[static_cast<size_t>(seat)]));
     if (seat == settlement.winner_seat) {
-      entry.Set("hand", TilesToJson(settlement.winner_flat_hand));
       json::Value types = json::Value::Arr(settlement.winner_types.size());
       for (const std::string& type : settlement.winner_types) {
         types.Append(json::Value::Str(type));
       }
       entry.Set("win_type", std::move(types));
     } else {
-      entry.Set("hand", json::Value::Arr());
       entry.Set("win_type", json::Value::Arr());
     }
     results.Append(std::move(entry));
@@ -1360,6 +1360,19 @@ stdexec::task<void> RoomActor::EndRoundWithWin(int winner_seat, int from_seat, T
     settlement.winner_flat_hand.insert(settlement.winner_flat_hand.end(), meld.tiles.begin(), meld.tiles.end());
   }
   SortTiles(settlement.winner_flat_hand);
+  // v4.5：结算摊牌数据（四家）——只写进 game_end，state_sync 仍不泄露。
+  for (int seat = 0; seat < kSeatCount; ++seat) {
+    if (seat == winner_seat) {
+      settlement.flat_hands[static_cast<size_t>(seat)] = settlement.winner_flat_hand;
+      continue;
+    }
+    std::vector<Tile> flat = hands_[static_cast<size_t>(seat)];
+    for (const Meld& meld : melds_[static_cast<size_t>(seat)]) {
+      flat.insert(flat.end(), meld.tiles.begin(), meld.tiles.end());
+    }
+    SortTiles(flat);
+    settlement.flat_hands[static_cast<size_t>(seat)] = std::move(flat);
+  }
   // B1: tags 直接取自判番结果（单一出口），不再单独调 WinTags —— 消除「同一件事判两遍」的漂移风险。
   settlement.tags.clear();
   for (const Yaku& yaku : score.yaku) settlement.tags.push_back(yaku.id);
@@ -1407,6 +1420,15 @@ stdexec::task<void> RoomActor::EndRoundWithDraw() {
   settlement.reason = "draw_exhausted";
   settlement.delta = score.delta;
   settlement.winner_seat = -1;
+  // v4.5：荒庄也摊四家手牌（只随 game_end 下发）。
+  for (int seat = 0; seat < kSeatCount; ++seat) {
+    std::vector<Tile> flat = hands_[static_cast<size_t>(seat)];
+    for (const Meld& meld : melds_[static_cast<size_t>(seat)]) {
+      flat.insert(flat.end(), meld.tiles.begin(), meld.tiles.end());
+    }
+    SortTiles(flat);
+    settlement.flat_hands[static_cast<size_t>(seat)] = std::move(flat);
+  }
   // v1.6（C8）场次字段
   settlement.round_index = round_index_;
   settlement.dealer = dealer_;

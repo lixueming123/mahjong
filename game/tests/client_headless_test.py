@@ -561,24 +561,21 @@ def main() -> int:
         "本地排序 = 数牌在前（m<p<s）、字牌 1z..7z 升序（PROTOCOL §2.2）",
     )
 
-    # 6 档冻结字号：必须是 SUIT_Z 墨色的真字形，不得退化为「?」占位，且字形不越界
-    ink_ok, fit_ok, slots_note = True, True, []
+    # v4.2：牌面改为 CC0 外部贴图；6 档尺寸都必须加载到真实牌面，不得为空/占位
+    face_dir = widgets_view._TILE_ASSET_DIR
+    asset_count = len(list(face_dir.glob("*.png")))
+    check(asset_count == 35, f"CC0 牌面贴图齐全：34 种牌 + 牌背，共 {asset_count} 张")
+    ink_ok, slots_note = True, []
     for label, size, (tw, th) in HONOR_SIZE_SLOTS:
         tile_surf = pygame.Surface((tw, th))
         tile_surf.fill((0, 0, 0))
         widgets_view.draw_tile(tile_surf, app.fonts, (0, 0, tw, th), "1z", honor_size=size)
         pixels = [tile_surf.get_at((x, y))[:3] for x in range(tw) for y in range(th)]
-        ink = sum(1 for p in pixels if all(abs(p[i] - T.SUIT_Z[i]) < 12 for i in range(3)))
-        placeholder = sum(1 for p in pixels if p[0] > 200 and 60 < p[1] < 140 and 60 < p[2] < 140)
-        glyph_img = app.fonts.get(size, bold=True).render(honor_glyph("1z"), True, (255, 255, 255))
-        if ink <= 20 or placeholder:
+        ink = sum(1 for p in pixels if max(p) > 25)
+        if ink <= 20:
             ink_ok = False
-            slots_note.append(f"{label}@{size}px SUIT_Z={ink} ?={placeholder}")
-        if glyph_img.get_width() > tw or glyph_img.get_height() > th:
-            fit_ok = False
-            slots_note.append(f"{label}@{size}px 字形 {glyph_img.get_width()}x{glyph_img.get_height()} > 牌面 {tw}x{th}")
-    check(ink_ok, f"6 档字号均以 SUIT_Z{T.SUIT_Z} 渲染真字形、无「?」占位 {slots_note or ''}")
-    check(fit_ok, f"字牌字形在 6 档牌位尺寸内不越界 {slots_note or ''}")
+            slots_note.append(f"{label}@{size}px 非空像素={ink}")
+    check(ink_ok, f"6 档字号均加载到 CC0 字牌贴图 {slots_note or ''}")
 
     # 字牌在桌面上不被过滤：手牌 / 牌河 / 四家副露（横排与竖排）
     check(all(t in app.state.hand for t in ("1z", "5z")), f"字牌保留在本家手牌：{app.state.hand}")
@@ -604,13 +601,13 @@ def main() -> int:
         f"对家（横排）字牌杠 4 张：{[m.tiles for m in seat2_melds]}",
     )
 
-    # 副露布局不溢出：横排（本家 / 对家）与竖排（上家 / 下家）逐块核验
+    # 副露布局不溢出：四家均 meld_layout 横排（侧家与对家同款）
     overflows: list[str] = []
     for area, melds, vertical, tag in (
         (T.R_SELF_MELD, app.state.melds, False, "本家横排"),
         (T.R_OPP_MELD, seat2_melds, False, "对家横排"),
-        (T.R_SIDE_L_MELD, app.state.seat_view(3).melds, True, "上家竖排"),
-        (T.R_SIDE_R_MELD, app.state.seat_view(1).melds, True, "下家竖排"),
+        (T.R_SIDE_L_MELD, app.state.seat_view(3).melds, False, "上家横排"),
+        (T.R_SIDE_R_MELD, app.state.seat_view(1).melds, False, "下家横排"),
     ):
         for group_rect, tiles in table_view.meld_layout(area, melds, vertical=vertical):
             if group_rect.x < area[0] or group_rect.right > area[0] + area[2]:
@@ -618,7 +615,7 @@ def main() -> int:
             for (tx, ty, tw, th), face in tiles:
                 if tx < area[0] or tx + tw > area[0] + area[2] or ty < area[1] or ty + th > area[1] + area[3]:
                     overflows.append(f"{tag}{face}@({tx},{ty},{tw},{th})")
-    check(not overflows, f"字牌副露 3 张 / 4 张在横排与竖排布局内均不溢出 {overflows or ''}")
+    check(not overflows, f"字牌副露 3 张 / 4 张布局内均不溢出 {overflows or ''}")
 
     # 含字牌场景的单帧耗时（update + render 一轮，30 次取最大）
     # 说明：测量前做 3 帧预热并暂停 GC，避免把「冷启动/GC 停顿」误判为渲染劣化
@@ -1972,6 +1969,18 @@ def main() -> int:
         bc_render._draw, bc_render._blit_panel = _orig_draw, _orig_blit
         pygame.draw.rect, pygame.draw.line = _orig_rect, _orig_line
     check(draw_calls["n"] <= 56, f"阶段 A 最坏帧 draw 次数 ≤56：{draw_calls['n']}")
+
+    # v4.5：播报面板与赢家手牌条都不得压住四家摊牌区域
+    stage = pygame.Rect(bc_render.R_STAGE)
+    win_strip = pygame.Rect(bc_render.R_WIN_HAND)
+    for label, rect in (
+        ("对家手牌", T.R_OPP_BACK),
+        ("上家手牌", T.R_SIDE_L_BACK),
+        ("下家手牌", T.R_SIDE_R_BACK),
+        ("本家手牌", T.R_SELF_HAND),
+    ):
+        check(not stage.colliderect(pygame.Rect(rect)), f"播报面板不遮挡{label} {rect}")
+        check(not win_strip.colliderect(pygame.Rect(rect)), f"赢家手牌条不遮挡{label} {rect}")
 
     # 跳过：起播 100ms 内不响应；之后一次走完；**全程不发任何帧**
     early = make_app()

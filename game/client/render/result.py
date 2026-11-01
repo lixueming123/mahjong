@@ -21,11 +21,23 @@ from .. import theme as T
 from ..game_state import GameState
 from ..tiles import multiset_remove
 from ..view import UiView
+from . import art
 from . import broadcast as broadcast_view
 from . import stats as stats_view
 from . import widgets as W
 
 log = logging.getLogger("mahjong.client.result")
+
+#: 纯装饰图层缓存（金色细线 / 和牌光晕）：尺寸固定，没必要每帧重建 Surface
+_DECOR: dict[tuple, pygame.Surface] = {}
+
+
+def _decor(key: tuple, build) -> pygame.Surface:
+    surface = _DECOR.get(key)
+    if surface is None:
+        surface = build()
+        _DECOR[key] = surface
+    return surface
 
 REASON_LABEL = {
     "win_tsumo": "自摸",
@@ -251,9 +263,24 @@ def mask_surface() -> pygame.Surface:
 
 def render(surface: pygame.Surface, ui: UiView) -> None:
     state, fonts = ui.state, ui.fonts
+
+    # v4.5：播报期不铺整屏蒙层、不画大面板——四家摊牌必须保持可见。
+    # 只画紧凑播报面板，并把四家手牌在各自桌边翻正。
+    if state.match_end is None and broadcast_view.is_broadcasting(ui):
+        from . import table as table_view
+
+        table_view.draw_revealed_hands(surface, ui)
+        broadcast_view.render_round_end(surface, ui)
+        return
+
     surface.blit(mask_surface(), (T.R_RESULT_MASK[0], T.R_RESULT_MASK[1]))
 
-    W.draw_panel(surface, T.R_RESULT_PANEL, fill=(24, 32, 30, 245), edge=T.PANEL_EDGE, radius=8, width=2)
+    # 结算面板（v2.1）：投影 + 玻璃 + 顶部鎏金细线，和牌桌的质感语言保持一致
+    W.draw_panel(surface, T.R_RESULT_PANEL, fill=(22, 32, 29, 248), edge=(120, 138, 126), radius=16, shadow=True)
+    surface.blit(
+        _decor(("gold", T.R_RESULT_PANEL[2] - 48), lambda: _build_gold_line(T.R_RESULT_PANEL[2] - 48)),
+        (T.R_RESULT_PANEL[0] + 24, T.R_RESULT_PANEL[1] + 8),
+    )
 
     if state.match_end is not None:
         _render_match_end(surface, ui)
@@ -289,6 +316,12 @@ def _render_round_end(surface: pygame.Surface, ui: UiView) -> None:
                 surface, f"{delta:+d}", fonts.get(T.FS_H1, bold=True), color, T.R_RESULT_TITLE, W.ALIGN_RIGHT
             )
 
+    # 标题下的细线（装饰：把「局号·连庄·和牌方式」与下面四张卡片分开）
+    surface.blit(
+        _decor(("rule", T.R_RESULT_PANEL[2] - 48), lambda: _build_rule_line(T.R_RESULT_PANEL[2] - 48)),
+        (T.R_RESULT_PANEL[0] + 24, T.R_RESULT_TAGS[1] + T.R_RESULT_TAGS[3] + 4),
+    )
+
     # 番种明细行（v2.0：win.yaku[] 顺序渲染；无番 → 「无番（0 番）」；无自摸加成行）
     W.draw_text(surface, _yaku_detail(win), fonts.get(T.FS_H3), T.TEXT_DIM, T.R_RESULT_TAGS)
 
@@ -301,10 +334,16 @@ def _render_round_end(surface: pygame.Surface, ui: UiView) -> None:
             continue
         rect = (T.R_RESULT_CARDS_X[rel], T.R_RESULT_CARDS_Y, T.R_RESULT_CARD_W, T.R_RESULT_CARDS_H)
         is_winner = win is not None and win.get("seat") == seat
-        fill = (40, 56, 48, 245) if is_winner else T.PANEL
-        W.draw_panel(surface, rect, fill=fill, edge=T.PANEL_EDGE, radius=6)
+        fill = (34, 66, 52, 248) if is_winner else (24, 32, 30, 240)
+        surface.blit(art.strip(rect[2], rect[3], fill, edge=None, radius=10), (rect[0], rect[1]))
+        # 顶部 3 px 强调条：赢家金、放炮红、其余灰（走 alpha 图层，别在无 alpha 画布上直接画）
+        accent = T.SELECT if is_winner else (T.NEG if from_payer == seat else (255, 255, 255, 30))
+        surface.blit(
+            art.strip(rect[2] - 2, 3, accent if len(accent) == 4 else (*accent, 255), edge=None, radius=2),
+            (rect[0] + 1, rect[1] + 1),
+        )
         if is_winner:
-            pygame.draw.rect(surface, T.SELECT, rect, width=3, border_radius=6)
+            pygame.draw.rect(surface, T.SELECT, rect, width=2, border_radius=10)
         view = state.seat_view(seat)
         name = f"{view.name or f'座位{seat}'}"
         if view.disconnected:
@@ -467,11 +506,39 @@ def _render_match_end(surface: pygame.Surface, ui: UiView) -> None:
     )
 
 
+def _build_gold_line(width: int) -> pygame.Surface:
+    line = pygame.Surface((width, 2), pygame.SRCALPHA)
+    line.fill((232, 192, 104, 120))
+    return line
+
+
+def _build_rule_line(width: int) -> pygame.Surface:
+    line = pygame.Surface((width, 1), pygame.SRCALPHA)
+    line.fill((255, 255, 255, 26))
+    return line
+
+
+def _build_win_glow(width: int, height: int) -> pygame.Surface:
+    glow = pygame.Surface((width + 40, height + 40), pygame.SRCALPHA)
+    for index, spread in enumerate((0, 8, 16)):
+        pygame.draw.rect(
+            glow, (232, 192, 104, 26 - index * 7),
+            (20 - spread, 20 - spread, width + spread * 2, height + spread * 2),
+            border_radius=18,
+        )
+    return glow
+
+
 def _render_win_block(surface: pygame.Surface, ui: UiView, win: dict) -> None:
     state, fonts = ui.state, ui.fonts
     tile = win.get("tile")
     box = T.R_RESULT_WIN_TILE
     if isinstance(tile, str):
+        # 和牌张后面垫一层金色光晕，让「胡的是哪张」一眼可见
+        surface.blit(
+            _decor(("glow", box[2], box[3]), lambda: _build_win_glow(box[2], box[3])),
+            (box[0] - 20, box[1] - 20),
+        )
         tile_rect = (
             box[0] + (box[2] - T.RESULT_TILE[0]) // 2,
             box[1] + (box[3] - T.RESULT_TILE[1]) // 2,

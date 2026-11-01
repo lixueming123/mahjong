@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import math
 
 import pygame
 
@@ -35,8 +36,8 @@ PANEL = (24, 32, 30, 235)
 PANEL_EDGE = (96, 112, 104)
 FACE = (246, 244, 234)
 FACE_EDGE = (168, 164, 150)
-BACK = (40, 96, 160)
-BACK_EDGE = (24, 64, 112)
+BACK = (214, 74, 142)          # v3.0：牌背改成参考视频的洋红（原来是蓝色）
+BACK_EDGE = (136, 30, 86)
 SUIT_M = (176, 32, 32)
 SUIT_P = (32, 96, 176)
 SUIT_S = (24, 128, 64)
@@ -71,6 +72,43 @@ BC_ACTIVE_BG = (255, 200, 64, 40)
 BC_CAPTION_BG = (0, 0, 0, 120)
 #: 封顶格的「被砍」填充
 BC_CAP_FILL = (255, 200, 64, 40)
+
+# ---------------------------------------------------------------- v2.1 视觉升级 token
+# 对标腾讯麻将的质感层（`art.py`）。**都是新增 token，上表 30 个既有色值一个都不改**，
+# 牌面/文字仍走 FACE / FACE_EDGE / SUIT_*，这里的色只用于光影与底板。
+FELT_CORE = (30, 118, 78)         # 台面受光中心
+FELT_EDGE = (11, 54, 38)          # 台面四周压暗
+FELT_RAIL = (6, 24, 18)           # 台边收边
+#: 牌身厚度（底沿）：比 FACE 略深，制造 3D 立牌感
+TILE_SIDE = (236, 226, 216)
+#: 牌面顶部高光
+TILE_HI = (255, 253, 247)
+#: 座位牌 / 托盘底板（半透明深色玻璃）
+PLATE = (10, 28, 22, 196)
+PLATE_EDGE = (74, 118, 96)
+#: 中央情报面板的深色玻璃
+GLASS = (9, 30, 24, 206)
+#: 金色强调（台边线 / 庄家 / 选中态装饰），与 DEALER/BTN_WIN 同色系但更亮
+GOLD = (232, 192, 104)
+#: 木质台边（上亮下暗，配木纹线）
+WOOD_HI = (120, 78, 48)
+WOOD_LO = (62, 38, 24)
+
+# ---------------------------------------------------------------- v3.0 桌布（复刻参考视频）
+# 参考视频的桌面是一整块粉色绒布：上浅下深、上面压着米色斜格线、还撒着浅蓝线稿图案。
+FELT_PINK_TOP = (214, 132, 146)
+FELT_PINK_BOTTOM = (188, 100, 118)
+#: 斜格线（米白，压在桌布上）
+FELT_LATTICE = (246, 208, 200)
+#: 桌面上的浅蓝线稿图案
+FELT_DOODLE = (172, 200, 232)
+#: 名牌上的分数条（洋红底 + 金色数字，和牌背同色系）
+PLATE_SCORE = (206, 52, 108)
+#: 名牌名字条（半透明深色）
+PLATE_NAME = (30, 26, 30, 186)
+#: 背景（人物身后那张糊掉的室内照片）
+HALL_WALL = (104, 62, 70)     # 暗紫褐：和桌面同色系，整屏像同一间屋子
+HALL_DARK = (52, 30, 36)
 
 COLORS = {
     "BG": BG,
@@ -107,6 +145,24 @@ COLORS = {
     "BC_ACTIVE_BG": BC_ACTIVE_BG,
     "BC_CAPTION_BG": BC_CAPTION_BG,
     "BC_CAP_FILL": BC_CAP_FILL,
+    "FELT_CORE": FELT_CORE,
+    "FELT_EDGE": FELT_EDGE,
+    "FELT_RAIL": FELT_RAIL,
+    "TILE_SIDE": TILE_SIDE,
+    "TILE_HI": TILE_HI,
+    "PLATE": PLATE,
+    "PLATE_EDGE": PLATE_EDGE,
+    "GLASS": GLASS,
+    "GOLD": GOLD,
+    "WOOD_HI": WOOD_HI,
+    "WOOD_LO": WOOD_LO,
+    "FELT_PINK_TOP": FELT_PINK_TOP,
+    "FELT_PINK_BOTTOM": FELT_PINK_BOTTOM,
+    "FELT_LATTICE": FELT_LATTICE,
+    "FELT_DOODLE": FELT_DOODLE,
+    "PLATE_SCORE": PLATE_SCORE,
+    "HALL_WALL": HALL_WALL,
+    "HALL_DARK": HALL_DARK,
 }
 
 # ---------------------------------------------------------------- §1.3 字体
@@ -175,6 +231,9 @@ L_LABEL = (432, 310, 416, 24)
 L_INPUT = (432, 336, 416, 48)
 L_LABEL2 = (432, 390, 416, 24)
 L_INPUT2 = (432, 416, 416, 48)
+# v4.6：密码标签行右端的「记住密码」勾选框。只占标签行右侧空白（右边界仍是 848），
+# 因此卡片高度、主按钮、注册按钮、状态行等既有坐标一个都不用动。
+L_REMEMBER = (700, 390, 148, 24)
 L_MAIN_BTN = (432, 472, 198, 52)
 L_REGISTER_BTN = (650, 472, 198, 52)
 L_STATUS = (432, 532, 416, 26)
@@ -191,86 +250,363 @@ R_HUD_LEFT = (8, 0, 320, 34)
 R_HUD_ROUND = (320, 0, 84, 34)
 R_HUD_MID = (520, 0, 240, 34)
 R_HUD_RIGHT = (960, 0, 312, 34)
-# v1.7：战绩入口（HUD 左块 8..328 与中块 520..760 之间的空档，只在账号会话显示）
-R_HUD_STATS_BTN = (404, 4, 88, 26)
+# v3.0：战绩/菜单入口移到桌面右下角（R_MENU_BTN 里），只在账号会话显示。
+# 名字保留 `R_HUD_STATS_BTN`，因为 `app.py::_table_click` 已经按这个名字做命中测试。
+R_HUD_STATS_BTN = (20, 614, 208, 22)
 
-R_OPP_NAME = (280, 36, 720, 20)
-R_OPP_BACK = (514, 58, 252, 16)
-# v2.0（§4.6）：他家手牌背容量 14 → 18（4 组全杠时 hand_count = 18）；15..18 张换行为
-# 第二行（行距 16 px，向下扩展），不裁剪、不缩小
+# ---------------------------------------------------------------- v2.5 牌桌构图（重排）
+# 从「整屏绿色矩形 + 贴边摆放的牌」改成「房间里的实体牌桌」：
+#   房间底（art.room）→ 椭圆木边牌桌（art.table_surface）→ 四家人物立绘 + 名牌 → 桌面上的牌。
+# 牌尺寸、河流容量、点击/hit-test 规则不变；元素矩形整体重排。
+
+# v2.0（§4.6）：他家手牌背容量 14 → 18（4 组全杠时 hand_count = 18）；横排 15..18 张换行，
+# 竖排（上/下家）沿列向下堆叠，不裁剪、不缩小。
 OPP_BACK_MAX = 18
 OPP_BACK_ROW_CAPACITY = 14
-R_OPP_MELD = (452, 80, 376, 36)
-R_OPP_RIVER = (545, 126, 190, 158)
 
-R_CENTER = (280, 290, 720, 60)
-R_CENTER_LINE1 = (280, 292, 720, 28)
-R_CENTER_LINE2 = (280, 322, 720, 26)
+# v3.3 参考视频《明星三缺一 2004》**按测量值复原**
+#
+# 参考的游戏窗口内容 = 778×552。这里的每个坐标都写成「参考像素 × S + 偏移」，
+# S = 720/552 = 1.3043（纵向铺满），水平偏移 = (1280 − 778×S)/2 = 133。
+# 桌布另行向左右铺到画面外，所以不影响这套映射。
+#
+# 参考实测（窗口坐标）：
+#   桌沿 y=126 │ 对家手牌背 x230..503 y120..146（13 张 pitch21 牌 20×26）
+#   对家牌墙 y147..174（pitch13）│ 对家副露 y176..200 │ 对家牌河 x300..500 y205..300
+#   上家手牌 x0..22（竖排 pitch16）│ 上家牌墙 x24..40 │ 上家牌河 x70..130
+#   本家牌河 y310..400 │ 本家牌墙 y385..404 │ 本家手牌 x99..559 y405..446（牌 32×34 pitch35.5）
+S = 1.3043
+OX = 133
 
-R_SELF_RIVER = (545, 356, 190, 158)
-R_SELF_MELD = (452, 518, 376, 36)
-R_SELF_HAND = (235, 564, 810, 80)
+TABLE_FELT = (0, 110, 1280, 610)      # 去掉人物后把桌沿上提，顶部只留名牌带
+TABLE_FAR_HALF = 470          # 远沿半宽：桌面是**梯形**，两侧边可见并收向远处
+TABLE_NEAR_HALF = 700         # 近沿半宽：铺到画面外
+TABLE_RIM = 0
+TABLE_RADIUS = 0
 
-R_SIDE_L = (8, 36, 260, 518)
-R_SIDE_R = (1012, 36, 260, 518)
-R_SIDE_L_NAME = (8, 36, 260, 20)
-R_SIDE_R_NAME = (1012, 36, 260, 20)
-R_SIDE_L_BACK = (12, 60, 252, 16)
-R_SIDE_R_BACK = (1016, 60, 252, 16)
-R_SIDE_L_MELD = (8, 82, 260, 160)
-R_SIDE_R_MELD = (1012, 82, 260, 160)
-R_SIDE_L_RIVER = (8, 248, 260, 306)
-R_SIDE_R_RIVER = (1012, 248, 260, 306)
+# --- 名牌：参考里贴在画面最上沿，宽约 190 → 248 ---
+R_OPP_NAME = (516, 10, 248, 46)
+R_SIDE_L_NAME = (196, 10, 248, 46)
+R_SIDE_R_NAME = (836, 10, 248, 46)
+PLATE_NAME_H = 24
 
-R_TOAST = (440, 344, 400, 24)
+# --- 对家：手牌背 → 牌墙 → 副露 → 牌河 ---
+R_OPP_BACK = (430, 124, 420, 44)
+R_OPP_WALL = (398, 172, 484, 32)
+R_OPP_MELD = (440, 210, 400, 32)
+R_OPP_RIVER = (505, 248, 268, 126)
 
-# B 批（FEEL_SPEC §2.2 F-TP-01）：听牌条 — 单行横条，居中于手牌区正上方。
-# 下沿 554，与手牌区选中/摸牌上移的 558 留 4 px 余量；不遮牌河（自家 356..514）与操作栏（650）。
-R_TENPAI = (240, 514, 800, 40)
-# ⚠️ 版式冲突（实现期发现，待 game-design-director 复核）：F-TP-01 的 (240,514,800,40) 与
-# 本家副露区 R_SELF_MELD = (452,518,376,36) **完全重叠**——有副露时副露组会被听牌条盖住。
-# 处置：本家**有副露**时整条上移 44 px（R_TENPAI_SHIFTED），代价是可能与自家牌河下沿
-# （y 470..514）相碰，但牌河自上而下填充、只有 >12 张才落到下沿，冲突概率远低于「必然盖住副露」。
-R_TENPAI_SHIFTED = (240, 470, 800, 40)
-TENPAI_BG_ALPHA = 216          # F-TP-02（比卡片 235 略透明）
-TENPAI_ITEM_X0 = 256           # F-TP-03
-TENPAI_ITEM_GAP = 16           # F-TP-03
-TENPAI_ITEM_WIDTH_EST = 74     # F-TP-04（溢出降级用的估算宽）
-TENPAI_PREFIX_GAP = 8          # F-TP-05
+# --- 桌心横带（听牌条）---
+R_CENTER = (486, 364, 308, 18)
+R_CENTER_LINE1 = (486, 364, 308, 15)
+R_CENTER_LINE2 = (486, 382, 308, 15)
+
+# --- 本家：牌河 → 牌墙 → 手牌 ---
+R_SELF_RIVER = (505, 402, 268, 126)
+R_SELF_WALL = (398, 532, 484, 32)   # 牌河底 528 与手牌顶 566 之间，两边留空
+R_SELF_MELD = (150, 566, 560, 46)
+R_SELF_HAND = (248, 566, 980, 56)   # 左边让给本家分数牌
+
+# 侧家几何在牌河尺寸定义之后统一推导（见文件下方 SIDE_* 段）
+
+# --- 本家分数牌 / 系统菜单 ---
+R_SELF_PLATE = (16, 560, 216, 52)
+R_MENU_BTN = (16, 616, 216, 28)
+
+R_SIDE_L = (8, 120, 300, 520)
+R_SIDE_R = (972, 120, 300, 520)
+
+# 牌元素几何（参考值 × 1.3043）
+RIVER_CENTER_TILE = (40, 46)
+RIVER_CENTER_COL_PITCH = 42
+RIVER_CENTER_ROW_PITCH = 47
+RIVER_CENTER_COLS = 6
+RIVER_CENTER_ROWS = 3
+RIVER_CENTER_CAPACITY = RIVER_CENTER_COLS * RIVER_CENTER_ROWS
+RIVER_CENTER_COMPACT_TILE = (28, 32)
+RIVER_CENTER_COMPACT_COL_PITCH = 30
+RIVER_CENTER_COMPACT_ROW_PITCH = 34
+RIVER_CENTER_COMPACT_COLS = 7
+RIVER_CENTER_COMPACT_ROWS = 3
+
+R_TOAST = (440, 398, 400, 24)
+
+R_TENPAI = (240, 362, 800, 32)
+R_TENPAI_SHIFTED = R_TENPAI
+TENPAI_BG_ALPHA = 216
+TENPAI_ITEM_X0 = 256
+TENPAI_ITEM_GAP = 16
+TENPAI_ITEM_WIDTH_EST = 74
+TENPAI_PREFIX_GAP = 8
+TENPAI_TILE_W = 24
+TENPAI_TILE_H = 30
 
 # 牌元素几何（§4.4）
-HAND_TILE_W = 56
-HAND_TILE_H = 76
-HAND_PITCH = 58
+HAND_TILE_W = 48      # CC0 牌面 3:4，按高度 60 时宽约 45
+HAND_TILE_H = 60
+HAND_PITCH = 48
 HAND_Y = 566
 HAND_SELECT_LIFT = 8
 HAND_DRAWN_LIFT = 4
 
-RIVER_CENTER_TILE = (30, 38)
-RIVER_CENTER_COL_PITCH = 32
+# 中央/侧家牌河的**生效值**（v3.0）：桌面纵向只有 224 px，两条河各占 3 行。
+RIVER_CENTER_TILE = (28, 34)
+RIVER_CENTER_COL_PITCH = 30
 RIVER_CENTER_ROW_PITCH = 40
 RIVER_CENTER_COLS = 6
-RIVER_CENTER_ROWS = 4
-RIVER_CENTER_CAPACITY = RIVER_CENTER_COLS * RIVER_CENTER_ROWS  # 24
-RIVER_CENTER_COMPACT_TILE = (24, 30)
+RIVER_CENTER_ROWS = 3
+RIVER_CENTER_CAPACITY = RIVER_CENTER_COLS * RIVER_CENTER_ROWS  # 18 = 一局最多弃牌数
+RIVER_CENTER_COMPACT_TILE = (24, 26)
 RIVER_CENTER_COMPACT_COL_PITCH = 26
-RIVER_CENTER_COMPACT_ROW_PITCH = 36
+RIVER_CENTER_COMPACT_ROW_PITCH = 30
 RIVER_CENTER_COMPACT_COLS = 7
-RIVER_CENTER_COMPACT_ROWS = 5
+RIVER_CENTER_COMPACT_ROWS = 3
 
-RIVER_SIDE_TILE = (26, 32)
-RIVER_SIDE_COL_PITCH = 28
-RIVER_SIDE_ROW_PITCH = 34
-RIVER_SIDE_COLS = 3
-RIVER_SIDE_ROWS = 9
+RIVER_SIDE_TILE = (40, 30)      # 侧家弃牌：牌顶朝桌心，沿桌边横排
+RIVER_SIDE_COL_PITCH = 36       # 沿轨方向槽距估算（碰撞盒用）
+RIVER_SIDE_ROW_PITCH = 40       # 向桌心叠行间距
+RIVER_SIDE_COLS = 6             # 横排 6 张/行
+RIVER_SIDE_ROWS = 3             # 3 行 × 6 = 18
 
-MELD_TILE = (28, 36)
+# --- 侧家轨：贴桌布左右边线，近端固定，左右镜像 ---
+# 近端靠近本家手牌，远端收到对家手牌下沿；再向桌心内偏，避免画出梯形外。
+SIDE_HAND_NEAR_Y = 520
+SIDE_HAND_FAR_Y = 175
+SIDE_HAND_INSET = 30
+SIDE_WALL_INSET = 128          # 和手牌隔开一截，不再贴在橙色牌墙上
+SIDE_RIVER_INSET = SIDE_HAND_INSET + 170
+#: 副露在牌山内侧、牌河外侧（与手牌/牌山同一套 ``side_rail_points`` 桌边 y）
+SIDE_MELD_INSET = SIDE_WALL_INSET + 58
+#: 副露沿轨的桌边 y 段（``side_rail_points`` 的 far/near，不是屏幕 y）
+SIDE_MELD_EDGE_FAR = 228
+SIDE_MELD_EDGE_NEAR = 298
+SIDE_MELD_GROUP_BANDS = 4    # 最多 4 组，沿轨分段
+#: 侧家牌河「远端列」的屏幕 y（``side_point_at_screen_y``）；须高于副露投影 y
+SIDE_RIVER_TOP = 392
+SIDE_HAND_FULL = 13
+#: 侧家手牌在槽位里占多长（<1 留出缝，不要整条贴图撑满）
+SIDE_HAND_TILE_FILL = 0.86
+#: 摊牌单张的兜底尺寸（沿轨长 × 朝桌心的厚）。实际长度按槽距取整。
+SIDE_TILE_ALONG = 34
+SIDE_TILE_ACROSS = 26
+#: 每家牌山最多叠数（开局 remaining/4 ≈ 21）
+WALL_PER_SIDE = 21
+
+SIDE_MELD_W = 160
+SIDE_MELD_H = 142
+SIDE_RIVER_W = RIVER_SIDE_ROWS * RIVER_SIDE_ROW_PITCH + 48
+SIDE_RIVER_H = int(HAND_Y - SIDE_RIVER_TOP - 16)
+SIDE_RIVER_X = 0   # 由 side_river_rect 覆盖；保留名字避免旧引用
+SIDE_RIVER_Y = 382
+
+
+def table_edge_x(y: float, left: bool) -> float:
+    """桌布左/右边线在屏幕 y 上的 x。远沿收、近沿铺出画面。"""
+    top = float(TABLE_FELT[1])
+    span = max(1.0, float(TABLE_FELT[3]))
+    t = (y - top) / span
+    cx = LOGICAL_W / 2.0
+    far = float(TABLE_FAR_HALF)
+    near = float(TABLE_NEAR_HALF)
+    if left:
+        return (cx - far) + ((cx - near) - (cx - far)) * t
+    return (cx + far) + ((cx + near) - (cx + far)) * t
+
+
+def side_inward(left: bool) -> tuple[float, float]:
+    """从桌沿指向桌心的单位向量（屏幕坐标，y 向下）。"""
+    y0 = float(SIDE_HAND_FAR_Y)
+    y1 = float(SIDE_HAND_NEAR_Y)
+    x0 = table_edge_x(y0, left)
+    x1 = table_edge_x(y1, left)
+    dx = x1 - x0
+    dy = y1 - y0
+    length = math.hypot(dx, dy) or 1.0
+    n1 = (-dy / length, dx / length)
+    n2 = (dy / length, -dx / length)
+    toward = LOGICAL_W / 2.0 - (x0 + x1) / 2.0
+    if toward * n1[0] >= toward * n2[0]:
+        return n1
+    return n2
+
+
+def side_face_angle(left: bool) -> float:
+    """扣着的立体牌墙：pygame 逆时针角度，牌顶转向桌心。"""
+    ix, iy = side_inward(left)
+    return math.degrees(math.atan2(-ix, -iy))
+
+
+def side_rail_points(
+    left: bool,
+    inset: float,
+    count: int,
+    full: int = SIDE_HAND_FULL,
+    from_far: bool = False,
+    *,
+    rail_far_y: float | None = None,
+    rail_near_y: float | None = None,
+) -> list[tuple[float, float]]:
+    """侧边轨上的槽位中心。
+
+    默认下标 0 是近端（靠近本家），张数少时远端留空。
+    `from_far` 时下标 0 是远端，张数少时近端留空，短牌山不会缩到名牌上。
+    ``rail_far_y`` / ``rail_near_y`` 为桌布边线上的 y（与 ``SIDE_HAND_*_Y`` 同系）。
+    """
+    if count <= 0:
+        return []
+    inward = side_inward(left)
+
+    def at(y: float) -> tuple[float, float]:
+        return (
+            table_edge_x(y, left) + inward[0] * inset,
+            y + inward[1] * inset,
+        )
+
+    near_y = float(SIDE_HAND_NEAR_Y if rail_near_y is None else rail_near_y)
+    far_y = float(SIDE_HAND_FAR_Y if rail_far_y is None else rail_far_y)
+    near = at(near_y)
+    far = at(far_y)
+    span = full if count <= full else count
+    if span <= 1:
+        return [far if from_far else near]
+    full_points: list[tuple[float, float]] = []
+    for index in range(span):
+        t = index / (span - 1)
+        full_points.append((
+            near[0] + (far[0] - near[0]) * t,
+            near[1] + (far[1] - near[1]) * t,
+        ))
+    if count >= span:
+        chosen = full_points
+    elif from_far:
+        chosen = list(reversed(full_points[-count:]))
+    else:
+        chosen = full_points[:count]
+    return chosen
+
+
+def side_point_at_screen_y(left: bool, inset: float, screen_y: float) -> tuple[float, float]:
+    """侧边轨在某个屏幕 y 上的点。"""
+    inward = side_inward(left)
+    y_edge = screen_y - inward[1] * inset
+    x = table_edge_x(y_edge, left) + inward[0] * inset
+    return (x, screen_y)
+
+
+def side_meld_rect(left: bool) -> tuple[int, int, int, int]:
+    """副露区外接盒（播报碰撞）；与 ``side_meld_group_centers`` 轨道段一致。"""
+    pts = side_meld_group_centers(left, 0, 3, 1)
+    xs = [point[0] for point in pts]
+    ys = [point[1] for point in pts]
+    pad = 36
+    x0 = math.floor(min(xs) - pad)
+    y0 = math.floor(min(ys) - pad)
+    x1 = math.ceil(max(xs) + pad)
+    y1 = math.ceil(max(ys) + pad)
+    if left:
+        return (x0, y0, x1 - x0, y1 - y0)
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+def side_meld_group_centers(
+    left: bool,
+    group_index: int,
+    tile_count: int,
+    group_count: int,
+) -> list[tuple[float, float]]:
+    """单组副露：``tile_count`` 张沿桌边横排（与手牌/牌山同轨）。"""
+    if tile_count <= 0:
+        return []
+    bands = max(1, min(int(SIDE_MELD_GROUP_BANDS), group_count))
+    edge_far = float(SIDE_MELD_EDGE_FAR)
+    edge_near = float(SIDE_MELD_EDGE_NEAR)
+    band = (edge_near - edge_far) / float(bands)
+    seg_far = edge_far + float(group_index) * band
+    seg_near = seg_far + band * 0.92
+    span = max(tile_count, 3)
+    return side_rail_points(
+        left,
+        float(SIDE_MELD_INSET),
+        tile_count,
+        span,
+        from_far=True,
+        rail_far_y=seg_far,
+        rail_near_y=seg_near,
+    )
+
+
+def _mirror_x(rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    return (LOGICAL_W - rect[0] - rect[2], rect[1], rect[2], rect[3])
+
+
+def _rail_bounds(left: bool, inset: float, count: int, pad: int) -> tuple[int, int, int, int]:
+    points = side_rail_points(left, inset, count, count)
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    x0 = math.floor(min(xs) - pad)
+    y0 = math.floor(min(ys) - pad)
+    x1 = math.ceil(max(xs) + pad)
+    y1 = math.ceil(max(ys) + pad)
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+# 手牌 / 牌山 / 牌河外接盒（播报碰撞）；副露 ``R_SIDE_*_MELD`` 与对家横排同款
+R_SIDE_L_BACK = _rail_bounds(True, SIDE_HAND_INSET, SIDE_HAND_FULL, 32)
+R_SIDE_L_WALL = _rail_bounds(True, SIDE_WALL_INSET, WALL_PER_SIDE, 20)
+
+
+def side_river_rect(left: bool) -> tuple[int, int, int, int]:
+    """牌河在侧边中段，比副露更靠桌心。"""
+    top = SIDE_RIVER_TOP
+    x, _ = side_point_at_screen_y(left, SIDE_RIVER_INSET, float(top))
+    if left:
+        return (int(round(x)), top, SIDE_RIVER_W, SIDE_RIVER_H)
+    return (int(round(x - SIDE_RIVER_W)), top, SIDE_RIVER_W, SIDE_RIVER_H)
+
+
+#: 侧家平牌副露与牌山外沿的间距（与 ``side_flat_meld_rect``）
+SIDE_MELD_WALL_GAP = 12
+SIDE_MELD_Y = 218
+
+
+def side_flat_meld_rect(left: bool) -> tuple[int, int, int, int]:
+    """侧家副露：对家同款横排，宽与牌河列一致，整体在牌山外侧。"""
+    wall = _rail_bounds(left, SIDE_WALL_INSET, WALL_PER_SIDE, 28)
+    river = side_river_rect(left)
+    height = R_OPP_MELD[3]
+    width = river[2]
+    gap = SIDE_MELD_WALL_GAP
+    if left:
+        x0 = wall[0] + wall[2] + gap
+        return (int(x0), SIDE_MELD_Y, width, height)
+    x0 = wall[0] - gap - width
+    return (int(x0), SIDE_MELD_Y, width, height)
+
+
+R_SIDE_L_RIVER = side_river_rect(True)
+R_SIDE_L_MELD = side_flat_meld_rect(True)
+
+R_SIDE_R_BACK = _mirror_x(R_SIDE_L_BACK)
+R_SIDE_R_WALL = _mirror_x(R_SIDE_L_WALL)
+R_SIDE_R_RIVER = side_river_rect(False)
+R_SIDE_R_MELD = side_flat_meld_rect(False)
+
+MELD_TILE = (38, 46)
 MELD_TILE_PITCH = 30
 MELD_GROUP_GAP = 8
 MELD_ROW_HEIGHT = 40
 
-OPP_BACK_TILE = (16, 16)
-OPP_BACK_PITCH = 18
+OPP_BACK_TILE = (30, 42)      # 参考 20×26：牌背是**窄而高**的立牌
+OPP_BACK_PITCH = 31
+#: 牌山（v3.5）：**一叠 = 2 张牌上下叠在一起**，横着码成一条。
+#: 俯视只看得见上面那张的牌顶（一条亮面）+ 两张牌背之间的一道缝，所以画成
+#: 「亮顶 + 上张牌背 + 缝 + 下张牌背」，高度约等于 2 张牌背。
+WALL_STACK = (22, 32)
+WALL_STACK_PITCH = 23
+WALL_STACK_PITCH_V = 24        # 竖排（上/下家）时沿列方向的间距
+#: 亮顶 / 上张牌背 / 下张牌背的分界（相对叠顶，按高度比例）
+WALL_TOP_RATIO = 0.17
+WALL_SEAM_RATIO = 0.58
 
 # ---------------------------------------------------------------- §5.2 操作栏
 

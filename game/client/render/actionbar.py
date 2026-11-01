@@ -22,6 +22,7 @@ from .. import theme as T
 from ..game_state import SCREEN_TABLE, WINDOW_CLAIM, WINDOW_DISCARD, GameState
 from ..tiles import button_label
 from ..view import UiView
+from . import art
 from . import widgets as W
 
 log = logging.getLogger("mahjong.client.actionbar")
@@ -157,8 +158,19 @@ def render(surface: pygame.Surface, ui: UiView, remaining_ms: float | None) -> N
         return
     window = state.window
 
+    # 底部操作带（v3.2）：参考里没有整条深色底栏，这里只留一层「越往下越暗」的渐变，
+    # 让按钮浮在桌布上，而不是压在一条黑边里
+    band = (0, T.R_BAR[1] - 6, T.LOGICAL_W, T.R_BAR[3] + 12)
+    fade = pygame.Surface((band[2], band[3]), pygame.SRCALPHA)
+    for row in range(band[3]):
+        fade.fill((6, 4, 8, int(96 * (row / band[3]) ** 0.8)), (0, row, band[2], 1))
+    surface.blit(fade, (band[0], band[1]))
+
     # 倒计时区
-    W.draw_panel(surface, T.R_BAR_TIMER, radius=4)
+    surface.blit(
+        art.strip(T.R_BAR_TIMER[2], T.R_BAR_TIMER[3], (8, 6, 12, 84), edge=(150, 116, 140, 70), radius=12),
+        (T.R_BAR_TIMER[0], T.R_BAR_TIMER[1]),
+    )
     if remaining_ms is None:
         remaining_ms = 0.0
     color = countdown_color(remaining_ms)
@@ -170,18 +182,13 @@ def render(surface: pygame.Surface, ui: UiView, remaining_ms: float | None) -> N
     if remaining_ms <= 0:
         text = "0 s"
     W.draw_text(
-        surface, text, fonts.get(T.FS_H2), color, T.R_BAR_TIMER_TEXT, W.ALIGN_CENTER, alpha=alpha
+        surface, text, fonts.get(T.FS_H2, bold=True), color, T.R_BAR_TIMER_TEXT, W.ALIGN_CENTER, alpha=alpha
     )
-    pygame.draw.rect(surface, T.PANEL_EDGE, T.R_BAR_TIMER_BAR, border_radius=6)
     ratio = 0.0 if window.window_ms <= 0 else max(0.0, min(1.0, remaining_ms / window.window_ms))
-    width = int(round(T.R_BAR_TIMER_BAR[2] * ratio))
-    if width > 0:
-        pygame.draw.rect(
-            surface,
-            color,
-            (T.R_BAR_TIMER_BAR[0], T.R_BAR_TIMER_BAR[1], width, T.R_BAR_TIMER_BAR[3]),
-            border_radius=6,
-        )
+    surface.blit(
+        art.meter(T.R_BAR_TIMER_BAR[2], T.R_BAR_TIMER_BAR[3], ratio, color),
+        (T.R_BAR_TIMER_BAR[0], T.R_BAR_TIMER_BAR[1]),
+    )
     if remaining_ms <= 0:
         W.draw_text(
             surface, "已超时，等待服务端行动", fonts.get(T.FS_SMALL), T.NEG,
@@ -189,9 +196,7 @@ def render(surface: pygame.Surface, ui: UiView, remaining_ms: float | None) -> N
             W.ALIGN_CENTER,
         )
 
-    # 按钮区
-    W.draw_panel(surface, (T.R_BAR_BUTTONS[0] - 4, T.R_BAR_BUTTONS[1] - 4,
-                           T.R_BAR_BUTTONS[2] + 8, T.R_BAR_BUTTONS[3] + 8), radius=4)
+    # 按钮区：不再套一层面板，按钮自己带投影浮在操作带上
     buttons = build_buttons(state, remaining_ms)
     button_font = fonts.get(T.FS_BODY)
     right_edge = T.R_BAR_BUTTONS[0]
