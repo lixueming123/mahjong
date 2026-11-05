@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RoomActor / PlayerActor 调度</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f5f2;
+      --fg: #1c1b19;
+      --muted: #6b6862;
+      --line: #d9d5cc;
+      --card: #fff;
+      --room: #1d4e89;
+      --room-bg: #e7f0fa;
+      --player: #9a4d12;
+      --player-bg: #f8eadf;
+      --hot: #1c1b19;
+      --code: #f3f1ec;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #161615;
+        --fg: #f3f1ec;
+        --muted: #a8a49c;
+        --line: #3a3834;
+        --card: #221f1c;
+        --room: #9ec4ef;
+        --room-bg: #1a2c40;
+        --player: #f0b27a;
+        --player-bg: #3a2a1c;
+        --hot: #f3f1ec;
+        --code: #2a2724;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 15px/1.45 ui-sans-serif, system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+    }
+    main {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 24px 16px 40px;
+    }
+    h1 {
+      font-size: 22px;
+      font-weight: 600;
+      margin: 0 0 4px;
+    }
+    .sub { color: var(--muted); margin: 0 0 16px; }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.3fr) minmax(240px, 0.9fr);
+      gap: 16px;
+      align-items: start;
+    }
+    @media (max-width: 720px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+    .stage {
+      position: relative;
+      height: 520px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .lane {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1 1 0;
+      min-height: 0;
+      padding: 0 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--card);
+    }
+    .lane.hot { outline: 2px solid var(--hot); outline-offset: -2px; }
+    .name { flex: 0 0 5.2rem; font-size: 13px; }
+    .slot-label { flex: 0 0 auto; font-size: 12px; color: var(--muted); }
+    .anchor { flex: 1 1 0; min-width: 0; align-self: stretch; }
+    .slot { flex: 0 0 5.6rem; }
+    .chip {
+      position: absolute;
+      top: 0;
+      left: 0;
+      margin: 0;
+      z-index: 1;
+      pointer-events: none;
+      padding: 4px 8px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .chip.room { color: var(--room); background: var(--room-bg); }
+    .chip.player { color: var(--player); background: var(--player-bg); }
+    .chip.susp { outline: 1px dashed var(--fg); outline-offset: 3px; }
+    .callout { flex: 0 0 auto; min-height: 1.4em; font-weight: 600; }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--card);
+      padding: 12px 14px;
+    }
+    .panel h2 { font-size: 15px; margin: 0 0 4px; font-weight: 600; }
+    .thread { color: var(--muted); font-size: 13px; margin: 0 0 8px; }
+    ol { margin: 0; padding-left: 1.3em; }
+    li { margin: 4px 0; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12.5px;
+      background: var(--code);
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    .empty { color: var(--muted); margin: 0; }
+    .controls { display: flex; gap: 8px; margin-top: 12px; }
+    button {
+      font: inherit;
+      padding: 6px 14px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: var(--card);
+      color: var(--fg);
+      cursor: pointer;
+    }
+    button.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+    .legend { display: flex; gap: 16px; font-size: 13px; margin-bottom: 12px; }
+    .swatch {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      margin-right: 6px;
+      vertical-align: -1px;
+    }
+    .swatch.room { background: var(--room); }
+    .swatch.player { background: var(--player); }
+    @media (prefers-reduced-motion: reduce) {
+      .chip { transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>一次 Send 的线程</h1>
+  <p class="sub">游戏池 4 个 worker。RoomActor 和 PlayerActor 没有专属线程。虚线表示协程还挂着。</p>
+  <div class="legend">
+    <span><i class="swatch room"></i>RoomActor</span>
+    <span><i class="swatch player"></i>PlayerActor</span>
+  </div>
+  <div class="layout">
+    <div id="stage" class="stage">
+      <div id="lane-dock" class="lane">
+        <span class="name">未绑定</span>
+        <span id="dock-room" class="anchor"></span>
+        <span id="dock-player" class="anchor"></span>
+      </div>
+      <div id="lane-queue" class="lane">
+        <span class="name">共享队列</span>
+        <span id="queue-slot" class="anchor"></span>
+      </div>
+      <div id="lane-0" class="lane">
+        <span class="name">Worker 0</span>
+        <span id="w0-run" class="anchor"></span>
+        <span class="slot-label">local slot</span>
+        <span id="w0-local" class="anchor slot"></span>
+      </div>
+      <div id="lane-1" class="lane">
+        <span class="name">Worker 1</span>
+        <span id="w1-run" class="anchor"></span>
+        <span class="slot-label">local slot</span>
+        <span id="w1-local" class="anchor slot"></span>
+      </div>
+      <div id="lane-2" class="lane">
+        <span class="name">Worker 2</span>
+        <span id="w2-run" class="anchor"></span>
+        <span class="slot-label">local slot</span>
+        <span id="w2-local" class="anchor slot"></span>
+      </div>
+      <div id="lane-3" class="lane">
+        <span class="name">Worker 3</span>
+        <span id="w3-run" class="anchor"></span>
+        <span class="slot-label">local slot</span>
+        <span id="w3-local" class="anchor slot"></span>
+      </div>
+      <div id="chip-room" class="chip room">RoomActor</div>
+      <div id="chip-player" class="chip player">PlayerActor</div>
+      <div id="callout" class="callout">两个 actor 都未绑定</div>
+    </div>
+    <section class="panel" aria-live="polite">
+      <h2 id="step-title">这一步的函数</h2>
+      <p id="step-thread" class="thread"></p>
+      <ol id="step-fns"></ol>
+      <p id="step-empty" class="empty" hidden>这一拍没有函数在跑。</p>
+    </section>
+  </div>
+  <div class="controls">
+    <button type="button" class="primary" id="play">播放</button>
+    <button type="button" id="step">下一步</button>
+  </div>
+</main>
+<script>
+(function () {
+  var stage = document.getElementById("stage");
+  var room = document.getElementById("chip-room");
+  var player = document.getElementById("chip-player");
+  var callout = document.getElementById("callout");
+  var playBtn = document.getElementById("play");
+  var stepBtn = document.getElementById("step");
+  var title = document.getElementById("step-title");
+  var thread = document.getElementById("step-thread");
+  var list = document.getElementById("step-fns");
+  var empty = document.getElementById("step-empty");
+  var lanes = {
+    queue: document.getElementById("lane-queue"),
+    "0": document.getElementById("lane-0"),
+    "2": document.getElementById("lane-2")
+  };
+  var steps = [
+    {
+      label: "两个 actor 都未绑定",
+      thread: "",
+      fns: [],
+      room: ["dock-room", "center"],
+      player: ["dock-player", "center"],
+      hot: "",
+      susp: false
+    },
+    {
+      label: "定时线程写入共享队列",
+      thread: "win-timer",
+      fns: [
+        "WindowTimer::Run",
+        "action()，即 ExActorOnSpawned 里注册的回调",
+        "ActorSendScope().spawn",
+        "ActorRef::Send → SendBuilder::Send → SendLocal",
+        "CallActorMethodUseTuple，只组出 schedule | let_value",
+        "WorkSharingThreadPool::EnqueueOperation",
+        "queue_.Push"
+      ],
+      room: ["queue-slot", "center"],
+      player: ["dock-player", "center"],
+      hot: "queue",
+      susp: false
+    },
+    {
+      label: "Worker 2 运行 Room",
+      thread: "ws_pool_worker · Worker 2",
+      fns: [
+        "WorkSharingThreadPool::WorkerThreadLoop",
+        "SchedulerOperationBase::Execute → set_value",
+        "Actor::PullMailboxAndRun",
+        "ActorMessage::Execute → set_value",
+        "let_value 调用 RoomActor::Dispatch",
+        "AsyncGate::Acquire，锁空闲，不挂起",
+        "Deliver → when_all → DeliverSeat"
+      ],
+      room: ["w2-run", "center"],
+      player: ["dock-player", "center"],
+      hot: "2",
+      susp: false
+    },
+    {
+      label: "Room 挂起，Player 入槽",
+      thread: "ws_pool_worker · Worker 2",
+      fns: [
+        "ActorRef::Send → SendLocal",
+        "CallActorMethodUseTuple",
+        "__sender_awaitable::await_suspend → start",
+        "SenderVariant::start → let_value::start",
+        "ActorMessageSubmissionOperation::start",
+        "Actor::PushMessage",
+        "Actor::TryActivate",
+        "AnyStdExecScheduler::Schedule",
+        "EnqueueOperation，写入 local_slot_",
+        "await_suspend 返回，DeliverSeat 挂起",
+        "PullMailboxAndRun 返回，activated_ 清掉"
+      ],
+      room: ["w2-run", "start"],
+      player: ["w2-local", "center"],
+      hot: "2",
+      susp: true
+    },
+    {
+      label: "同一 Worker 运行 Player",
+      thread: "ws_pool_worker · Worker 2",
+      fns: [
+        "WorkerThreadLoop 取走 local_slot_",
+        "SchedulerOperationBase::Execute → set_value",
+        "Actor::PullMailboxAndRun",
+        "ActorMessage::Execute → set_value",
+        "let_value 调用 PlayerActor::Dispatch",
+        "PlayerActor::SeatFrame",
+        "Connection::SendFrame"
+      ],
+      room: ["w2-run", "end"],
+      player: ["w2-run", "start"],
+      hot: "2",
+      susp: true
+    },
+    {
+      label: "resume 嵌在 Player 栈上",
+      thread: "ws_pool_worker · Worker 2",
+      fns: [
+        "PlayerActor::Dispatch 执行 co_return",
+        "let_value 的下游 set_value",
+        "__receiver::set_value",
+        "coroutine_handle::resume",
+        "DeliverSeat 从 co_await Send 的下一行继续",
+        "when_all 完成，Deliver 继续"
+      ],
+      room: ["w2-run", "end"],
+      player: ["w2-run", "start"],
+      hot: "2",
+      susp: false
+    },
+    {
+      label: "这次激活已经结束",
+      thread: "ws_pool_worker · Worker 2",
+      fns: [
+        "RoomActor::Dispatch 执行 co_return",
+        "AsyncGate::Guard::~Guard",
+        "AsyncGate::Release",
+        "PlayerActor 的 PullMailboxAndRun 返回",
+        "WorkerThreadLoop 回到 Pop"
+      ],
+      room: ["dock-room", "center"],
+      player: ["dock-player", "center"],
+      hot: "",
+      susp: false
+    },
+    {
+      label: "下一条再进共享队列",
+      thread: "win-timer",
+      fns: [
+        "WindowTimer::Run",
+        "action()",
+        "ActorSendScope().spawn",
+        "ActorRef::Send → SendLocal",
+        "CallActorMethodUseTuple",
+        "WorkSharingThreadPool::EnqueueOperation",
+        "queue_.Push"
+      ],
+      room: ["queue-slot", "center"],
+      player: ["dock-player", "center"],
+      hot: "queue",
+      susp: false
+    },
+    {
+      label: "Worker 0 运行 Room",
+      thread: "ws_pool_worker · Worker 0",
+      fns: [
+        "WorkSharingThreadPool::WorkerThreadLoop",
+        "SchedulerOperationBase::Execute → set_value",
+        "Actor::PullMailboxAndRun",
+        "ActorMessage::Execute → set_value",
+        "let_value 调用 RoomActor::Dispatch"
+      ],
+      room: ["w0-run", "center"],
+      player: ["dock-player", "center"],
+      hot: "0",
+      susp: false
+    }
+  ];
+  var index = 0;
+  var timer = 0;
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function place(chip, anchorId, align) {
+    var anchor = document.getElementById(anchorId);
+    var stageBox = stage.getBoundingClientRect();
+    var box = anchor.getBoundingClientRect();
+    var width = chip.offsetWidth;
+    var x = box.left - stageBox.left;
+    if (align === "start") x += 4;
+    else if (align === "end") x += Math.max(4, box.width - width - 4);
+    else x += (box.width - width) / 2;
+    var y = box.top - stageBox.top + (box.height - chip.offsetHeight) / 2;
+    chip.style.transform = "translate(" + Math.round(x) + "px, " + Math.round(y) + "px)";
+  }
+
+  function apply(i) {
+    var step = steps[i];
+    place(room, step.room[0], step.room[1]);
+    place(player, step.player[0], step.player[1]);
+    room.classList.toggle("susp", step.susp);
+    callout.textContent = (i + 1) + " / " + steps.length + "  " + step.label;
+    title.textContent = step.label;
+    thread.textContent = step.thread ? "线程 " + step.thread : "没有线程在跑这段逻辑";
+    list.replaceChildren();
+    step.fns.forEach(function (name) {
+      var li = document.createElement("li");
+      var code = document.createElement("code");
+      code.textContent = name;
+      li.appendChild(code);
+      list.appendChild(li);
+    });
+    var none = step.fns.length === 0;
+    list.hidden = none;
+    empty.hidden = !none;
+    Object.keys(lanes).forEach(function (key) {
+      lanes[key].classList.toggle("hot", key === step.hot);
+    });
+  }
+
+  function stop() {
+    if (timer) {
+      clearTimeout(timer);
+      timer = 0;
+    }
+  }
+
+  function play() {
+    stop();
+    if (index >= steps.length - 1) {
+      index = 0;
+      apply(0);
+    }
+    playBtn.textContent = "播放";
+    var delay = reduce ? 0 : 1100;
+    function tick() {
+      if (index >= steps.length - 1) {
+        playBtn.textContent = "重播";
+        timer = 0;
+        return;
+      }
+      index += 1;
+      apply(index);
+      if (index >= steps.length - 1) {
+        playBtn.textContent = "重播";
+        timer = 0;
+        return;
+      }
+      timer = setTimeout(tick, delay);
+    }
+    timer = setTimeout(tick, delay);
+  }
+
+  function stepOnce() {
+    stop();
+    if (index >= steps.length - 1) return;
+    index += 1;
+    apply(index);
+    playBtn.textContent = index >= steps.length - 1 ? "重播" : "播放";
+  }
+
+  playBtn.addEventListener("click", play);
+  stepBtn.addEventListener("click", stepOnce);
+  window.addEventListener("resize", function () { apply(index); });
+  if (!reduce) {
+    room.style.transition = "transform 480ms ease";
+    player.style.transition = "transform 480ms ease";
+  }
+  apply(0);
+  requestAnimationFrame(function () { apply(index); });
+})();
+</script>
+</body>
+</html>

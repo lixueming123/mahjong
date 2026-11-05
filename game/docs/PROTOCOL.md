@@ -1,18 +1,30 @@
 # 麻将里程碑协议（PROTOCOL）
 
 - 文档 ID：PROTOCOL
-- 版本：**v1.7（冻结）**
+- 版本：**v1.17（冻结）**
+  v1.17 **日麻规则补全**：① 立直合法性新增「**振听不可立直**」（舍て牌振听 / 见逃振听，违者 `ILLEGAL_ACTION`）；② 新增役满 `tenhou`（天和）/ `chiihou`（地和），会出现在 `game_end.win.yaku[]` 里；③ 修复国士无双此前**根本无法和牌**的缺陷（牌型门禁不认国士，连带听牌条、立直、荒庄听牌全错）。**零新增字段、零新增错误码**，classic 不受影响
+  v1.16 **立直后暗杠**：立直状态下 `options` 重新允许 **`ankan`**，条件是「暗杠不改变听牌」（等待张集合与暗杠前完全一致）；`kakan` 仍不提供（立直手不可能有碰组）。判据需要「刚摸到的那张」，所以 `drawn_tile` 未知时一律不给。**classic 与其他玩法行为不变**，零新增错误码、零新增字段
+  v1.15 **抢杠增补**：`mode=riichi` 下 `action{action:"kakan"}` 不再立即落地 —— 服务端先给三家开一次 **`window:"chankan"`** 的抢杠窗口（新增可选字段 `tile` 携带被抢牌面，`options` 只有 `win`/`pass`），无人和才真正加杠。抢杠是 1 番役，`is_chankan` 已进入判番上下文。**classic 不受影响**（仍立即落地、无此窗口），零新增错误码
+  v1.14 **半庄（局数）增补**：① `create_room` 新增可选 `length`（`tonpu` 东场 4 局 = 缺省 / `hanchan` 半庄 8 局），仅 `mode=riichi` 有效，classic 传 `hanchan` 回 `BAD_REQUEST`；② `game_start.round_wind` 不再是恒 0（南场为 1）、`round_count` 随 `length` 取 4/8；③ **自风口径修正**：`seat_wind` 现在按「庄家自风 = 场风」推导（东场庄家=东、南场庄家=南），东场数值与之前完全一致；④ 日麻的连庄上限放宽到「局数」（东场 8 / 半庄 16 次 `game_end` 封顶），classic 的 4 不变。见 §12.1/§12.2/§12.9
+  v1.13 **日麻听牌提示口径增补**：`tenpai` 帧在 `mode=riichi` 下追加 `waits[].yaku`（该等待张**按荣和**是否至少有一个役）与帧级 `no_yaku`（全部无役）。**`is_tenpai` 语义不变**——仍是「形式听牌」（流局罚符与立直资格都看它），`no_yaku` 只影响提示文案。**classic 帧逐字节不变**（不加任何键）。见 §12.8 与附录 C v1.13 行
+  v1.12 **日麻玩法增补**（`mode=riichi`）：① `create_room` 新增可选 `mode`（`classic` 缺省 / `riichi`），未知值 `BAD_REQUEST`；② **classic 的每一帧逐字节不变**（不传 `mode` 时服务端行为与 v1.11 完全一致）；③ `game_start` / `state_sync` 在日麻下追加 `points[4]`、`dora_indicators[]`，`game_start` 另有 `round_wind` / `seat_wind`；④ `action` 动作词表 7 → **8**（+`riichi`，只出现在 `discard` 窗口，`tiles` 恰 1 张 = 宣言牌）；⑤ `game_end` 追加顶层 `points_after[4]` / `tenpai[4]`，`win` 追加 `fu` / `points` / `limit` / `dora` / `ura_dora` / `riichi` / `dora_indicators` / `kyoutaku` / `honba`；⑥ `stats` 顶层字段与 `recent` **仍表示 classic**，新增 `classic` / `riichi` 两个子对象与 `recent[].mode`（两套玩法分数不可比，禁止混算）；⑦ 牌山口径：日麻切 14 张王牌，可摸区 122、发牌后 `remaining` 初值 69（**classic 仍是 83**）；⑧ 无役不能和 —— 日麻下窗口不会给出 `win`，因此 `game_end.reason` 永不出现 `win_*` 的零役局。**零新增错误码**（仍 14 条）。见 §12 与附录 C v1.12 行
   v1.7 **B 批增补**（手感表现的数据通路）：① 新增服务端帧 **`tenpai`**（听牌提示，**仅发本家**，S→C 14 → **15 条**，见 §5.16）——**独立低频帧，不塞 `state_sync`**；② `tenpai.tenpai_seq` 是**独立单调计数器**，与 `room.seq`（窗口作废）**解耦**，理由见 §11.2（若挂载 `room.seq` 会把正常的 `action_request` 判成过期，玩家收不到鸣牌请求）；③ 下发时机冻结 6 行（T1 打牌后 / T2 副露后 / **T3 `sync` 后补发** / T4 摸牌后**不发** / T5 他家动作不发 / T6 局终·新局·场终不发）；④ `waits[].remaining` 冻结为**可见枚数**口径，**他家暗杠的 4 张不扣减**（扣了就能反推出暗杠牌面），**牌山真值永不入帧**（§11.3）；⑤ 三条性能预算 PB-1/PB-2/PB-3 各自绑定可执行处置（§11.4）；⑥ **修正 v1.6 缺陷**：`action_event{action:"ankan"}` 的 `tiles` 恒为 `[]`（v1.6 广播 `[T]` 会把暗杠牌面泄露给三家）；⑦ 新增 §11.6「表现事件来源矩阵」E1–E13 与 §11.7「客户端四条陷阱」。**零新增错误码**；v1.6 客户端不读新帧也能正常跑（未知帧类型忽略，§1.3）。见附录 C v1.7 行。
   v1.6 **A 批增补**（番型表 + 番数结算 + 一场四局/连庄/场次总分 + 暗杠/加杠）：① `action` 动作词表 5 → **7**（+`ankan`、+`kakan`），**不新增窗口类型**（两者是 `discard` 窗口的附加 `options`）；② `melds[].type` 3 → **5**（+`ankan`、+`kakan`），暗杠对他家的 `tiles` 为**空数组**并在局终揭示（§5.9、§8.1）；③ `game_end` **只增字段**（`win.yaku[]` / `win.han_breakdown{base,tsumo,dealer,total}` / `win.han` / `win.dealer_bonus` / `win.rinshan` / `results[].match_total` / 顶层 `round_index` / `dealer` / `renchan_count` / `match_will_continue`），既有字段形状一律不动（**`win.tags` 保持旧语义**，仍是 `yaku[].id` 的子集）；④ 新增服务端帧 **`match_end`**（场终，§5.15）；⑤ **零新增错误码**（仍 14 条，§7.1）；⑥ 明确 `seq` **跨局单调不重置**（§6.2）。见附录 C v1.6 行。
   v1.5 大厅选房：新增 `list_rooms` / `room_list`；`join_room` 在开局前替换一个 AI 座位并回 `room_joined`；`create_room` 不自动开局；`ready` 仍是开局信号。错误码不新增。见 §3、§4.2–§4.4、§4.11、§5.14。
 - 状态：**已冻结**（t3 网关、t4 房间状态机、t5 客户端、t6 端到端脚本必须严格按本文实现；变更须走新的需求评审）
-- 修订：v1.7 依 captain 裁决（B 批「手感表现」需求）**增补**：新增服务端帧 `tenpai`（§5.16，仅发本家）、`tenpai_seq` 与 `room.seq` 解耦的时序判据（§11.2）、`remaining` 可见枚数口径与暗杠例外（§11.3）、三条性能预算（§11.4）、**修正** `action_event` 的 `ankan.tiles` 为 `[]`（§11.5）、表现事件来源矩阵与客户端陷阱（§11.6/§11.7）。既有帧的字段、错误码、窗口与 `room.seq` 机制**一律未动**
+- 修订：v1.17 补「振听不可立直」与天和/地和，并修国士无双的和牌判定
+  v1.16 放开「不影响听牌的暗杠」（§12.4）
+  v1.15 依抢杠需求**增补** §12.10（`window:"chankan"`、`tile`、`is_chankan` 判番）
+  v1.14 依半庄需求**增补** §12.9（`length`、场风轮转、自风修正、连庄上限）
+  v1.13 依「形听但无役」缺陷**增补** §12.8（`waits[].yaku` / `no_yaku`）并把 PB-2 的日麻预算显式写开（1000 µs）
+  v1.12 依日麻接入需求**增补**第 12 章：玩法开关 `create_room.mode`、日麻专属字段（持点/宝牌/符/满贯分档/听牌罚符）、`action{riichi}`、`stats` 按玩法分桶。**既有 14 条错误码、窗口与 `seq` 机制、经典玩法（缺省）的帧字节一律未动**
+  v1.7 依 captain 裁决（B 批「手感表现」需求）**增补**：新增服务端帧 `tenpai`（§5.16，仅发本家）、`tenpai_seq` 与 `room.seq` 解耦的时序判据（§11.2）、`remaining` 可见枚数口径与暗杠例外（§11.3）、三条性能预算（§11.4）、**修正** `action_event` 的 `ankan.tiles` 为 `[]`（§11.5）、表现事件来源矩阵与客户端陷阱（§11.6/§11.7）。既有帧的字段、错误码、窗口与 `room.seq` 机制**一律未动**
   v1.6 依 captain 裁决（A 批需求评审，见 `A1_ARCH_ASSESSMENT.md` 的 `0.3` 与附录 C v1.6 行）**增补**番型表/番数结算、一场四局/连庄/场次总分、暗杠/加杠：帧数 C→S **10 条不变**（动作词表扩到 7 值，不新增帧类型）、S→C **13 → 14**（+`match_end`），错误码 **14 条不变**。既有 14 条错误码的语义与阈值、15 s 窗口、`seq` 作废方案、136/83/84/21、零和口径、私有信息规则（除暗杠一处新增）**全部未动**；`M ∈ {1,4,16}` 的算分口径随 `RULESET`/`GAME_DESIGN` 的 A 批修订版改由番数表承载（本文只改承载字段，不改数值）
   v1.4 依用户需求（本轮 actor 化重构）补 §7.2 一句话：计数与阈值**逐字不变**，仅**计数归属**从 `Connection` 移到该连接的 `ConnectionActor`。**帧格式、字段、时序、错误码与配额数值一律未动**（见附录 C v1.4 行）
   v1.3 依 captain 裁决（账号功能需求）**增补**账号注册/登录、战绩查询与三条错误码；帧数 8→10（C→S）、12→13（S→C），错误码 11→14。既有 11 条错误码的语义与阈值、15 s 窗口、`seq` 作废、私有信息规则、136/83/84/21 与零和口径**全部未动**（见附录 C v1.3 行与 `ACCOUNT_DESIGN.md`）
 - 作者 / 负责人：game-architect（t1）
 - 上游源头：`game/docs/GAME_DESIGN.md` **v1.10**（玩法源头，A 批已定稿）、`game/docs/UI_UX_SPEC.md` **v1.9**（表现层，A 批修订后为 v2.0）。A 批（番型表/番数/局制/暗杠加杠）的**规则源头**以 `GAME_DESIGN.md` v1.10 / `RULESET.md` v1.3 为准，与本文 v1.6 同批冻结；两者冲突时以 `GAME_DESIGN.md` 为准（§0.1）
-- 关联文档：`game/docs/RULESET.md`（t1，规则数值与算法）、`game/docs/GAME_DESIGN_REVIEW.md`（t10/t12 门禁与 H1–H7 移交项）、`game/docs/ACCOUNT_DESIGN.md`（v1.3，账号与战绩）、`game/docs/A1_ARCH_ASSESSMENT.md`（v1.6 的架构评估与改造点清单）
+- 关联文档：`game/docs/GAME_DESIGN_RIICHI_DRAFT.md`（日麻玩法设计与实现进度，§12 的上游）、`game/docs/RULESET.md`（t1，规则数值与算法）、`game/docs/GAME_DESIGN_REVIEW.md`（t10/t12 门禁与 H1–H7 移交项）、`game/docs/ACCOUNT_DESIGN.md`（v1.3，账号与战绩）、`game/docs/A1_ARCH_ASSESSMENT.md`（v1.6 的架构评估与改造点清单）
 - 适用里程碑：**单房间、四座位（1 真人 + 3 服务端 AI）；v1.6 起为「一场 4 局 + 连庄」的场次（§0.4）**
 
 ## 0. 适用范围、优先级与设计决断
@@ -760,6 +772,8 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | `waits` | array | 听牌张列表，**已按 §2.2 牌序排好**（数牌 `m<p<s`、字牌 `1z..7z`、同面不重复），客户端**不再排序**；`is_tenpai == false` 时**恒为 `[]`**（MUST，见下） |
 | `waits[].tile` | string | 牌面码，编码同 §2.1 |
 | `waits[].remaining` | int | 该牌面的**可见剩余枚数**，`0..4`，口径见 §11.3（**不是**牌山真值） |
+| `waits[].yaku` | bool | **仅 `mode=riichi`（v1.13）**：该等待张按荣和口径是否至少有一个役；见 §12.8 |
+| `no_yaku` | bool | **仅 `mode=riichi`（v1.13）**：形听但**全部**等待张无役；见 §12.8 |
 
 > ⚠️ **两个同名的 `remaining`，语义完全不同，实现与文档都不得混用（v1.7 显式消歧）**：
 >
@@ -1218,7 +1232,7 @@ remaining(tile) = 4
 | # | 指标 | 数值目标 | 测量方式 | 超阈处置 |
 | --- | --- | --- | --- | --- |
 | **PB-1** | `WaitingTiles(concealed, melds)` 单次纯函数耗时（13 张等待态的最坏手牌） | **≤ 200 µs**（均值；p99 ≤ 400 µs） | `mahjong_rules_test` 新增 perf 用例，写法照 `ChooseDiscardPerformanceAndDefaultUnchanged`（`mahjong_rules_test.cc:1160-1174`：预热 10 次 + 200 次取均值 + `EXPECT_LT`） | **门禁卡点**：单测 `EXPECT_LT(per_call_us, 200.0)` 失败即阻断合入，判定人＝跑 `ctest` 的人 / CI，不达标后果＝B1 不验收。纯函数无运行时降级空间 ⇒ 门禁类 |
-| **PB-2** | 单次 `tenpai` 帧的**端到端构建耗时**（含 34 面 `remaining` 统计）与帧字节 | 构建 **≤ 300 µs**；单帧 **< 1 KB**（`waits` 至多 34 项 × ~30 B ≈ 1 KB，实际听牌面 ≤ 9） | ①`RoomActor::SendTenpai(seat)` 处一次性计时，**阈值 300 µs 打 `spdlog::warn("slow tenpai build: N us")`**（触发点＝每次构建）；②t6 脚本断言每条 `tenpai` 原始字节 < 1024 | **自动降级**（真实落点，二选一，按触发先后）：若 PB-2 超线 → ①先把 `remaining` 的统计从"每次重算 4 项输入"改为**增量维护一张 34 面可见计数表**（`VisibleCounts counts_[34]`，在**本局内**的摸牌/打牌/副露时 +1/−1；**不跨局**，`StartRound` 清零）——这是纯优化、语义不变；②若增量表后仍超线，则 `tenpai` 改为**仅在 `is_tenpai` 或 `waits` 集合变化时下发**（牺牲 `remaining` 刷新，客户端保留旧值） |
+| **PB-2** | 单次 `tenpai` 帧的**端到端构建耗时**（含 34 面 `remaining` 统计；**v1.13**：日麻另需逐张判役，阈值放宽到 **≤ 1000 µs**，classic 仍 300 µs）与帧字节 | 构建 **≤ 300 µs**（classic）/ **≤ 1000 µs**（riichi）；单帧 **< 1 KB**（`waits` 至多 34 项 × ~30 B ≈ 1 KB，实际听牌面 ≤ 9） | ①`RoomActor::SendTenpai(seat)` 处一次性计时，**阈值 300 µs 打 `spdlog::warn("slow tenpai build: N us")`**（触发点＝每次构建）；②t6 脚本断言每条 `tenpai` 原始字节 < 1024 | **自动降级**（真实落点，二选一，按触发先后）：若 PB-2 超线 → ①先把 `remaining` 的统计从"每次重算 4 项输入"改为**增量维护一张 34 面可见计数表**（`VisibleCounts counts_[34]`，在**本局内**的摸牌/打牌/副露时 +1/−1；**不跨局**，`StartRound` 清零）——这是纯优化、语义不变；②若增量表后仍超线，则 `tenpai` 改为**仅在 `is_tenpai` 或 `waits` 集合变化时下发**（牺牲 `remaining` 刷新，客户端保留旧值） |
 | **PB-3** | `tenpai` 正确性（不得出现陈旧值/与手牌不一致） | **0 次不一致**：任何 `hands_`/`melds_` 变化后的首条 `tenpai` 必须与新状态一致 | 单测 `WaitingTilesMatchesCanWinExact`：随机 200 手牌，断言 `WaitingTiles(h,m) == {f \| CanWinExact(h+{f}, m)}`（两条独立代码路径交叉验证）；房间层断言"`tenpai` 与该时刻 `hands_[seat]`/`melds_[seat]` 自洽" | **门禁卡点**：两条单测任一失败即阻断；不达标后果＝B1 不验收。**不做结果缓存**（每次触发都是"手牌刚变"的时刻，必然 miss；缓存只会制造陈旧值） |
 
 **成本依据（为什么 200 µs 是合理线）**：现有门禁是 `ChooseDiscard < 2000 µs`，而它内部是"34 个候选打牌 × 每个再看 34 面"≈ 千次级向听计算；`WaitingTiles` 只是"1 次 `Shanten` 门控 + 至多 34 次 `CanWinExact`"，量级小一个数量级以上。200 µs 给了约 10 倍余量，且远低于 10 ms 渲染帧预算（`FEEL_SPEC` `F-G-01` 60 FPS）。
@@ -1297,6 +1311,171 @@ remaining(tile) = 4
 
 ---
 
+## 12. 日麻玩法（`mode=riichi`，**v1.12 增补**）
+
+> 上游：`GAME_DESIGN_RIICHI_DRAFT.md`。规则数值（役种、符、点数表）以该草案 §2 与 `riichi_rules.{h,cc}` 为准；
+> 本节只冻结**线协议增量**。**缺省玩法是 classic，本节全部字段在 classic 下不出现。**
+
+### 12.1 玩法开关：`create_room.mode`
+
+| 字段 | 类型 | 必填 | 取值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `mode` | string | 否 | `classic` / `riichi` | 缺省 `classic`；未知值 → `BAD_REQUEST` |
+| `length` | string | 否 | `tonpu` / `hanchan` | 缺省 `tonpu`（东场 4 局）；`hanchan` = 半庄 8 局。**仅 `mode=riichi`**：classic 传 `hanchan` → `BAD_REQUEST`（classic 局数由 C15 冻结为 4） |
+
+- 玩法是**房间属性**：`join_room` 沿用目标房间的玩法，不需要也不接受 `mode`。
+- **兼容承诺**：客户端不传 `mode` 时，服务端下发的**每一帧与 v1.11 逐字节一致**（`points` / `dora_indicators` / `fu` 等键一律不出现）。
+
+### 12.2 `game_start` 增量（仅 riichi）
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `points` | int[4] | 四家持点，按 seat 下标；开局为 25000 |
+| `dora_indicators` | string[] | 已翻开的宝牌指示牌（开局 1 张，每杠 +1，上限 5） |
+| `round_wind` | int | 场风：0 东 / 1 南（东场 0..3 局 ⇒ 0；半庄的 4..7 局 ⇒ 1） |
+| `seat_wind` | int | 自风：0 东 / 1 南 / 2 西 / 3 北（= `(round_wind + seat − dealer + 4) % 4`；**庄家的自风恒等于场风**） |
+| `round_count` | int | 本场总局数：东场 4 / 半庄 8（classic 恒 4） |
+
+**牌山口径**：日麻切 14 张王牌（0..3 岭上 / 4..8 宝牌指示 / 9..13 里宝指示），可摸区 = 136 − 14 = **122**；
+发牌 53 张后 `state_sync.remaining` 初值为 **69**（classic 仍为 **83**）。§0.6 的 136/83/84/21 是 **classic 口径**，
+日麻对应为 136/122/70。
+
+### 12.3 `state_sync` 增量（仅 riichi）
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `points` | int[4] | 四家持点（权威值，随每局结算与立直供托变化） |
+| `dora_indicators` | string[] | 已翻开的宝牌指示牌 |
+| `seats[].riichi` | bool | 该座位本局是否已立直（公开信息；classic 下不出现该键） |
+
+### 12.4 `action` 新增动作 `riichi`
+
+- **窗口**：只出现在 `discard` 窗口的 `options` 里，形状 `{"action":"riichi","tiles":[]}`。
+- **提交**：`{"type":"action","action":"riichi","tiles":["<宣言牌>"],"seq":N}` —— `tiles` **恰 1 个牌面**。
+- **语义**：**宣言与打牌是同一条消息**。服务端先扣 1000 点供托（`points[seat] -= 1000`、`kyoutaku += 1`），
+  再执行该牌的打牌流程。客户端**不得**拆成「先 action 再 discard」两条消息。
+- **合法性**：服务端重算（门前清 + 打出该牌后听牌 + **未处于振听** + 持点 ≥ 1000 + 可摸区 ≥ 4），
+  不满足 → `ILLEGAL_ACTION`。振听包含舍て牌振听（自家牌河里有自己的等待张）与见逃振听（本局放过了和牌）。
+- **广播**：宣言成功即广播 `action_event{seat, action:"riichi", tiles:[], seq}`（不带 `from_seat`），
+  供前端起「立直棒 / 横置」动画；权威状态见 `state_sync.seats[].riichi`。
+- **一发**：宣言后至本家下一次摸牌前有效；期间任何鸣牌（吃/碰/杠）立即失效。
+- **立直后（手牌锁定）**：普通 `discard` **只能是刚摸到的那张**（摸切），打其它牌回 `ILLEGAL_ACTION`；
+  鸣牌窗口只保留 `win` / `pass`（吃/碰/杠一律不给）。杠的口径：
+  - **`kakan` 永不提供** —— 立直手是门前清，不可能有碰组，这条在结构上就不会出现。
+  - **`ankan` 只在「不改变听牌」时提供**（v1.16）：把 4 张杠掉之后的等待张集合必须与杠前**完全相同**。
+    客户端不需要自己判断，照 `options` 渲染即可；被拒绝时不会出现该按钮。
+- **天和 / 地和**（v1.17）：第一巡自摸的役满，会作为 `yaku[].id = "tenhou"` / `"chiihou"` 出现在
+  `game_end.win.yaku[]` 里（`limit = "yakuman"`）。天和＝庄家配牌即和；地和＝闲家在自己第一次摸牌时和，
+  两者都要求本局此前**无鸣牌**。
+- **无役不能和**：日麻窗口只在「至少一个役」时提供 `win`（宝牌不算役）。因此 `game_end.reason`
+  在日麻下只会是 `win_ron` / `win_tsumo`（有役）或 `draw_exhausted`。
+
+### 12.5 `game_end` 增量（仅 riichi）
+
+顶层：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `points_after` | int[4] | 本局结算后的持点（排名口径；不含供托的持有者变化） |
+| `tenpai` | bool[4] | 荒庄时四家是否听牌；和牌局恒 `false` |
+
+`win` 追加：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `fu` | int | 符（七对子固定 25；平和自摸 20） |
+| `points` | int | 和牌点数（荣和 = 放炮者付出；自摸 = 三家之和） |
+| `limit` | string | `none` / `mangan` / `haneman` / `baiman` / `sanbaiman` / `yakuman` |
+| `dora` | int | 宝牌张数 |
+| `ura_dora` | int | 里宝张数（非立直和牌恒 0） |
+| `riichi` | bool | 和牌者本局是否立直 |
+| `dora_indicators` | string[] | 本局已翻开的指示牌 |
+| `kyoutaku` | int | 本局结算时收走的供托棒数 |
+| `honba` | int | 本局本场数（支付已含在 `delta_score` 里） |
+
+- **兼容字段**：日麻下 `win.multiplier` 填**点数**（客户端旧公式「合计 N 番（M 分）」不会崩），
+  `win.han` / `win.yaku[]` / `win.han_breakdown` 语义不变。
+- **日麻下 `han_breakdown.dealer` 的读法**（避免客户端误用）：服务端按「赢家是否庄家」填 0/1，
+  但日麻**没有庄家加番，也没有 6 番封顶** —— `total = Σ yaku[].han`（役满为 13 的倍数），
+  并不满足 §5.10 的 `min(base + dealer, 6)`（该恒等式只对 classic 成立）。客户端 MUST NOT
+  把日麻的这个 `dealer` 当加成渲染或播报，也不得据此判「封顶」；结算播报口径见
+  `GAME_DESIGN_RIICHI_DRAFT.md` §7.3。帧形状未变，老客户端逐字兼容。
+- **零和**：`results[].delta_score` 仍是四家和为 0；供托在宣言时已从各家持点扣除，收走时补回和牌者。
+
+### 12.6 `stats` 增量
+
+- 顶层 `games` / `wins` / `draws` / `net_score` / `recent` **仍表示 classic**（老客户端逐字不变）。
+- 新增 `classic` / `riichi` 两个子对象，形状 = 上述四个数字 + `recent`。
+- `recent[]` 新增 `mode`（`classic` / `riichi`）。
+- **禁令**：客户端不得把两个桶的 `net_score` 相加或比较 —— 一个是零和得失分，一个是 25000 起的持点增减。
+
+### 12.7 与既有条款的关系
+
+| 既有条款 | 日麻下的处理 |
+| --- | --- |
+| §0.4「抢杠和**永久不做**」 | 仅对 classic 生效。日麻**已接线**（v1.15）：加杠时开 `window:"chankan"` 的抢杠窗口，见 §12.10 |
+| §0.6「136 / 83 / 84 / 21」 | 每局口径不变；日麻的可摸区改为 122、发牌后 `remaining` 69（见 §12.2） |
+| §0.2 H6（`seats[]` 不含 `hand`） | 两种玩法一致，未放松 |
+| §7.1 错误码 14 条 | **零新增**：立直/无役/振听一律走 `ILLEGAL_ACTION` 或「不给该 option」 |
+
+### 12.8 `tenpai` 帧增量（仅 riichi，**v1.13 增补**）
+
+日麻存在「**形听但无役**」：牌型只差一张，和了却一个役都没有（副露最常见 —— 门清还能靠立直或自摸，副露两头都堵死）。
+按 §5.16，`is_tenpai` 是**形式听牌**（流局罚符看它、立直资格也看它），**这个语义不变**；本节只追加「能不能和」的提示：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `waits[].yaku` | bool | 该等待张**按荣和口径**是否至少有一个役（宝牌不算役；已立直时恒 `true`） |
+| `no_yaku` | bool | `is_tenpai == true` 且**所有** `waits[].yaku == false` |
+
+```json
+{"type":"tenpai","tenpai_seq":12,"is_tenpai":true,"no_yaku":true,
+ "waits":[{"tile":"6s","remaining":3,"yaku":false},{"tile":"9s","remaining":2,"yaku":false}]}
+```
+
+- **判定口径**：逐张把该牌加进手牌、以**荣和**上下文判番（不含门前清自摸、岭上开花这类自摸役，所以
+  「门清无役」也会是 `yaku=false`，这类手牌仍然**可以**自摸和牌）。已立直者不逐张计算（立直本身是役）。
+- **客户端用法**：`no_yaku` + 有副露 ⇒「无役不能和」；`no_yaku` + 门清 ⇒「无役（立直或自摸才可和）」；
+  逐张 `yaku=false` 的等待张在听牌条上压灰 + 枚数红字，**不得隐藏**。
+- **禁令**：客户端**不得**因 `no_yaku` 隐藏听牌条，也**不得**把它当作 `is_tenpai=false` —— 形听仍要吃流局罚符、
+  仍可能宣言立直（立直后本节字段恒为「都有役」）。
+- **性能**：PB-2 在日麻下的阈值放宽到 1000 µs（九面听 worst case 约 600 µs，且只在 T1/T2/T3 触发）；
+  classic 仍卡 300 µs，且不做这次判役。
+
+### 12.9 局数与场风（**v1.14 增补**）
+
+| 概念 | 取值 | 说明 |
+| --- | --- | --- |
+| 东场（`tonpu`，缺省） | `round_count = 4` | 场风恒东；第 1..4 局依次由四家坐庄 |
+| 半庄（`hanchan`） | `round_count = 8` | 第 1..4 局东场、第 5..8 局南场 |
+
+- **场风由局号唯一决定**：`round_wind = round_index / 4`（`round_index` 只在该局**轮庄**时 +1，连庄不推进）。
+- **自风口径（修正）**：庄家的自风等于场风 —— 东场庄家是东家、南场庄家是南家。
+  `seat_wind = (round_wind + seat − dealer + 4) % 4`。**`(seat − dealer) % 4` 是错的**：那在东场成立，
+  到南场会整体差一圈（南家被当成东家，役牌/连风牌判番全错）。
+- **连庄上限**：日麻放宽为 `round_count`（东场 ≤ 8 次、半庄 ≤ 16 次 `game_end`）；C15 的 classic
+  上限 4 不变。此前日麻共用 4，会让连庄 5 次的半庄在 `round_index=5` 就场终。
+- **兼容**：不传 `length` ⇒ 东场，`round_count` 与 `round_wind` 与 v1.13 完全一致。
+
+### 12.10 抢杠（`window:"chankan"`，**v1.15 增补**）
+
+- **触发**：`mode=riichi` 下本家提交 `action{action:"kakan", tiles:[T]}`。服务端**不立即落地**，
+  先给另外三家一次抢杠机会；确认无人和牌后才补岭上牌、翻新宝牌、开打牌窗口。
+- **窗口帧**：`window:"chankan"`，比 §5.7 的鸣牌窗口多一个字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `tile` | string | 被抢的那张牌面。**它不在任何人的牌河里**（加杠是自理动作），客户端无法自行推导 |
+
+- **options**：只有 `win` / `pass` —— 加杠的牌不能被吃/碰/大明杠。**只有真能和的家才会收到窗口**；
+  三家都不能和时服务端不开窗、直接落地（否则每次加杠都要白等 15 s）。
+- **抢杠是 1 番役**：判番上下文带 `is_chankan=true`，因此**无役的手牌也能抢**（这是它与普通荣和的唯一区别）。
+- **和了**：`game_end.reason = "win_ron"`，`win.yaku[]` 里出现 `chankan`；第 4 张从加杠者手牌移入和牌者手牌，
+  **杠不成立**（不会翻新宝牌、不会补岭上牌）。
+- **无人和**：加杠正常落地，客户端随后才会看到 `action_event{action:"kakan"}`（不是先播后撤）。
+- **振听**：窗口给了 `win` 却过（含超时）⇒ 本局见逃振听，与普通荣和同口径。
+- **不做**：国士无双抢**暗杠**（本版只做加杠）。
+
 ## 附录 A：消息 × 字段速查
 
 | `type` | 方向 | 关键字段 | `seq` |
@@ -1341,6 +1520,12 @@ remaining(tile) = 4
 
 | 版本 | 内容 | 来源 |
 | --- | --- | --- |
+| **v1.17** | **日麻规则补全**：① §12.4 立直合法性加「振听不可立直」；② §12.5 `win.yaku[]` 新增 `tenhou`/`chiihou`（役满，第一巡自摸，要求本局无鸣牌）；③ 修复国士无双不可和牌（牌型门禁补国士，`IsKokushiHand`/`RiichiWaitingTiles`）。**classic 不变**，零新增字段/错误码 | 规则修正（振听立直、天和地和缺失、国士和不了） |
+| **v1.16** | **立直后暗杠**：§12.4 改为「`kakan` 永不提供 / `ankan` 仅在暗杠不改变听牌时提供」——判据是 14 张去掉刚摸牌（13 张）与暗杠后（10 张 + 暗杠组）的 `WaitingTiles` 完全相同；`drawn_tile` 未知时保守不给。**classic 不变**，零新增错误码/字段 | 规则修正（此前一律拒绝合法暗杠）；实现见 `riichi::CanAnkanAfterRiichi` |
+| **v1.15** | **抢杠增补**（`mode=riichi`）：① `action{kakan}` 改为「先开抢杠窗口、再落地」，新增 `action_request.window:"chankan"` 与字段 `tile`（被抢牌面，不在牌河）；② 该窗口 `options` 只有 `win`/`pass`，且**只发给真能和的座位**；③ 判番上下文新增 `is_chankan`（抢杠 1 番，无役手也能抢）；④ 和牌时 `win.yaku[]` 含 `chankan`，杠不成立（不补牌/不翻宝牌）；⑤ §12.7 的「抢杠对 classic 永久不做」仍是 classic 条款，日麻已接线。**classic 无窗口、零新增错误码** | 需求（抢杠和） |
+| **v1.14** | **半庄（局数）增补**：① §12.1 `create_room` 新增可选 `length`（`tonpu`/`hanchan`，仅 riichi；classic 传 `hanchan` ⇒ `BAD_REQUEST`）；② §12.2 `game_start.round_wind` 支持 1（南场），`round_count` 随局数取 4/8；③ **自风修正**：`seat_wind = (round_wind + seat − dealer + 4) % 4`（庄家自风 = 场风），东场数值不变；④ §12.9 新增整节（场风由局号推导、连庄上限放宽到局数）。**不传 `length` 时行为与 v1.13 逐字节一致**，零新增错误码（复用 `BAD_REQUEST`） | 需求（半庄）；缺陷修复（南场自风错一圈） |
+| **v1.13** | **日麻听牌提示口径增补**（`mode=riichi`）：§5.16 `tenpai` 帧追加 `waits[].yaku`（该等待张按荣和是否至少有一个役）与帧级 `no_yaku`（形听且全部无役）。**`is_tenpai` 语义不变**（形听；流局罚符与立直资格仍看它），`no_yaku` 只影响客户端提示：副露「无役不能和」/ 门清「无役（立直或自摸才可和）」，逐张无役的等待张压灰 + 红字，**禁止**隐藏听牌条。§11.4 PB-2 显式拆开两种口径（classic 300 µs / riichi 1000 µs）。**classic 帧逐字节不变**，零新增错误码、零新增帧 | 缺陷修复（副露无役时听牌条谎报「能和」）；规格与实现见 §12.8 |
+| **v1.12** | **日麻玩法增补**（`mode=riichi`）：① §4.2 `create_room` 新增可选 `mode`（`classic` 缺省 / `riichi`），未知值 `BAD_REQUEST`；② §5.4 `game_start` 追加 `points[4]` / `dora_indicators[]` / `round_wind` / `seat_wind`（仅 riichi）；③ §5.9 `state_sync` 追加 `points[4]` / `dora_indicators[]`（仅 riichi）；④ §4.6 动作词表 7 → **8**（+`riichi`，只出现在 `discard` 窗口，`tiles` 恰 1 张宣言牌，宣言与打牌同一条消息）；⑤ §5.10 `game_end` 追加顶层 `points_after[4]` / `tenpai[4]`，`win` 追加 `fu` / `points` / `limit` / `dora` / `ura_dora` / `riichi` / `dora_indicators` / `kyoutaku` / `honba`，`multiplier` 在日麻下填点数；⑥ §5.13 `stats` 顶层保持 classic、新增 `classic` / `riichi` 子对象与 `recent[].mode`；⑦ 新增 §12 整节（含牌山 122/69 口径、无役不能和、抢杠对 classic 的适用范围）。**classic 帧字节逐字节不变**，错误码仍 14 条，窗口与 `seq` 机制未动 | 需求（日麻玩法接入）；规格与实现见 `GAME_DESIGN_RIICHI_DRAFT.md` |
 | **v1.11** | 仅 §1.8 客户端启动参数增补两行：`--no-auto-login` / `--forget-login`——**纯客户端本地**（本机登录凭据记忆的开关与清档，存档路径 `~/.ex_actor_mahjong/login.json`）。**线协议零改动**：帧、字段形状、错误码（仍 14 条）、时序、`seq`、配额与全部数值未动 | 用户需求（「每次都要重新输入账号密码」；表现层见 `UI_UX_SPEC.md` v4.6 §3.5） |
 | **v1.10** | **实现口径（非线协议）**：§1.1 传输行由「actor 之间用 `SendLocal`」改为「统一用 `Send`，消息体全部可序列化」。为此房间的定时器改为 `ExActorOnSpawned` 自装、结算通知改为 `RoomOwner::OnRoomFinished` 消息、选座改为 `task<bool> TakeSeat` 请求/应答，`json::Value` 增加 reflect-cpp 反射。**线协议零改动**：帧形状、错误码、时序、`seq`、配额与数值全部未动 | 用户需求（统一 `Send`；为将来跨节点留出通路） |
 | **v1.9** | **房间号全局唯一**：§4.2 `room_id` 格式由 `r-####`（4 位十进制，进程内从 1 递增）改为 `r-` + **13 位小写 36 进制**（36 比特进程级随机标记 + 28 比特进程内递增序号）。重启服务器、同库多进程都不再复用旧编号——账号库 `match_results` 的 `(room_id, account_id)` 唯一键不会再把一个新场次误判为重复写入而丢弃。§5.14 `room_list.rooms[].room_id` 与 §4.3/§5.3/§5.13/§5.14/§9 的示例同步。**未改动**：帧的字段形状、消息条数、错误码、时序、`seq` 规则、配额与其余全部口径 | 用户需求（房间号需全局唯一，重启服务器也不复用） |
