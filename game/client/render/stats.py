@@ -29,9 +29,11 @@ RECENT_LIMIT = 10
 
 def summary_text(stats: dict) -> str:
     """汇总一行（两处共用同一公式，避免两套文案漂移）。"""
+    # 日麻的 net_score 是「点数增减」，不是零和得失分 —— 标签跟着玩法走，别混着叫“得分”。
+    suffix = "净得点" if stats.get("mode") == "riichi" else "净得分"
     return (
         f"累计战绩：{stats['games']} 局 · 和牌 {stats['wins']} · 荒庄 {stats['draws']} "
-        f"· 净得分 {stats['net_score']:+d}"
+        f"· {suffix} {stats['net_score']:+d}"
     )
 
 

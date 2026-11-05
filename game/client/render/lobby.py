@@ -91,6 +91,51 @@ def render(surface: pygame.Surface, ui: UiView) -> None:
 
     _render_rooms(surface, ui)
 
+    # 玩法选择：建桌时随 create_room 一起发给服务端（classic / riichi）
+    W.draw_text(surface, "玩法", fonts.get(T.FS_SMALL), T.TEXT_DIM, T.LB_MODE_LABEL, W.ALIGN_LEFT)
+    for rect, key, label in (
+        (T.LB_MODE_CHIPS[0], "classic", "经典麻将"),
+        (T.LB_MODE_CHIPS[1], "riichi", "日本麻将"),
+    ):
+        selected = ui.lobby_mode == key
+        hovered = T.rect_contains(rect, ui.mouse)
+        if selected or hovered:
+            surface.blit(
+                art.strip(
+                    rect[2], rect[3], (232, 192, 104, 46 if selected else 20),
+                    edge=T.SELECT if selected else T.PANEL_EDGE, radius=6,
+                ),
+                (rect[0], rect[1]),
+            )
+        W.draw_text(
+            surface, label, fonts.get(T.FS_SMALL), T.TEXT if selected else T.TEXT_DIM,
+            rect, W.ALIGN_CENTER,
+        )
+
+    # 局数：只在日麻下出现（classic 由服务端冻结为 4 局，给个无效开关反而误导）
+    if ui.lobby_mode == "riichi":
+        W.draw_text(
+            surface, "局数", fonts.get(T.FS_SMALL), T.TEXT_DIM, T.LB_LEN_LABEL, W.ALIGN_LEFT
+        )
+        for rect, key, label in (
+            (T.LB_LEN_CHIPS[0], "tonpu", "东场"),
+            (T.LB_LEN_CHIPS[1], "hanchan", "半庄"),
+        ):
+            selected = ui.lobby_length == key
+            hovered = T.rect_contains(rect, ui.mouse)
+            if selected or hovered:
+                surface.blit(
+                    art.strip(
+                        rect[2], rect[3], (232, 192, 104, 46 if selected else 20),
+                        edge=T.SELECT if selected else T.PANEL_EDGE, radius=6,
+                    ),
+                    (rect[0], rect[1]),
+                )
+            W.draw_text(
+                surface, label, fonts.get(T.FS_SMALL), T.TEXT if selected else T.TEXT_DIM,
+                rect, W.ALIGN_CENTER,
+            )
+
     for rect, label, enabled in (
         (T.LB_NEW_BTN, "新建房间", ui.lobby_create_enabled),
         (T.LB_START_BTN, "开始对局", ui.lobby_begin_enabled),

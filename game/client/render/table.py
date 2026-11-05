@@ -1,14 +1,18 @@
-"""牌桌界面（UI_UX_SPEC §4；v3.0 起按参考视频《明星三缺一 2004》复原）。
+"""牌桌界面（UI_UX_SPEC §4；v4.0 起按参考视频《雀魂》抽帧重排，v5.0 重排牌河）。
 
-图层顺序（关键在**桌布压在人物之上**：桌沿那条线就是把人物切开的那条线）：
+v5.0：四家牌河紧贴八角板围成方形环——侧家弃牌从桌边斜轨搬进板左右两侧的
+6×3 正交网格（横躺 90°、不倾斜），对家/本家牌河第一排贴板、后续排朝外叠。
 
-    art.hall()                       背景：糊掉的室内照片（暖灰墙 + 货架）
-    三家人物半身像 + 名牌            都贴在上沿，下半身等着被桌布切掉
-    art.table_cloth()                粉色桌布：米白斜格 + 浅蓝线稿 + 桌沿高光
-    牌                               他家手牌背 / 副露 / 牌河；本家副露 + 手牌
+图层顺序（v4.0：台布铺满整屏，名牌必须画在台布**之后**）：
 
-**本家没有立绘**（参考视频是第一人称视角），只有右下角一块分数牌 + 系统菜单。
-坐标全部取自 `theme.py`（= §4.3 v3.0 坐标表）。本模块是纯读取渲染：
+    art.riichi_cloth()       深蓝台布：桌心柔光 + 四角放射线 + 牌河区细框 + 左右木边
+    _draw_hud()              左上场况卡片 / 右上两枚圆按钮 / 连接状态
+    四家名牌                 竖排窄卡（头像 + 名字 + 分数），分列四角/四边
+    牌                       他家手牌背 / 副露 / 牌河；本家副露 + 手牌
+    _draw_center()           桌心八边形情报板（四家持点 / 场风 / 余牌）
+
+本家没有立绘（参考帧是第一人称视角），名牌与系统菜单是唯一落点。
+坐标全部取自 `theme.py`（v4.0 分区表）。本模块是纯读取渲染：
 - 他家手牌**只**通过 `draw_tile_back` 以 `hand_count` 张牌背呈现（§4.6 / §7.2）；
 - 他家的 `SeatView` 结构里没有任何牌面字段可读。
 """
@@ -40,8 +44,7 @@ PERSPECTIVE_FAR = 0.84
 
 #: 副露与手牌同一行时，两组之间的间距
 HAND_MELD_GAP = 18
-#: 侧家牌河每下一行的水平偏移（顺着桌边斜）
-SIDE_RIVER_SHEAR = 0
+# v5.0：牌河已改成中央板两侧的正交网格，不再有「顺着桌边斜」的逐行偏移。
 #: 副露排布用的「自然宽度」上限（4 组杠刚好放得下，不会触发收缩）
 MELD_ROW_MAX_W = 560
 
@@ -146,8 +149,15 @@ def hand_hit_test(state: GameState, pos: tuple[float, float]) -> int | None:
     return None
 
 
-def center_river_rects(area: tuple[int, int, int, int], count: int) -> list[tuple[int, int, int, int]]:
-    """中央牌河（自家 / 对家）：6×4，超过 24 张切换紧凑 7×5（§4.7）。"""
+def center_river_rects(
+    area: tuple[int, int, int, int], count: int, *, flip_rows: bool = False,
+) -> list[tuple[int, int, int, int]]:
+    """中央环牌河（本家 / 对家）：6 列 × 3 排，超过容量切紧凑模式。
+
+    ``flip_rows`` 给对家用：第一排要**贴着中央板上沿**，后续排往上叠；
+    本家则是第一排贴板下沿、往下叠（默认行为）。这样四家牌河都从板边
+    向外生长，和参考视频的方形环一致。
+    """
     ox, oy = area[0], area[1]
     if count <= T.RIVER_CENTER_CAPACITY:
         tw, th = T.RIVER_CENTER_TILE
@@ -158,35 +168,43 @@ def center_river_rects(area: tuple[int, int, int, int], count: int) -> list[tupl
         cw, ch = T.RIVER_CENTER_COMPACT_COL_PITCH, T.RIVER_CENTER_COMPACT_ROW_PITCH
         cols = T.RIVER_CENTER_COMPACT_COLS
     out = []
+    base_y = oy + area[3] - ch if flip_rows else oy
     for i in range(count):
         row, col = divmod(i, cols)
-        out.append((ox + col * cw, oy + row * ch, tw, th))
+        y = base_y - row * ch if flip_rows else base_y + row * ch
+        out.append((ox + col * cw, int(y), tw, th))
     return out
 
 
-def _side_river_col_y(col: int, cols: int) -> float:
-    """横排槽在桌沿上的 y：col 0 靠近本家，递增往远端。"""
-    near_y = float(T.HAND_Y - 22)
-    far_y = float(T.SIDE_RIVER_TOP)
-    if cols <= 1:
-        return near_y
-    t = col / (cols - 1)
-    return near_y + (far_y - near_y) * t
+def side_ring_river_rects(left: bool, count: int) -> list[tuple[int, int, int, int]]:
+    """v5.0 侧家牌河：第一列紧贴中央板，6 行竖排，满 6 张朝桌外叠下一列。
+
+    牌是**正正的横躺牌**（只旋转 90°，不倾斜）——参考视频里侧家弃牌
+    就围在八角板左右两侧，跟桌边那两条斜着的牌山完全无关。
+    """
+    area = T.side_river_rect(left)
+    tw, th = T.RIVER_RING_TILE
+    row_pitch = T.RIVER_RING_ROW_PITCH
+    col_pitch = T.RIVER_RING_COL_PITCH
+    rows = T.RIVER_RING_ROWS
+    cols = T.RIVER_RING_COLS
+    col0_x = area[0] + area[2] - tw if left else area[0]
+    out: list[tuple[int, int, int, int]] = []
+    for index in range(min(count, T.RIVER_RING_CAPACITY)):
+        col, row = divmod(index, rows)
+        if col >= cols:
+            break
+        x = col0_x + (-col * col_pitch if left else col * col_pitch)
+        out.append((int(x), int(area[1] + row * row_pitch), tw, th))
+    return out
 
 
 def side_river_centers(left: bool, count: int) -> list[tuple[float, float]]:
-    """侧家牌河：6 张横排沿桌边，满行后向桌心叠下一行（与真实牌河一致）。"""
-    cols = T.RIVER_SIDE_COLS
-    out: list[tuple[float, float]] = []
-    for index in range(count):
-        row, col = divmod(index, cols)
-        if row >= T.RIVER_SIDE_ROWS:
-            break
-        inset = T.SIDE_RIVER_INSET + row * float(T.RIVER_SIDE_ROW_PITCH)
-        y = _side_river_col_y(col, cols)
-        x, y = T.side_point_at_screen_y(left, inset, y)
-        out.append((x, y))
-    return out
+    """侧家牌河槽位中心（中央环网格），供飞行动画 / 命中测试复用。"""
+    return [
+        (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0)
+        for r in side_ring_river_rects(left, count)
+    ]
 
 
 def _side_river_tile_size() -> tuple[int, int]:
@@ -221,7 +239,7 @@ def discard_flight_end(
     if rel == 0:
         rects = center_river_rects(T.R_SELF_RIVER, discard_count)
     elif rel == 2:
-        rects = center_river_rects(T.R_OPP_RIVER, discard_count)
+        rects = center_river_rects(T.R_OPP_RIVER, discard_count, flip_rows=True)
     elif rel == 1:
         return _side_discard_flight_end_rect(False, discard_count)
     else:
@@ -229,38 +247,30 @@ def discard_flight_end(
 
 
 def _side_discard_flight_end_rect(left: bool, count: int) -> tuple[float, float, float, float] | None:
-    centers = side_river_centers(left, count)
-    if not centers:
+    rects = side_ring_river_rects(left, count)
+    if not rects:
         return None
-    cx, cy = centers[-1]
-    along, across = _side_river_tile_size()
-    return (
-        float(cx - across / 2.0),
-        float(cy - along / 2.0),
-        float(across),
-        float(along),
-    )
+    x, y, w, h = rects[-1]
+    return (float(x), float(y), float(w), float(h))
 
 
 def side_river_rects(rect: tuple[int, int, int, int], count: int) -> list[tuple[int, int, int, int]]:
-    """侧家牌河命中/飞行动画（中心在轨上）。"""
+    """侧家牌河命中 / 飞行动画槽位（中央环网格，横躺牌）。"""
     left = rect[0] + rect[2] // 2 < T.LOGICAL_W // 2
-    along, across = _side_river_tile_size()
-    out: list[tuple[int, int, int, int]] = []
-    for x, y in side_river_centers(left, count):
-        out.append((
-            int(round(x - across / 2.0)),
-            int(round(y - along / 2.0)),
-            across,
-            along,
-        ))
-    return out
+    return side_ring_river_rects(left, count)
 
 
 def meld_layout(
-    area: tuple[int, int, int, int], melds, vertical: bool = False
+    area: tuple[int, int, int, int], melds, vertical: bool = False,
+    groups_per_row: int = 0,
 ) -> list[tuple[pygame.Rect, list[tuple[tuple[int, int, int, int], str | None]]]]:
     """副露分组布局（§4.8）：组内牌 28×36 pitch 30，组间距 8；空间不足时等比收缩 pitch。
+
+    ``vertical=True`` 一组一行地纵向堆叠（v5.1 侧家用：贴牌山、离牌河远，
+    组数再多也只会往下叠，不会横向溢出压到弃牌）。横排用于本家 / 对家。
+
+    ``groups_per_row>0``（v5.3 对家用）：横排每行最多放这么多组，超出换到下一行，
+    行距 ``MELD_ROW_HEIGHT``。这样 4 组也不会把牌压到糊掉、更不会横向溢出压到别家。
 
     v2.0 暗杠空数组形态：`tiles == []` 按占位 4 张（face=None ⇒ 由调用方画牌背，
     §4.8 两形态之二），组宽按 4 张计。
@@ -273,8 +283,6 @@ def meld_layout(
 
     def width_of(meld) -> int:
         return len(meld.tiles) if meld.tiles else 4
-
-    total_tiles = sum(width_of(m) for m in melds)
 
     if vertical:
         max_w = area[2]
@@ -298,26 +306,46 @@ def meld_layout(
             y += T.MELD_ROW_HEIGHT
         return out
 
-    max_w = area[2]
-    pitch = T.MELD_TILE_PITCH
-    widths = [max(1, width_of(m)) * pitch - 2 + 2 * outer for m in melds]
-    total = sum(widths) + gap * (len(melds) - 1)
-    if total > max_w and total_tiles > 0:
-        # 收缩：解出货架宽度 sum(n_i*pitch) + 常量 = max_w
-        constant = len(melds) * (2 * outer - 2) + gap * (len(melds) - 1)
-        pitch = max(16, int((max_w - constant) / total_tiles))
-        widths = [max(1, width_of(m)) * pitch - 2 + 2 * outer for m in melds]
+    def row_layout(
+        row_area: tuple[int, int, int, int], chunk,
+    ) -> list[tuple[pygame.Rect, list[tuple[tuple[int, int, int, int], str | None]]]]:
+        max_w = row_area[2]
+        pitch = T.MELD_TILE_PITCH
+        widths = [max(1, width_of(m)) * pitch - 2 + 2 * outer for m in chunk]
+        total = sum(widths) + gap * (len(chunk) - 1)
+        row_tiles = sum(width_of(m) for m in chunk)
+        if total > max_w and row_tiles > 0:
+            # 收缩：解出货架宽度 sum(n_i*pitch) + 常量 = max_w
+            # v5.1：下限从 16 降到 8。原下限会让「组数多」时算出的总宽仍 > max_w，
+            # 于是整行向右溢出（侧家旧版就是这样压到牌河上的）。正常 4 组 / 300px
+            # 只会算到 16，不会碰到新下限，牌面尺寸不受影响。
+            constant = len(chunk) * (2 * outer - 2) + gap * (len(chunk) - 1)
+            pitch = max(8, int((max_w - constant) / row_tiles))
+            widths = [max(1, width_of(m)) * pitch - 2 + 2 * outer for m in chunk]
+        out = []
+        x = row_area[0]
+        for meld, width in zip(chunk, widths):
+            group_rect = pygame.Rect(x, row_area[1], width, row_area[3])
+            tiles = []
+            faces: list[str | None] = list(meld.tiles) or [None] * 4  # 暗杠空数组 ⇒ 4 张牌背占位
+            for i, face in enumerate(faces):
+                tile_w = min(tw, pitch - 2)
+                tiles.append(((x + outer + i * pitch, row_area[1], tile_w, row_area[3]), face))
+            out.append((group_rect, tiles))
+            x += width + gap
+        return out
+
+    if groups_per_row <= 0:
+        return row_layout(area, melds)
     out = []
-    x = area[0]
-    for meld, width in zip(melds, widths):
-        group_rect = pygame.Rect(x, area[1], width, area[3])
-        tiles = []
-        faces: list[str | None] = list(meld.tiles) or [None] * 4  # 暗杠空数组 ⇒ 4 张牌背占位
-        for i, face in enumerate(faces):
-            tile_w = min(tw, pitch - 2)
-            tiles.append(((x + outer + i * pitch, area[1], tile_w, area[3]), face))
-        out.append((group_rect, tiles))
-        x += width + gap
+    row_h = T.MELD_ROW_HEIGHT
+    for row_index, start in enumerate(range(0, len(melds), groups_per_row)):
+        chunk = melds[start:start + groups_per_row]
+        row_area = (
+            area[0], area[1] + row_index * row_h,
+            area[2], max(1, min(area[3] - row_index * row_h, row_h - 4)),
+        )
+        out.extend(row_layout(row_area, chunk))
     return out
 
 
@@ -328,14 +356,11 @@ _LAYERS: dict[tuple, pygame.Surface] = {}
 
 
 def cloth_layer(width: int, height: int) -> pygame.Surface:
-    """粉色桌布（整屏尺寸，梯形以外透明）：只在首次或换分辨率时构建。"""
-    key = ("cloth", width, height)
+    """v4.0 雀魂式深蓝台布（整屏不透明）：只在首次或换分辨率时构建。"""
+    key = ("riichi_cloth", width, height)
     layer = _LAYERS.get(key)
     if layer is None:
-        felt = T.TABLE_FELT
-        layer = art.table_cloth(
-            width, height, felt[1], T.TABLE_FAR_HALF, T.TABLE_NEAR_HALF,
-        )
+        layer = art.riichi_cloth(width, height)
         _LAYERS[key] = layer
     return layer
 
@@ -352,21 +377,20 @@ def hall_layer(width: int, height: int) -> pygame.Surface:
 
 def render(surface: pygame.Surface, ui: UiView, feel=None) -> None:
     width, height = surface.get_size()
-    # ① 背景（糊掉的室内照片）
-    surface.blit(hall_layer(width, height), (0, 0))
-    # ② 三家人物：先画人，**再画桌布**——桌沿那条线负责把他们切开
+    # ① 深蓝台布铺满整屏（v4.0：不再有房间背景与人物立绘层）
+    surface.blit(cloth_layer(width, height), (0, 0))
+    # ② 左上场况框 + 右上圆按钮
+    _draw_hud(surface, ui)
+    # ③ 四家名牌：v4.0 从顶部一字排开改到四角/四边，必须画在台布**之后**
     for seat in range(4):
         _draw_seat_character(surface, ui, seat)
-    surface.blit(cloth_layer(width, height), (0, 0))
-    # ④ 角标（参考视频没有顶栏，房间/局号压到右上角两行小字）
-    _draw_hud(surface, ui)
-    # ⑤ 牌：他家手牌背 / 副露 / 牌河
+    # ④ 牌：他家手牌背 / 副露 / 牌河
     for seat in range(4):
         _draw_seat_tiles(surface, ui, seat, feel)
-    # ⑥ 桌心情报 + 本家面前的牌山
+    # ⑤ 桌心八边形情报板 + 本家面前的牌山
     _draw_center(surface, ui)
     _draw_near_wall(surface, ui)
-    # ⑦ 本家手牌（含副露）
+    # ⑥ 本家手牌（含副露）
     _draw_self_hand(surface, ui, feel)
     _draw_toast(surface, ui)
 
@@ -468,13 +492,45 @@ def _ellipsize(text: str, font: pygame.font.Font, max_width: int) -> str:
 
 
 def _draw_hud(surface: pygame.Surface, ui: UiView) -> None:
-    """v3.0：参考视频**没有顶栏**。
+    """v4.0：参考帧的左上场况卡片 + 右上两枚圆按钮。
 
-    房间 / 局号 / 阶段 / 连接状态全部压成右上角两行 12 px 小字——不铺底色、不画分隔线，
-    顶部整条让给三家名牌。异常（非法操作、张数异常）优先占用第二行。
+    v3.0 只有右上角两行小字；v4.0 把宝牌指示 / 余牌 / 本场 / 房间收进左上
+    金边卡片，右上角保留房间 / 阶段 / 持点与连接状态（这些文案有验收断言）。
     """
     state, fonts = ui.state, ui.fonts
-    box = (T.LOGICAL_W - 196, 5, 188, 40)
+
+    # ① 左上场况卡片
+    info = pygame.Rect(14, 12, 210, 116)
+    surface.blit(
+        art.strip(info.w, info.h, (10, 20, 34, 214), edge=T.PLATE_GOLD, radius=6),
+        info.topleft,
+    )
+    W.draw_text(surface, "场况", fonts.get(T.FS_MICRO, bold=True), T.PLATE_GOLD,
+                (info.x + 10, info.y + 6, info.w - 20, 18), W.ALIGN_LEFT)
+    pygame.draw.line(
+        surface, (*T.PLATE_GOLD, 90),
+        (info.x + 8, info.y + 26), (info.right - 8, info.y + 26), 1,
+    )
+    dora = " ".join(tile_label(t) for t in state.dora_indicators) if state.dora_indicators else "—"
+    W.draw_text(surface, "宝牌 " + dora, fonts.get(T.FS_MICRO), T.TEXT,
+                (info.x + 10, info.y + 32, info.w - 20, 20), W.ALIGN_LEFT)
+    remaining = "—" if state.remaining is None else str(state.remaining)
+    W.draw_text(surface, f"余 {remaining}   本场 {state.renchan_count}",
+                fonts.get(T.FS_MICRO), T.TEXT_DIM,
+                (info.x + 10, info.y + 54, info.w - 20, 18), W.ALIGN_LEFT)
+    W.draw_text(surface, f"房间 {state.room_id or '—'}", fonts.get(T.FS_MICRO), T.TEXT_DIM,
+                (info.x + 10, info.y + 76, info.w - 20, 18), W.ALIGN_LEFT)
+
+    # ② 右上两枚圆按钮（参考帧的「?」与设置齿轮）
+    for offset, glyph in ((0, "?"), (44, "设")):
+        cx, cy = T.LOGICAL_W - 34 - offset, 30
+        pygame.draw.circle(surface, (18, 32, 52, 230), (cx, cy), 17)
+        pygame.draw.circle(surface, (*T.PLATE_GOLD, 170), (cx, cy), 17, 1)
+        W.draw_text(surface, glyph, fonts.get(T.FS_SMALL, bold=True), T.PLATE_GOLD,
+                    (cx - 17, cy - 14, 34, 28), W.ALIGN_CENTER)
+
+    # ③ 右上状态两行（v3.0 文案逐字保留）
+    box = (1096, 56, 176, 40)
     dot_color = T.POS if ui.connected else T.NEG
     pygame.draw.circle(surface, dot_color, (box[0] + 5, box[1] + 8), 4)
     pygame.draw.circle(surface, art.shade(dot_color, 1.4), (box[0] + 5, box[1] + 8), 2)
@@ -493,6 +549,8 @@ def _draw_hud(surface: pygame.Surface, ui: UiView) -> None:
         line2, color = "张数异常", T.WARN
     elif state.game_started:
         line2 = f"{state.round_index + 1}/{state.round_count} · {state.phase}"
+        if state.points is not None and state.my_seat is not None and 0 <= state.my_seat < len(state.points):
+            line2 += f" · {state.points[state.my_seat]:,} 点"  # 日麻持点（classic 无 points）
         color = T.TEXT_DIM
     else:
         line2, color = state.phase, T.TEXT_DIM
@@ -538,53 +596,70 @@ def _wind_of(seat: int, state: GameState) -> str:
 
 
 def _draw_plate(surface: pygame.Surface, ui: UiView, seat: int, rel: int, *, active: bool) -> None:
-    """参考视频的座位名牌：上一条深色名字条（风位徽标 + 名字），下一条洋红分数条。
+    """v4.0 雀魂式名牌：竖排窄卡，头像在上、名字条与分数条在下。
 
-    分数条原本放的是 `$ 96300`——我们这局没有累计分，就把它用来放张数（金色数字），
-    配色与节奏和参考一致。
+    参考帧里四家名牌都是这种窄卡（贴在牌山外侧），比 v3.0 的通栏横条更贴边、
+    也避开收直后的侧家牌山。风位 / 立直 / 庄 / 断线状态全部保留为小角标。
     """
     state, fonts = ui.state, ui.fonts
     view = state.seat_view(seat)
-    rect = _seat_name_rect(rel)
+    rect = pygame.Rect(_seat_name_rect(rel))
     name_h = T.PLATE_NAME_H
-    edge = T.ACTIVE if active else (146, 112, 100)
+    score_h = rect.h - T.PLATE_AVATAR - 4 - name_h
 
+    # ① 头像（圆形，行动方带金环、断线压暗）
+    size = T.PLATE_AVATAR
+    avatar_rect = pygame.Rect(rect.x + (rect.w - size) // 2, rect.y + 2, size, size)
+    name = state.name_of(seat)
     surface.blit(
-        art.strip(rect[2], name_h, T.PLATE_NAME, edge=edge, radius=4),
-        (rect[0], rect[1]),
+        art.avatar(size, name, name[0] if name else "?", fonts,
+                   ring=T.PLATE_GOLD if active else None, dim=view.disconnected),
+        avatar_rect.topleft,
     )
-    badge = pygame.Rect(rect[0] + 4, rect[1] + 3, 22, name_h - 6)
-    pygame.draw.rect(
-        surface, T.ACTIVE if active else T.PLATE_SCORE, badge, border_radius=3,
-    )
+
+    # ② 风位小徽标（头像左上角）
+    badge = pygame.Rect(avatar_rect.x - 2, avatar_rect.y - 2, 20, 18)
+    pygame.draw.rect(surface, T.ACTIVE if active else T.PLATE_SCORE, badge, border_radius=3)
     W.draw_text(
         surface, _wind_of(seat, state), fonts.get(T.FS_MICRO, bold=True), (28, 20, 24),
         (badge.x, badge.y, badge.w, badge.h), W.ALIGN_CENTER,
     )
+    # ③ 立直：头像右下角红标
+    riichi_now = getattr(view, "riichi", False)
+    if riichi_now:
+        tag = pygame.Rect(avatar_rect.right - 28, avatar_rect.bottom - 16, 30, 18)
+        pygame.draw.rect(surface, (214, 92, 92), tag, border_radius=3)
+        W.draw_text(surface, "立直", fonts.get(T.FS_MICRO, bold=True), (255, 246, 246),
+                    (tag.x, tag.y, tag.w, tag.h), W.ALIGN_CENTER)
 
-    name_font = fonts.get(T.FS_SMALL, bold=True)
-    label = _ellipsize(
-        f"{state.name_of(seat)} · {state.rel_label(seat)}", name_font, rect[2] - 40,
-    )
-    W.draw_text(
-        surface, label, name_font, T.WARN if view.disconnected else T.TEXT,
-        (rect[0] + 30, rect[1], rect[2] - 34, name_h), W.ALIGN_LEFT,
-    )
-
-    score = (rect[0], rect[1] + name_h, rect[2], rect[3] - name_h)
+    # ④ 名字条
+    name_y = avatar_rect.bottom + 2
     surface.blit(
-        art.strip(score[2], score[3], T.PLATE_SCORE, edge=art.shade(T.PLATE_SCORE, 1.45), radius=4),
-        (score[0], score[1]),
+        art.strip(rect.w, name_h, T.PLATE_NAME,
+                  edge=T.ACTIVE if active else T.CENTER_PLATE_EDGE, radius=4),
+        (rect.x, name_y),
+    )
+    name_font = fonts.get(T.FS_MICRO, bold=True)
+    W.draw_text(
+        surface, _ellipsize(name, name_font, rect.w - 8), name_font,
+        T.WARN if view.disconnected else T.TEXT,
+        (rect.x + 4, name_y, rect.w - 8, name_h), W.ALIGN_CENTER,
+    )
+
+    # ⑤ 分数条（张数 / 断线 / 庄）
+    score_y = name_y + name_h
+    surface.blit(
+        art.strip(rect.w, score_h, T.PLATE_SCORE,
+                  edge=art.shade(T.PLATE_SCORE, 1.45), radius=4),
+        (rect.x, score_y),
     )
     face_font = fonts.get(T.FS_MICRO, bold=True)
-    if view.disconnected:
-        W.draw_text(surface, "断线托管", face_font, (255, 216, 216),
-                    (score[0] + 8, score[1], score[2] - 16, score[3]), W.ALIGN_LEFT)
-    else:
-        W.draw_text(surface, f"{view.hand_count} 张", face_font, (255, 232, 176),
-                    (score[0] + 8, score[1], score[2] - 60, score[3]), W.ALIGN_LEFT)
+    text = "断线托管" if view.disconnected else f"{view.hand_count} 张"
+    W.draw_text(surface, text, face_font,
+                (255, 216, 216) if view.disconnected else T.PLATE_GOLD,
+                (rect.x + 4, score_y, rect.w - 30, score_h), W.ALIGN_LEFT)
     if state.dealer == seat:
-        tag = pygame.Rect(score[0] + score[2] - 30, score[1] + 2, 26, score[3] - 4)
+        tag = pygame.Rect(rect.right - 24, score_y + 1, 21, score_h - 2)
         pygame.draw.rect(surface, T.DEALER, tag, border_radius=3)
         W.draw_text(surface, "庄", fonts.get(T.FS_MICRO, bold=True), (48, 30, 8),
                     (tag.x, tag.y, tag.w, tag.h), W.ALIGN_CENTER)
@@ -1035,16 +1110,22 @@ def _draw_seat_tiles(surface: pygame.Surface, ui: UiView, seat: int, feel=None) 
         if not reveal_now:
             _draw_back_row(surface, T.R_OPP_BACK, view.hand_count)
         _draw_wall_row(surface, T.R_OPP_WALL, wall_stacks(ui))
-        _draw_melds(surface, ui, seat, T.R_OPP_MELD, vertical=False)
+        # v5.3：对家副露「每行最多两组、多的换行」，且不做透视投影（与中央牌河一致），
+        # 免得位置被 project() 拉向屏中、重新压上别家的牌。
+        _draw_melds(
+            surface, ui, seat, T.R_OPP_MELD, vertical=False,
+            groups_per_row=T.OPP_MELD_GROUPS_PER_ROW, project_tiles=False,
+        )
         _draw_river(
             surface, ui, seat, T.R_OPP_RIVER, center=True, feel=feel, project_tiles=False,
+            flip_rows=True,
         )
     elif rel == 1:
         if not reveal_now:
             _draw_side_hand(surface, rel, view.hand_count)
         _draw_side_wall(surface, rel, wall_stacks(ui))
         _draw_melds(
-            surface, ui, seat, T.R_SIDE_R_MELD, vertical=False, project_tiles=False,
+            surface, ui, seat, T.R_SIDE_R_MELD, vertical=True, project_tiles=False,
             highlight=_winner_seat(state) == seat and reveal_now,
         )
         _draw_river(surface, ui, seat, T.R_SIDE_R_RIVER, center=False, feel=feel)
@@ -1053,7 +1134,7 @@ def _draw_seat_tiles(surface: pygame.Surface, ui: UiView, seat: int, feel=None) 
             _draw_side_hand(surface, rel, view.hand_count)
         _draw_side_wall(surface, rel, wall_stacks(ui))
         _draw_melds(
-            surface, ui, seat, T.R_SIDE_L_MELD, vertical=False, project_tiles=False,
+            surface, ui, seat, T.R_SIDE_L_MELD, vertical=True, project_tiles=False,
             highlight=_winner_seat(state) == seat and reveal_now,
         )
         _draw_river(surface, ui, seat, T.R_SIDE_L_RIVER, center=False, feel=feel)
@@ -1067,7 +1148,12 @@ def _draw_side_melds(
     left: bool,
     highlight: bool = False,
 ) -> None:
-    """侧家副露：每组横排沿桌边，整组在牌山内侧，不叠牌、不压牌山。"""
+    """v3 遗留的「侧家副露走桌边斜轨」方案，v5.1 起**不再调用**。
+
+    现行侧家副露走 `_draw_melds(..., vertical=True)`：一组一行、竖直堆叠在
+    牌山与牌河之间，牌面不旋转。此函数与 `T.side_meld_group_centers` 一并保留，
+    供将来若要恢复斜轨副露时参考。
+    """
     melds = ui.state.seat_view(seat).melds
     if not melds:
         return
@@ -1101,14 +1187,19 @@ def _draw_side_river_rail(
     rect: tuple[int, int, int, int],
     feel,
 ) -> None:
-    """侧家牌河：槽位在桌沿轨上，牌顶朝桌心。"""
+    """v5.0 侧家牌河：中央板两侧的 6×3 正交网格，牌横躺、不倾斜。
+
+    旧版把弃牌画在桌边斜轨上（跟牌山挤在一起）；参考视频里四家弃牌
+    全部围在八角板四周，所以这里换成与对家/本家同构的网格 + 90° 旋转牌面。
+    """
     left = rect[0] + rect[2] // 2 < T.LOGICAL_W // 2
     discards = ui.state.seat_view(seat).discards
     if not discards:
         return
-    centers = side_river_centers(left, len(discards))
-    angle = T.side_face_angle(left)
-    along, across = _side_river_tile_size()
+    rects = side_ring_river_rects(left, len(discards))
+    angle = T.RIVER_RING_ROTATE_L if left else T.RIVER_RING_ROTATE_R
+    rank, suit = T.FS_TILE_RIVER_RANK, T.FS_TILE_RIVER_SUIT
+    honor = T.FS_TILE_Z_RIVER_SIDE
     skip_last = bool(feel is not None and seat in feel.flying_seats())
     last_index = len(discards) - 1
     mark_claimed = (
@@ -1116,22 +1207,20 @@ def _draw_side_river_rail(
         and claim_highlight_active(ui.state)
         and getattr(feel, "claim_hints_on", True)
     )
-    for index, (center, face) in enumerate(zip(centers, discards)):
+    for index, (tile_rect, face) in enumerate(zip(rects, discards)):
         if skip_last and index == last_index:
             continue
-        outline = None
+        W.draw_tile_rotated(
+            surface, ui.fonts, tile_rect, face, angle=angle,
+            rank_size=rank, suit_size=suit, honor_size=honor,
+        )
         if mark_claimed and index == last_index:
+            alpha = _active_alpha(ui.now)
             if ui.state.pending:
-                outline = (T.PANEL_EDGE, 1.0, 1)
+                # F-CL-07：已提交 ⇒ 降级为 PANEL_EDGE 1 px（表示「已处理」）
+                W.draw_border_alpha(surface, tile_rect, T.PANEL_EDGE, 1.0, width=1)
             else:
-                outline = (T.ACTIVE, _active_alpha(ui.now), 2)
-        sprite = _rail_face_sprite(
-            ui.fonts, face, along, across, angle, outline=outline,
-        )
-        dest = sprite.get_rect(
-            center=(int(round(center[0])), int(round(center[1]))),
-        )
-        surface.blit(sprite, dest)
+                W.draw_border_alpha(surface, tile_rect, T.ACTIVE, alpha, width=2)
 
 
 def _draw_river(
@@ -1144,12 +1233,13 @@ def _draw_river(
     feel=None,
     rotate: int = 0,
     project_tiles: bool = True,
+    flip_rows: bool = False,
 ) -> None:
     discards = ui.state.seat_view(seat).discards
     if not center:
         _draw_side_river_rail(surface, ui, seat, rect, feel)
         return
-    rects = center_river_rects(rect, len(discards))
+    rects = center_river_rects(rect, len(discards), flip_rows=flip_rows)
     rank, suit = T.FS_TILE_RIVER_RANK, T.FS_TILE_RIVER_SUIT
     honor = T.FS_TILE_Z_RIVER_CENTER
     # F-AN-16：飞行期间该格**不画**（否则同一张牌会同时出现在牌河与飞行体里）
@@ -1192,6 +1282,7 @@ def _draw_melds(
     *,
     vertical: bool,
     groups=None,
+    groups_per_row: int = 0,
     project_tiles: bool = True,
     highlight: bool = False,
 ) -> None:
@@ -1200,7 +1291,7 @@ def _draw_melds(
         melds = state.melds if seat == state.my_seat else state.seat_view(seat).melds
         if not melds:
             return
-        groups = meld_layout(area, melds, vertical=vertical)
+        groups = meld_layout(area, melds, vertical=vertical, groups_per_row=groups_per_row)
     if not groups:
         return
 
@@ -1344,11 +1435,73 @@ def _draw_near_wall(surface: pygame.Surface, ui: UiView) -> None:
 
 
 def _draw_center(surface: pygame.Surface, ui: UiView) -> None:
-    """桌心（v3.0）：桌心那条横带留给听牌条，临时提示压到桌沿正下方一行。"""
+    """v4.0：参考帧的桌心八边形情报板——四家持点围一圈，中间场风 / 余牌。
+
+    v3.0 桌心只有一条听牌横带；v4.0 听牌条挪到屏幕顶沿，这里换成雀魂的
+    深色八角板。`classic` 没有 points 时只画场况，不显示四角分数。
+    """
+    state, fonts = ui.state, ui.fonts
+    rect = pygame.Rect(T.R_CENTER_BOARD)
+    cut = 18
+
+    points = [
+        (rect.left + cut, rect.top), (rect.right - cut, rect.top),
+        (rect.right, rect.top + cut), (rect.right, rect.bottom - cut),
+        (rect.right - cut, rect.bottom), (rect.left + cut, rect.bottom),
+        (rect.left, rect.bottom - cut), (rect.left, rect.top + cut),
+    ]
+    pygame.draw.polygon(surface, T.CENTER_PLATE, points)
+    pygame.draw.polygon(surface, T.CENTER_PLATE_EDGE, points, 2)
+    inner = rect.inflate(-26, -24)
+    pygame.draw.rect(surface, (12, 18, 28), inner, border_radius=8)
+    pygame.draw.rect(surface, T.CENTER_PLATE_EDGE, inner, width=1, border_radius=8)
+
+    # v5.0：四角自风徽标（参考帧）。按屏幕四角固定方位：左上=对家、右上=下家、
+    # 左下=上家、右下=本家；本家角用红底强调「東」，和视频里的庄家标记一致。
+    badge_font = fonts.get(T.FS_SMALL, bold=True)
+    wind_badges = (
+        (rect.left + 4, rect.top + 4, "西", False),
+        (rect.right - 38, rect.top + 4, "南", False),
+        (rect.left + 4, rect.bottom - 34, "北", False),
+        (rect.right - 38, rect.bottom - 34, "東", True),
+    )
+    for x, y, wind, dealer_mark in wind_badges:
+        badge = pygame.Rect(x, y, 34, 30)
+        pygame.draw.rect(
+            surface, (158, 46, 46) if dealer_mark else T.CENTER_PLATE_EDGE,
+            badge, border_radius=4,
+        )
+        W.draw_text(surface, wind, badge_font, T.PLATE_GOLD,
+                    (badge.x, badge.y, badge.w, badge.h), W.ALIGN_CENTER)
+
+    # 四家持点：rel 2=对家(上) / 1=下家(右) / 0=本家(下) / 3=上家(左)
+    if state.points:
+        score_font = fonts.get(T.FS_MICRO, bold=True)
+        for seat in range(4):
+            rel = state.rel_index(seat)
+            if rel == 2:
+                area = (rect.centerx - 62, rect.top + 5, 124, 20)
+            elif rel == 0:
+                area = (rect.centerx - 62, rect.bottom - 25, 124, 20)
+            elif rel == 1:
+                area = (rect.right - 84, rect.centery - 10, 78, 20)
+            else:
+                area = (rect.left + 6, rect.centery - 10, 78, 20)
+            W.draw_text(surface, f"{state.points[seat]:,}", score_font,
+                        T.CENTER_PLATE_TEXT, area, W.ALIGN_CENTER)
+
+    round_wind = "東" if state.round_index < state.round_count else "南"
+    label = f"{round_wind}{state.round_index % max(1, state.round_count) + 1}局"
+    W.draw_text(surface, label, fonts.get(T.FS_SMALL, bold=True), T.PLATE_GOLD,
+                (rect.centerx - 70, rect.centery - 26, 140, 24), W.ALIGN_CENTER)
+    remaining = "—" if state.remaining is None else str(state.remaining)
+    W.draw_text(surface, f"余 {remaining}", fonts.get(T.FS_MICRO), T.TEXT_DIM,
+                (rect.centerx - 70, rect.centery + 2, 140, 20), W.ALIGN_CENTER)
+
     for i, note in enumerate(ui.extra_notes[:1]):
         W.draw_text(
-            surface, note, ui.fonts.get(T.FS_MICRO), T.WARN,
-            (440, T.TABLE_FELT[1] + 4 + i * 15, 400, 14),
+            surface, note, fonts.get(T.FS_MICRO), T.WARN,
+            (rect.centerx - 200, rect.bottom + 2 + i * 15, 400, 14),
             W.ALIGN_CENTER,
         )
 
@@ -1373,47 +1526,14 @@ def _draw_hand_tray(surface: pygame.Surface, ui: UiView) -> None:
 
 
 def _draw_self_plate(surface: pygame.Surface, ui: UiView) -> None:
-    """本家那块分数牌 + 系统菜单（参考视频放在手牌右侧的桌角）。
+    """v4.0：本家名牌复用四家统一的竖排窄卡，另挂系统菜单按钮。
 
-    本家没有立绘，这块牌子就是「我是谁、我现在几张」的唯一落点。
+    本家没有立绘，这块牌子就是「我是谁、我现在几张 / 是否立直」的唯一落点。
+    立直与风位徽标走 ``_draw_plate`` 同一套绘制，不会再出现两处漂移。
     """
     state, fonts = ui.state, ui.fonts
-    rect = T.R_SELF_PLATE
-    name = state.name_of(state.my_seat) if state.my_seat is not None else "你"
-    name_h = T.PLATE_NAME_H
-
-    surface.blit(
-        art.strip(rect[2], name_h, T.PLATE_NAME, edge=(146, 112, 100), radius=4),
-        (rect[0], rect[1]),
-    )
-    badge = pygame.Rect(rect[0] + 4, rect[1] + 3, 22, name_h - 6)
-    pygame.draw.rect(surface, T.ACTIVE, badge, border_radius=3)
-    wind = _wind_of(state.my_seat, state) if state.my_seat is not None else "東"
-    W.draw_text(
-        surface, wind, fonts.get(T.FS_MICRO, bold=True), (28, 20, 24),
-        (badge.x, badge.y, badge.w, badge.h), W.ALIGN_CENTER,
-    )
-    name_font = fonts.get(T.FS_SMALL, bold=True)
-    W.draw_text(
-        surface, _ellipsize(f"{name}（你）", name_font, rect[2] - 44), name_font, T.TEXT,
-        (rect[0] + 30, rect[1], rect[2] - 34, name_h), W.ALIGN_LEFT,
-    )
-
-    score = (rect[0], rect[1] + name_h, rect[2], rect[3] - name_h)
-    surface.blit(
-        art.strip(score[2], score[3], T.PLATE_SCORE, edge=art.shade(T.PLATE_SCORE, 1.45), radius=4),
-        (score[0], score[1]),
-    )
-    face_font = fonts.get(T.FS_MICRO, bold=True)
-    W.draw_text(
-        surface, f"{len(state.hand)} 张", face_font, (255, 232, 176),
-        (score[0] + 8, score[1], score[2] - 60, score[3]), W.ALIGN_LEFT,
-    )
-    if state.my_seat is not None and state.dealer == state.my_seat:
-        tag = pygame.Rect(score[0] + score[2] - 30, score[1] + 2, 26, score[3] - 4)
-        pygame.draw.rect(surface, T.DEALER, tag, border_radius=3)
-        W.draw_text(surface, "庄", fonts.get(T.FS_MICRO, bold=True), (48, 30, 8),
-                    (tag.x, tag.y, tag.w, tag.h), W.ALIGN_CENTER)
+    if state.my_seat is not None:
+        _draw_plate(surface, ui, state.my_seat, 0, active=False)
 
     # 系统菜单（账号会话才有内容可看：打开战绩面板）
     if ui.has_account_session:

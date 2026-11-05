@@ -32,6 +32,9 @@ REL_LABELS = ("自家", "下家", "对家", "上家")
 
 WINDOW_DISCARD = "discard"
 WINDOW_CLAIM = "claim"
+# 日麻抢杠窗口（v1.15）：与 claim 同为「只能和/过」，但被抢的那张牌不在牌河里，
+# 所以帧里额外带 `tile`，客户端据此显示「抢杠 5m」。
+WINDOW_CHANKAN = "chankan"
 
 MELD_TYPES = ("pong", "chow", "kong", "ankan", "kakan")  # v2.0：3 → 5 值（PROTOCOL v1.6 §5.9）
 
@@ -82,6 +85,7 @@ class SeatView:
     discards: list[str] = field(default_factory=list)
     melds: list[Meld] = field(default_factory=list)
     disconnected: bool = False
+    riichi: bool = False  # 日麻：该座位本局是否立直（公开信息，立直棒/横置据此渲染）
 
 
 @dataclass
@@ -93,6 +97,8 @@ class ActionWindow:
     recv_monotonic: float
     recv_epoch_ms: float
     window_ms: int
+    # 只有抢杠窗口带：被抢的那张牌（claim/discard 窗口为 None，语义不变）
+    tile: str | None = None
 
     def has(self, action: str, tiles: list[str] | None = None) -> bool:
         for opt in self.options:
@@ -148,6 +154,10 @@ class GameState:
         self.melds: list[Meld] = []
         self.seats: list[SeatView] = [SeatView(seat=i) for i in range(4)]
         self.remaining: int | None = None
+        # 日麻（mode=riichi）：持点 / 宝牌指示牌 / 荒庄听牌标记。classic 下恒为 None/空。
+        self.points: list[int] | None = None
+        self.dora_indicators: list[str] = []
+        self.tenpai_flags: list[bool] = []
         self.current_seat: int | None = None
         self.seq: int | None = None
         self.last_seq: int | None = None
@@ -172,6 +182,8 @@ class GameState:
         self.tenpai_seq: int | None = None
         self.tenpai_waits: list[dict] = []
         self.is_tenpai: bool = False
+        # 日麻（v1.13 §12.8）：形听但不能和。classic 帧不带该键 ⇒ 恒 False，听牌条行为不变。
+        self.tenpai_no_yaku: bool = False
         self.last_discard_seat: int | None = None   # B 批：F-CL-01 被鸣牌定位（公开派生）
 
     # ------------------------------------------------------------ 派生查询
@@ -277,6 +289,7 @@ class GameState:
         round_count = frame.get("round_count")
         if isinstance(round_count, int) and round_count > 0:
             self.round_count = round_count
+        self._absorb_riichi_fields(frame, reset=True)
         self.melds = []
         self.remaining = None
         self.seq = None
@@ -357,7 +370,7 @@ class GameState:
             log.warning("收到过期 action_request(seq=%s < %s)，已忽略", seq, self.last_seq)
             return
         window = frame.get("window")
-        if window not in (WINDOW_DISCARD, WINDOW_CLAIM):
+        if window not in (WINDOW_DISCARD, WINDOW_CLAIM, WINDOW_CHANKAN):
             log.warning("action_request.window 非法：%r，已忽略", window)
             return
         options = frame.get("options")
@@ -381,6 +394,11 @@ class GameState:
             deadline = now_epoch
         window_ms = int(clamp(float(deadline) - now_epoch, 1000.0, 60000.0))
 
+        chankan_tile = frame.get("tile")
+        if window == WINDOW_CHANKAN and not is_valid_tile(chankan_tile):
+            log.warning("chankan 窗口缺少合法 tile：%r", chankan_tile)
+            chankan_tile = None
+
         self.last_seq = seq
         self.seq = seq
         self.window = ActionWindow(
@@ -391,6 +409,7 @@ class GameState:
             recv_monotonic=now_mono,
             recv_epoch_ms=now_epoch,
             window_ms=window_ms,
+            tile=chankan_tile if window == WINDOW_CHANKAN else None,
         )
         self.pending = False
         self.pending_label = None
@@ -420,6 +439,10 @@ class GameState:
             self.frozen = True
             if isinstance(seat, int):
                 self.win_seat = seat
+        elif action == "riichi":
+            # 日麻：公开事件，供立直棒/横置动画。权威状态随后由 state_sync.seats[].riichi 覆盖。
+            if isinstance(seat, int) and 0 <= seat <= 3:
+                self.seat_view(seat).riichi = True
         # F-TP-11 ①⑤：本家和牌 / 本家副露生效 ⇒ 立刻清空听牌（牌形已变，旧 waits 是脏数据）
         if action == "win" or action in ("pong", "chow", "kong", "ankan", "kakan"):
             self.clear_tenpai()
@@ -459,13 +482,37 @@ class GameState:
                 if isinstance(view_melds, list):
                     view.melds = [m for m in (parse_meld(x) for x in view_melds) if m is not None]
                 view.disconnected = bool(raw.get("disconnected", False))
+                view.riichi = bool(raw.get("riichi", view.riichi))
         remaining = frame.get("remaining")
         if isinstance(remaining, int):
             self.remaining = remaining
+        self._absorb_riichi_fields(frame, reset=False)
         current = frame.get("current_seat")
         if isinstance(current, int):
             self.current_seat = current
         self.check_hand_count()
+
+    def _absorb_riichi_fields(self, frame: dict, *, reset: bool) -> None:
+        """日麻字段（持点 / 宝牌指示牌 / 荒庄听牌）。
+
+        classic 帧不带这些键，因此**不写**任何值——`points` 保持 None，HUD 与结算页自动回到
+        番数制文案，不会出现「0 点」这种假信息。
+        """
+        points = frame.get("points")
+        if isinstance(points, list) and len(points) == 4 and all(isinstance(v, int) for v in points):
+            self.points = list(points)
+        elif reset:
+            self.points = None
+        dora = frame.get("dora_indicators")
+        if isinstance(dora, list):
+            self.dora_indicators = [t for t in dora if is_valid_tile(t)]
+        elif reset:
+            self.dora_indicators = []
+        tenpai = frame.get("tenpai")
+        if isinstance(tenpai, list) and len(tenpai) == 4:
+            self.tenpai_flags = [bool(v) for v in tenpai]
+        elif reset:
+            self.tenpai_flags = []
 
     # ------------------------------------------------------------ 听牌（v1.7 §5.16）
 
@@ -477,6 +524,7 @@ class GameState:
         """
         self.tenpai_waits = []
         self.is_tenpai = False
+        self.tenpai_no_yaku = False
 
     def _apply_tenpai(self, frame: dict) -> None:
         """`tenpai` 帧：**仅本家**、独立 `tenpai_seq`、不掺 `room.seq`。
@@ -508,14 +556,21 @@ class GameState:
                     log.warning("tenpai.waits[%s].remaining=%r 越界（应 0..4），照画不崩", tile, remaining)
                     if not isinstance(remaining, int):
                         remaining = 0
-                clean.append({"tile": tile, "remaining": remaining})
+                # `yaku` 只有日麻帧才有；缺省 True ⇒ classic 与老服务端的渲染路径完全不变。
+                has_yaku = item.get("yaku", True)
+                clean.append({"tile": tile, "remaining": remaining,
+                              "yaku": has_yaku if isinstance(has_yaku, bool) else True})
         else:
             log.warning("tenpai.waits 非法，按空处理")
         flag = frame.get("is_tenpai")
         self.tenpai_waits = clean
         self.is_tenpai = bool(flag) if isinstance(flag, bool) else bool(clean)
+        no_yaku = frame.get("no_yaku")
+        # 帧级标记只做「提示口径」，不改变 is_tenpai：形听仍然要收流局罚符、仍然可以立直。
+        self.tenpai_no_yaku = bool(no_yaku) if isinstance(no_yaku, bool) else False
         if not self.is_tenpai:
             self.tenpai_waits = []  # 双向一致（false ⇒ []）
+            self.tenpai_no_yaku = False
 
     def _apply_game_end(self, frame: dict) -> None:
         # §5.10 / H5：game_end 不携带 seq，不参与 seq 比较。v2.0：game_end = 局终页（非终态），

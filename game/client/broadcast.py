@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable, Sequence
 
 from . import vo_durations as VO
+from .tiles import LIMIT_LABEL, RIICHI_YAKU_LABEL
 
 log = logging.getLogger("mahjong.client.broadcast")
 
@@ -194,6 +195,46 @@ YAKU_LABEL = {
 #: 字幕条字数上限（UI §5.1 R1：≤24 汉字；22 px × 24 = 528 px ≤ 856）
 BC_CAPTION_MAX_CHARS = 24
 
+# ---------------------------------------------------------------- 日麻文案（阶段 A 字幕与格子同源）
+#
+# 日麻没有「庄家加一番 / 自摸不加番 / 封顶 6 番 / 2^番 倍率」——`win.multiplier` 在日麻下
+# 只是「点数」的兼容填充（PROTOCOL §12.5）。六段口径改为：番种 → 合计番 → 符 → 满贯分档
+# → 点数 → 收付（单位「点」）。下面三个函数是**字幕条与 S3/S4/S5 格子的唯一来源**，
+# 渲染层不得再自己拼一遍，否则又会漂移。
+
+#: 日麻役种 → 可复用的 classic 语音（VO 库是「役名 + 番值」的整句资产）。
+#: 只有**役名与番值都一致**才复用：`honitsu`（classic 2 番 / 日麻门清 3 番）、`yakuhai`
+#: （「箭刻」不含日麻的场风/自风）、`chiitoitsu`/`chinitsu`（id 不同）等一律不念 ——
+#: 宁可「语音有损、字幕无损」（RULINGS U2），也不能把 3 番念成 2 番。
+RIICHI_VOICE_YAKU: dict[str, tuple[str, int]] = {
+    "tanyao": ("vo_yaku_tanyao", 1),
+    "pinfu": ("vo_yaku_pinfu", 1),
+    "iipeikou": ("vo_yaku_iipeikou", 1),
+    "rinshan": ("vo_yaku_rinshan", 1),
+    "toitoi": ("vo_yaku_toitoi", 2),
+    "sanankou": ("vo_yaku_sanankou", 2),
+    "shousangen": ("vo_yaku_shousangen", 2),
+    "sanshoku_doujun": ("vo_yaku_sanshoku_doujun", 2),
+    "ittsuu": ("vo_yaku_ittsuu", 2),
+}
+
+
+def riichi_fu_text(fu: int | None) -> str:
+    """日麻 S3 格子与段 3 字幕的唯一文案（符）。役满 `fu = 0` ⇒ 不计符。"""
+    if fu is None:
+        return "符数 —"
+    return f"{fu} 符" if fu > 0 else "不计符"
+
+
+def riichi_limit_text(limit: str) -> str:
+    """日麻 S4 格子与段 4 字幕的唯一文案（满贯分档；未达显示「未满贯」）。"""
+    return LIMIT_LABEL.get(str(limit or ""), "") or "未满贯"
+
+
+def riichi_points_text(points: int | None) -> str:
+    """日麻 S5 格子文案（点数；段 5 字幕另带番符，见 `_build_lines`）。"""
+    return f"{points} 点" if points is not None else "— 点"
+
 
 # ---------------------------------------------------------------- 语音 id 选取
 #
@@ -209,14 +250,19 @@ def _mode_cue(pay_mode: str) -> str:
     return "vo_mode_tsumo" if pay_mode == PAY_TSUMO else "vo_mode_ron"
 
 
-def _yaku_cue(row: "YakuRow") -> tuple[str, ...]:
+def _yaku_cue(row: "YakuRow", riichi_mode: bool = False) -> tuple[str, ...]:
     """段 1 的一条番种整句（AUDIO §8.3 的第 4–19 条）。
 
     - 箭刻按组数分三条：`vo_yaku_yakuhai_1/2/3`（`han` 是组数，>3 归 3）；
-    - 合并行 / 「无番」「明细不可用」不念（合并回的番数已在「合计 N 番」里念到）。
+    - 合并行 / 「无番」「明细不可用」不念（合并回的番数已在「合计 N 番」里念到）；
+    - 日麻：VO 资产是 classic 的「役名 + 番值」整句，只复用 `RIICHI_VOICE_YAKU`
+      里役名与番值都一致的条目，其余只进字幕（不念错比念全重要）。
     """
     if not row.yaku_id:
         return ()
+    if riichi_mode:
+        entry = RIICHI_VOICE_YAKU.get(row.yaku_id)
+        return (entry[0],) if entry is not None and entry[1] == row.han else ()
     if row.yaku_id == "yakuhai":
         groups = min(3, max(1, row.han))
         return (f"vo_yaku_yakuhai_{groups}",)
@@ -445,6 +491,12 @@ class Plan:
     lines: tuple[Line, ...] = ()
     interlude_ms: int = BC_DEFAULT_INTERLUDE_MS
     budget_ms: int = BC_VOICE_BUDGET_MS
+    # 日麻（mode=riichi）：符 / 和牌点数 / 满贯分档 / 是否日麻。classic 下 fu 为 None。
+    # `mult` 是 `win.multiplier`（日麻下服务端填点数，仅兼容用）；`points` 才是 `win.points`。
+    fu: int | None = None
+    points: int | None = None
+    limit: str = ""
+    riichi_mode: bool = False
     broadcast: bool = False          # 这一局是否应该播报
     static_caption: str = ""         # 不播报 / 播完常驻的结论句
     voice: tuple[str, ...] = ()      # 语音播放序（**删句前**的全量，供日志与断言）
@@ -498,7 +550,9 @@ class BroadcastView:
 # ---------------------------------------------------------------- 解析（L0–L3）
 
 
-def _parse_yaku_rows(yaku_list: Sequence[dict], has_yaku_key: bool) -> tuple[tuple[YakuRow, ...], int]:
+def _parse_yaku_rows(
+    yaku_list: Sequence[dict], has_yaku_key: bool, labels: dict | None = None
+) -> tuple[tuple[YakuRow, ...], int]:
     """番种行（UI §3.3 / §3.3.1）：≤7 槽，第 7 槽在超界时降级为合并行。"""
     rows: list[YakuRow] = []
     if not yaku_list:
@@ -513,12 +567,12 @@ def _parse_yaku_rows(yaku_list: Sequence[dict], has_yaku_key: bool) -> tuple[tup
     count = len(yaku_list)
     if count <= BC_YAKU_SLOTS:
         for item in yaku_list:
-            rows.append(_yaku_row(item))
+            rows.append(_yaku_row(item, labels))
         return tuple(rows), count
 
     # 防御分支（真实可达上限就是 7，见 UI §3.3.1）：前 6 条逐条 + 第 7 槽合并
     for item in yaku_list[: BC_YAKU_SLOTS - 1]:
-        rows.append(_yaku_row(item))
+        rows.append(_yaku_row(item, labels))
     rest = yaku_list[BC_YAKU_SLOTS - 1:]
     rest_han = sum(_as_int(item.get("han")) or 0 for item in rest)
     rows.append(
@@ -535,10 +589,10 @@ def _parse_yaku_rows(yaku_list: Sequence[dict], has_yaku_key: bool) -> tuple[tup
     return tuple(rows), count
 
 
-def _yaku_row(item: dict) -> YakuRow:
+def _yaku_row(item: dict, labels: dict | None = None) -> YakuRow:
     yid = item.get("id")
     han = _as_int(item.get("han")) or 0
-    label = YAKU_LABEL.get(str(yid), str(yid))
+    label = (labels or YAKU_LABEL).get(str(yid), YAKU_LABEL.get(str(yid), str(yid)))
     # 箭刻合并为一条（han = 组数）：han > 1 时写「箭刻 N 组」
     name = f"{label} {han} 组" if (yid == "yakuhai" and han > 1) else label
     return YakuRow(yaku_id=str(yid), name=name, han=han)
@@ -625,7 +679,17 @@ def plan_for(
     else:
         level = LEVEL_NO_BREAKDOWN
 
-    rows, yaku_count = _parse_yaku_rows(yaku_list, has_yaku_key)
+    # 日麻：`win.fu` 只有日麻才下发（classic 恒缺）——必须按**键是否存在**判，不能判 `fu > 0`：
+    # 役满手 `fu = 0`（riichi_rules.cc `ScoreHand`），`> 0` 会把役满整局误判成 classic 播报
+    # （「13 番，32000 倍」+「按 6 番封顶」）。
+    fu_field = _as_int(win.get("fu"))
+    riichi_mode = fu_field is not None
+    # `win.points` 是权威点数；`win.multiplier` 只是兼容填充（PROTOCOL §12.5），留作兜底。
+    points_field = _as_int(win.get("points"))
+    riichi_points = points_field if points_field is not None else (mult_field if riichi_mode else None)
+    rows, yaku_count = _parse_yaku_rows(
+        yaku_list, has_yaku_key, RIICHI_YAKU_LABEL if riichi_mode else None
+    )
     sum_han = sum(_as_int(item.get("han")) or 0 for item in yaku_list)
 
     base = dealer = total_han = mult = None
@@ -657,6 +721,14 @@ def plan_for(
     else:
         cap_state = CAP_NONE
 
+    if riichi_mode:
+        # `han_breakdown.dealer` 在日麻下是服务端按「赢家是否庄家」填的兼容值（§12.5），
+        # 但日麻**没有庄家加番，也没有 6 番封顶**。播报侧一律按「无加成、无封顶」解释，
+        # 否则役满（13 番）会被念成「N 番超过封顶，按 6 番计」。协议帧保持不动。
+        dealer = 0
+        capped_input = None
+        cap_state = CAP_NONE
+
     per_payer = _as_int(win.get("per_payer"))
     total_score = _as_int(win.get("total"))
     pay_mode = PAY_TSUMO if tsumo else PAY_RON
@@ -680,6 +752,10 @@ def plan_for(
         capped_input=capped_input,
         per_payer=per_payer,
         total_score=total_score,
+        riichi_mode=riichi_mode,
+        fu=fu_field,
+        points=riichi_points,
+        limit_text=riichi_limit_text(str(win.get("limit") or "")),
     )
 
     # RULINGS §2.6（v1.6 修订）：L2（协议里没有 `yaku` 键）**仍播报**，但只播结论
@@ -705,6 +781,10 @@ def plan_for(
         dealer=dealer,
         total_han=total_han,
         mult=mult,
+        fu=fu_field,
+        points=riichi_points,
+        limit=str(win.get("limit") or ""),
+        riichi_mode=riichi_mode,
         capped_input=capped_input,
         cap_state=cap_state,
         pay_mode=pay_mode,
@@ -720,7 +800,7 @@ def plan_for(
         static_caption=_conclusion(
             winner_name=winner_name, total_han=total_han, mult=mult,
             delta=delta.get(winner_seat) if winner_seat is not None else None,
-            pay_mode=pay_mode, level=level,
+            pay_mode=pay_mode, level=level, fu=fu_field, points=riichi_points,
         ),
     )
 
@@ -746,12 +826,25 @@ def _conclusion(
     delta: int | None,
     pay_mode: str,
     level: str,
+    fu: int | None = None,
+    points: int | None = None,
 ) -> str:
     """结论句（DESIGN §2.5 的意图 + RULINGS C7：播完停在字幕条上不消失）。"""
     if level in (LEVEL_NO_YAKU, LEVEL_UNUSABLE):
         return "本局结算 · 番种明细不可用"
     if pay_mode == PAY_DRAW:
         return "荒庄 · 本局不计分"
+    if fu is not None:
+        # 日麻：符 × 番 → 点数（`win.points` 是权威值，`win.multiplier` 只是兼容填充），
+        # 屏上不出现「倍」。与阶段 B 的结算明细、阶段 A 的 S5 格子共用同一个数。
+        # 役满 `fu = 0` 不写符（分档由 S4 的「役满」承担）。
+        delta_text = f"{delta:+d}" if isinstance(delta, int) else "—"
+        han_text = f"{total_han}番" if total_han is not None else "—番"
+        if fu > 0:
+            han_text += f"{fu}符"
+        point_value = points if points is not None else mult
+        point_text = f"{point_value}点" if point_value is not None else "—点"
+        return _check_caption(f"{han_text} {point_text} · {winner_name} {delta_text}", "结论句")
     han_text = f"合计 {total_han} 番" if total_han is not None else "合计 —"
     mult_text = f"{mult} 倍" if mult is not None else "—"
     delta_text = f"{delta:+d}" if isinstance(delta, int) else "—"
@@ -776,11 +869,18 @@ def _build_lines(
     capped_input: int | None,
     per_payer: int | None,
     total_score: int | None,
+    riichi_mode: bool = False,
+    fu: int | None = None,
+    points: int | None = None,
+    limit_text: str = "",
 ) -> tuple[Line, ...]:
     """播报脚本（ARCH §4.2 行表 + UI §4.7 模板 + RULINGS §2.2 段结构）。
 
     段结构（RULINGS §2.2，六段 + 开场）：
     开场（和牌方式）→ ① 番种明细 → ② 番种合计 → ③ 加成 → ④ 封顶 → ⑤ 倍率 → ⑥ 收付。
+
+    日麻同六个槽位，但语义换成「番种 → 合计番 → 符 → 满贯分档 → 点数 → 收付（点）」：
+    classic 的庄家加成 / 6 番封顶 / 2^番 倍率在日麻都不存在，语音也只保留能正确复用的资产。
     """
     lines: list[Line] = []
     label = REASON_LABEL.get(reason, "结算")
@@ -811,7 +911,7 @@ def _build_lines(
             # `han` 只有合并步在用（「另 K 项，H 番」要回算被合并行的番数和）
             lines.append(
                 Line(kind="yaku", caption=caption, focus=(FOCUS_YAKU, i), step=True,
-                     han=row.han, voice=_yaku_cue(row))
+                     han=row.han, voice=_yaku_cue(row, riichi_mode))
             )
 
     # ② 牌型番合计：句库里没有「牌型 N 番」这条（AUDIO §8.2 只到合计番数），故不念
@@ -821,7 +921,12 @@ def _build_lines(
         )
 
     # ③ 加成：庄家 +1 才有独立步（自摸不是番种，RULINGS C9 / §2.4 荣和非庄家整段跳过）
-    if dealer is not None and dealer > 0:
+    #    日麻：没有庄家加成，也没有「自摸不加番」（门前清自摸在日麻是 1 番役）——这一格讲符。
+    if riichi_mode:
+        lines.append(
+            Line(kind="dealer", caption=riichi_fu_text(fu), focus=(FOCUS_CHAIN, "dealer"), step=False)
+        )
+    elif dealer is not None and dealer > 0:
         lines.append(
             Line(kind="dealer", caption="庄家加一番", focus=(FOCUS_CHAIN, "dealer"), step=True,
                  voice=("vo_dealer_bonus",))
@@ -834,7 +939,10 @@ def _build_lines(
         )
 
     # ④ 封顶：只有真被封顶才推进；「恰好 6 番」不是封顶（UI §3.4）
-    if cap_state == CAP_CAPPED:
+    #    日麻：没有 6 番封顶，这一格是满贯分档（与 S4 同源）；VO 库无分档句，只进字幕。
+    if riichi_mode:
+        lines.append(Line(kind="cap", caption=limit_text, focus=(FOCUS_CHAIN, "cap")))
+    elif cap_state == CAP_CAPPED:
         lines.append(
             Line(
                 kind="cap",
@@ -845,28 +953,38 @@ def _build_lines(
         )
 
     # ⑤ 倍率（段 5a 合计番数 + 5b 倍率是同一步，UI §4.8）：两句都念
-    if total_han is not None and mult is not None:
-        lines.append(
-            Line(
-                kind="total",
-                caption=_check_caption(f"{total_han} 番，{mult} 倍", "段5"),
-                focus=(FOCUS_CHAIN, "total"),
-                han=total_han,
-                voice=_han_cue(total_han) + _mult_cue(mult),
+    #    日麻：S5 是点数不是倍率，字幕写「N 番 M 符，X 点」，只念合计番数。
+    #    `vo_han_*` 只覆盖 0..6 番，役满（13 番）不念，避免把 13 念成 6；
+    #    `vo_mult_*` / `vo_pay_*` 都是 classic 的倍率与「分」整句，日麻一律不用。
+    if total_han is not None and (mult is not None or points is not None):
+        if riichi_mode:
+            point_value = points if points is not None else mult
+            fu_part = f" {fu} 符" if fu else ""
+            caption = _check_caption(
+                f"{total_han} 番{fu_part}，"
+                f"{point_value if point_value is not None else '—'} 点",
+                "段5",
             )
+            voice = _han_cue(total_han) if 0 <= total_han <= 6 else ()
+        else:
+            caption = _check_caption(f"{total_han} 番，{mult} 倍", "段5")
+            voice = _han_cue(total_han) + _mult_cue(mult)
+        lines.append(
+            Line(kind="total", caption=caption, focus=(FOCUS_CHAIN, "total"),
+                 han=total_han, voice=voice)
         )
 
-    # ⑥ 收付
+    # ⑥ 收付（日麻单位是「点」，且 `vo_pay_*` 只有 classic 的 1..64 分句，日麻不念）
+    unit = "点" if riichi_mode else "分"
+    per_text = per_payer if per_payer is not None else "—"
+    total_text = total_score if total_score is not None else "—"
     if pay_mode == PAY_TSUMO:
-        caption = _check_caption(
-            f"三家各付 {per_payer if per_payer is not None else '—'} 分，合计 {total_score if total_score is not None else '—'} 分",
-            "段6",
-        )
+        caption = _check_caption(f"三家各付 {per_text} {unit}，合计 {total_text} {unit}", "段6")
     else:
         where = _call_or(rel_label, from_seat, "放炮者")
-        caption = _check_caption(f"{where}支付 {per_payer if per_payer is not None else '—'} 分", "段6")
+        caption = _check_caption(f"{where}支付 {per_text} {unit}", "段6")
     lines.append(Line(kind="payment", caption=caption, focus=(FOCUS_PAY, "P1"),
-                      voice=_pay_cue(pay_mode, per_payer)))
+                      voice=() if riichi_mode else _pay_cue(pay_mode, per_payer)))
 
     # 派生：本场累计领先（进底注行，UI §4.5），不是高亮步
     lines.append(Line(kind="leader", caption=""))
@@ -883,16 +1001,45 @@ def _draw_plan(
     results: list[dict],
     name_of: Callable[[int], str] | None,
 ) -> Plan:
-    """荒庄（`win == null`）：六段仍铺满，但只在「无番种 / 不计分 / 四家 0」三处推进。"""
-    lines = (
-        Line(kind="title", caption="荒庄 · 牌山摸尽", voice=("vo_mode_draw",)),
-        Line(kind="winner", caption="荒庄 · 牌山摸尽"),
-        Line(kind="yaku", caption="本局不计分", focus=(FOCUS_YAKU, 0), step=True,
-             voice=("vo_draw_no_score",)),
-        Line(kind="payment", caption="四家均不计分 · 庄家连庄", focus=(FOCUS_PAY, "P1"),
-             voice=("vo_draw_renchan",)),
-        Line(kind="leader", caption=""),
-    )
+    """荒庄（`win == null`）：六段仍铺满，但只在「无番种 / 不计分 / 四家 0」三处推进。
+
+    日麻（`tenpai[4]` 是 §12.5 的日麻专属键）：流局有**听牌罚符**，且「庄家听牌才连庄」，
+    classic 的「本局不计分 / 四家均不计分 · 庄家连庄」在这里是假话（罚符局真的有收付）。
+    语音同理：只念「荒庄」，不念 `vo_draw_no_score` / `vo_draw_renchan`（VO 库是 classic 口径）。
+    """
+    tenpai = payload.get("tenpai")
+    riichi_mode = isinstance(tenpai, list)
+    if riichi_mode:
+        waiting = sum(1 for flag in tenpai if flag is True)
+        dealer_seat = _as_int(payload.get("dealer"))
+        dealer_tenpai = (
+            tenpai[dealer_seat] is True
+            if isinstance(dealer_seat, int) and 0 <= dealer_seat < len(tenpai)
+            else False
+        )
+        has_penalty = any(value != 0 for value in delta.values())
+        renchan_text = "庄家连庄" if dealer_tenpai else "庄家轮庄"
+        lines = (
+            Line(kind="title", caption="荒庄 · 牌山摸尽", voice=("vo_mode_draw",)),
+            Line(kind="winner", caption="荒庄 · 牌山摸尽"),
+            Line(kind="yaku", caption=f"听牌 {waiting} 家 · {'罚符结算' if has_penalty else '无罚符'}",
+                 focus=(FOCUS_YAKU, 0), step=True),
+            Line(kind="payment", caption=f"听牌 {waiting} 家 · {renchan_text}",
+                 focus=(FOCUS_PAY, "P1")),
+            Line(kind="leader", caption=""),
+        )
+        static_caption = f"流局 · 听牌 {waiting} 家 · {renchan_text}"
+    else:
+        lines = (
+            Line(kind="title", caption="荒庄 · 牌山摸尽", voice=("vo_mode_draw",)),
+            Line(kind="winner", caption="荒庄 · 牌山摸尽"),
+            Line(kind="yaku", caption="本局不计分", focus=(FOCUS_YAKU, 0), step=True,
+                 voice=("vo_draw_no_score",)),
+            Line(kind="payment", caption="四家均不计分 · 庄家连庄", focus=(FOCUS_PAY, "P1"),
+                 voice=("vo_draw_renchan",)),
+            Line(kind="leader", caption=""),
+        )
+        static_caption = "荒庄 · 本局不计分"
     return Plan(
         level=LEVEL_FULL,
         reason=reason,
@@ -919,9 +1066,10 @@ def _draw_plan(
         lines=lines,
         interlude_ms=interlude,
         budget_ms=budget,
+        riichi_mode=riichi_mode,
         broadcast=should_broadcast(budget),
         voice=_voice_sequence(lines),
-        static_caption="荒庄 · 本局不计分",
+        static_caption=static_caption,
     )
 
 

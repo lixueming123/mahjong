@@ -416,6 +416,83 @@ def table_cloth(
     return _cached(("cloth", width, height, top, far_half, near_half, cx), build)
 
 
+def riichi_cloth(width: int, height: int) -> pygame.Surface:
+    """v4.0 雀魂参考帧的深蓝台布：铺满整屏（不裁梯形）。
+
+    图层：上浅下深底色 → 桌心柔光 → 桌心到四角的放射分区线 → 四家牌河区细框
+    → 左右深红木桌框 → 织物噪点 → 四周暗角。整屏缓存，只在换分辨率时重建。
+    """
+
+    def build() -> pygame.Surface:
+        surface = pygame.Surface((width, height), pygame.SRCALPHA)
+        surface.blit(
+            vertical_gradient(width, height, T.FELT_BLUE_TOP, T.FELT_BLUE_BOTTOM), (0, 0),
+        )
+
+        # v5.0：所有分区都以中央八角板为基准（四家牌河紧贴它围成方形环）
+        board = pygame.Rect(T.R_CENTER_BOARD)
+        cx, cy = board.centerx, board.centery
+
+        glow = pygame.Surface((width, height), pygame.SRCALPHA)
+        for rx, ry, alpha in ((0.78, 0.62, 30), (0.52, 0.40, 22), (0.28, 0.22, 14)):
+            rect = pygame.Rect(0, 0, int(width * rx), int(height * ry))
+            rect.center = (cx, cy)
+            pygame.draw.ellipse(glow, (*T.FELT_BLUE_CORE, alpha), rect)
+        surface.blit(glow, (0, 0))
+
+        # 分区线：桌心 → 屏幕四角，把台面划成四家的梯形区
+        for corner in ((0, 0), (width, 0), (0, height), (width, height)):
+            pygame.draw.line(surface, (*T.FELT_RADIAL, 52), (cx, cy), corner, 1)
+
+        # 四家牌河区外框 / 内框（参考帧那两圈细线）：外框罩住整个方形环，
+        # 内框刚好贴着八角板，两圈之间就是四家弃牌的位置。
+        zone = board.inflate(int(width * 0.23), int(height * 0.38))
+        pygame.draw.rect(surface, (*T.FELT_ZONE_LINE, 76), zone, 1)
+        inner = board.inflate(int(width * 0.02), int(height * 0.025))
+        pygame.draw.rect(surface, (*T.FELT_ZONE_LINE, 34), inner, 1)
+
+        # 左右深红木桌框：斜切进画面，制造「桌子比屏幕略窄」的透视
+        rim_w = int(width * 0.055)
+        pygame.draw.polygon(
+            surface, (*T.RIM_WOOD_HI, 255),
+            [(0, 0), (rim_w, 0), (rim_w // 3, height), (0, height)],
+        )
+        pygame.draw.polygon(
+            surface, (*T.RIM_WOOD_LO, 255),
+            [(width, 0), (width - rim_w, 0), (width - rim_w // 3, height), (width, height)],
+        )
+        pygame.draw.line(
+            surface, (*T.PLATE_GOLD, 96), (rim_w, 0), (rim_w // 3, height), 2,
+        )
+        pygame.draw.line(
+            surface, (*T.PLATE_GOLD, 96),
+            (width - rim_w, 0), (width - rim_w // 3, height), 2,
+        )
+
+        # 织物噪点：一眼看不出，但深蓝不再是一块死板的平涂
+        weave = pygame.Surface((width, height), pygame.SRCALPHA)
+        noise = random.Random(20261105)
+        for _ in range(width * height // 260):
+            weave.set_at(
+                (noise.randrange(width), noise.randrange(height)),
+                (200, 220, 255, noise.choice((6, 9, 12))),
+            )
+        surface.blit(weave, (0, 0))
+
+        shade_layer = pygame.Surface((width, height), pygame.SRCALPHA)
+        for step in range(96):
+            alpha = int(70 * (1 - step / 96) ** 1.6)
+            if alpha <= 0:
+                continue
+            pygame.draw.rect(
+                shade_layer, (6, 14, 28, alpha),
+                (step, step // 2, width - step * 2, height - step), width=1,
+            )
+        surface.blit(shade_layer, (0, 0))
+        return surface
+
+    return _cached(("riichi_cloth", width, height), build)
+
 
 # ---------------------------------------------------------------- 面板 / 卡片
 

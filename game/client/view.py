@@ -54,6 +54,10 @@ class UiView:
     # 大厅（§12）：新建与开局分开。建桌/加入在途时两个按钮都不可再点。
     lobby_start_enabled: bool = True
     lobby_create_enabled: bool = True
+    # 大厅的玩法选择（classic / riichi），建桌时随 create_room 一起发出。
+    lobby_mode: str = "classic"
+    # 日麻的局数（tonpu 东场 4 局 / hanchan 半庄 8 局）；classic 恒 4 局，不发这个字段。
+    lobby_length: str = "tonpu"
     lobby_begin_enabled: bool = False
     open_rooms: list = field(default_factory=list)
 

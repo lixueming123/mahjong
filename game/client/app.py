@@ -22,7 +22,8 @@ from . import theme as T
 from .audio import AudioEngine
 from .broadcast import VOICE_ENABLED, Broadcast
 from .feel import Feel
-from .game_state import (SCREEN_LOGIN, SCREEN_LOBBY, SCREEN_RESULT, SCREEN_TABLE, WINDOW_CLAIM, WINDOW_DISCARD,
+from .game_state import (SCREEN_LOGIN, SCREEN_LOBBY, SCREEN_RESULT, SCREEN_TABLE, WINDOW_CHANKAN,
+                         WINDOW_CLAIM, WINDOW_DISCARD,
                          GameState)
 from .login_store import LoginStore
 from .net_client import NetClient
@@ -152,6 +153,10 @@ class GameApp:
         # 仅 `start_game()`（再来一局 / 旧握手）在 `room_joined` 后自动 `ready`。
         # 大厅「新建房间」和点击加入都不置这个标记。
         self.auto_ready_on_join = False
+        # 大厅玩法选择（classic / riichi）：只影响 create_room 的 mode 字段。
+        self.lobby_mode = "classic"
+        # 日麻局数（tonpu 东场 / hanchan 半庄）：只影响 create_room 的 length 字段。
+        self.lobby_length = "tonpu"
         self.open_rooms: list[dict] = []
         self.last_list_rooms_at = 0.0
         # 只有账号会话才有战绩可查（游客的 stats 是零值，显示出来只会让人困惑）。
@@ -1463,7 +1468,7 @@ class GameApp:
         self.stage_since = self.now
         self.login_status = "正在建桌…"
         self.login_status_color = T.TEXT_DIM
-        self.send_frame("create_room")
+        self._send_create_room()
 
     def create_lobby_room(self) -> None:
         """大厅「新建房间」：只发 `create_room`，成功后仍停在大厅。"""
@@ -1474,7 +1479,30 @@ class GameApp:
         self.stage_since = self.now
         self.login_status = "正在建桌…"
         self.login_status_color = T.TEXT_DIM
-        self.send_frame("create_room")
+        self._send_create_room()
+
+    def _stats_view(self) -> dict | None:
+        """按大厅当前玩法取战绩分桶。
+
+        服务端把统计拆成 `classic` / `riichi` 两个子对象（两套玩法的分数不可比）；
+        老服务端没有这两个键时退回顶层字段（= classic），行为与之前一致。
+        """
+        stats = self.stats
+        if not isinstance(stats, dict):
+            return None
+        section = stats.get(self.lobby_mode)
+        if isinstance(section, dict):
+            merged = dict(section)
+            merged["mode"] = self.lobby_mode
+            return merged
+        return stats
+
+    def _send_create_room(self) -> None:
+        """建桌：classic 不带 mode（帧与之前逐字节一致），只有日麻才带上 mode / length。"""
+        if self.lobby_mode == "classic":
+            self.send_frame("create_room")
+        else:
+            self.send_frame("create_room", mode=self.lobby_mode, length=self.lobby_length)
 
     def begin_match(self) -> None:
         """大厅「开始对局」：人已经入座，只发 `ready`。"""
@@ -1489,6 +1517,20 @@ class GameApp:
     def _lobby_click(self, pos: tuple[float, float]) -> None:
         if self.disconnect_reason:
             return
+        if T.rect_contains(T.LB_MODE_CHIPS[0], pos):
+            self.lobby_mode = "classic"
+            return
+        if T.rect_contains(T.LB_MODE_CHIPS[1], pos):
+            self.lobby_mode = "riichi"
+            return
+        if self.lobby_mode == "riichi":
+            # 局数只在日麻下可见/可点：classic 的局数由服务端冻结为 4（PROTOCOL §12.1）
+            if T.rect_contains(T.LB_LEN_CHIPS[0], pos):
+                self.lobby_length = "tonpu"
+                return
+            if T.rect_contains(T.LB_LEN_CHIPS[1], pos):
+                self.lobby_length = "hanchan"
+                return
         if T.rect_contains(T.LB_NEW_BTN, pos):
             self.create_lobby_room()
             return
@@ -1646,6 +1688,8 @@ class GameApp:
         self._sfx("ui_click")       # F-AU-01：点击**按下**帧
         if spec.kind == "discard":
             self._confirm_discard()
+        elif spec.kind == "riichi":
+            self._confirm_riichi()
         else:
             self._do_action(spec.kind, spec.tiles)
 
@@ -1666,6 +1710,24 @@ class GameApp:
         log.info("提交打牌：tile=%s seq=%s", tile, seq)
         return True
 
+    def _confirm_riichi(self) -> bool:
+        """立直宣言：选中的那张牌既是宣言牌也是打出的牌，走同一条 `action` 帧。"""
+        state = self.state
+        if not self._can_select_hand():
+            return False
+        index = state.selected_index
+        if index is None or not 0 <= index < len(state.hand):
+            return False
+        tile = state.hand[index]
+        seq = state.window.seq if state.window else None
+        if seq is None:
+            return False
+        if not self._do_action("riichi", [tile]):
+            return False
+        state.mark_pending("立直", index)
+        log.info("提交立直：tile=%s seq=%s", tile, seq)
+        return True
+
     def _do_action(self, action: str, tiles: list[str]) -> bool:
         """§5.5 守卫：无窗口不发帧、动作必须在 `options` 内、`seq` 取 `current_seq`。"""
         state = self.state
@@ -1675,7 +1737,12 @@ class GameApp:
         remaining = self._remaining_ms()
         if remaining is not None and remaining <= 0:
             return False
-        if action in ("kong", "pong", "chow", "ankan", "kakan"):
+        if action == "riichi":
+            # 日麻：窗口必须提供 riichi，且恰好给出 1 张宣言牌
+            if not window.has("riichi") or len(tiles) != 1:
+                log.warning("立直需要窗口提供 riichi 且恰好 1 张宣言牌，拒绝发送：%r", tiles)
+                return False
+        elif action in ("kong", "pong", "chow", "ankan", "kakan"):
             # v2.0：ankan/kakan 的 tiles 恰好 1 个牌面元素（PROTOCOL v1.6 §4.6）
             if action in ("ankan", "kakan") and len(tiles) != 1:
                 log.warning("%s 的 tiles 必须恰好 1 个牌面元素，拒绝发送：%r", action, tiles)
@@ -1687,7 +1754,7 @@ class GameApp:
             if not window.has("win"):
                 return False
         elif action == "pass":
-            if window.window != WINDOW_CLAIM or not window.has("pass", []):
+            if window.window not in (WINDOW_CLAIM, WINDOW_CHANKAN) or not window.has("pass", []):
                 return False
         if not self.send_frame("action", action=action, tiles=list(tiles), seq=window.seq):
             return False
@@ -1723,6 +1790,8 @@ class GameApp:
             now_epoch_ms=time.time() * 1000.0,
             mouse=self.mouse_pos,
             mouse_down=self.mouse_down,
+            lobby_mode=self.lobby_mode,
+            lobby_length=self.lobby_length,
             nickname=self.nickname,
             ime_composition=self.ime_composition if self.state.screen == SCREEN_LOGIN else "",
             caret_on=(now % 1.0) < 0.5,
@@ -1739,7 +1808,7 @@ class GameApp:
             login_focus=self.login_focus,
             remember_password=self.remember_password,
             login_register_enabled=self._login_register_enabled(),
-            stats=self.stats,
+            stats=self._stats_view(),
             stats_open=self.stats_open,
             has_account_session=self.has_account,
             lobby_create_enabled=self._lobby_create_enabled(),

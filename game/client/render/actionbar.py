@@ -19,8 +19,8 @@ from dataclasses import dataclass, field
 import pygame
 
 from .. import theme as T
-from ..game_state import SCREEN_TABLE, WINDOW_CLAIM, WINDOW_DISCARD, GameState
-from ..tiles import button_label
+from ..game_state import SCREEN_TABLE, WINDOW_CHANKAN, WINDOW_CLAIM, WINDOW_DISCARD, GameState
+from ..tiles import button_label, tile_label
 from ..view import UiView
 from . import art
 from . import widgets as W
@@ -39,7 +39,7 @@ ELLIPSIS = "…"
 
 @dataclass
 class ButtonSpec:
-    kind: str            # discard | win | kong | ankan | kakan | pong | chow | pass
+    kind: str            # discard | win | riichi | kong | ankan | kakan | pong | chow | pass
     label: str
     rect: tuple[int, int, int, int]
     enabled: bool
@@ -73,6 +73,9 @@ def build_buttons(state: GameState, remaining_ms: float | None) -> list[ButtonSp
         specs.append(("discard", button_label("discard"), [], False))
     if window.has("win"):
         specs.append(("win", button_label("win"), [], True))
+    # 日麻立直：与打牌同一条 action，需要先选中「宣言后打出的那张」。
+    if window.has("riichi"):
+        specs.append(("riichi", button_label("riichi"), [], False))
     for tiles in window.option_list("kong")[:1]:
         specs.append(("kong", button_label("kong", tiles), tiles, False))
     # v2.0（§5.3）：暗杠 / 加杠 紧随明杠之后。暗杠可能有多条 option（每个可杠牌面一条，
@@ -89,7 +92,7 @@ def build_buttons(state: GameState, remaining_ms: float | None) -> list[ButtonSp
         chow_options = chow_options[:MAX_CHOW_BUTTONS]
     for tiles in chow_options:
         specs.append(("chow", button_label("chow", tiles), tiles, False))
-    if window.window == WINDOW_CLAIM:
+    if window.window in (WINDOW_CLAIM, WINDOW_CHANKAN):
         specs.append(("pass", button_label("pass"), [], False))
 
     if len(specs) > T.BAR_BUTTON_MAX:
@@ -103,7 +106,8 @@ def build_buttons(state: GameState, remaining_ms: float | None) -> list[ButtonSp
     out: list[ButtonSpec] = []
     x = T.R_BAR_BUTTONS[0]
     for kind, label, tiles, is_win in specs:
-        if kind == "discard":
+        if kind in ("discard", "riichi"):
+            # 两者都要先选中一张手牌（立直 = 打牌 + 宣言）
             enabled = base and state.selected_index is not None
         else:
             enabled = base
@@ -253,4 +257,10 @@ def _status_text(state: GameState, ui: UiView) -> tuple[str, str, tuple]:
             # §5.3.1：打牌窗口不提供「过」按钮，用中性提示帮助理解
             return "也可直接点手牌打牌（本局不胡）", "也可直接点手牌打牌", T.TEXT_DIM
         return "请打牌", "", T.TEXT_DIM
+    if state.window.window == WINDOW_CHANKAN:
+        # 抢杠的那张牌不在牌河里，玩家只能靠这行知道自己在抢什么
+        tile = getattr(state.window, "tile", None)
+        if tile:
+            return f"抢杠 {tile_label(tile)} · 可胡", f"抢杠 {tile_label(tile)}", T.WARN
+        return "抢杠 · 可胡", "抢杠", T.WARN
     return "请选择动作", "", T.TEXT_DIM

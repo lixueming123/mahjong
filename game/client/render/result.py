@@ -18,6 +18,7 @@ import pygame
 
 from .. import broadcast as BC
 from .. import theme as T
+from ..tiles import LIMIT_LABEL, RIICHI_YAKU_LABEL
 from ..game_state import GameState
 from ..tiles import multiset_remove
 from ..view import UiView
@@ -109,13 +110,16 @@ def _yaku_detail(win_diff: dict | None) -> str:
     yaku = [y for y in (win_diff.get("yaku") or []) if isinstance(y, dict) and isinstance(y.get("id"), str)]
     if not yaku:
         return "无番（0 番）"
+    # `win.fu` 键存在即日麻（役满 `fu = 0` 也算，不能用 `> 0` 判，否则退回 classic 公式）
+    riichi_mode = isinstance(win_diff.get("fu"), int)
+    labels = RIICHI_YAKU_LABEL if riichi_mode else YAKU_LABEL
     parts: list[str] = []
     base = 0
     for item in yaku:
         yid = item["id"]
         han = item.get("han") if isinstance(item.get("han"), int) else 0
         base += han
-        label = YAKU_LABEL.get(yid, str(yid))
+        label = labels.get(yid, YAKU_LABEL.get(yid, str(yid)))
         # 箭刻合并为一条（han = 组数）：han > 1 时显示「箭刻 N 组」（§9.4）
         if yid == "yakuhai" and han > 1:
             parts.append(f"{label} {han} 组")
@@ -132,11 +136,23 @@ def _yaku_detail(win_diff: dict | None) -> str:
         if isinstance(breakdown.get("base"), int):
             base = breakdown["base"]
         dealer = breakdown.get("dealer") if isinstance(breakdown.get("dealer"), int) else 0
-        if dealer > 0:
+        # 日麻：服务端把 `dealer` 按「赢家是庄家」填 1（兼容字段，PROTOCOL §12.5），
+        # 但日麻庄家不加番。阶段 A 播报已按「无加成」解释，阶段 B 明细行必须同口径。
+        if dealer > 0 and not riichi_mode:
             text += f" ｜ 庄家 +{dealer}"
     multiplier = win_diff.get("multiplier")
     if not isinstance(multiplier, int) or multiplier <= 0:
         multiplier = 1 << total  # = 2^total（§9.4：R = 2^番）
+    fu = win_diff.get("fu")
+    points = win_diff.get("points")
+    if isinstance(fu, int) and isinstance(points, int):
+        # 日麻：符 × 番 → 点数（不是 2^番 的倍率制）；役满 `fu = 0` 不写符
+        limit = win_diff.get("limit")
+        fu_text = f" {fu} 符" if fu > 0 else ""
+        text += f" ｜ 合计 {total} 番{fu_text}（{points} 点）"
+        if isinstance(limit, str) and limit not in ("none", ""):
+            text += f" {LIMIT_LABEL.get(limit, limit)}"
+        return text
     text += f" ｜ 合计 {total} 番（{multiplier} 分）"
     # F7：封顶判据是 `base + dealer > 6`，**不是** `total >= 6`——「打满 6 番」不是「被砍」。
     if base + dealer > 6:
@@ -384,9 +400,15 @@ def _render_round_end(surface: pygame.Surface, ui: UiView) -> None:
 
     if win is None:
         # §9.3 荒庄分支：和牌者手牌区替换为居中文案
+        # 日麻流局有听牌罚符（§12.5 的 tenpai[4]），「本局不计分」是假话。
+        tenpai = result.get("tenpai")
+        draw_text = (
+            f"流局 · 听牌 {sum(1 for flag in tenpai if flag is True)} 家"
+            if isinstance(tenpai, list) else "本局不计分"
+        )
         W.draw_text(
             surface,
-            "本局不计分",
+            draw_text,
             fonts.get(T.FS_H2),
             T.ZERO_SCORE,
             T.R_RESULT_HAND,
@@ -560,6 +582,8 @@ def _render_win_block(surface: pygame.Surface, ui: UiView, win: dict) -> None:
     # 自摸 =「<和牌者> 自摸，合计 <total> 番，三家各付 <per_payer> 分，合计 <total> 分」；
     # 末行灰色「本场累计：<领先者昵称> 领先」（D-3：并列时「并列领先」）。
     # 自摸**不渲染加成行**（B1.1：自摸不是番种，tsumo 恒 0 自然不显示）。
+    # 日麻（有 `win.fu`）：单位是「点」不是「分」，句首写「N 番 M 符」——与阶段 A 的
+    # 结论句 / S5 格子同口径，避免播报页与静态结算页各说一套。
     han_total = None
     breakdown = win.get("han_breakdown")
     if isinstance(breakdown, dict) and isinstance(breakdown.get("total"), int):
@@ -567,16 +591,23 @@ def _render_win_block(surface: pygame.Surface, ui: UiView, win: dict) -> None:
     tsumo = bool(win.get("tsumo"))
     per_payer = win.get("per_payer")
     total = win.get("total")
-    han_text = f"合计 {han_total} 番" if han_total is not None else ""
+    riichi_mode = isinstance(win.get("fu"), int)
+    unit = "点" if riichi_mode else "分"
+    if riichi_mode:
+        fu = win.get("fu")
+        fu_text = f" {fu} 符" if isinstance(fu, int) and fu > 0 else ""
+        han_text = f"{han_total} 番{fu_text}" if han_total is not None else ""
+    else:
+        han_text = f"合计 {han_total} 番" if han_total is not None else ""
     lines: list[tuple[str, tuple]] = []
     if tsumo:
         lines.append((f"{winner_name} 自摸，{han_text}，", T.TEXT))
-        lines.append((f"三家各付 {per_payer} 分，合计 {total} 分", T.TEXT))
+        lines.append((f"三家各付 {per_payer} {unit}，合计 {total} {unit}", T.TEXT))
     else:
         payer = win.get("from_seat")
         payer_name = state.name_of(payer) if isinstance(payer, int) else "—"
         lines.append((f"{winner_name} 荣和，{han_text}，", T.TEXT))
-        lines.append((f"{payer_name} 支付 {per_payer} 分", T.TEXT))
+        lines.append((f"{payer_name} 支付 {per_payer} {unit}", T.TEXT))
     leader = _leader_text(state)
     if leader:
         lines.append((leader, T.TEXT_DIM))

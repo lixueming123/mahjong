@@ -40,12 +40,12 @@ R_CAPTION_TEXT = (332, 220, 616, 28)   # 文本区
 R_STAGE = (300, 210, 680, 330)         # 舞台底：只占桌心，不压左右摊牌
 R_S1 = (316, 258, 330, 208)            # S1 番种区（8 槽 × 行高 26）
 R_S2 = (660, 258, 148, 42)             # 牌型番合计
-R_S3 = (818, 258, 146, 42)             # 加成 + 合计番数
-R_S4 = (660, 308, 148, 42)             # 封顶
-R_S5 = (818, 308, 146, 42)             # 倍率
+R_S3 = (818, 258, 146, 42)             # 加成 + 合计番数（日麻 = 符）
+R_S4 = (660, 308, 148, 42)             # 封顶（日麻 = 满贯分档）
+R_S5 = (818, 308, 146, 42)             # 倍率（日麻 = 点数）
 R_S6 = (316, 470, 648, 48)             # 四户支付
 R_WIN_TILE = (818, 360, 120, 96)       # 和牌张（紧凑面板右侧空档）
-R_WIN_HAND = (340, 70, 600, 38)        # 赢家手牌条：名牌与桌面之间的空白带，不压四家摊牌
+R_WIN_HAND = (340, 168, 600, 38)       # v4.0：赢家手牌条下移到舞台正上方，避开上移后的对家手牌背
 R_HINT = (430, 546, 420, 22)           # 播报提示行（面板下方、本家手牌上方）
 
 #: S1 每一槽的左边界 / 宽度 / 行高（8×26 = 208，正好填满 R_S1 的高度）
@@ -362,14 +362,26 @@ def _draw_dividers(surface: pygame.Surface) -> None:
 
 
 def _s2_text(plan) -> str:
-    """段 2 牌型番合计；键缺失（L2/L3）时显式说「明细不可用」，不假装 0 番。"""
+    """段 2 牌型番合计；键缺失（L2/L3）时显式说「明细不可用」，不假装 0 番。
+
+    日麻流局没有番种推导（只有听牌罚符），四格一律留空，不显示 classic 的番/封顶/倍率。
+    """
+    if getattr(plan, "riichi_mode", False) and not plan.has_winner:
+        return "—"
     if plan.level in (BC.LEVEL_NO_YAKU, BC.LEVEL_UNUSABLE):
         return "明细不可用"
     return f"牌型 {plan.base} 番" if plan.base is not None else "牌型 —"
 
 
 def _s3_text(plan) -> str:
-    """段 3：**禁止只显示「+1」不显示「= N 番」**（RULINGS §2.2 必现行）。"""
+    """段 3：**禁止只显示「+1」不显示「= N 番」**（RULINGS §2.2 必现行）。
+
+    日麻没有庄家加成，这一格与段 3 字幕同源，只显示符；流局则留空。
+    """
+    if getattr(plan, "riichi_mode", False) and not plan.has_winner:
+        return "—"
+    if getattr(plan, "riichi_mode", False):
+        return BC.riichi_fu_text(getattr(plan, "fu", None))
     total = plan.total_han
     total_text = f"{total} 番" if total is not None else "— 番"
     dealer = plan.dealer or 0
@@ -382,7 +394,15 @@ def _s3_text(plan) -> str:
 
 
 def _s4_text(plan) -> str:
-    """段 4 封顶三子态。判据是 `base + dealer > 6`，**不是** `total >= 6`（打满 6 番不是被砍）。"""
+    """段 4 封顶三子态。判据是 `base + dealer > 6`，**不是** `total >= 6`（打满 6 番不是被砍）。
+
+    日麻没有「封顶 6 番」，这一格改为满贯分档（满贯 / 跳满 / …），未达则显示「未满贯」；
+    流局没有分档，留空。
+    """
+    if getattr(plan, "riichi_mode", False) and not plan.has_winner:
+        return "—"
+    if getattr(plan, "riichi_mode", False):
+        return BC.riichi_limit_text(getattr(plan, "limit", ""))
     if plan.cap_state == BC.CAP_CAPPED:
         return f"{plan.capped_input} 番 → 封顶 6 番"
     if plan.cap_state == BC.CAP_EXACT:
@@ -391,6 +411,11 @@ def _s4_text(plan) -> str:
 
 
 def _s5_text(plan) -> str:
+    if getattr(plan, "riichi_mode", False) and not plan.has_winner:
+        return "—"
+    if getattr(plan, "riichi_mode", False):
+        # 日麻显示 `win.points`（`multiplier` 只是兼容填充，PROTOCOL §12.5），与结论句同源
+        return BC.riichi_points_text(getattr(plan, "points", None))
     return f"× {plan.mult} 倍" if plan.mult is not None else "× — 倍"
 
 

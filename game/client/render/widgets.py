@@ -487,6 +487,19 @@ def _face_art(
     return surface
 
 
+def _tint_back(image: pygame.Surface) -> pygame.Surface:
+    """``back.png`` 自带大红，统一染成 ``T.BACK`` 橙金（不改 CC0 原始素材）。
+
+    侧家牌墙是浅粉贴图乘 ``SIDE_STRIP_TINT``；牌背这张是纯红，红通道已饱和，
+    同样的乘法只会得到橙红。所以先灰度化、抬亮到接近白，再乘目标色。
+    所有牌背（暗杠占位 / 3D 牌墙顶 / 旋转牌背）都走这里，颜色一次对齐。
+    """
+    gray = pygame.transform.grayscale(image).copy()
+    gray.fill(T.BACK_LIFT, special_flags=pygame.BLEND_RGB_ADD)
+    gray.fill(T.BACK, special_flags=pygame.BLEND_RGB_MULT)
+    return gray
+
+
 def _image_tile_surface(face: str, width: int, height: int, pending: bool) -> pygame.Surface | None:
     """按牌位尺寸等比缩放 CC0 牌面贴图；缺图返回 None（调用方回退程序化）。"""
     if width <= 0 or height <= 0:
@@ -506,6 +519,8 @@ def _image_tile_surface(face: str, width: int, height: int, pending: bool) -> py
     image = pygame.transform.smoothscale(source, (draw_w, draw_h))
     if pending:
         image = pygame.transform.grayscale(image)
+    if face == "back":
+        image = _tint_back(image)
     out = pygame.Surface((width, height), pygame.SRCALPHA)
     out.blit(image, ((width - draw_w) // 2, (height - draw_h) // 2))
     return out
@@ -679,6 +694,10 @@ def side_strip_surface(count: int) -> pygame.Surface | None:
     except (pygame.error, OSError) as exc:  # pragma: no cover
         log.warning("侧墙贴图加载失败：%s（%s）", path, exc)
         return None
+    # v4.0：雀魂参考帧的牌山是橙金，Blender 素材是浅粉红。一次 RGB 乘法
+    # 整体调色，保留渐变 / 高光 / alpha，也不改 CC BY 原始素材。
+    image = image.copy()
+    image.fill(T.SIDE_STRIP_TINT, special_flags=pygame.BLEND_RGB_MULT)
     if n < src_n:
         cut = max(1, int(round(image.get_width() * n / src_n)))
         image = image.subsurface((0, 0, cut, image.get_height())).copy()

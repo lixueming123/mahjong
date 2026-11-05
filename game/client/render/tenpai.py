@@ -96,7 +96,22 @@ def render(surface: pygame.Surface, ui: UiView, feel) -> None:
     counts = [str(item.get("remaining", 0)) + " 枚" for item in items]
     pw = name_font.size(prefix)[0]
     item_w = [T.TENPAI_TILE_W + 3 + count_font.size(text)[0] for text in counts]
-    total = pw + T.TENPAI_PREFIX_GAP + sum(item_w) + T.TENPAI_ITEM_GAP * max(0, len(items) - 1)
+
+    # 日麻（PROTOCOL v1.13 §12.8）：`waits[].yaku == false` 的牌面**荣和不了**（无役）。
+    # `is_tenpai` 仍是形听（流局罚符照收、仍可立直），所以这里只做「能不能和」的提示，
+    # 绝不把牌藏掉——藏了玩家会以为没听牌。classic / 老服务端没有这两个键，走不到这里。
+    dead = [item for item in items if not item.get("yaku", True)]
+    suffix = ""
+    if getattr(state, "tenpai_no_yaku", False):
+        # 暗杠**不破门清**（riichi::IsClosedHand 同口径）：只有吃/碰/明杠/加杠才让这手牌彻底没救
+        open_hand = any(getattr(meld, "type", "") != "ankan" for meld in state.melds)
+        suffix = "· 无役不能和" if open_hand else "· 无役（立直或自摸才可和）"
+    elif dead:
+        suffix = "· 灰牌无役"
+    suffix_w = name_font.size(suffix)[0] + 6 if suffix else 0
+
+    total = (pw + T.TENPAI_PREFIX_GAP + sum(item_w) + T.TENPAI_ITEM_GAP * max(0, len(items) - 1)
+             + suffix_w)
 
     # v2.1：底板收窄到「内容 + 内边距」并居中（原来是固定 800 px 的长条，
     # 两三个听牌面时会显得空荡）；外框矩形仍是 §4.3 冻结的 R_TENPAI。
@@ -126,7 +141,9 @@ def render(surface: pygame.Surface, ui: UiView, feel) -> None:
     for index, item in enumerate(items):
         remaining = item.get("remaining", 0)
         face = str(item.get("tile", "?"))
-        color = remaining_color(remaining)
+        # 无役的等待张：枚数改红字 + 牌面压灰（不能用删除线——那是 `remaining == 0` 的语义）
+        riichi_dead = not item.get("yaku", True)
+        color = T.NEG if riichi_dead else remaining_color(remaining)
         width = item_w[index]
         # F-TP-07：新增项用 WARN 底色高亮并淡出（同整条一起衰减）
         if tile_label(face) in new_tiles or face in new_tiles:
@@ -142,6 +159,10 @@ def render(surface: pygame.Surface, ui: UiView, feel) -> None:
             suit_size=T.FS_TILE_RIVER_SUIT,
             honor_size=T.FS_TILE_Z_RIVER_CENTER,
         )
+        if riichi_dead:
+            veil = pygame.Surface((T.TENPAI_TILE_W, T.TENPAI_TILE_H), pygame.SRCALPHA)
+            veil.fill((*T.PANEL[:3], 136))
+            layer.blit(veil, (cursor, (h - T.TENPAI_TILE_H) // 2))
         count_rect = (cursor + T.TENPAI_TILE_W + 3, 0, width - T.TENPAI_TILE_W - 3, h)
         W.draw_text(
             layer, counts[index], count_font, color, count_rect, W.ALIGN_LEFT,
@@ -154,6 +175,11 @@ def render(surface: pygame.Surface, ui: UiView, feel) -> None:
                 width=1,
             )
         cursor += width + T.TENPAI_ITEM_GAP
+
+    if suffix:
+        W.draw_text(
+            layer, suffix, count_font, T.NEG, (cursor + 2, 0, suffix_w, h), W.ALIGN_LEFT,
+        )
 
     layer.set_alpha(int(alpha))
     surface.blit(layer, (bar_x, y))

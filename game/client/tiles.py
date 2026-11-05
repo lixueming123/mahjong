@@ -125,7 +125,51 @@ def button_label(action: str, tiles: list[str] | None = None) -> str:
     if action == "chow":
         names = [tile_label(t) for t in tiles[:2]]
         return "吃 " + " ".join(names) if names else "吃"
-    return {"win": "胡", "pass": "过", "discard": "打牌"}.get(action, str(action))
+    return {"win": "胡", "pass": "过", "discard": "打牌", "riichi": "立直"}.get(action, str(action))
+
+
+# 日麻（mode=riichi）专用番种中文表。放在 tiles.py 是为了让**逻辑层**（broadcast.py）
+# 与**渲染层**（render/result.py）共用同一份表，避免两处各写一遍再漂移。
+# `yakuhai` 在日麻里含风牌，故覆盖成「役牌」而不是「箭刻」。
+RIICHI_YAKU_LABEL = {
+    "riichi": "立直",
+    "ippatsu": "一发",
+    "tsumo": "门前清自摸",
+    "chankan": "抢杠",
+    "tenhou": "天和",
+    "chiihou": "地和",
+    "haitei": "海底摸月",
+    "houtei": "河底捞鱼",
+    "chanta": "混全带幺九",
+    "junchan": "纯全带幺九",
+    "ryanpeikou": "二杯口",
+    "sankantsu": "三杠子",
+    "honroutou": "混老头",
+    "chiitoitsu": "七对子",
+    "chinitsu": "清一色",
+    "yakuhai": "役牌",
+    "dora": "宝牌",
+    "ura_dora": "里宝牌",
+    "kokushi": "国士无双",
+    "suuankou": "四暗刻",
+    "daisangen": "大三元",
+    "tsuuiisou": "字一色",
+    "ryuuiisou": "绿一色",
+    "chinroutou": "清老头",
+    "chuuren": "九莲宝灯",
+    "suukantsu": "四杠子",
+    "shousuushii": "小四喜",
+    "daisuushii": "大四喜",
+}
+
+# 满贯以上的中文分档（日麻结算行尾）。
+LIMIT_LABEL = {
+    "mangan": "满贯",
+    "haneman": "跳满",
+    "baiman": "倍满",
+    "sanbaiman": "三倍满",
+    "yakuman": "役满",
+}
 
 
 def remove_leftmost(tiles: list[str], face: str) -> bool:
