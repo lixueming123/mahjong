@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 os.environ["SDL_AUDIODRIVER"] = "dummy"
@@ -565,6 +566,14 @@ def main() -> int:
     face_dir = widgets_view._TILE_ASSET_DIR
     asset_count = len(list(face_dir.glob("*.png")))
     check(asset_count == 35, f"CC0 牌面贴图齐全：34 种牌 + 牌背，共 {asset_count} 张")
+    # v5.3：back.png 自带大红 (255,55,55)，必须统一染成 T.BACK 橙金；
+    # 暗杠占位 / 3D 牌墙顶 / 旋转牌背都走这条路径，别再漏掉染色。
+    back_surf = widgets_view.tile_back_surface(28, 36, plain=True)
+    back_pixel = back_surf.get_at((14, 18))[:3] if back_surf is not None else (0, 0, 0)
+    check(
+        all(abs(channel - target) <= 12 for channel, target in zip(back_pixel, T.BACK)),
+        f"牌背贴图染色为橙金 {back_pixel} ≈ {T.BACK}（不得用素材原色 255,55,55）",
+    )
     ink_ok, slots_note = True, []
     for label, size, (tw, th) in HONOR_SIZE_SLOTS:
         tile_surf = pygame.Surface((tw, th))
@@ -601,21 +610,81 @@ def main() -> int:
         f"对家（横排）字牌杠 4 张：{[m.tiles for m in seat2_melds]}",
     )
 
-    # 副露布局不溢出：四家均 meld_layout 横排（侧家与对家同款）
+    # 副露布局不溢出：本家横排、对家两列网格（v5.3）、侧家一组一行竖排（v5.1）
     overflows: list[str] = []
-    for area, melds, vertical, tag in (
-        (T.R_SELF_MELD, app.state.melds, False, "本家横排"),
-        (T.R_OPP_MELD, seat2_melds, False, "对家横排"),
-        (T.R_SIDE_L_MELD, app.state.seat_view(3).melds, False, "上家横排"),
-        (T.R_SIDE_R_MELD, app.state.seat_view(1).melds, False, "下家横排"),
+    for area, melds, vertical, per_row, tag in (
+        (T.R_SELF_MELD, app.state.melds, False, 0, "本家横排"),
+        (T.R_OPP_MELD, seat2_melds, False, T.OPP_MELD_GROUPS_PER_ROW, "对家两列网格"),
+        (T.R_SIDE_L_MELD, app.state.seat_view(3).melds, True, 0, "上家竖排"),
+        (T.R_SIDE_R_MELD, app.state.seat_view(1).melds, True, 0, "下家竖排"),
     ):
-        for group_rect, tiles in table_view.meld_layout(area, melds, vertical=vertical):
+        for group_rect, tiles in table_view.meld_layout(
+            area, melds, vertical=vertical, groups_per_row=per_row,
+        ):
             if group_rect.x < area[0] or group_rect.right > area[0] + area[2]:
                 overflows.append(f"{tag}组框 {group_rect}")
             for (tx, ty, tw, th), face in tiles:
                 if tx < area[0] or tx + tw > area[0] + area[2] or ty < area[1] or ty + th > area[1] + area[3]:
                     overflows.append(f"{tag}{face}@({tx},{ty},{tw},{th})")
     check(not overflows, f"字牌副露 3 张 / 4 张布局内均不溢出 {overflows or ''}")
+
+    # v5.1：侧家副露一组一行竖排 —— 即使吃满 4 组，也必须留在牌河外侧、不越界。
+    # 旧版把 4 组全压一行，pitch 触到 16px 下限后横向溢出，正好压上中央牌河。
+    four_melds = [
+        types.SimpleNamespace(tiles=["m1", "m2", "m3"]),
+        types.SimpleNamespace(tiles=["p5", "p5", "p5"]),
+        types.SimpleNamespace(tiles=["s7", "s8", "s9"]),
+        types.SimpleNamespace(tiles=["z1", "z1", "z1", "z1"]),
+    ]
+    side_intrusions: list[str] = []
+    for area, river, tag, left in (
+        (T.R_SIDE_L_MELD, T.R_SIDE_L_RIVER, "上家", True),
+        (T.R_SIDE_R_MELD, T.R_SIDE_R_RIVER, "下家", False),
+    ):
+        groups = table_view.meld_layout(area, four_melds, vertical=True)
+        if len(groups) != 4:
+            side_intrusions.append(f"{tag}只排了 {len(groups)} 行")
+        for group_rect, tiles in groups:
+            if left and group_rect.right >= river[0]:
+                side_intrusions.append(f"{tag}组框右沿 {group_rect.right} ≥ 牌河左沿 {river[0]}")
+            if not left and group_rect.x <= river[0] + river[2]:
+                side_intrusions.append(f"{tag}组框左沿 {group_rect.x} ≤ 牌河右沿 {river[0] + river[2]}")
+            if group_rect.bottom > area[1] + area[3]:
+                side_intrusions.append(f"{tag}组框下沿 {group_rect.bottom} 超出副露区")
+    check(not side_intrusions, f"侧家 4 组副露竖排不侵入牌河 {side_intrusions or ''}")
+
+    # v5.3：对家副露「每行最多 2 组、多的换行」——4 组不溢出，也不压别家副露 / 牌河 / 中央板。
+    # 旧区域 (756,168,300,32) 与下家副露列 (918,176,124,160) 相交，横排 4 组还会缩到糊掉。
+    opp_groups = table_view.meld_layout(
+        T.R_OPP_MELD, four_melds, vertical=False,
+        groups_per_row=T.OPP_MELD_GROUPS_PER_ROW,
+    )
+    opp_intrusions: list[str] = []
+    if len(opp_groups) != 4:
+        opp_intrusions.append(f"只排了 {len(opp_groups)} 组")
+    if len({int(rect.y) for rect, _ in opp_groups}) != 2:
+        opp_intrusions.append("没有换成两行")
+
+    def intersects(rect, box: tuple[int, int, int, int]) -> bool:
+        return (rect.x < box[0] + box[2] and rect.right > box[0]
+                and rect.y < box[1] + box[3] and rect.bottom > box[1])
+
+    forbidden = (
+        ("下家副露", T.R_SIDE_R_MELD),
+        ("右侧牌河", T.R_SIDE_R_RIVER),
+        ("对家牌河", T.R_OPP_RIVER),
+        ("中央情报板", T.R_CENTER_BOARD),
+    )
+    for group_rect, tiles in opp_groups:
+        for label, box in forbidden:
+            if intersects(group_rect, box):
+                opp_intrusions.append(f"组框 {group_rect} 压到{label} {box}")
+        if group_rect.bottom > T.R_OPP_MELD[1] + T.R_OPP_MELD[3]:
+            opp_intrusions.append(f"组框 {group_rect} 超出副露区下沿")
+        for (tx, ty, tw, th), face in tiles:
+            if tx < T.R_OPP_MELD[0] or tx + tw > T.R_OPP_MELD[0] + T.R_OPP_MELD[2]:
+                opp_intrusions.append(f"牌 {face} 横向溢出")
+    check(not opp_intrusions, f"对家 4 组副露两行网格不重叠 {opp_intrusions or ''}")
 
     # 含字牌场景的单帧耗时（update + render 一轮，30 次取最大）
     # 说明：测量前做 3 帧预热并暂停 GC，避免把「冷启动/GC 停顿」误判为渲染劣化
@@ -1639,6 +1708,57 @@ def main() -> int:
     tp_app.render_frame(present=False)   # 越界值渲染不崩溃
     check(True, "越界 remaining 渲染不崩溃")
 
+    # --- v1.15 §12.10：抢杠窗口（window="chankan"，额外带 tile）---
+    ck_app = make_app()
+    build_table_state(ck_app)
+    ck_app.state.apply({
+        "type": "action_request", "seq": 41, "deadline_ms": int(time.time() * 1000) + 15000,
+        "window": "chankan", "tile": "5m",
+        "options": [{"action": "win", "tiles": []}, {"action": "pass", "tiles": []}],
+    })
+    check(ck_app.state.window is not None and ck_app.state.window.window == "chankan",
+          "chankan 窗口被接受（不是「window 非法」）")
+    check(getattr(ck_app.state.window, "tile", None) == "5m",
+          f"抢杠牌面来自帧：{getattr(ck_app.state.window, 'tile', None)}")
+    ck_app.state.my_seat = 1
+    ck_app.now = time.monotonic()
+    buttons = actionbar.build_buttons(ck_app.state, 10000)
+    kinds = [b.kind for b in buttons]
+    check("win" in kinds and "pass" in kinds,
+          f"抢杠窗口同时给「胡」和「过」：{kinds}")
+    # `_status_text` 只读 ui.illegal_count，用一个最小替身即可（渲染层其余部分不参与）
+    status = actionbar._status_text(ck_app.state, types.SimpleNamespace(illegal_count=0))[0]
+    # tile_label 给的是中文牌名（"5 万"），断言只要求「抢杠 + 这张牌」
+    check(status.startswith("抢杠") and "5" in status, f"状态行写明抢杠牌面：{status!r}")
+    ck_app.render_frame(present=False)
+    check(True, "抢杠窗口渲染不崩溃")
+    ck_app.close_socket("抢杠用例结束")
+
+    # --- v1.13 §12.8：日麻「形听但无役」的提示字段 ---
+    # classic 帧不带 yaku/no_yaku ⇒ 缺省 yaku=True、no_yaku=False（老渲染路径完全不变）
+    check(tp_app.state.tenpai_waits[0].get("yaku", None) is None
+          or tp_app.state.tenpai_waits[0]["yaku"] is True and tp_app.state.tenpai_no_yaku is False,
+          "classic tenpai 帧不含 yaku 键时按「都有役」渲染")
+    tp_app.state.apply({"type": "tenpai", "tenpai_seq": 4, "is_tenpai": True, "no_yaku": True,
+                        "waits": [{"tile": "6s", "remaining": 3, "yaku": False},
+                                  {"tile": "9s", "remaining": 2, "yaku": False}]})
+    check(tp_app.state.tenpai_no_yaku is True, "no_yaku=true ⇒ 无役提示置位")
+    check([w["yaku"] for w in tp_app.state.tenpai_waits] == [False, False],
+          "waits[].yaku 逐张解析（副露无役：两张都荣和不了）")
+    check(tp_app.state.is_tenpai is True, "无役不改变 is_tenpai：形听照收罚符、仍可立直")
+    tp_app.now = time.monotonic()
+    tp_app.render_frame(present=False)   # 灰牌 + 红字 + 尾巴渲染不崩溃
+    check(True, "无役听牌条渲染不崩溃")
+    tp_app.state.apply({"type": "tenpai", "tenpai_seq": 5, "is_tenpai": True, "no_yaku": False,
+                        "waits": [{"tile": "1p", "remaining": 3, "yaku": False},
+                                  {"tile": "4p", "remaining": 2, "yaku": True}]})
+    check([w["yaku"] for w in tp_app.state.tenpai_waits] == [False, True],
+          "逐张有役（1p 无役 / 4p 断幺）不被抹平")
+    check(tp_app.state.tenpai_no_yaku is False, "no_yaku 只表示「全部无役」")
+    tp_app.now = time.monotonic()
+    tp_app.render_frame(present=False)
+    check(True, "混合有役/无役的听牌条渲染不崩溃")
+
     # F-TP-11 硬列表：game_end / game_start / match_end / 本家副露 / win 均清零
     for name, frame in (
         ("game_end", {"type": "game_end", "reason": "win", "results": []}),
@@ -2013,6 +2133,115 @@ def main() -> int:
     check(not quiet_app.bc.running and quiet_app.bc.plan is not None
           and not quiet_app.bc.plan.broadcast and not quiet_sent,
           "interlude 0 ⇒ 不播报（budget 4200 < 5100 档），且不发帧")
+    # --- 日麻（mode=riichi）结算播报：字幕 / 格子 / 语音 / 阶段 B 明细行四处同口径 ---
+    # 回归背景：日麻沿用 classic 六段文案时会念「2 番，2000 倍」「庄家加一番」「按 6 番封顶」，
+    # 与 S4「满贯」/ S5「2000 点」/ 阶段 B「合计 2 番 30 符（2000 点）」互相矛盾。
+    def _riichi_end(*, tsumo, yaku, han, fu, points, limit, per):
+        win = {
+            "seat": 0, "tile": "5m", "from_seat": None if tsumo else 2, "tsumo": tsumo,
+            "multiplier": points, "per_payer": per, "total": points,
+            "yaku": [{"id": yid, "han": h} for yid, h in yaku], "han": han,
+            "han_breakdown": {"base": sum(h for _, h in yaku), "tsumo": 0, "dealer": 1,
+                              "total": han},
+            "dealer_bonus": True, "fu": fu, "points": points, "limit": limit,
+        }
+        return {
+            "type": "game_end", "reason": "win_tsumo" if tsumo else "win_ron",
+            "round_index": 0, "dealer": 0, "renchan_count": 0, "match_will_continue": True,
+            "interlude_ms": 12000, "win": win,
+            "results": [{"seat": i, "delta_score": 0, "match_total": 0} for i in range(4)],
+        }
+
+    riichi_cases = [
+        ("荣和 2番30符", _riichi_end(tsumo=False, yaku=[("riichi", 1), ("tanyao", 1)],
+                                    han=2, fu=30, points=2000, limit="none", per=2000)),
+        ("自摸 满贯", _riichi_end(tsumo=True, yaku=[("riichi", 1), ("honitsu", 3)],
+                                 han=4, fu=30, points=8000, limit="mangan", per=2000)),
+        ("役满 fu=0", _riichi_end(tsumo=False, yaku=[("kokushi", 13)],
+                                  han=13, fu=0, points=32000, limit="yakuman", per=32000)),
+    ]
+    for label, frame in riichi_cases:
+        rplan = bc_mod.plan_for(frame)
+        captions = rplan.captions()
+        joined = " ｜ ".join(captions)
+        check(rplan.riichi_mode and rplan.points == frame["win"]["points"],
+              f"日麻 {label}：按 fu 键判玩法、点数取 win.points")
+        check(all(word not in joined for word in ("倍", "庄家加一番", "自摸不加番", "封顶", "分")),
+              f"日麻 {label}：字幕不得出现 classic 的倍/加成/封顶/分：{captions}")
+        check(f"{frame['win']['points']} 点" in joined and "符" in joined,
+              f"日麻 {label}：字幕必须写符与点数：{captions}")
+        check(bc_render._s3_text(rplan) == bc_mod._script_line(rplan.lines, "dealer").caption
+              and bc_render._s4_text(rplan) == bc_mod._script_line(rplan.lines, "cap").caption
+              and bc_render._s5_text(rplan) in bc_mod._script_line(rplan.lines, "total").caption,
+              f"日麻 {label}：S3/S4/S5 格子与段 3/4/5 字幕同源")
+        check(not any(cue.startswith(("vo_mult_", "vo_cap", "vo_dealer_bonus",
+                                     "vo_tsumo_no_add", "vo_pay_")) for cue in rplan.voice),
+              f"日麻 {label}：不念 classic 的倍率/封顶/加成/支付整句：{rplan.voice}")
+        check(all(cue in vo_mod.VOICE_MS for cue in rplan.voice),
+              f"日麻 {label}：只复用 VO 库里存在的句子：{rplan.voice}")
+        detail = result_view._yaku_detail(frame["win"])
+        check("庄家 +1" not in detail and f"（{frame['win']['points']} 点）" in detail,
+              f"日麻 {label}：阶段 B 明细行不写庄家加成、写点数：{detail}")
+
+    # 役满 fu=0 是判据的关键：用 `fu > 0` 判会把整局误判回 classic（「13 番，32000 倍」）
+    yplan = bc_mod.plan_for(riichi_cases[-1][1])
+    check(yplan.riichi_mode and "不计符" in yplan.captions()
+          and bc_render._s4_text(yplan) == "役满" and bc_render._s5_text(yplan) == "32000 点",
+          "日麻役满（fu=0）：仍按日麻播报，不写「0 符」，S4 显示役满")
+    # 番值不一致的 classic 整句（混一色两番 vs 日麻混一色 3 番）不得复用
+    check("vo_yaku_honitsu" not in bc_mod.plan_for(riichi_cases[1][1]).voice,
+          "日麻：役名相同但番值不同的 classic 语音整句不复用（字幕仍显示）")
+
+    # 日麻流局有听牌罚符，「本局不计分 / 四家均不计分」是假话
+    riichi_draw = {
+        "type": "game_end", "reason": "draw_exhausted", "round_index": 0, "dealer": 0,
+        "renchan_count": 0, "match_will_continue": True, "interlude_ms": 12000,
+        "win": None, "tenpai": [True, False, True, False],
+        "points_after": [26000, 24000, 26000, 24000],
+        "results": [{"seat": i, "delta_score": d, "match_total": 0}
+                    for i, d in enumerate((1500, -1500, 1500, -1500))],
+    }
+    dplan = bc_mod.plan_for(riichi_draw)
+    check(dplan.riichi_mode and "本局不计分" not in dplan.captions()
+          and "庄家连庄" in dplan.static_caption and dplan.voice == ("vo_mode_draw",),
+          f"日麻流局：字幕报听牌罚符与连庄，不念 classic 的不计分/连庄句：{dplan.captions()}")
+    check(all(text == "—" for text in (bc_render._s2_text(dplan), bc_render._s3_text(dplan),
+                                      bc_render._s4_text(dplan), bc_render._s5_text(dplan))),
+          "日麻流局：S2–S5 四格留空，不出现番/封顶/倍率")
+
+    # classic 逐字不变：仍写「倍」与「分」，日麻分支不得污染老玩法
+    classic_captions = bc_mod.plan_for(dict(GAME_END, interlude_ms=12000)).captions()
+    check(any("倍" in text for text in classic_captions)
+          and any("分" in text for text in classic_captions),
+          f"classic 播报文案不变（倍率/分）：{classic_captions}")
+
+    # 阶段 B 收付文案：日麻单位「点」+ 番符，classic 单位「分」（只抓文本，不真渲染）
+    from unittest.mock import patch
+
+    def _payment_text(game_end_frame: dict) -> str:
+        captured: list[str] = []
+        fake_state = types.SimpleNamespace(
+            result=game_end_frame, name_of=lambda seat: f"座位{seat}", remaining=70,
+        )
+        fake_ui = types.SimpleNamespace(
+            state=fake_state,
+            fonts=types.SimpleNamespace(get=lambda size, bold=False: None),
+        )
+        win = dict(game_end_frame["win"])
+        win.pop("tile", None)       # 跳过和牌张绘制，只留文本
+        win["seat"] = None          # 跳过赢家手牌绘制（收付文案在此之前已全部生成）
+        with patch.object(result_view.W, "draw_text",
+                          side_effect=lambda *args, **kwargs: captured.append(args[1])):
+            result_view._render_win_block(pygame.Surface((1, 1)), fake_ui, win)
+        return " ｜ ".join(captured)
+
+    r_pay = _payment_text(riichi_cases[0][1])
+    c_pay = _payment_text(dict(GAME_END, interlude_ms=12000))
+    check("点" in r_pay and "分" not in r_pay and "30 符" in r_pay,
+          f"日麻阶段 B：收付写「点」+ 符，不写「分」：{r_pay}")
+    check("分" in c_pay and "点" not in c_pay,
+          f"classic 阶段 B：收付文案逐字不变（仍写「分」）：{c_pay}")
+
     check(bc_app.state.screen == SCREEN_RESULT, "播报期停在局终页")
     bc_app.close_socket("播报用例结束")
     worst_app.close_socket("播报用例结束")

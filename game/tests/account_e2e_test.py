@@ -434,6 +434,13 @@ def run(args: argparse.Namespace) -> None:
               f"matches 按局一行：recent 应有 {ends_count} 行: {len(stats['recent'])}")
         check(all(entry["room_id"] == room_id for entry in stats["recent"]),
               f"recent must name the room: {stats['recent'][:2]}")
+        # 日麻接入：统计按玩法分桶，且每行带 mode（两套玩法的分数不可比，不能混算）
+        check(isinstance(stats.get("classic"), dict) and isinstance(stats.get("riichi"), dict),
+              f"stats must carry classic/riichi buckets: {sorted(stats)}")
+        check(stats["riichi"]["games"] == 0,
+              f"this match is classic, so the riichi bucket must be empty: {stats['riichi']}")
+        check(all(entry.get("mode") == "classic" for entry in stats["recent"]),
+              f"recent entries must carry mode=classic: {stats['recent'][:2]}")
         print(f"[account-e2e] match history recorded: games={stats['games']} "
               f"net_score={stats['net_score']}")
 
