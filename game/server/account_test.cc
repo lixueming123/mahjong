@@ -148,23 +148,34 @@ TEST(StatsFrameTest, UnaffectedByMatchResultsPersistence) {
   std::string error;
   std::optional<json::Value> parsed = json::Value::Parse(text, &error);
   ASSERT_TRUE(parsed.has_value()) << error;
-  // 字段集合冻结：既有 6 个键（type + 四项汇总 + recent），不得因 match_results 增删任何键
+  // 字段集合冻结：v1.12 起 8 个键 = 既有 6 个（type + 四项汇总 + recent，语义仍是 classic）
+  // + 新增的 classic / riichi 两个分桶。日麻的持点增减与零和得失分不可比，必须分桶。
   const auto& object = parsed->AsObject();
-  ASSERT_EQ(object.size(), 6u);
+  ASSERT_EQ(object.size(), 8u);
   EXPECT_NE(parsed->Find("type"), nullptr);
   EXPECT_NE(parsed->Find("games"), nullptr);
   EXPECT_NE(parsed->Find("wins"), nullptr);
   EXPECT_NE(parsed->Find("draws"), nullptr);
   EXPECT_NE(parsed->Find("net_score"), nullptr);
   EXPECT_NE(parsed->Find("recent"), nullptr);
-  // recent 的行形状冻结：5 个键
+  // 兼容重载只填 classic：顶层数字与 classic 桶必须一致，riichi 桶为空
+  const json::Value* classic = parsed->Find("classic");
+  const json::Value* riichi = parsed->Find("riichi");
+  ASSERT_NE(classic, nullptr);
+  ASSERT_NE(riichi, nullptr);
+  EXPECT_EQ(classic->Find("games")->AsInt(), 4);
+  EXPECT_EQ(classic->Find("net_score")->AsInt(), 6);
+  EXPECT_EQ(riichi->Find("games")->AsInt(), 0);
+  EXPECT_TRUE(riichi->Find("recent")->AsArray().empty());
+  // recent 的行形状：v1.12 起 6 个键（+mode，缺省 classic）
   const json::Value& entry = parsed->Find("recent")->AsArray().front();
-  EXPECT_EQ(entry.AsObject().size(), 5u);
+  EXPECT_EQ(entry.AsObject().size(), 6u);
   EXPECT_NE(entry.Find("room_id"), nullptr);
   EXPECT_NE(entry.Find("reason"), nullptr);
   EXPECT_NE(entry.Find("delta_score"), nullptr);
   EXPECT_NE(entry.Find("win"), nullptr);
   EXPECT_NE(entry.Find("ended_at"), nullptr);
+  EXPECT_EQ(entry.Find("mode")->AsString(), "classic");
 }
 
 // The three codes ACCOUNT_DESIGN.md §3.5 adds must not disturb the frozen eleven.

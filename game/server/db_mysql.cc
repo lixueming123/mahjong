@@ -234,6 +234,7 @@ bool DbActor::EnsureSchema() {
       "  account_id BIGINT UNSIGNED NOT NULL,"
       "  room_id VARCHAR(16) NOT NULL,"
       "  reason VARCHAR(16) NOT NULL,"
+      "  mode VARCHAR(16) NOT NULL DEFAULT 'classic',"
       "  delta_score INT NOT NULL,"
       "  win TINYINT NOT NULL,"
       "  ended_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
@@ -249,6 +250,7 @@ bool DbActor::EnsureSchema() {
       "  dealer_hands INT NOT NULL,"
       "  final_score INT NOT NULL,"
       "  final_rank TINYINT NOT NULL,"
+      "  mode VARCHAR(16) NOT NULL DEFAULT 'classic',"
       "  ended_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
       "  PRIMARY KEY (id),"
       "  KEY idx_match_results_account (account_id, id),"
@@ -259,6 +261,17 @@ bool DbActor::EnsureSchema() {
     if (mysql_query(mysql, statement) != 0) {
       spdlog::error("db: schema creation failed: {}", mysql_error(mysql));
       return false;
+    }
+  }
+  // 迁移：日麻接入前建的库没有 mode 列。重复列（1060）是「已经迁移过」，直接忽略；
+  // 其它错误只记 WARN —— 老库缺列时战绩写入会失败，但**不能**因此拒绝启动（§2.3）。
+  static constexpr const char* kMigrations[] = {
+      "ALTER TABLE matches ADD COLUMN mode VARCHAR(16) NOT NULL DEFAULT 'classic'",
+      "ALTER TABLE match_results ADD COLUMN mode VARCHAR(16) NOT NULL DEFAULT 'classic'",
+  };
+  for (const char* statement : kMigrations) {
+    if (mysql_query(mysql, statement) != 0 && mysql_errno(mysql) != 1060 /* ER_DUP_FIELDNAME */) {
+      spdlog::warn("db: migration skipped ({}): {}", statement, mysql_error(mysql));
     }
   }
   return true;
@@ -404,58 +417,70 @@ StatsOutcome DbActor::StatsJob(uint64_t account_id) {
   }
   MYSQL* mysql = static_cast<MYSQL*>(mysql_);
   const std::string id = std::to_string(account_id);
-  // COALESCE: an account with no finished game has SUM(x) = NULL, not 0.
-  const std::string totals =
-      "SELECT COUNT(*), COALESCE(SUM(delta_score), 0), COALESCE(SUM(win), 0),"
-      " COALESCE(SUM(reason = 'draw_exhausted'), 0) FROM matches WHERE account_id = " +
-      id;
-  if (mysql_query(mysql, totals.c_str()) != 0) {
-    spdlog::error("db: stats query failed: {}", mysql_error(mysql));
-    Disconnect();
-    return outcome;
-  }
-  MYSQL_RES* result = mysql_store_result(mysql);
-  if (result == nullptr) {
-    spdlog::error("db: stats query returned no result: {}", mysql_error(mysql));
-    return outcome;
-  }
-  MYSQL_ROW row = mysql_fetch_row(result);
-  if (row != nullptr) {
-    outcome.summary.games = ParseInt(row[0]);
-    outcome.summary.net_score = ParseInt(row[1]);
-    outcome.summary.wins = ParseInt(row[2]);
-    outcome.summary.draws = ParseInt(row[3]);
-  }
-  mysql_free_result(result);
 
-  // §3.4: the recent list is newest first and capped at kMaxRecentMatches.
-  const std::string recent =
-      "SELECT room_id, reason, delta_score, win, UNIX_TIMESTAMP(ended_at) FROM matches"
-      " WHERE account_id = " +
-      id + " ORDER BY id DESC LIMIT " + std::to_string(protocol::kMaxRecentMatches);
-  if (mysql_query(mysql, recent.c_str()) != 0) {
-    spdlog::error("db: recent matches query failed: {}", mysql_error(mysql));
-    Disconnect();
-    return outcome;
-  }
-  result = mysql_store_result(mysql);
-  if (result == nullptr) {
-    spdlog::error("db: recent matches query returned no result: {}", mysql_error(mysql));
-    return outcome;
-  }
-  while (MYSQL_ROW entry = mysql_fetch_row(result)) {
-    if (entry[0] == nullptr || entry[1] == nullptr) {
-      continue;
+  // 一种玩法一套统计。两套玩法的 net_score 语义不同（零和得失分 vs 25000 起持点），
+  // 合并成一个数字会直接误导玩家，所以按 mode 分桶查询、分桶返回。
+  auto load_mode = [&](std::string_view mode, protocol::StatsSummary* summary) -> bool {
+    const std::string filter = " AND mode = '" + std::string(mode) + "'";
+    // COALESCE: an account with no finished game has SUM(x) = NULL, not 0.
+    const std::string totals =
+        "SELECT COUNT(*), COALESCE(SUM(delta_score), 0), COALESCE(SUM(win), 0),"
+        " COALESCE(SUM(reason = 'draw_exhausted'), 0) FROM matches WHERE account_id = " +
+        id + filter;
+    if (mysql_query(mysql, totals.c_str()) != 0) {
+      spdlog::error("db: stats query failed: {}", mysql_error(mysql));
+      Disconnect();
+      return false;
     }
-    protocol::StatsEntry item;
-    item.room_id = entry[0];
-    item.reason = entry[1];
-    item.delta_score = ParseInt(entry[2]);
-    item.win = entry[3] != nullptr && std::strcmp(entry[3], "1") == 0;
-    item.ended_at = static_cast<int64_t>(ParseUint(entry[4]));
-    outcome.summary.recent.push_back(std::move(item));
+    MYSQL_RES* result = mysql_store_result(mysql);
+    if (result == nullptr) {
+      spdlog::error("db: stats query returned no result: {}", mysql_error(mysql));
+      return false;
+    }
+    if (MYSQL_ROW row = mysql_fetch_row(result)) {
+      summary->games = ParseInt(row[0]);
+      summary->net_score = ParseInt(row[1]);
+      summary->wins = ParseInt(row[2]);
+      summary->draws = ParseInt(row[3]);
+    }
+    mysql_free_result(result);
+
+    // §3.4: the recent list is newest first and capped at kMaxRecentMatches.
+    const std::string recent =
+        "SELECT room_id, reason, mode, delta_score, win, UNIX_TIMESTAMP(ended_at) FROM matches"
+        " WHERE account_id = " + id + filter + " ORDER BY id DESC LIMIT " +
+        std::to_string(protocol::kMaxRecentMatches);
+    if (mysql_query(mysql, recent.c_str()) != 0) {
+      spdlog::error("db: recent matches query failed: {}", mysql_error(mysql));
+      Disconnect();
+      return false;
+    }
+    result = mysql_store_result(mysql);
+    if (result == nullptr) {
+      spdlog::error("db: recent matches query returned no result: {}", mysql_error(mysql));
+      return false;
+    }
+    while (MYSQL_ROW entry = mysql_fetch_row(result)) {
+      if (entry[0] == nullptr || entry[1] == nullptr) {
+        continue;
+      }
+      protocol::StatsEntry item;
+      item.room_id = entry[0];
+      item.reason = entry[1];
+      item.mode = entry[2] != nullptr ? entry[2] : "classic";
+      item.delta_score = ParseInt(entry[3]);
+      item.win = entry[4] != nullptr && std::strcmp(entry[4], "1") == 0;
+      item.ended_at = static_cast<int64_t>(ParseUint(entry[5]));
+      summary->recent.push_back(std::move(item));
+    }
+    mysql_free_result(result);
+    return true;
+  };
+
+  if (!load_mode("classic", &outcome.snapshot.classic) ||
+      !load_mode("riichi", &outcome.snapshot.riichi)) {
+    return outcome;  // ok stays false
   }
-  mysql_free_result(result);
   outcome.ok = true;
   return outcome;
 }
@@ -466,10 +491,11 @@ void DbActor::RecordJob(const MatchRecord& record) {
     return;
   }
   MYSQL* mysql = static_cast<MYSQL*>(mysql_);
-  const std::string sql = "INSERT INTO matches (account_id, room_id, reason, delta_score, win) VALUES (" +
-                          std::to_string(record.account_id) + ", '" + Escape(record.room_id) + "', '" +
-                          Escape(record.reason) + "', " + std::to_string(record.delta_score) + ", " +
-                          (record.win ? "1" : "0") + ")";
+  const std::string sql =
+      "INSERT INTO matches (account_id, room_id, reason, mode, delta_score, win) VALUES (" +
+      std::to_string(record.account_id) + ", '" + Escape(record.room_id) + "', '" +
+      Escape(record.reason) + "', '" + Escape(record.mode) + "', " +
+      std::to_string(record.delta_score) + ", " + (record.win ? "1" : "0") + ")";
   if (mysql_query(mysql, sql.c_str()) != 0) {
     spdlog::error("db: recording the match of room {} failed: {}", record.room_id, mysql_error(mysql));
     const unsigned int error = mysql_errno(mysql);
@@ -486,10 +512,11 @@ void DbActor::RecordMatchResultJob(const MatchResultRecord& record) {
   }
   MYSQL* mysql = static_cast<MYSQL*>(mysql_);
   const std::string sql =
-      "INSERT INTO match_results (account_id, room_id, hands_played, dealer_hands, final_score, final_rank) VALUES (" +
-      std::to_string(record.account_id) + ", '" + Escape(record.room_id) + "', " +
-      std::to_string(record.hands_played) + ", " + std::to_string(record.dealer_hands) + ", " +
-      std::to_string(record.final_score) + ", " + std::to_string(record.final_rank) + ")";
+      "INSERT INTO match_results (account_id, room_id, mode, hands_played, dealer_hands, final_score, final_rank) VALUES (" +
+      std::to_string(record.account_id) + ", '" + Escape(record.room_id) + "', '" +
+      Escape(record.mode) + "', " + std::to_string(record.hands_played) + ", " +
+      std::to_string(record.dealer_hands) + ", " + std::to_string(record.final_score) + ", " +
+      std::to_string(record.final_rank) + ")";
   if (mysql_query(mysql, sql.c_str()) != 0) {
     const unsigned int error = mysql_errno(mysql);
     // v1.3 §4 第 1 条：重复写入（同 room_id + account_id 命中 UNIQUE 键）记 WARN 并忽略，绝不重试。

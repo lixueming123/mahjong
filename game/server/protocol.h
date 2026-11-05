@@ -140,13 +140,13 @@ inline bool IsValidNickname(std::string_view name) {
 inline bool IsValidTileCode(std::string_view tile) { return ParseTile(tile).has_value(); }
 
 // ---- §4.6 action names ----------------------------------------------------------------
-// The seven names are frozen by §4.6 (v1.6: 5 → 7, +ankan/kakan), so the vocabulary lives here
-// next to the tile alphabet. Whether an action is legal *in the current window* is a game-level
-// question that stays in room.cc (ILLEGAL_ACTION); this only says the client spelled a real
-// action.
+// The eight names are the wire vocabulary (v1.6: 5 → 7, +ankan/kakan；日麻: +riichi), so the
+// vocabulary lives here next to the tile alphabet. Whether an action is legal *in the current
+// window* is a game-level question that stays in room.cc (ILLEGAL_ACTION); this only says the
+// client spelled a real action.
 inline bool IsKnownActionName(std::string_view action) {
   return action == "pass" || action == "pong" || action == "chow" || action == "kong" ||
-         action == "ankan" || action == "kakan" || action == "win";
+         action == "ankan" || action == "kakan" || action == "win" || action == "riichi";
 }
 
 // ---- §5.2 error frame -----------------------------------------------------------------
@@ -166,6 +166,8 @@ struct StatsEntry {
   int delta_score = 0;
   bool win = false;
   int64_t ended_at = 0;  // Unix seconds
+  // classic / riichi（日麻接入：两种玩法的分数不可比）。放最后：既有聚合初始化不动。
+  std::string mode = "classic";
 };
 
 struct StatsSummary {
@@ -176,8 +178,18 @@ struct StatsSummary {
   std::vector<StatsEntry> recent;  // newest first, at most kMaxRecentMatches entries
 };
 
+// 按玩法分开的统计。classic 的四个字段同时是 stats 帧的**顶层字段**（老客户端不受影响），
+// 日麻放在 `riichi` 子对象里：两套玩法的 net_score 语义不同（零和得失分 vs 25000 起持点），
+// 混在一个数字里会直接误导玩家。
+struct StatsSnapshot {
+  StatsSummary classic;
+  StatsSummary riichi;
+};
+
 inline constexpr size_t kMaxRecentMatches = 10;
 
+std::string StatsFrame(const StatsSnapshot& snapshot);
+// 兼容重载：只填 classic 的调用（内部与单测）等价于「riichi 桶为空」。
 std::string StatsFrame(const StatsSummary& summary);
 
 }  // namespace mahjong::protocol

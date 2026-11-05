@@ -142,6 +142,11 @@ ex_actor::ActorRef<RoomActor> LobbyActor::FindRoom(const std::string& room_id) c
 }
 
 stdexec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player) {
+  co_await CreateRoomWithMode(std::move(conn), player, GameMode::kClassic);
+}
+
+stdexec::task<void> LobbyActor::CreateRoomWithMode(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player,
+                                                   GameMode mode, GameLength length) {
   // Reserve the player, then spawn. A second create_room sees `creating_` and is rejected; a
   // disconnect erases the reservation so the commit below does not register a room whose owner
   // is already gone. The reservation is the whole cross-await invariant — no lock is involved
@@ -188,7 +193,8 @@ stdexec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn
   try {
     // The room gets the lobby's ref up front: it reports finished rounds by message, and it
     // installs its own timeout scheduler in ExActorOnSpawned (nothing serializable to send).
-    room = co_await ex_actor::Spawn<RoomActor>(room_id, room_seed, action_timeout_ms_, seats, timer, -1, -1, self);
+    room = co_await ex_actor::Spawn<RoomActor>(room_id, room_seed, action_timeout_ms_, seats, timer, -1, -1, self,
+                                               TimeoutScheduler {}, RoomFinishedCallback {}, mode, length);
   } catch (const std::exception& e) {
     // Answering happens below: a `co_await` is not allowed inside a catch handler.
     spawn_error = e.what();
@@ -245,8 +251,9 @@ stdexec::task<void> LobbyActor::OnRoomFinished(GameSettlement settlement) {
       if (seat.is_bot || seat.player.account_id == 0) {
         continue;  // guests and bots have no history to keep (§4.2)
       }
-      ActorSendScope().spawn(db_.RecordMatch(
-          MatchRecord {seat.player.account_id, settlement.room_id, settlement.reason, seat.delta_score, seat.winner}));
+      ActorSendScope().spawn(db_.RecordMatch(MatchRecord {seat.player.account_id, settlement.room_id,
+                                                          settlement.reason, seat.delta_score, seat.winner,
+                                                          settlement.mode}));
     }
   }
   // ACCOUNT_DESIGN.md v1.3 §4 item 7: the match summary is written ONCE per match (at
@@ -261,6 +268,7 @@ stdexec::task<void> LobbyActor::OnRoomFinished(GameSettlement settlement) {
       MatchResultRecord result;
       result.account_id = seat.player.account_id;
       result.room_id = settlement.room_id;
+      result.mode = settlement.mode;
       result.hands_played = settlement.hands_played;
       result.dealer_hands = settlement.dealer_hands[seat_index];
       result.final_score = settlement.totals[seat_index];

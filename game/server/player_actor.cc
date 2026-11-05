@@ -219,7 +219,7 @@ void PlayerActor::RequestStats() {
   if (session_.account_id() == 0) {
     // §3.3: a guest has no account, so nothing was ever recorded. A zeroed payload is not an
     // error — the client then needs no special case for guest sessions.
-    conn_->SendFrame(protocol::StatsFrame(protocol::StatsSummary {}));
+    conn_->SendFrame(protocol::StatsFrame(protocol::StatsSnapshot {}));
     return;
   }
   if (db_.IsEmpty() || self_ref_.IsEmpty()) {
@@ -273,7 +273,7 @@ void PlayerActor::OnStatsResult(StatsOutcome outcome) {
     AccountServiceUnavailable();
     return;
   }
-  conn_->SendFrame(protocol::StatsFrame(outcome.summary));
+  conn_->SendFrame(protocol::StatsFrame(outcome.snapshot));
 }
 
 bool PlayerActor::AcceptAccount(const AuthOutcome& outcome) {

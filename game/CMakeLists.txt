@@ -13,6 +13,28 @@ target_link_libraries(mahjong_rules_test PRIVATE mahjong_rules GTest::gtest_main
 add_test(NAME mahjong_rules_test COMMAND mahjong_rules_test)
 set_tests_properties(mahjong_rules_test PROPERTIES TIMEOUT 60)
 
+# 日麻规则库：复用 mahjong_rules 的牌张/拆法/听牌/副露原语，只重写役种、符与点数表
+# （规格 game/docs/GAME_DESIGN_RIICHI_DRAFT.md §2.2/§2.3）
+add_library(riichi_rules STATIC server/riichi_rules.cc)
+target_include_directories(riichi_rules PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(riichi_rules PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_link_libraries(riichi_rules PUBLIC mahjong_rules)
+
+add_executable(riichi_rules_test server/riichi_rules_test.cc)
+target_link_libraries(riichi_rules_test PRIVATE riichi_rules GTest::gtest_main
+                                                GTest::gmock)
+add_test(NAME riichi_rules_test COMMAND riichi_rules_test)
+set_tests_properties(riichi_rules_test PROPERTIES TIMEOUT 60)
+
+# 日麻房间冒烟：模式分派 / 王牌切分 / 持点 / 立直拒绝（算分由 riichi_rules_test 负责）
+add_executable(riichi_room_test server/riichi_room_test.cc server/room.cc server/timer.cc
+                               server/json.cc server/protocol.cc)
+target_link_libraries(riichi_room_test PRIVATE ex_actor mahjong_rules riichi_rules GTest::gtest_main
+                                                GTest::gmock)
+add_test(NAME riichi_room_test COMMAND riichi_room_test)
+set_tests_properties(riichi_room_test PROPERTIES TIMEOUT 60)
+
+
 # 账号存储（ACCOUNT_DESIGN.md §2）：用系统装的 libmysqlclient，不走 CPM
 # （CPM 在配置期要联网拉源码，而 MySQL 客户端本来就是本机的一个库）。
 # 找不到库时不报错，只退化成 db_stub.cc —— 与服务端「MySQL 连不上」是同一种降级行为（§2.3）。
@@ -67,7 +89,7 @@ add_executable(
   server/room.cc
   server/timer.cc
   server/gateway.cc)
-target_link_libraries(mahjong_server PRIVATE ex_actor mahjong_rules mahjong_db)
+target_link_libraries(mahjong_server PRIVATE ex_actor mahjong_rules riichi_rules mahjong_db)
 if(MAHJONG_MYSQL_FOUND)
   # libmysqlclient's install name is @rpath/libmysqlclient.<n>.dylib, so without this the
   # binary links but fails to launch with "Library not loaded". Its own OpenSSL is resolved
@@ -120,7 +142,7 @@ endif()
 # t4：RoomActor 状态机单测（回合驱动 / seq 作废 / 非法操作 / AI / 结算零和）
 add_executable(mahjong_room_test server/mahjong_room_test.cc server/room.cc server/timer.cc
                                 server/json.cc server/protocol.cc)
-target_link_libraries(mahjong_room_test PRIVATE ex_actor mahjong_rules GTest::gmock)
+target_link_libraries(mahjong_room_test PRIVATE ex_actor mahjong_rules riichi_rules GTest::gmock)
 add_test(NAME mahjong_room_test COMMAND mahjong_room_test)
 set_tests_properties(mahjong_room_test PROPERTIES TIMEOUT 120)
 
@@ -128,7 +150,7 @@ set_tests_properties(mahjong_room_test PROPERTIES TIMEOUT 120)
 # 量的是「一局游戏要多少 CPU」和「一个核能带几张桌」，不是通过/失败，所以不注册成 ctest。
 add_executable(mahjong_room_bench server/room_bench.cc server/room.cc server/timer.cc server/json.cc
                                  server/protocol.cc)
-target_link_libraries(mahjong_room_bench PRIVATE ex_actor mahjong_rules)
+target_link_libraries(mahjong_room_bench PRIVATE ex_actor mahjong_rules riichi_rules)
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   # The tree is configured Debug; a load test at -O0 measures the build type, not the room. This
   # optimizes only this target's own sources (the framework's static lib stays as configured).
@@ -139,7 +161,7 @@ endif()
 add_executable(mahjong_lobby_test server/lobby_test.cc server/lobby.cc server/room.cc server/connection.cc
                                   server/player_actor.cc server/player_session_agent.cc server/player_lobby_agent.cc server/player_room_agent.cc server/frame_parser.cc server/net.cc server/timer.cc
                                   server/json.cc server/protocol.cc)
-target_link_libraries(mahjong_lobby_test PRIVATE ex_actor mahjong_rules mahjong_db GTest::gtest_main GTest::gmock)
+target_link_libraries(mahjong_lobby_test PRIVATE ex_actor mahjong_rules riichi_rules mahjong_db GTest::gtest_main GTest::gmock)
 add_test(NAME mahjong_lobby_test COMMAND mahjong_lobby_test)
 set_tests_properties(mahjong_lobby_test PROPERTIES TIMEOUT 60)
 
@@ -168,4 +190,13 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/account_e2e_test.py
             --server-bin $<TARGET_FILE:mahjong_server>)
   set_tests_properties(account_e2e_test PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
+endif()
+
+# 日麻端到端：真服务端 + create_room{"mode":"riichi"} 打完一局，验牌山切分/持点/和牌载荷
+if(Python3_Interpreter_FOUND)
+  add_test(
+    NAME riichi_e2e_test
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/riichi_e2e_test.py
+            --server-bin $<TARGET_FILE:mahjong_server>)
+  set_tests_properties(riichi_e2e_test PROPERTIES TIMEOUT 180)
 endif()

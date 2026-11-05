@@ -34,12 +34,32 @@
 #include "json_rfl.h"
 #include "mahjong_rules.h"
 #include "player.h"
+#include "riichi_rules.h"
 #include "seat_endpoint.h"
 #include "timer.h"
 
 namespace mahjong {
 
 inline constexpr int kSeatCount = 4;
+
+// 玩法（mode）。日麻接入见 game/docs/GAME_DESIGN_RIICHI_DRAFT.md：
+//   kClassic = 现行玩法（番数制、无立直/宝牌/振听），默认值，行为与之前逐字节一致；
+//   kRiichi  = 日麻（符+番、立直、振听、宝牌、点数制）。
+enum class GameMode : uint8_t { kClassic = 0, kRiichi = 1 };
+
+// 协议里的玩法名：create_room 的 "mode" 字段。未知值返回 nullopt（调用方回 BAD_REQUEST）。
+std::optional<GameMode> ParseGameMode(std::string_view name);
+std::string_view GameModeName(GameMode mode);
+
+// 局数（只对日麻有意义；classic 由 C15 冻结为 4 局，传什么都按 4 局走）：
+//   kTonpu   = 东场 4 局（默认，短局）
+//   kHanchan = 半庄 8 局（东场 4 + 南场 4，场风 0 → 1）
+enum class GameLength : uint8_t { kTonpu = 0, kHanchan = 1 };
+
+std::optional<GameLength> ParseGameLength(std::string_view name);
+std::string_view GameLengthName(GameLength length);
+// 这个玩法下的一共几局：classic 恒 4（C15），日麻按 kTonpu/kHanchan 取 4/8。
+int RoundCountOf(GameMode mode, GameLength length);
 
 // Schedules the frozen "window timeout" message: after |delay_ms| the scheduler must call
 // RoomActor::OnWindowTimeout(|window_seq|). Production installs it in ExActorOnSpawned from the
@@ -62,6 +82,7 @@ struct SettledSeat {
 struct GameSettlement {
   std::string room_id;
   std::string reason;              // win_ron / win_tsumo / draw_exhausted
+  std::string mode;                // classic / riichi（lobby 写战绩时落库）
   std::vector<SettledSeat> seats;  // always kSeatCount entries, in seat order
   bool match_over = false;         // true = the match_end has been/will be broadcast (§5.15)
   // ---- v1.3 场终快照（match_over 时有效；lobby 据此写 match_results，B3）----
@@ -257,7 +278,9 @@ class RoomActor {
   RoomActor(std::string room_id, uint64_t seed, int action_timeout_ms, std::vector<RoomSeat> seats,
             std::shared_ptr<WindowTimer> timer, int ai_delay_ms = -1, int inter_hand_delay_ms = -1,
             ex_actor::ActorRef<RoomOwner> owner = {}, TimeoutScheduler timeout_scheduler = {},
-            RoomFinishedCallback finished_for_test = {});
+            RoomFinishedCallback finished_for_test = {},
+            GameMode mode = GameMode::kClassic,
+            GameLength length = GameLength::kTonpu);
 
   // ex_actor hands every actor its own ref right after construction. The room needs it to post
   // the frozen window timeout back to itself, so it installs the production scheduler here
@@ -297,6 +320,9 @@ class RoomActor {
 
   // Introspection (logs and tests).
   const std::string& room_id() const { return room_id_; }
+  GameMode mode() const { return mode_; }
+  GameLength length() const { return length_; }
+  int round_wind() const { return round_wind_; }
   bool game_started() const { return game_started_; }
   // v1.6（C13）: `game_finished` is the MATCH end (the room is done for good); a round that has
   // settled but is waiting for the next game_start is `round_finished`, not `game_finished`.
@@ -310,14 +336,14 @@ class RoomActor {
   int next_wall_index() const { return next_index_; }
   // v1.6（C1 场次状态）
   int round_index() const { return round_index_; }        // 0-based, 0..round_count-1（连庄不动）
-  int round_count() const { return round_count_; }        // 恒 4
+  int round_count() const { return round_count_; }        // classic 4 / 日麻 东场 4、半庄 8
   int renchan_count() const { return renchan_count_; }    // 本场累计连庄次数
   int hands_played() const { return hands_played_; }      // 已下发的 game_end 次数（含连庄）
   int match_total_of(int seat) const { return match_totals_[static_cast<size_t>(seat)]; }
   // "" when no window is open, otherwise "discard" or "claim" (PROTOCOL.md §5.7).
   std::string CurrentWindow() const {
     if (discard_window_open_) return "discard";
-    if (claim_open_) return "claim";
+    if (claim_open_) return claim_chankan_ ? "chankan" : "claim";
     return "";
   }
   const std::vector<Tile>& hand_of(int seat) const { return hands_[static_cast<size_t>(seat)]; }
@@ -385,6 +411,18 @@ class RoomActor {
     int han = 0;                           // 封顶后番数（= han_breakdown.total）
     int dealer_bonus = 0;                  // 0/1
     bool rinshan = false;
+    // ---- 日麻（mode == kRiichi）专用；classic 下全部保持默认值 ----
+    int fu = 0;                              // 符（classic 恒 0）
+    int points = 0;                          // 和牌点数（classic = multiplier）
+    std::string limit;                       // none/mangan/haneman/baiman/sanbaiman/yakuman
+    bool riichi = false;                     // 本局和牌者是否立直
+    int dora = 0;
+    int ura_dora = 0;
+    int kyoutaku = 0;                        // 结算后剩余供托（通常 0）
+    int honba = 0;                           // 本局本场数（支付已计入 delta）
+    std::vector<Tile> dora_indicators;
+    std::array<int, kSeatCount> points_after {};  // 本局结束后的持点（日麻排名口径）
+    std::array<bool, kSeatCount> tenpai {};       // 荒庄时的听牌家（日麻罚符与 UI 用）
     // ---- v1.3 场终快照（仅 match_over == true 时有意义；B3 落库用，与 match_end 同源）----
     int hands_played = 0;                  // 实际计入局数（D2 口径：含截断）
     std::array<int, kSeatCount> dealer_hands {};  // 各座位本场坐庄手数（含连庄）
@@ -399,13 +437,17 @@ class RoomActor {
   stdexec::task<void> OpenDiscardWindow(bool win_check, std::optional<Tile> drawn_tile);
   stdexec::task<void> ApplyDiscard(int seat, Tile tile);
   stdexec::task<void> OpenClaimWindow(int from_seat, Tile tile, const std::array<bool, kSeatCount>& recipients,
-                                   const std::array<std::vector<Option>, kSeatCount>& options);
+                                   const std::array<std::vector<Option>, kSeatCount>& options,
+                                   bool chankan = false);
   stdexec::task<void> ResolveClaimWindow();
   stdexec::task<void> ApplyMeld(int seat, const std::string& action, const std::vector<Tile>& client_tiles, int from_seat,
                              Tile claimed_tile);
   // v1.6（自理杠）：ankan / kakan 只在本家打牌窗口；补摸 1 张后重开打牌窗口
   stdexec::task<void> ApplySelfKan(int seat, const std::string& action, const std::vector<Tile>& client_tiles);
-  stdexec::task<void> EndRoundWithWin(int winner_seat, int from_seat, Tile winning_tile, bool tsumo);
+  // 抢杠窗口（v1.15）：加杠那张牌先给三家一次「和/过」，没人抢才真正把杠落地。
+  stdexec::task<void> OpenChankanWindow(int kan_seat, Tile tile);
+  stdexec::task<void> EndRoundWithWin(int winner_seat, int from_seat, Tile winning_tile, bool tsumo,
+                                      bool is_chankan = false);
   stdexec::task<void> EndRoundWithDraw();
   // v1.6（C7 局终 → 场终）：totals 累加 → 连庄/轮庄 → game_end → RecordMatch（C10）→
   // 场终 match_end，否则 kRoundEnd + 武装 C6 推进令牌（C5：co_return，推进走定时消息）。
@@ -481,6 +523,30 @@ class RoomActor {
   std::string BuildMatchEnd() const;
   stdexec::task<void> BroadcastSettlement(const Settlement& settlement);
 
+  // ---- 日麻（mode == kRiichi）--------------------------------------------------------
+  // 打牌 / 鸣牌窗口的选项：classic 直接转发规则库，日麻额外叠加立直与振听过滤。
+  std::vector<Option> DiscardOptionsFor(int seat) const;
+  std::vector<Option> ClaimOptionsFor(int seat, Tile tile, bool is_next_player, int from_seat) const;
+  // 日麻：没有役就不能和（宝牌不算役）。classic 恒 true。房间在这里用**完整上下文**判，
+  // 这样立直/一发/海底/杠上开花这类「状态役」也能算进去。
+  bool HasYakuForWin(int seat, Tile winning_tile, bool tsumo, int from_seat,
+                     bool is_chankan = false) const;
+  // 和牌形：日麻要额外认国士无双 —— 共享的 `IsWinningHand` 是番数制口径，没有这个役。
+  bool IsWinShape(const std::vector<Tile>& concealed, const std::vector<Meld>& melds,
+                  Tile winning_tile, bool tsumo) const;
+  bool IsFuriten(int seat) const;
+  bool RiichiDeclared(int seat) const { return riichi_[static_cast<size_t>(seat)]; }
+  // 立直宣言（与打牌同一条 action）：校验后扣 1000 供托、置位，再由调用方打出该牌。
+  bool CanDeclareRiichiNow(int seat, Tile discard) const;
+  stdexec::task<void> DeclareRiichi(int seat);
+  // 岭上补牌：日麻从王牌取、并用手牌山顶牌补满王牌；classic 仍从牌山取。
+  Tile DrawReplacementTile();
+  void FlipDoraIndicator();
+  riichi::WinContext BuildRiichiContext(int winner_seat, int from_seat, bool tsumo,
+                                        Tile winning_tile, bool is_chankan = false) const;
+  void ApplyDeltaToPoints(const std::array<int, kSeatCount>& delta);
+  bool BotShouldRiichi(int seat) const;
+
   // ---- state ------------------------------------------------------------------------
   std::string room_id_;
   uint64_t seed_;
@@ -492,6 +558,24 @@ class RoomActor {
   std::vector<Tile> wall_;
   int next_index_ = 0;
   int remaining_ = 0;
+  // 可摸区上界：classic = 136（整副牌都在牌山）；日麻 = 122（136 - 14 张王牌）。
+  // `remaining_` 一律派生自 drawable_end_ - next_index_，禁止自减（RULESET §1.5 红线）。
+  int drawable_end_ = kTileCount;
+  GameMode mode_ = GameMode::kClassic;
+  GameLength length_ = GameLength::kTonpu;  // 只影响 round_count_ 与场风轮转（classic 恒 4 局）
+  // 日麻王牌 14 张：0..3 岭上牌 / 4..8 宝牌指示牌 / 9..13 里宝指示牌。
+  std::vector<Tile> dead_wall_;
+  int dead_draw_index_ = 0;
+  std::vector<Tile> dora_indicators_;  // 已翻开的指示牌（classic 恒为空）
+  std::array<int, kSeatCount> points_ {};  // 日麻持点（classic 不使用）
+  int kyoutaku_ = 0;                       // 供托（立直棒总数 × 1000）
+  int honba_ = 0;                          // 本场数
+  int round_wind_ = 0;                     // 场风：0 东 / 1 南（每局开始时按 round_index_ 推导）
+  std::array<bool, kSeatCount> riichi_ {};       // 本局已宣言立直
+  std::array<bool, kSeatCount> ippatsu_ {};      // 一发仍然有效（鸣牌后清除）
+  std::array<bool, kSeatCount> ippatsu_armed_ {};  // 宣言后尚未跨过「下一摸」
+  std::array<bool, kSeatCount> furiten_ever_ {}; // 见逃振听（本局内持久）
+  bool draw_dealer_tenpai_ = false;              // 荒庄时庄家是否听牌（决定连庄/轮庄）
   int dealer_ = 0;
   int current_seat_ = 0;
   uint64_t seq_ = 0;
@@ -500,7 +584,7 @@ class RoomActor {
 
   // v1.6（C1 场次状态）。跨局存活、绝不在 StartRound 里重置：room_id_/seats_/seq_/match_totals_。
   int round_index_ = 0;   // 0-based；连庄不推进，轮庄 +1（GAME_DESIGN v1.10 §3.3）
-  int round_count_ = 4;   // 恒 4（C15 max_rounds）
+  int round_count_ = 4;   // classic 恒 4（C15）；日麻 4（东场）/ 8（半庄）
   int hands_played_ = 0;  // 已下发的 game_end 次数（含连庄），上界 8
   int renchan_count_ = 0; // 本场累计连庄次数；> kMaxRenchan 强制场终（C15）
   std::array<int, kSeatCount> match_totals_ {};
@@ -508,7 +592,8 @@ class RoomActor {
   // v1.7 §5.16：`tenpai_seq` 是**每座位一条的独立单调计数器**（从 1 起、跨局不重置；
   // 与 room.seq 完全解耦——挂 room.seq 会把正常 action_request 判成过期）。
   std::array<uint64_t, kSeatCount> tenpai_seq_ {};
-  // C15 双闸：单场上界 = 4 局 + 4 连庄 = 8 次 game_end
+  // C15 双闸：classic 单场上界 = 4 局 + 4 连庄 = 8 次 game_end；
+  // 日麻用 round_count_ 作连庄上限（东场 8 / 半庄 16 次 game_end 封顶），不吃这个 4。
   static constexpr int kMaxRenchan = 4;
 
   // v1.6（C6 局间推进令牌）：true = 本局的推进消息已武装，等定时到达
@@ -529,6 +614,9 @@ class RoomActor {
 
   // claim window
   bool claim_open_ = false;
+  // 本次鸣牌窗口是「抢杠」而不是「抢打出的牌」：没人抢时要回到加杠者的自理杠流程，
+  // 而不是把下家推进成庄家（ResolveClaimWindow 的两个分支就靠它区分）。
+  bool claim_chankan_ = false;
   int claim_from_seat_ = -1;
   Tile claim_tile_ {};
   std::array<bool, kSeatCount> claim_recipient_ {};

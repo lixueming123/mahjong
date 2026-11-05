@@ -88,6 +88,7 @@ struct MatchRecord {
   std::string reason;  // win_ron / win_tsumo / draw_exhausted
   int delta_score = 0;
   bool win = false;
+  std::string mode = "classic";  // classic / riichi（stats 按玩法分桶，绝不混算）
 };
 
 // One finished MATCH per account, stored in `match_results` (ACCOUNT_DESIGN.md v1.3 §4 item 7).
@@ -96,6 +97,7 @@ struct MatchRecord {
 struct MatchResultRecord {
   uint64_t account_id = 0;
   std::string room_id;
+  std::string mode = "classic";
   int hands_played = 0;  // 实际计入局数（D2 口径：无截断 = round_count，截断场更小）
   int dealer_hands = 0;  // 该座位本场坐庄的手数（含连庄的额外手）
   int final_score = 0;   // 本场累计得失分（同 room_id 四行之和 = 0）
@@ -106,7 +108,7 @@ struct MatchResultRecord {
 // failure from "no games played" by the payload alone — hence the explicit flag.
 struct StatsOutcome {
   bool ok = false;
-  protocol::StatsSummary summary;
+  protocol::StatsSnapshot snapshot;  // classic 同时是 stats 帧的兼容顶层字段
 };
 
 class DbActor {

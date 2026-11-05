@@ -56,6 +56,10 @@ class LobbyActor : public RoomOwner {
   void SetSelfRef(ex_actor::ActorRef<LobbyActor> self);
 
   stdexec::task<void> CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player);
+  // 带玩法的建房（create_room 的 "mode" 字段）。保留 CreateRoom(conn, player) 的既有签名，
+  // 因为单元测试与既有调用点都按两条消息参数写死；这里只多一个参数，行为完全一致。
+  stdexec::task<void> CreateRoomWithMode(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player,
+                                         GameMode mode, GameLength length = GameLength::kTonpu);
   stdexec::task<void> JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player, std::string room_id);
   // Open (not yet started) rooms, so the lobby screen can offer them.
   stdexec::task<void> ListRooms(ex_actor::ActorRef<SeatEndpoint> conn);
