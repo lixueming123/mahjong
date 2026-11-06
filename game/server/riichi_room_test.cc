@@ -280,6 +280,121 @@ TEST_F(RiichiRoomTest, LengthSelectsRoundCount) {
   EXPECT_EQ(tonpu->Find("round_count")->AsInt(), 4);
 }
 
+// 赤 5（v1.18）：日麻房会把 5 的第 4 张下发成 `0m`/`0p`/`0s`；classic 房永远只下发 `1-9` 开头。
+// 发牌是种子确定的，所以这里换成不同种子把「至少见过一张赤牌」跑成确定性断言。
+TEST_F(RiichiRoomTest, RedFivesAreDealtOnlyInRiichi) {
+  bool saw_red = false;
+  for (uint64_t seed = 1; seed <= 12 && !saw_red; ++seed) {
+    BuildRoom(GameMode::kRiichi, seed);
+    const std::optional<json::Value> start = ReadyAndTakeGameStart();
+    ASSERT_TRUE(start.has_value());
+    const json::Value* hand = start->Find("hand");
+    ASSERT_NE(hand, nullptr);
+    for (const json::Value& tile : hand->AsArray()) {
+      const std::string text = tile.AsString();
+      ASSERT_EQ(text.size(), 2u) << text;
+      const bool red = text[0] == '0';
+      if (red) {
+        // 只有 5 才有赤牌：0m / 0p / 0s
+        EXPECT_EQ(text[1] == 'z', false) << text;
+        saw_red = true;
+      }
+      EXPECT_NE(std::string("0123456789").find(text[0]), std::string::npos) << text;
+      EXPECT_NE(std::string("mpsz").find(text[1]), std::string::npos) << text;
+    }
+  }
+  EXPECT_TRUE(saw_red) << "12 个种子都没发出赤 5，赤牌没有进牌山";
+
+  BuildRoom(GameMode::kClassic, /*seed=*/1);
+  const std::optional<json::Value> classic = ReadyAndTakeGameStart();
+  ASSERT_TRUE(classic.has_value());
+  for (const json::Value& tile : classic->Find("hand")->AsArray()) {
+    const std::string text = tile.AsString();
+    ASSERT_EQ(text.size(), 2u) << text;
+    EXPECT_NE(text[0], '0') << "classic 帧不得出现 `0m`/`0p`/`0s`（逐字节不变）";
+  }
+}
+
+// 日麻 game_end.win 的自洽性（v1.18）：`han` 必须等于 `Σ yaku[].han`（双倍役满记 26 也成立），
+// 且新的 `aka_dora` 字段必须存在（没有赤牌就是 0）。
+TEST_F(RiichiRoomTest, WinFrameCarriesAkaDoraAndConsistentHan) {
+  BuildRoom(GameMode::kRiichi, /*seed=*/20260101);
+  Send(RoomEnvelope::Ready(human_));
+
+  std::vector<std::string> my_hand;
+  bool need_answer = false;
+  uint64_t seq = 0;
+  std::string window;
+  std::optional<json::Value> win_frame;
+  std::optional<json::Value> win_body;
+
+  for (int guard = 0; guard < 4000 && !win_body.has_value() && !room_->game_finished(); ++guard) {
+    for (json::Value& frame : sink_->Drain()) {
+      const std::string type = TypeOf(frame);
+      if (type == "game_start" || type == "state_sync") {
+        const json::Value* hand = frame.Find("hand");
+        if (hand != nullptr && hand->IsArray()) {
+          my_hand.clear();
+          for (const json::Value& tile : hand->AsArray()) {
+            my_hand.push_back(tile.AsString());
+          }
+        }
+        continue;
+      }
+      if (type == "action_request") {
+        const json::Value* seq_value = frame.Find("seq");
+        const json::Value* window_value = frame.Find("window");
+        need_answer = seq_value != nullptr && window_value != nullptr;
+        if (need_answer) {
+          seq = static_cast<uint64_t>(seq_value->AsInt());
+          window = window_value->AsString();
+        }
+        continue;
+      }
+      if (type == "game_end") {
+        const json::Value* win = frame.Find("win");
+        if (win != nullptr && win->IsObject()) {
+          win_body = *win;  // json::Value 是可拷贝的轻量视图
+        }
+      }
+    }
+    if (!need_answer) {
+      stdexec::sync_wait(ActorSendScope().on_empty());
+      continue;
+    }
+    need_answer = false;
+
+    json::Value action = json::Value::Obj(5);
+    action.Set("seq", json::Value::Int(static_cast<int64_t>(seq)));
+    if (window == "discard" && !my_hand.empty()) {
+      action.Set("type", json::Value::Str("discard"));
+      action.Set("tile", json::Value::Str(MostIsolatedTile(my_hand)));
+    } else {
+      action.Set("type", json::Value::Str("action"));
+      action.Set("action", json::Value::Str("pass"));
+      action.Set("tiles", json::Value::Arr(0));
+    }
+    Send(RoomEnvelope::GameFrame(human_, std::move(action)));
+  }
+
+  ASSERT_TRUE(win_body.has_value()) << "一局都没和牌，取不到 game_end.win";
+  const json::Value* aka = win_body->Find("aka_dora");
+  ASSERT_NE(aka, nullptr) << "日麻的 win 必须带 aka_dora（v1.18 §12.5）";
+  EXPECT_GE(aka->AsInt(), 0);
+
+  const json::Value* han = win_body->Find("han");
+  ASSERT_NE(han, nullptr);
+  int sum = 0;
+  const json::Value* yaku = win_body->Find("yaku");
+  ASSERT_NE(yaku, nullptr);
+  for (const json::Value& item : yaku->AsArray()) {
+    const json::Value* value = item.Find("han");
+    ASSERT_NE(value, nullptr);
+    sum += value->AsInt();
+  }
+  EXPECT_EQ(han->AsInt(), sum) << "win.han 必须等于 Σ yaku[].han（双倍役满记 26）";
+}
+
 // 半庄真的会打到南场（v1.14）：托管整场，逐手采样「局号 → 场风」
 TEST_F(RiichiRoomTest, HanchanPlaysThroughSouthRound) {
   BuildRoom(GameMode::kRiichi, /*seed=*/20260101, GameLength::kHanchan);

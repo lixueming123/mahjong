@@ -347,13 +347,70 @@ std::vector<Yaku> YakuForDecomposition(const Decomposition& decomp, const std::v
   return yaku;
 }
 
-// 役满（独立于番数；同一手可叠加多个役满）
+// 四暗刻单骑：把和牌张从 14 张里去掉后，剩 13 张应能写成「4 组暗刻 + 1 张孤张」。
+// 这种形态只有唯一一种拆法（4×3 + 1，不含顺子），所以按计数直接判即可：
+// 双碰荣和（3 暗刻 + 2 对子）去掉一张后是「3 组刻子 + 1 对 + 1 孤张」，count == 2 会把它挡掉。
+bool IsTankiWait(const std::vector<Tile>& concealed, Tile winning) {
+  std::array<int, kFaceCount> counts {};
+  for (const Tile& tile : concealed) {
+    counts[static_cast<size_t>(FaceOf(tile))] += 1;
+  }
+  const size_t win_face = static_cast<size_t>(FaceOf(winning));
+  if (counts[win_face] == 0) {
+    return false;
+  }
+  counts[win_face] -= 1;
+  int triplets = 0;
+  int singles = 0;
+  for (int count : counts) {
+    if (count == 0) {
+      continue;
+    }
+    if (count == 3) {
+      ++triplets;
+    } else if (count == 1) {
+      ++singles;
+    } else {
+      return false;
+    }
+  }
+  return triplets == 4 && singles == 1;
+}
+
+// 纯正九莲宝灯（九面听）：去掉和牌张后恰好是 1112345678999（3-1-1-1-1-1-1-1-3）。
+bool IsJunseiChuuren(const std::vector<Tile>& concealed, Tile winning, uint8_t suit) {
+  static constexpr int kBase[9] = {3, 1, 1, 1, 1, 1, 1, 1, 3};
+  std::array<int, 9> counts_by_rank {};
+  for (const Tile& tile : concealed) {
+    const Face face = FaceOf(tile);
+    if (SuitOf(face) == suit) {
+      counts_by_rank[static_cast<size_t>(RankOf(face) - 1)] += 1;
+    }
+  }
+  const size_t win_rank = static_cast<size_t>(RankOf(FaceOf(winning)) - 1);
+  if (counts_by_rank[win_rank] == 0) {
+    return false;
+  }
+  counts_by_rank[win_rank] -= 1;
+  for (int i = 0; i < 9; ++i) {
+    if (counts_by_rank[static_cast<size_t>(i)] != kBase[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// 役满（独立于番数；同一手可叠加多个役满）。双倍役满用 `YakumanMultiplier` 折算：
+// 每条款目的 han = 13 × 倍数（`kokushi_13` / `suuankou_tanki` / `chuuren_junsei` / `daisuushii` = 26），
+// 这样 `win.han_breakdown.base`（Σ yaku.han）与 `win.han` 仍然相等，客户端不必知道「倍数」这回事。
 std::vector<Yaku> DetectYakuman(const std::vector<Tile>& concealed, const std::vector<Meld>& melds,
                                 Tile winning, const WinContext& ctx) {
   std::vector<Yaku> result;
   const bool tsumo = ctx.Tsumo();
   const HandFacts facts = ComputeFacts(concealed, melds);
-  auto push = [&result](std::string_view id) { result.push_back(Yaku {std::string(id), 13}); };
+  auto push = [&result](std::string_view id) {
+    result.push_back(Yaku {std::string(id), 13 * YakumanMultiplier(id)});
+  };
 
   if (facts.all_honors) {
     push("tsuuiisou");
@@ -402,7 +459,8 @@ std::vector<Yaku> DetectYakuman(const std::vector<Tile>& concealed, const std::v
       }
     }
     if (only_orphans && all_present && has_pair) {
-      push("kokushi");
+      // 国士十三面：和牌张正是那张「对子」⇒ 和牌前 13 张是十三种各一张（十三面听）。
+      push(counts[static_cast<size_t>(FaceOf(winning))] == 2 ? "kokushi_13" : "kokushi");
       return result;  // 国士无双不与其它役满复合
     }
 
@@ -423,7 +481,8 @@ std::vector<Yaku> DetectYakuman(const std::vector<Tile>& concealed, const std::v
         }
       }
       if (ok) {
-        push("chuuren");
+        push(IsJunseiChuuren(concealed, winning, static_cast<uint8_t>(facts.suit)) ? "chuuren_junsei"
+                                                                                  : "chuuren");
       }
     }
   }
@@ -452,7 +511,8 @@ std::vector<Yaku> DetectYakuman(const std::vector<Tile>& concealed, const std::v
       }
     }
     if (concealed_triplets >= 4) {
-      push("suuankou");
+      // 四暗刻单骑：单骑（和牌张进将）比双碰多一番，记双倍役满。
+      push(melds.empty() && IsTankiWait(concealed, winning) ? "suuankou_tanki" : "suuankou");
     }
     if (dragon_triplets >= 3) {
       push("daisangen");
@@ -626,7 +686,7 @@ Face DoraFaceFromIndicator(Tile indicator) {
 int YakuHan(std::string_view id, bool closed) {
   if (id == "riichi" || id == "ippatsu" || id == "tsumo" || id == "pinfu" || id == "iipeikou" ||
       id == "tanyao" || id == "yakuhai" || id == "rinshan" || id == "chankan" || id == "haitei" ||
-      id == "houtei" || id == "dora" || id == "ura_dora") {
+      id == "houtei" || id == "dora" || id == "ura_dora" || id == "aka_dora") {
     return 1;
   }
   if (id == "chiitoitsu" || id == "toitoi" || id == "sanankou" || id == "sankantsu" ||
@@ -652,10 +712,18 @@ int YakuHan(std::string_view id, bool closed) {
 }
 
 bool IsYakumanYaku(std::string_view id) {
-  return id == "tenhou" || id == "chiihou" || id == "kokushi" || id == "suuankou" ||
-         id == "daisangen" || id == "tsuuiisou" ||
-         id == "ryuuiisou" || id == "chinroutou" || id == "chuuren" || id == "suukantsu" ||
-         id == "shousuushii" || id == "daisuushii";
+  return id == "tenhou" || id == "chiihou" || id == "kokushi" || id == "kokushi_13" ||
+         id == "suuankou" || id == "suuankou_tanki" || id == "daisangen" || id == "tsuuiisou" ||
+         id == "ryuuiisou" || id == "chinroutou" || id == "chuuren" || id == "chuuren_junsei" ||
+         id == "suukantsu" || id == "shousuushii" || id == "daisuushii";
+}
+
+int YakumanMultiplier(std::string_view id) {
+  // 双倍役满四兄弟：国士十三面 / 四暗刻单骑 / 纯正九莲 / 大四喜。
+  if (id == "kokushi_13" || id == "suuankou_tanki" || id == "chuuren_junsei" || id == "daisuushii") {
+    return 2;
+  }
+  return IsYakumanYaku(id) ? 1 : 0;
 }
 
 std::string_view LimitName(Limit limit) {
@@ -1073,7 +1141,10 @@ ScoreResult ScoreHand(const std::vector<Tile>& concealed_with_winning_tile,
           DetectYakuman(concealed_with_winning_tile, melds, winning_tile, ctx);
       !yakuman.empty()) {
     result.yaku = yakuman;
-    result.yakuman_count = static_cast<int>(yakuman.size());
+    result.yakuman_count = 0;
+    for (const Yaku& item : yakuman) {
+      result.yakuman_count += YakumanMultiplier(item.id);  // 双倍役满记 2，可叠加
+    }
     result.han = 13 * result.yakuman_count;
     result.fu = 0;
     result.limit = Limit::kYakuman;
@@ -1110,6 +1181,23 @@ ScoreResult ScoreHand(const std::vector<Tile>& concealed_with_winning_tile,
   result.dora = dora;
   result.ura_dora = ura_dora;
 
+  // ---- 2b. 赤宝牌（v1.18）：每张 1 番。赤牌是**物理牌属性**（5 的第 4 张），
+  // 与指示牌无关；副露/杠里的赤牌同样计入。役满不计赤宝牌（上面已提前返回）。
+  int aka = 0;
+  for (const Tile& tile : concealed_with_winning_tile) {
+    if (IsRedFive(tile)) {
+      ++aka;
+    }
+  }
+  for (const Meld& meld : melds) {
+    for (const Tile& tile : meld.tiles) {
+      if (IsRedFive(tile)) {
+        ++aka;
+      }
+    }
+  }
+  result.aka = aka;
+
   // ---- 3. 七对子 / 标准型：取点数最高的拆法 ----
   const Face winning_face = FaceOf(winning_tile);
   int best_points = -1;
@@ -1119,7 +1207,7 @@ ScoreResult ScoreHand(const std::vector<Tile>& concealed_with_winning_tile,
       // 日麻无役不能和：宝牌不是役。房间已在窗口层过滤（HasYakuForWin），这里是第二道防线。
       return;
     }
-    int han = dora + ura_dora;
+    int han = dora + ura_dora + aka;
     for (const Yaku& item : base_yaku) {
       han += item.han;
     }
@@ -1134,10 +1222,14 @@ ScoreResult ScoreHand(const std::vector<Tile>& concealed_with_winning_tile,
     if (ura_dora > 0) {
       candidate.yaku.push_back(Yaku {"ura_dora", ura_dora});
     }
+    if (aka > 0) {
+      candidate.yaku.push_back(Yaku {"aka_dora", aka});
+    }
     candidate.han = han;
     candidate.fu = fu;
     candidate.dora = dora;
     candidate.ura_dora = ura_dora;
+    candidate.aka = aka;
     Limit limit = Limit::kNone;
     const int base = BaseFor(han, fu, &limit);
     const PointResult pay =

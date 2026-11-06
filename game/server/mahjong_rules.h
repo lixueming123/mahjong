@@ -57,6 +57,16 @@ uint8_t CopyOf(Tile tile);   // 0..3
 Tile MakeTileFromFace(Face face, uint8_t copy = 0);
 Tile MakeTile(uint8_t suit, uint8_t rank, uint8_t copy = 0);
 
+// ---- 赤宝牌（日麻）--------------------------------------------------------------
+// 5m / 5p / 5s 各有 4 张物理牌，其中 **copy == 3 的那一张**记为赤牌（同一花色四张里固定挑一张，
+// 不引入新的牌面/张数：`kFaceCount` 仍是 34、`kTileCount` 仍是 136）。
+// 它是**日麻专属**语义：classic 的算分（`mahjong_rules` 的番数制）不认识赤牌，房间也只在
+// `mode=riichi` 时把它序列化成 `0m`/`0p`/`0s`（见 `FormatTile` 的第二参数），因此 classic 的
+// 帧字节与 v1.17 逐字节一致。
+inline constexpr uint8_t kRedFiveCopy = kCopiesPerFace - 1;
+
+bool IsRedFive(Tile tile);  // 数牌 5 且 copy == kRedFiveCopy
+
 // 数牌 / 字牌判定（字牌不可成顺，是唯一需要按类别区分的地方）
 bool IsNumberFace(Face face);  // 面 ∈ [0,26]
 bool IsHonorFace(Face face);   // 面 ∈ [27,33]
@@ -64,10 +74,13 @@ bool IsHonorFace(Face face);   // 面 ∈ [27,33]
 // 非字牌返回空。
 std::string_view HonorName(Face face);
 
-// 编码：与 PROTOCOL.md §2.1 的合取正则 `^([1-9][mps]|[1-7]z)$` 一致。
-// 合法：数牌 `1m`..`9s`、字牌 `1z`..`7z`；非法（返回 nullopt）：`0m`、`8z`、`10p`、`5x`、空串等。
+// 编码：与 PROTOCOL.md §2.1 的合取正则 `^((0|[1-9])[mps]|[1-7]z)$` 一致。
+// 合法：数牌 `1m`..`9s`、字牌 `1z`..`7z`；日麻另认 `0m`/`0p`/`0s` = 赤 5（解析成该面的赤牌那张）。
+// 非法（返回 nullopt）：`0z`、`8z`、`10p`、`5x`、空串等。
 std::optional<Tile> ParseTile(std::string_view text);
-std::string FormatTile(Tile tile);
+// `red_fives` 为真且该牌是赤牌时输出 `0m`/`0p`/`0s`（PROTOCOL v1.18 §2.1）；
+// 缺省 false ⇒ 赤牌也按 `5m` 输出 —— classic 的所有帧因此逐字节不变。
+std::string FormatTile(Tile tile, bool red_fives = false);
 std::optional<std::vector<Tile>> ParseTiles(const std::vector<std::string>& texts);
 
 // 排序键：**先数牌后字牌**（`m<p<s<z`），数牌内 rank 升序、字牌内 `1z`..`7z` 升序，同面副本升序

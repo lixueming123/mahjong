@@ -118,6 +118,11 @@ Tile MakeTile(uint8_t suit, uint8_t rank, uint8_t copy) {
   return MakeTileFromFace(face, copy);
 }
 
+bool IsRedFive(Tile tile) {
+  const Face face = FaceOf(tile);
+  return SuitOf(face) != kHonorSuit && RankOf(face) == 5 && CopyOf(tile) == kRedFiveCopy;
+}
+
 // 数牌 / 字牌判定：字牌面 27..33（SuitOf == 3）
 bool IsNumberFace(Face face) { return face < kNumericFaceCount; }
 bool IsHonorFace(Face face) { return face >= kNumericFaceCount && face < kFaceCount; }
@@ -129,10 +134,24 @@ std::string_view HonorName(Face face) {
 }
 
 std::optional<Tile> ParseTile(std::string_view text) {
-  // 合取正则（PROTOCOL.md §2.1）：`^([1-9][mps]|[1-7]z)$`
+  // 合取正则（PROTOCOL.md §2.1）：`^((0|[1-9])[mps]|[1-7]z)$`
   if (text.size() != 2) return std::nullopt;
   const char rank_char = text[0];
   const char suit_char = text[1];
+  if (rank_char == '0') {
+    // 赤 5（v1.18）：`0m` / `0p` / `0s`，解析成该面 copy == kRedFiveCopy 的那一张物理牌。
+    uint8_t suit = 0;
+    if (suit_char == 'm') {
+      suit = 0;
+    } else if (suit_char == 'p') {
+      suit = 1;
+    } else if (suit_char == 's') {
+      suit = 2;
+    } else {
+      return std::nullopt;  // 0z 非法
+    }
+    return MakeTile(suit, 5, kRedFiveCopy);
+  }
   if (rank_char < '1' || rank_char > '9') return std::nullopt;
   if (suit_char == 'z') {
     // 字牌仅 1z..7z（8z/9z 非法）
@@ -154,10 +173,14 @@ std::optional<Tile> ParseTile(std::string_view text) {
   return MakeTile(suit, static_cast<uint8_t>(rank_char - '0'));
 }
 
-std::string FormatTile(Tile tile) {
+std::string FormatTile(Tile tile, bool red_fives) {
   const Face face = FaceOf(tile);
   std::string out;
-  out.push_back(static_cast<char>('0' + RankOf(face)));
+  if (red_fives && IsRedFive(tile)) {
+    out.push_back('0');
+  } else {
+    out.push_back(static_cast<char>('0' + RankOf(face)));
+  }
   out.push_back(SuitChar(SuitOf(face)));
   return out;
 }
@@ -395,17 +418,22 @@ std::optional<KongResult> ApplyKakan(const std::vector<Tile>& hand,
   const Meld& target = melds[static_cast<size_t>(meld_index)];
   if (target.type != MeldType::kPong || target.tiles.empty()) return std::nullopt;
   const Face face = FaceOf(target.tiles.front());
+  // 赤 5（v1.18）：优先把**普通 5** 拿去加杠，赤牌留在手里（与房间侧 `TakeFaces` 同口径）。
   std::optional<Tile> fourth;
   for (Tile t : hand) {
-    if (FaceOf(t) == face) {
+    if (FaceOf(t) != face) continue;
+    if (!fourth.has_value() || (IsRedFive(*fourth) && !IsRedFive(t))) {
       fourth = t;
-      break;
     }
   }
   if (!fourth.has_value()) return std::nullopt;
 
   KongResult result;
-  result.hand = RemoveFace(hand, face, 1);
+  // 扣掉的必须是上面选中的那一张（赤 5 与普通 5 是两张不同的物理牌，不能按牌面随便扣）
+  result.hand = hand;
+  const auto chosen = std::find(result.hand.begin(), result.hand.end(), *fourth);
+  if (chosen == result.hand.end()) return std::nullopt;
+  result.hand.erase(chosen);
   result.melds = melds;
   Meld& upgraded = result.melds[static_cast<size_t>(meld_index)];
   upgraded.type = MeldType::kKakan;        // 就地升级：组序不变、MeldCountOf 不变

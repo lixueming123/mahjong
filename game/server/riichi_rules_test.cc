@@ -178,15 +178,30 @@ TEST(RiichiScore, ManganOrAbove) {
   EXPECT_NE(score.limit, Limit::kNone);
 }
 
-// 役满：国士无双 → 闲家荣和 32000
-TEST(RiichiScore, KokushiYakuman) {
+// 役满：国士十三面（和牌张正是那张对子 ⇒ 和牌前十三种各一张）→ **双倍役满**，闲家 64000
+TEST(RiichiScore, KokushiThirteenSidedDoubleYakuman) {
   const std::vector<Tile> hand = Tiles({"1m", "9m", "1p", "9p", "1s", "9s", "1z",
                                         "2z", "3z", "4z", "5z", "6z", "7z", "1z"});
   const ScoreResult score = ScoreHand(hand, {}, *ParseTile("1z"), Ron(2));
 
-  ASSERT_TRUE(HasId(score.yaku, "kokushi"));
-  EXPECT_EQ(score.yakuman_count, 1);
+  ASSERT_TRUE(HasId(score.yaku, "kokushi_13"));
+  EXPECT_FALSE(HasId(score.yaku, "kokushi"));
+  EXPECT_EQ(score.yakuman_count, 2);
   EXPECT_EQ(score.limit, Limit::kYakuman);
+  EXPECT_EQ(score.han, 26);       // 13 × 2（`han_breakdown.base` 与 `win.han` 仍相等）
+  EXPECT_EQ(score.points, 64000);  // 闲家荣和 = 16000 base × 4
+}
+
+// 国士无双（单骑：和牌张是缺的那一种）→ 1 倍役满 32000
+TEST(RiichiScore, KokushiSingleWaitYakuman) {
+  // 和牌前：缺 7z、1z 成对；和 7z ⇒ 1z 才是对子 ⇒ 只听 7z，不构成十三面
+  const std::vector<Tile> hand = Tiles({"1m", "9m", "1p", "9p", "1s", "9s", "1z",
+                                        "2z", "3z", "4z", "5z", "6z", "1z", "7z"});
+  const ScoreResult score = ScoreHand(hand, {}, *ParseTile("7z"), Ron(2));
+
+  ASSERT_TRUE(HasId(score.yaku, "kokushi"));
+  EXPECT_FALSE(HasId(score.yaku, "kokushi_13"));
+  EXPECT_EQ(score.yakuman_count, 1);
   EXPECT_EQ(score.points, 32000);
 }
 
@@ -329,9 +344,10 @@ TEST(RiichiKokushi, ShapeAndScoring) {
 
   const ScoreResult score = ScoreHand(hand, {}, *ParseTile("7z"), Tsumo());
   ASSERT_EQ(score.yaku.size(), 1u);
-  EXPECT_EQ(score.yaku[0].id, "kokushi");
+  // 7z 成对 ⇒ 和牌前是十三种各一张 ⇒ 国士十三面（双倍役满）
+  EXPECT_EQ(score.yaku[0].id, "kokushi_13");
   EXPECT_EQ(score.limit, Limit::kYakuman);
-  EXPECT_EQ(score.points, 32000);  // 闲家自摸 8000/16000/16000
+  EXPECT_EQ(score.points, 64000);  // 闲家自摸 16000/16000/32000
 
   // 混进一张非幺九字 ⇒ 不是国士
   std::vector<Tile> broke = hand;
@@ -551,6 +567,142 @@ TEST(RiichiRiichi, AnkanAfterRiichiOnlyWhenWaitsUnchanged) {
   const std::vector<Option> before_riichi =
       DiscardOptions(hand, {}, 30, /*riichi_declared=*/false, *ParseTile("1m"));
   EXPECT_TRUE(FindOption(before_riichi, "ankan") != nullptr);
+}
+
+// ============================================================================
+// 赤宝牌（v1.18）：5m/5p/5s 的第 4 张 = 赤牌，每张 +1 番；不是役，役满不加算
+// ============================================================================
+
+// 手牌里的赤 5：平和 + 赤 ⇒ 2 番 30 符 2000（同一个牌型不换赤牌时是 1000）
+TEST(RiichiAka, ConcealedAkaAddsOneHan) {
+  const std::vector<Tile> plain = PinfuHand();
+  const std::vector<Tile> aka = Tiles({"1m", "2m", "3m", "4m", "0m", "6m", "7p", "8p",
+                                       "9p", "2s", "3s", "4s", "9p", "9p"});
+  const ScoreResult without = ScoreHand(plain, {}, *ParseTile("4s"), Ron(2));
+  const ScoreResult with = ScoreHand(aka, {}, *ParseTile("4s"), Ron(2));
+
+  EXPECT_EQ(without.aka, 0);
+  EXPECT_EQ(without.points, 1000);
+  EXPECT_EQ(with.aka, 1);
+  EXPECT_TRUE(HasId(with.yaku, "aka_dora"));
+  EXPECT_EQ(with.han, 2);  // pinfu 1 + 赤 1
+  EXPECT_EQ(with.points, 2000);
+  int sum = 0;
+  for (const Yaku& item : with.yaku) {
+    sum += item.han;
+  }
+  EXPECT_EQ(sum, with.han);  // yaku[].han 之和 == 总番（含宝牌条目）
+}
+
+// 副露里的赤 5 同样计入（碰 0s 5s 5s）
+TEST(RiichiAka, AkaInsideMeldCounts) {
+  const std::vector<Meld> melds = {Pong({"0s", "5s", "5s"})};
+  // 234m 567m 234p 77s + 碰 5s，和 2p：断幺九 1 番 + 赤 1 番
+  const std::vector<Tile> hand =
+      Tiles({"2m", "3m", "4m", "5m", "6m", "7m", "3p", "4p", "7s", "7s", "2p"});
+  const ScoreResult score = ScoreHand(hand, melds, *ParseTile("2p"), Ron(2));
+
+  EXPECT_TRUE(HasId(score.yaku, "tanyao"));
+  EXPECT_EQ(score.aka, 1);
+  EXPECT_TRUE(HasId(score.yaku, "aka_dora"));
+  EXPECT_EQ(score.han, 2);
+  EXPECT_GT(score.points, 0);
+}
+
+// 赤宝牌不是役：无役的手牌就算抓了三张赤牌也和不掉
+TEST(RiichiAka, AkaIsNotAYaku) {
+  const std::vector<Meld> melds = {Pong({"0s", "5s", "5s"})};
+  // 123m 789p 123s 5z5z + 碰 5s、和 2s：一个役都没有（无断幺、无平和、无役牌）
+  const std::vector<Tile> hand =
+      Tiles({"1m", "2m", "3m", "7p", "8p", "9p", "1s", "3s", "5z", "5z", "2s"});
+  const ScoreResult score = ScoreHand(hand, melds, *ParseTile("2s"), Ron(2));
+
+  EXPECT_FALSE(HasId(score.yaku, "aka_dora"));  // 无役 ⇒ 整个手牌不算（与宝牌同口径）
+  EXPECT_TRUE(score.yaku.empty());
+  EXPECT_EQ(score.points, 0);
+  EXPECT_EQ(YakuHan("aka_dora", /*closed=*/true), 1);
+  EXPECT_FALSE(IsYakumanYaku("aka_dora"));
+}
+
+// ============================================================================
+// 双倍役满（v1.18）：国士十三面 / 四暗刻单骑 / 纯正九莲 / 大四喜 = 2 倍
+// ============================================================================
+
+TEST(RiichiYakuman, MultiplierTable) {
+  EXPECT_EQ(YakumanMultiplier("kokushi_13"), 2);
+  EXPECT_EQ(YakumanMultiplier("suuankou_tanki"), 2);
+  EXPECT_EQ(YakumanMultiplier("chuuren_junsei"), 2);
+  EXPECT_EQ(YakumanMultiplier("daisuushii"), 2);
+
+  EXPECT_EQ(YakumanMultiplier("kokushi"), 1);
+  EXPECT_EQ(YakumanMultiplier("suuankou"), 1);
+  EXPECT_EQ(YakumanMultiplier("chuuren"), 1);
+  EXPECT_EQ(YakumanMultiplier("shousuushii"), 1);
+  EXPECT_EQ(YakumanMultiplier("daisangen"), 1);
+  EXPECT_EQ(YakumanMultiplier("tenhou"), 1);
+  EXPECT_EQ(YakumanMultiplier("pinfu"), 0);
+
+  for (const char* id : {"kokushi_13", "suuankou_tanki", "chuuren_junsei", "daisuushii"}) {
+    EXPECT_TRUE(IsYakumanYaku(id)) << id;
+  }
+}
+
+// 四暗刻单骑：111m 222m 333m 555s（含赤）+ 5p 单骑自摸 ⇒ 2 倍役满，闲家 64000
+TEST(RiichiYakuman, SuuankouTankiIsDouble) {
+  const std::vector<Tile> hand = Tiles({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m",
+                                        "3m", "0s", "5s", "5s", "5p", "5p"});
+  const ScoreResult score = ScoreHand(hand, {}, *ParseTile("5p"), Tsumo());
+
+  ASSERT_TRUE(HasId(score.yaku, "suuankou_tanki"));
+  EXPECT_FALSE(HasId(score.yaku, "suuankou"));
+  EXPECT_EQ(score.yakuman_count, 2);
+  EXPECT_EQ(score.han, 26);
+  EXPECT_EQ(score.points, 64000);
+  EXPECT_EQ(score.aka, 0);  // 役满不加算赤宝牌
+}
+
+// 四暗刻（双碰自摸，非单骑）⇒ 1 倍役满 32000
+TEST(RiichiYakuman, SuuankouShanponIsSingle) {
+  const std::vector<Tile> hand = Tiles({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m",
+                                        "3m", "4p", "4p", "4p", "5s", "5s"});
+  const ScoreResult score = ScoreHand(hand, {}, *ParseTile("4p"), Tsumo());
+
+  ASSERT_TRUE(HasId(score.yaku, "suuankou"));
+  EXPECT_FALSE(HasId(score.yaku, "suuankou_tanki"));
+  EXPECT_EQ(score.yakuman_count, 1);
+  EXPECT_EQ(score.points, 32000);
+}
+
+// 纯正九莲：1112345678999 + 任意一张 ⇒ 九面听 2 倍；非纯正（本例单骑 9m）⇒ 1 倍
+TEST(RiichiYakuman, ChuurenJunseiIsDouble) {
+  const std::vector<Tile> junsei = Tiles({"1m", "1m", "1m", "2m", "3m", "4m", "5m",
+                                          "5m", "6m", "7m", "8m", "9m", "9m", "9m"});
+  const ScoreResult pure = ScoreHand(junsei, {}, *ParseTile("5m"), Tsumo());
+  ASSERT_TRUE(HasId(pure.yaku, "chuuren_junsei"));
+  EXPECT_EQ(pure.yakuman_count, 2);
+  EXPECT_EQ(pure.points, 64000);
+
+  // 1m1m1m 2m2m 3..8m 9m9m + 和 9m ⇒ 只听 9m 的九莲，不是九面听
+  const std::vector<Tile> single = Tiles({"1m", "1m", "1m", "2m", "2m", "3m", "4m",
+                                          "5m", "6m", "7m", "8m", "9m", "9m", "9m"});
+  const ScoreResult plain = ScoreHand(single, {}, *ParseTile("9m"), Tsumo());
+  ASSERT_TRUE(HasId(plain.yaku, "chuuren"));
+  EXPECT_EQ(plain.yakuman_count, 1);
+  EXPECT_EQ(plain.points, 32000);
+}
+
+// 多役满叠加：大四喜（2）+ 字一色（1）= 3 倍 ⇒ 闲家荣和 96000
+TEST(RiichiYakuman, StackedYakumanAddsMultipliers) {
+  const std::vector<Meld> melds = {Pong({"4z", "4z", "4z"})};  // 北 副露，排除四暗刻
+  const std::vector<Tile> hand = Tiles({"1z", "1z", "1z", "2z", "2z", "2z",
+                                        "3z", "3z", "3z", "5z", "5z"});
+  const ScoreResult score = ScoreHand(hand, melds, *ParseTile("5z"), Ron(2));
+
+  ASSERT_TRUE(HasId(score.yaku, "daisuushii"));
+  ASSERT_TRUE(HasId(score.yaku, "tsuuiisou"));
+  EXPECT_EQ(score.yakuman_count, 3);
+  EXPECT_EQ(score.han, 39);
+  EXPECT_EQ(score.points, 96000);
 }
 
 }  // namespace

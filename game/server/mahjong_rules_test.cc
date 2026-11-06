@@ -177,7 +177,16 @@ bool BruteCanWin(const std::vector<Tile>& tiles) {
 TEST(MahjongRules, ParseAndSortTiles) {  // 1
   EXPECT_EQ(FormatTile(*ParseTile("1m")), "1m");
   EXPECT_EQ(FormatTile(*ParseTile("9s")), "9s");
-  EXPECT_FALSE(ParseTile("0m").has_value());
+  // v1.18：`0m`/`0p`/`0s` 是**日麻赤 5**（5 的第 4 张）。缺省 FormatTile 仍按 `5m` 输出，
+  // 只有 `red_fives=true` 才回 `0m` —— classic 的所有帧因此逐字节不变。
+  EXPECT_TRUE(ParseTile("0m").has_value());
+  EXPECT_EQ(FaceOf(*ParseTile("0m")), FaceOf(*ParseTile("5m")));
+  EXPECT_TRUE(IsRedFive(*ParseTile("0m")));
+  EXPECT_FALSE(IsRedFive(*ParseTile("5m")));
+  EXPECT_EQ(FormatTile(*ParseTile("0m")), "5m");
+  EXPECT_EQ(FormatTile(*ParseTile("0m"), /*red_fives=*/true), "0m");
+  EXPECT_EQ(FormatTile(*ParseTile("5m"), /*red_fives=*/true), "5m");
+  EXPECT_FALSE(ParseTile("0z").has_value());
   // t14 起字牌合法（1z..7z）；非法边界改为 8z/9z/5x 等，详见 HonorConstantsAndEncoding 用例
   EXPECT_TRUE(ParseTile("1z").has_value());
   EXPECT_FALSE(ParseTile("8z").has_value());
@@ -2168,6 +2177,22 @@ TEST(MahjongRules, KongTileAccountingStaysInsideBothFormulas) {
   EXPECT_FALSE(ApplyKakan(hand, pong, /*meld_index=*/5).has_value());
   // 手中没有该面的第 4 张 ⇒ 不可加杠
   EXPECT_FALSE(ApplyKakan(hand, {Pong({"9s", "9s", "9s"})}, 0).has_value());
+}
+
+// 赤 5（v1.18）：加杠优先消耗普通 5，赤牌留在手里（它要在算分时 +1 番）
+TEST(MahjongRules, AkaFiveStaysOutOfMeld) {
+  const std::vector<Meld> pong = {Pong({"5p", "5p", "5p"})};
+  // 手里同时握着普通 5p 与赤 5p（`0p`）
+  std::vector<Tile> hand = H({"5p", "0p", "2m", "3m", "4m", "6m", "7m", "8m", "9m"});
+  const auto kakan = ApplyKakan(hand, pong, 0);
+  ASSERT_TRUE(kakan.has_value());
+  EXPECT_EQ(kakan->hand.size(), hand.size() - 1);
+  bool meld_has_red = false;
+  for (Tile t : kakan->melds[0].tiles) meld_has_red = meld_has_red || IsRedFive(t);
+  EXPECT_FALSE(meld_has_red) << "加杠应当拿走普通 5p";
+  bool hand_has_red = false;
+  for (Tile t : kakan->hand) hand_has_red = hand_has_red || IsRedFive(t);
+  EXPECT_TRUE(hand_has_red) << "赤 5p 应当还在手里";
 }
 
 TEST(MahjongRules, DiscardOptionsKongWindows) {

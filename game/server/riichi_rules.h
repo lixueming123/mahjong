@@ -78,9 +78,10 @@ struct ScoreResult {
   int points = 0;       // 和牌者总收入（荣和 = 放炮者付出；自摸 = 三家之和）
   int base = 0;         // 点数公式里的 base（满贯以上为分档值）
   Limit limit = Limit::kNone;
-  int yakuman_count = 0;  // 0 = 非役满
+  int yakuman_count = 0;  // 役满倍数合计（双倍役满记 2，可叠加多个役满）
   int dora = 0;
   int ura_dora = 0;
+  int aka = 0;  // 赤宝牌张数（每张 1 番；役满时不加算）
   std::vector<Yaku> yaku;
   int per_payer = 0;  // 荣和 = points；自摸 = 闲家付出（庄家为 2×base）
 };
@@ -92,6 +93,12 @@ Face DoraFaceFromIndicator(Tile indicator);
 int YakuHan(std::string_view id, bool closed);
 bool IsYakumanYaku(std::string_view id);
 std::string_view LimitName(Limit limit);
+
+// ---- 双倍役满（v1.18）----------------------------------------------------------
+// 四种「双倍役满」各记 2 倍：`kokushi_13`（国士十三面）、`suuankou_tanki`（四暗刻单骑）、
+// `chuuren_junsei`（纯正九莲宝灯）、`daisuushii`（大四喜）。其余役满 1 倍，非役满 0。
+// 一手多役满时**倍数相加**（大四喜 + 字一色 = 3 倍 = 48000 / 闲家自摸每家 16000）。
+int YakumanMultiplier(std::string_view id);
 
 // ---- 场风 / 自风 --------------------------------------------------------------
 // 每「場」4 局（东场 4 局或南场 4 局）。半庄 = 东场 + 南场 = 8 局。

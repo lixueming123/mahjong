@@ -418,6 +418,7 @@ class RoomActor {
     bool riichi = false;                     // 本局和牌者是否立直
     int dora = 0;
     int ura_dora = 0;
+    int aka_dora = 0;                        // 赤宝牌张数（v1.18，classic 恒 0）
     int kyoutaku = 0;                        // 结算后剩余供托（通常 0）
     int honba = 0;                           // 本局本场数（支付已计入 delta）
     std::vector<Tile> dora_indicators;
