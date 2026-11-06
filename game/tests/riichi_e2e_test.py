@@ -7,7 +7,8 @@
   * `game_start` 带 `points`（四家 25000）、`dora_indicators`（1 张）、`round_wind`/`seat_wind`；
   * `state_sync.remaining` 首次为 69（王牌 14 张被切走），且每份都带 `points`；
   * 全程零 `error` 帧（说明日麻的分支没有把经典帧打坏）；
-  * 若本局有人和牌，`game_end.win` 必须带 `fu` / `points` / `limit` / `dora`。
+  * 若本局有人和牌，`game_end.win` 必须带 `fu` / `points` / `limit` / `dora`；
+  * 帧里出现的每个牌码都符合 v1.18 §2.1 的 `^((0|[1-9])[mps]|[1-7]z)$`（含赤 5 `0m`/`0p`/`0s`）。
 
 用法：
     python3 game/tests/riichi_e2e_test.py --server-bin build/game/mahjong_server
@@ -18,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -25,6 +27,8 @@ import time
 
 MY_SEAT = 0
 START_POINTS = 25000
+#: v1.18 §2.1：数牌 / 字牌 / 赤 5（`0m`/`0p`/`0s`）
+TILE_RE = re.compile(r"^((0|[1-9])[mps]|[1-7]z)$")
 EXPECTED_FIRST_REMAINING = 69  # 136 − 52 − 14 王牌 = 70，再减庄家第一次摸牌 = 69
 
 
@@ -91,6 +95,32 @@ def start_server(binary: str, port: int, seed: int) -> subprocess.Popen:
     raise TestFailure("server did not start listening in 20s")
 
 
+def scan_tiles(frame: dict, observation: dict) -> None:
+    """v1.18 §2.1：帧里出现的每个牌码都要符合 `^((0|[1-9])[mps]|[1-7]z)$`。
+
+    顺带数一数赤 5（`0m`/`0p`/`0s`）——日麻房应当真的会发出它们（classic 永不发）。
+    """
+
+    def visit(value: object) -> None:
+        if isinstance(value, str):
+            if TILE_RE.match(value) is None:
+                if len(value) == 2 and value[1] in "mpsz":
+                    observation["bad_tiles"].append(value)
+                return
+            if value[0] == "0":
+                observation["red_tiles"] += 1
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                if key in ("tile", "tiles", "hand", "discards", "dora_indicators", "melds",
+                           "options", "waits", "win"):
+                    visit(item)
+
+    visit(frame)
+
+
 def play_one_round(client: Client, length: str = "tonpu") -> dict:
     """打完一局（到第一份 game_end），返回收集到的观测值。"""
     client.send({"type": "login", "name": "日麻玩家"})
@@ -115,6 +145,8 @@ def play_one_round(client: Client, length: str = "tonpu") -> dict:
         "tenpai_frames": 0,
         "tenpai_no_yaku": 0,
         "tenpai_bad": [],
+        "bad_tiles": [],
+        "red_tiles": 0,
     }
     my_hand: list[str] = []
     deadline = time.monotonic() + 120.0
@@ -122,6 +154,7 @@ def play_one_round(client: Client, length: str = "tonpu") -> dict:
     while time.monotonic() < deadline:
         frame = client.recv(timeout=30.0)
         kind = frame.get("type")
+        scan_tiles(frame, observation)
 
         if kind == "error":
             observation["errors"].append(frame)
@@ -215,6 +248,8 @@ def main() -> int:
         )
     if observation["tenpai_bad"]:
         raise TestFailure(f"tenpai frame defects: {observation['tenpai_bad'][:2]}")
+    if observation["bad_tiles"]:
+        raise TestFailure(f"illegal tile codes on the wire: {observation['bad_tiles'][:4]!r}")
     if observation["errors"]:
         raise TestFailure(f"server answered {len(observation['errors'])} error frames: {observation['errors'][:2]!r}")
 
@@ -239,6 +274,7 @@ def main() -> int:
     print(
         f"[riichi-e2e] OK syncs={observation['syncs']} remaining={observation['max_remaining']} "
         f"tenpai={observation['tenpai_frames']}(no_yaku={observation['tenpai_no_yaku']}) "
+        f"aka_seen={observation['red_tiles']} "
         f"reason={end.get('reason')} {detail}"
     )
     return 0

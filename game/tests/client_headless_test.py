@@ -30,6 +30,8 @@ os.environ["SDL_VIDEODRIVER"] = "dummy"
 os.environ["SDL_AUDIODRIVER"] = "dummy"
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
+import pygame  # noqa: E402
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 GAME_DIR = os.path.dirname(HERE)
 REPO_ROOT = os.path.dirname(GAME_DIR)
@@ -522,6 +524,38 @@ def main() -> int:
     pygame.image.save(table_surface, table_path)
     check(os.path.getsize(table_path) > 1000, f"牌桌界面 PNG 已保存：{table_path}")
 
+    print("[2b] 日麻赤 5 在牌桌上的观感（贴图染色，不是程序化重绘）")
+    aka_app = make_app()
+    aka_app.state.apply(ROOM_JOINED)
+    aka_app.state.apply(dict(GAME_START, mode="riichi",
+                             points=[25000, 25000, 24800, 25200],
+                             hand=["0m", "5m", "1m", "2m", "3m", "0p",
+                                   "5p", "6p", "0s", "5s", "7s", "1z", "1z"]))
+    aka_app.state.apply({
+        "type": "state_sync",
+        "seq": 9,
+        "remaining": 45,
+        "current_seat": 0,
+        "hand": ["0m", "5m", "1m", "2m", "3m", "0p", "5p", "6p", "0s", "5s", "7s", "1z", "1z"],
+        "melds": [],
+        "points": [25000, 25000, 24800, 25200],
+        "dora_indicators": ["3p"],
+        "seats": [
+            {"seat": 0, "name": "玩家_", "is_bot": False, "hand_count": 13,
+             "discards": ["0p", "5s", "1z"], "melds": [], "disconnected": False},
+            {"seat": 1, "name": "AI-1", "is_bot": True, "hand_count": 13,
+             "discards": ["3m", "0s", "7z"], "melds": [], "disconnected": False},
+            {"seat": 2, "name": "AI-2", "is_bot": True, "hand_count": 13,
+             "discards": ["7m", "2s", "0m"], "melds": [], "disconnected": False},
+            {"seat": 3, "name": "AI-3", "is_bot": True, "hand_count": 13,
+             "discards": ["1s", "5m"], "melds": [], "disconnected": False},
+        ],
+    })
+    aka_path = os.path.join(ARTIFACTS, "client_table_aka.png")
+    aka_app.now = time.monotonic()
+    pygame.image.save(aka_app.render_frame(present=False), aka_path)
+    check(os.path.getsize(aka_path) > 1000, f"日麻赤 5 牌桌 PNG 已保存：{aka_path}")
+
     print("[3] 打牌窗口：手牌可点选、无「过」按钮（H1）")
     app.state.apply(DISCARD_REQUEST)
     app.now = time.monotonic()
@@ -563,9 +597,10 @@ def main() -> int:
     )
 
     # v4.2：牌面改为 CC0 外部贴图；6 档尺寸都必须加载到真实牌面，不得为空/占位
+    # v1.18：+3 张赤 5（`0m`/`0p`/`0s`）
     face_dir = widgets_view._TILE_ASSET_DIR
     asset_count = len(list(face_dir.glob("*.png")))
-    check(asset_count == 35, f"CC0 牌面贴图齐全：34 种牌 + 牌背，共 {asset_count} 张")
+    check(asset_count == 38, f"CC0 牌面贴图齐全：34 种牌 + 3 张赤 5 + 牌背，共 {asset_count} 张")
     # v5.3：back.png 自带大红 (255,55,55)，必须统一染成 T.BACK 橙金；
     # 暗杠占位 / 3D 牌墙顶 / 旋转牌背都走这条路径，别再漏掉染色。
     back_surf = widgets_view.tile_back_surface(28, 36, plain=True)
@@ -1052,9 +1087,46 @@ def main() -> int:
         f"字牌牌名（繁體）= {[(c, tile_label(c)) for c, _ in honor_map]}",
     )
     check(
-        all(tile_label(bad) == "?" for bad in ("0m", "8z", "zz", "", "1M")),
+        all(tile_label(bad) == "?" for bad in ("8z", "zz", "", "1M", "0z")),
         "非法牌面的牌名为「?」（防御性、不抛异常）",
     )
+    # v1.18：`0m`/`0p`/`0s` 是合法牌码（日麻赤宝牌），牌名带「赤」前缀
+    check(
+        all(tile_label(code) == f"赤 5 {suit}" for code, suit in (("0m", "万"), ("0p", "筒"), ("0s", "条"))),
+        f"赤 5 牌名 = {[(c, tile_label(c)) for c in ('0m', '0p', '0s')]}",
+    )
+    # 赤 5 的**外观**走 CC0 贴图染色派生（`game/tools/make_aka_tiles.py`），
+    # 与其它 33 种牌同源；素材必须随包发布，否则会静默退化成程序化重绘。
+    aka_report = []
+    aka_ok = True
+    for code in ("0m", "0p", "0s"):
+        path = face_dir / f"{code}.png"
+        source = face_dir / f"5{code[1]}.png"
+        if not (path.exists() and source.exists()):
+            aka_report.append(f"{code}.png 或 5{code[1]}.png 缺失")
+            aka_ok = False
+            continue
+        aka = pygame.image.load(str(path))
+        normal = pygame.image.load(str(source))
+        same_size = aka.get_size() == normal.get_size()
+        recolored = pygame.image.tostring(aka, "RGBA") != pygame.image.tostring(normal, "RGBA")
+        aka_report.append(f"{code}={aka.get_size()}{'染色' if recolored else '未染色'}")
+        aka_ok = aka_ok and same_size and recolored
+    check(aka_ok, f"赤 5 贴图 = 5 的同尺寸染色派生（{aka_report}）")
+    # 只要 `5X.png` 换了素材，`0X.png` 必须跟着重新生成（否则肉眼看不出的旧色）
+    try:
+        sys.path.insert(0, os.path.join(GAME_DIR, "tools"))
+        from PIL import Image as PILImage  # noqa: E402
+        from make_aka_tiles import DEFAULT_RED, recolor as recolor_aka  # noqa: E402
+
+        drifted = [
+            code for code in ("0m", "0p", "0s")
+            if recolor_aka(PILImage.open(str(face_dir / f"5{code[1]}.png")), DEFAULT_RED).tobytes()
+            != PILImage.open(str(face_dir / f"{code}.png")).convert("RGBA").tobytes()
+        ]
+        check(not drifted, f"赤 5 贴图与生成脚本结果一致（漂移 {drifted}）")
+    except ImportError:  # pragma: no cover - 生成工具依赖 Pillow，测试机可能没有
+        pass
 
     # 按钮文案公式逐字对齐 §5.3
     check(button_label("kong", ["5p"]) == "杠 5 筒", f"kong 文案 = {button_label('kong', ['5p'])}")
