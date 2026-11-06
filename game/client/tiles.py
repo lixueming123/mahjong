@@ -2,8 +2,11 @@
 
 客户端与服务端必须完全一致的纯函数集合：
 
-- 编码（PROTOCOL v1.1 §2.1）：数牌 `^[1-9][mps]$`、字牌 `^[1-7]z$`，合取 `^([1-9][mps]|[1-7]z)$`；
+- 编码（PROTOCOL v1.18 §2.1）：数牌 `^[1-9][mps]$`、字牌 `^[1-7]z$`、赤 5 `^0[mps]$`；
+  合取 `^((0|[1-9])[mps]|[1-7]z)$`；
   `m`=万、`p`=筒、`s`=条、`z`=字牌（`1z..7z` = 東/南/西/北/白/發/中）；
+- `0m`/`0p`/`0s` 是**日麻赤宝牌**（5 的第 4 张）：牌面仍是 5，排序按 5，只是渲染成红色、
+  计分时每张 +1 番。classic 房永不下发这三种牌码；
 - 排序键（§2.2）：`(suit_index, rank)`，`m=0 < p=1 < s=2 < z=3`；数牌 rank 1..9 升序、
   字牌 `1z..7z` 升序 ⇒ **数牌在前、字牌在后**；
 - 字牌**不可成顺**（只能构成刻子/杠），故客户端不生成也不会渲染字牌顺子；
@@ -29,13 +32,30 @@ HONOR_NAME = {"1": "东", "2": "南", "3": "西", "4": "北", "5": "白", "6": "
 #: 字牌**牌面字形**（繁體，UI_UX_SPEC v1.3 §1.3 规则 4 / §4.4 规则 2 冻结）
 HONOR_GLYPH = {"1": "東", "2": "南", "3": "西", "4": "北", "5": "白", "6": "發", "7": "中"}
 
-#: 合取正则（PROTOCOL v1.1 §2.1）：数牌 + 字牌
-TILE_RE = re.compile(r"^([1-9][mps]|[1-7]z)$")
+#: 合取正则（PROTOCOL v1.18 §2.1）：数牌 + 字牌 + 赤 5
+#: `0m` / `0p` / `0s` = 赤宝牌（5 的第 4 张），**牌面仍是 5**；只有日麻房会下发。
+TILE_RE = re.compile(r"^((0|[1-9])[mps]|[1-7]z)$")
 _INVALID_KEY = (len(SUIT_INDEX) + 1, 0)  # 非法牌面排在最后（不抛异常）
 
 
 def is_valid_tile(tile: object) -> bool:
     return isinstance(tile, str) and TILE_RE.match(tile) is not None
+
+
+def is_red_five(tile: object) -> bool:
+    """赤宝牌判定（`0m` / `0p` / `0s`）。"""
+    return isinstance(tile, str) and len(tile) == 2 and tile[0] == "0" and tile[1] in NUMBER_SUITS
+
+
+def tile_face(tile: str) -> str:
+    """把赤 5 归一到普通牌面（`0m` → `5m`），其余原样返回。
+
+    选牌/扣牌一律按**线上牌码**匹配（赤 5 与普通 5 是两张不同的牌），
+    只有「画什么图案」「排序按几」这类**牌面语义**才用它。
+    """
+    if is_red_five(tile):
+        return "5" + tile[1]
+    return tile
 
 
 def is_honor(tile: object) -> bool:
@@ -57,14 +77,16 @@ def honor_name(tile: object) -> str | None:
     return HONOR_NAME[str(tile)[0]]
 
 
-def tile_key(tile: str) -> tuple[int, int]:
+def tile_key(tile: str) -> tuple:
     """排序键（PROTOCOL §2.2）：数牌在前、字牌在后，字牌内 1z..7z 升序。
 
+    赤 5 按**牌面 5** 排序（与服务端「同面副本相邻」一致：赤牌是 5 的第 4 张，排在同面最后）。
     非法牌面返回 `_INVALID_KEY`（排到最后，保证不抛异常）。
     """
     if not is_valid_tile(tile):
         return _INVALID_KEY
-    return (SUIT_INDEX[tile[1]], int(tile[0]))
+    # 第三位把赤 5 排在同面最后：服务端 SortTiles 按 (face, copy)，赤牌是 copy 3。
+    return (SUIT_INDEX[tile[1]], int(tile_face(tile)[0]), 1 if is_red_five(tile) else 0)
 
 
 def sort_tiles(tiles: list[str]) -> list[str]:
@@ -72,7 +94,7 @@ def sort_tiles(tiles: list[str]) -> list[str]:
 
 
 def tile_rank(tile: str) -> str:
-    return tile[0] if len(tile) == 2 else "?"
+    return tile_face(tile)[0] if len(tile) == 2 else "?"
 
 
 def tile_suit_label(tile: str) -> str:
@@ -96,8 +118,10 @@ def tile_label(tile: str) -> str:
     """
     if is_honor(tile):
         return HONOR_GLYPH[str(tile)[0]]
-    if isinstance(tile, str) and len(tile) == 2 and tile[0] in "123456789" and tile[1] in SUIT_LABEL:
-        return f"{tile[0]} {SUIT_LABEL[tile[1]]}"
+    face = tile_face(tile) if isinstance(tile, str) else tile
+    if isinstance(face, str) and len(face) == 2 and face[0] in "123456789" and face[1] in SUIT_LABEL:
+        label = f"{face[0]} {SUIT_LABEL[face[1]]}"
+        return f"赤 {label}" if is_red_five(tile) else label
     return "?"
 
 
@@ -150,13 +174,17 @@ RIICHI_YAKU_LABEL = {
     "yakuhai": "役牌",
     "dora": "宝牌",
     "ura_dora": "里宝牌",
+    "aka_dora": "赤宝牌",
     "kokushi": "国士无双",
+    "kokushi_13": "国士十三面",
     "suuankou": "四暗刻",
+    "suuankou_tanki": "四暗刻单骑",
     "daisangen": "大三元",
     "tsuuiisou": "字一色",
     "ryuuiisou": "绿一色",
     "chinroutou": "清老头",
     "chuuren": "九莲宝灯",
+    "chuuren_junsei": "纯正九莲宝灯",
     "suukantsu": "四杠子",
     "shousuushii": "小四喜",
     "daisuushii": "大四喜",

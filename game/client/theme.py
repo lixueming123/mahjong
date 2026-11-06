@@ -45,6 +45,9 @@ BACK_LIFT = (140, 140, 140)
 SUIT_M = (176, 32, 32)
 SUIT_P = (32, 96, 176)
 SUIT_S = (24, 128, 64)
+#: 赤宝牌（v1.18）：日麻 `0m`/`0p`/`0s` 的牌面统一用这个亮红，比 `SUIT_M` 更鲜艳，
+#: 让「赤 5」在牌河里一眼可辨（万子的「萬」本来就是 SUIT_M，若同色会看不出来）。
+AKA = (208, 36, 40)
 #: 字牌墨色（UI_UX_SPEC v1.3 §1.4 新增）：字牌字形与其单元格文字统一使用该色
 SUIT_Z = (48, 44, 40)
 TEXT = (236, 236, 232)
@@ -148,6 +151,7 @@ COLORS = {
     "SUIT_P": SUIT_P,
     "SUIT_S": SUIT_S,
     "SUIT_Z": SUIT_Z,
+    "AKA": AKA,
     "TEXT": TEXT,
     "TEXT_DIM": TEXT_DIM,
     "SELECT": SELECT,

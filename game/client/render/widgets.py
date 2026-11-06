@@ -1,8 +1,10 @@
 """渲染原语（UI_UX_SPEC §1.3：几何绘制 + 系统字体 + CC0 牌面贴图）。
 
 牌面贴图来自 FluffyStuff / riichi-mahjong-tiles（CC0 公有领域）：
-34 种牌 + 牌背，运行时按牌位尺寸等比缩放并缓存。贴图缺失时回退到原有的
-程序化牌面（万/筒/条/字），保证离线或资源损坏时仍能渲染。
+34 种牌 + 3 张赤 5（`0m`/`0p`/`0s`，由 5 的贴图染色派生，见
+`game/tools/make_aka_tiles.py`）+ 牌背，运行时按牌位尺寸等比缩放并缓存。
+贴图缺失时回退到原有的程序化牌面（万/筒/条/字、赤 5 走程序化染红），
+保证离线或资源损坏时仍能渲染。
 
 本模块为纯绘制函数：无副作用、不发帧、不读网络。
 """
@@ -15,7 +17,7 @@ from pathlib import Path
 import pygame
 
 from .. import theme as T
-from ..tiles import SUIT_INDEX, honor_glyph, is_honor, is_valid_tile
+from ..tiles import SUIT_INDEX, honor_glyph, is_honor, is_red_five, is_valid_tile, tile_face
 from . import art
 
 log = logging.getLogger("mahjong.client.widgets")
@@ -244,12 +246,15 @@ def _pick_sizes(box: pygame.Rect, first: str, second: str, fonts, base: float) -
     return size_first, size_second, gap
 
 
-def _draw_wan(surface: pygame.Surface, fonts, box: pygame.Rect, rank: int) -> None:
+def _draw_wan(surface: pygame.Surface, fonts, box: pygame.Rect, rank: int, red: bool = False) -> None:
     """万子：上「一…九」（墨蓝）下「萬」（红）——传统牌的上蓝下红。"""
     numeral = _CN_NUMERAL[rank - 1]
     size_first, size_second, gap = _pick_sizes(box, numeral, "萬", fonts, 0.24)
-    image_first = fonts.get(size_first, bold=True).render(numeral, True, (44, 62, 120))
-    image_second = fonts.get(size_second, bold=True).render("萬", True, T.SUIT_M)
+    # 赤 5：两行都染亮红（普通万子是「上蓝下红」）
+    numeral_color = T.AKA if red else (44, 62, 120)
+    wan_color = T.AKA if red else T.SUIT_M
+    image_first = fonts.get(size_first, bold=True).render(numeral, True, numeral_color)
+    image_second = fonts.get(size_second, bold=True).render("萬", True, wan_color)
     total = image_first.get_height() + image_second.get_height() + gap
     y = box.y + (box.h - total) // 2
     surface.blit(image_first, (box.x + (box.w - image_first.get_width()) // 2, y))
@@ -259,18 +264,20 @@ def _draw_wan(surface: pygame.Surface, fonts, box: pygame.Rect, rank: int) -> No
     )
 
 
-def _draw_wan_flat(surface: pygame.Surface, fonts, box: pygame.Rect, rank: int) -> None:
+def _draw_wan_flat(surface: pygame.Surface, fonts, box: pygame.Rect, rank: int, red: bool = False) -> None:
     """横放牌位上的万子：左「一…九」（墨蓝）右「萬」（红），保持正向可读。"""
     numeral = _CN_NUMERAL[rank - 1]
+    numeral_color = T.AKA if red else (44, 62, 120)
+    wan_color = T.AKA if red else T.SUIT_M
     size = max(9, int(box.h * 0.52))
     while size > 9:
-        first = fonts.get(size, bold=True).render(numeral, True, (44, 62, 120))
-        second = fonts.get(size, bold=True).render("萬", True, T.SUIT_M)
+        first = fonts.get(size, bold=True).render(numeral, True, numeral_color)
+        second = fonts.get(size, bold=True).render("萬", True, wan_color)
         if first.get_width() + second.get_width() + 2 <= box.w:
             break
         size -= 1
-    first = fonts.get(size, bold=True).render(numeral, True, (44, 62, 120))
-    second = fonts.get(size, bold=True).render("萬", True, T.SUIT_M)
+    first = fonts.get(size, bold=True).render(numeral, True, numeral_color)
+    second = fonts.get(size, bold=True).render("萬", True, wan_color)
     gap = 2
     total_w = first.get_width() + second.get_width() + gap
     x = box.x + max(0, (box.w - total_w) // 2)
@@ -360,8 +367,12 @@ def _draw_sparrow(surface: pygame.Surface, box: pygame.Rect) -> None:
         )
 
 
-def _draw_pips(surface: pygame.Surface, box: pygame.Rect, count: int, kind: str, tall: bool) -> None:
-    """筒（dot）/ 条（stick）按传统排布绘制；`tall` 为真时 1 条画成麻雀。"""
+def _draw_pips(surface: pygame.Surface, box: pygame.Rect, count: int, kind: str, tall: bool,
+               red: bool = False) -> None:
+    """筒（dot）/ 条（stick）按传统排布绘制；`tall` 为真时 1 条画成麻雀。
+
+    `red`（赤 5）：所有图案统一换成亮红 —— 赤牌在牌河里必须一眼可辨。
+    """
     if kind == "dot" and count == 1:
         _big_dot(surface, (box.centerx, box.centery), max(3, int(min(box.w, box.h) * 0.40)))
         return
@@ -391,7 +402,9 @@ def _draw_pips(surface: pygame.Surface, box: pygame.Rect, count: int, kind: str,
         for col in range(per_row):
             cx = box.x + cell_w * (col + 0.5)
             cy = box.y + row_h * (row_index + 0.5)
-            tint = _SUIT_TINT.get(row_colors[col] if col < len(row_colors) else "S", T.SUIT_S)
+            tint = T.AKA if red else _SUIT_TINT.get(
+                row_colors[col] if col < len(row_colors) else "S", T.SUIT_S
+            )
             if kind == "dot":
                 radius = max(1, int(min(cell_w, row_h) * 0.40))
                 _dot(surface, (int(cx), int(cy)), radius, tint)
@@ -453,22 +466,28 @@ def _face_art(
         _draw_honor(surface, fonts, pygame.Rect(0, 0, width, height), face, honor_size)
         return surface
 
-    rank = int(face[0])
-    suit = face[1]
+    # 赤 5（v1.18）：牌面仍是 5，只是图案全部走亮红（`0m`/`0p`/`0s`）。
+    # 正常路径是贴图 `faces/0X.png`（由 `5X.png` 染色派生，同源同光照）；
+    # 下面这段程序化染红只在贴图缺失时兜底，外观与贴图版不完全一致。
+    red = is_red_five(face)
+    normal_face = tile_face(face)
+    rank = int(normal_face[0])
+    suit = normal_face[1]
     if suit == "m":
         # 万：竖牌两行字（一…九 + 萬）；横放牌位改左右横排，保持正向可读。
         if height >= 30 and width >= 22:
             pad_y = max(2, int(height * 0.09))
             pad_x = max(2, int(width * 0.08))
-            _draw_wan(surface, fonts, pygame.Rect(pad_x, pad_y, width - pad_x * 2, height - pad_y * 2), rank)
+            _draw_wan(surface, fonts, pygame.Rect(pad_x, pad_y, width - pad_x * 2, height - pad_y * 2),
+                      rank, red)
         elif width >= 26:
             pad = max(2, int(width * 0.08))
             _draw_wan_flat(
-                surface, fonts, pygame.Rect(pad, 1, width - pad * 2, height - 2), rank
+                surface, fonts, pygame.Rect(pad, 1, width - pad * 2, height - 2), rank, red
             )
         else:
             draw_text(
-                surface, str(rank), fonts.get(rank_size, bold=True), T.SUIT_M,
+                surface, str(rank), fonts.get(rank_size, bold=True), T.AKA if red else T.SUIT_M,
                 (0, 0, width, height), ALIGN_CENTER,
             )
         return surface
@@ -478,10 +497,11 @@ def _face_art(
     vertical_pad = max(2, int(height * 0.10))
     box = pygame.Rect(pad, vertical_pad, width - pad * 2, height - vertical_pad * 2)
     if box.w >= 8 and box.h >= 8:
-        _draw_pips(surface, box, rank, "dot" if suit == "p" else "stick", tall=height >= 46)
+        _draw_pips(surface, box, rank, "dot" if suit == "p" else "stick", tall=height >= 46, red=red)
     else:
         draw_text(
-            surface, str(rank), fonts.get(rank_size, bold=True), suit_color(face),
+            surface, str(rank), fonts.get(rank_size, bold=True),
+            T.AKA if red else suit_color(face),
             (0, 0, width, height), ALIGN_CENTER,
         )
     return surface
