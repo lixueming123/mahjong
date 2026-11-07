@@ -101,8 +101,11 @@ std::string BuildDiscardEventFrame(int seat, Tile tile, uint64_t seq, bool red) 
 std::string BuildActionRequestFrame(uint64_t seq, int64_t deadline_ms, std::string_view window,
                                     const std::vector<Option>& options,
                                     std::optional<Tile> claimed = std::nullopt,
-                                    bool red = false) {
-  json::Value frame = json::Value::Obj(claimed.has_value() ? 6 : 5);  // + tile（仅抢杠窗口）
+                                    bool red = false,
+                                    const std::vector<Tile>& riichi_tiles = {}) {
+  const bool has_riichi_tiles = !riichi_tiles.empty();
+  json::Value frame =
+      json::Value::Obj((claimed.has_value() ? 6 : 5) + (has_riichi_tiles ? 1 : 0));
   frame.Set("type", json::Value::Str("action_request"));
   frame.Set("seq", json::Value::Int(static_cast<int64_t>(seq)));
   frame.Set("deadline_ms", json::Value::Int(deadline_ms));
@@ -111,6 +114,12 @@ std::string BuildActionRequestFrame(uint64_t seq, int64_t deadline_ms, std::stri
   if (claimed.has_value()) {
     // 抢杠的那张牌不在任何人的牌河里，客户端没法从 state_sync 推出来，必须显式带上。
     frame.Set("tile", json::Value::Str(FormatTile(*claimed, red)));
+  }
+  if (has_riichi_tiles) {
+    // v1.21 §4.4：立直宣言牌的候选牌面（打出后仍听牌、且不落振听）。
+    // 客户端只允许这几张作宣言牌，避免「选了张打完不听牌的牌 ⇒ ILLEGAL_ACTION」的试错。
+    // 恒用普通牌面码（5m 而不是 0m）：候选是**牌面**，赤 5 与普通 5 作宣言牌等价。
+    frame.Set("riichi_tiles", TilesToJson(riichi_tiles, /*red=*/false));
   }
   return frame.Dump();
 }
@@ -803,9 +812,9 @@ std::string RoomActor::BuildMatchEnd() const {
 
 std::string RoomActor::BuildGameEnd(const Settlement& settlement) const {
   const bool riichi_mode = mode_ == GameMode::kRiichi;
-  json::Value frame = json::Value::Obj(riichi_mode ? 10 : 9);  // type, reason, round_index, dealer,
+  json::Value frame = json::Value::Obj(riichi_mode ? 11 : 9);  // type, reason, round_index, dealer,
                                             // renchan_count, match_will_continue, interlude_ms,
-                                            // results (+ win)；日麻再加 points_after
+                                            // results (+ win)；日麻再加 points_after / kyoutaku_award
   frame.Set("type", json::Value::Str("game_end"));
   frame.Set("reason", json::Value::Str(settlement.reason));
   // v1.6 新增顶层字段：场次进度（game_end 是低频帧，state_sync 不带这些，§5.9 性能注）
@@ -847,6 +856,18 @@ std::string RoomActor::BuildGameEnd(const Settlement& settlement) const {
     }
     frame.Set("points_after", std::move(scores));
     frame.Set("tenpai", std::move(tenpai));  // 荒庄时四家是否听牌（和牌局恒 false）
+    // v1.20：场终那一局把剩下的立直棒归了一位 —— 这笔已计入 results[].delta_score /
+    // points_after，这里只把「归了谁、几根」单独报出来，供结算页写「场供 2 根 → 一位」。
+    // 非场终局恒 null（供托还在台面上等下一次和牌）。
+    if (settlement.kyoutaku_award > 0) {
+      json::Value award = json::Value::Obj(3);  // seat, sticks, points
+      award.Set("seat", json::Value::Int(settlement.kyoutaku_award_seat));
+      award.Set("sticks", json::Value::Int(settlement.kyoutaku_award));
+      award.Set("points", json::Value::Int(settlement.kyoutaku_award * riichi::kRiichiStickPoints));
+      frame.Set("kyoutaku_award", std::move(award));
+    } else {
+      frame.Set("kyoutaku_award", json::Value::Null());
+    }
   }
 
   if (settlement.winner_seat < 0) {
@@ -1131,13 +1152,16 @@ stdexec::task<void> RoomActor::OpenDiscardWindow(bool win_check, std::optional<T
     co_return;  // bots / entrusted seats act inside this same message: no frame, no timer
   }
   std::vector<Option> options;
+  std::vector<Tile> riichi_tiles;
   if (win_check) {
     // B2 接线（B1 裁决 F）：显式传 remaining_，缺省 −1 永远不出杠选项。
     // 日麻下由 DiscardOptionsFor 追加立直选项、并在已立直时去掉杠选项。
-    options = DiscardOptionsFor(seat);
+    // 这里同时取走「立直宣言牌候选」，随帧下发（v1.21 §4.4）。
+    options = DiscardOptionsFor(seat, &riichi_tiles);
   }
   co_await ReplyFrame(seat, BuildActionRequestFrame(seq_, clock::EpochMs() + action_timeout_ms_, "discard", options,
-                                                    std::nullopt, mode_ == GameMode::kRiichi));
+                                                    std::nullopt, mode_ == GameMode::kRiichi,
+                                                    riichi_tiles));
   OpenWindowTimer();
 }
 
@@ -1611,7 +1635,35 @@ void RoomActor::FlipDoraIndicator() {
   dora_indicators_.push_back(dead_wall_[index]);
 }
 
-std::vector<Option> RoomActor::DiscardOptionsFor(int seat) const {
+std::vector<Tile> RoomActor::RiichiDiscardTilesFor(int seat) const {
+  std::vector<Tile> candidates;
+  if (mode_ != GameMode::kRiichi || RiichiDeclared(seat)) {
+    return candidates;
+  }
+  const std::vector<Tile>& hand = hands_[static_cast<size_t>(seat)];
+  const std::vector<Meld>& melds = melds_[static_cast<size_t>(seat)];
+  // 与提交时的 `CanDeclareRiichiNow` 同口径：门前、点数、牌山、至少一张能听的打出牌。
+  if (!riichi::CanDeclareRiichi(hand, melds, remaining_)) {
+    return candidates;
+  }
+  if (points_[static_cast<size_t>(seat)] < riichi::kRiichiStickPoints) {
+    return candidates;
+  }
+  if (furiten_ever_[static_cast<size_t>(seat)]) {
+    return candidates;  // 见逃振听：本局内不许立直（与 CanDeclareRiichiNow 第 5 条一致）
+  }
+  for (Face face : riichi::RiichiDiscardFaces(hand, melds)) {
+    std::vector<Tile> rest = hand;
+    RemoveOneFace(&rest, face);
+    if (riichi::IsPermanentFuriten(rest, melds, discards_[static_cast<size_t>(seat)])) {
+      continue;  // 这张打出去正好落舍て牌振听 ⇒ 不是合法宣言牌，不给前端标记
+    }
+    candidates.push_back(MakeTileFromFace(face));
+  }
+  return candidates;
+}
+
+std::vector<Option> RoomActor::DiscardOptionsFor(int seat, std::vector<Tile>* riichi_tiles) const {
   const std::vector<Tile>& hand = hands_[static_cast<size_t>(seat)];
   const std::vector<Meld>& melds = melds_[static_cast<size_t>(seat)];
   if (mode_ != GameMode::kRiichi) {
@@ -1627,6 +1679,18 @@ std::vector<Option> RoomActor::DiscardOptionsFor(int seat) const {
     options.erase(std::remove_if(options.begin(), options.end(),
                                  [](const Option& option) { return option.action == "win"; }),
                   options.end());
+  }
+  if (riichi_tiles != nullptr) {
+    // v1.21：立直选项与「宣言牌候选」必须同时成立 —— 候选为空（振听 / 打了都不听）
+    // 就把选项一并摘掉，别让玩家点开一个注定被拒的按钮。
+    std::vector<Tile> candidates = RiichiDiscardTilesFor(seat);
+    const bool offer = FindOption(options, "riichi") != nullptr && !candidates.empty();
+    if (!offer) {
+      options.erase(std::remove_if(options.begin(), options.end(),
+                                   [](const Option& option) { return option.action == "riichi"; }),
+                    options.end());
+    }
+    *riichi_tiles = offer ? std::move(candidates) : std::vector<Tile> {};
   }
   return options;
 }
@@ -2013,18 +2077,26 @@ stdexec::task<void> RoomActor::AdvanceAfterRound(Settlement& settlement, const S
   ++dealer_hands_[static_cast<size_t>(settlement.dealer)];
   ++hands_played_;
 
+  // v1.19（雀魂口径）：任一持点 **< 0** ⇒ 击飞，本场立即终局，优先级高于连庄与局数
+  // （庄家本来能连庄，也不再开下一局）。恰好 0 点不算击飞；负点不截断，照实进排名与精算。
+  // classic 不参与：它没有持点概念（points_ 恒 0），加上判定会把每一场都截断在第 1 局。
+  const bool busted = mode_ == GameMode::kRiichi && riichi::IsBusted(points_);
+
   // 连庄/轮庄判定（§3.3）：classic 荒庄一律连庄；日麻荒庄按「庄家是否听牌」决定。
-  RoundResult result = ClassifyRound(settlement.reason, settlement.winner_seat, settlement.dealer);
-  if (mode_ == GameMode::kRiichi && result == RoundResult::kDrawExhausted && !draw_dealer_tenpai_) {
-    result = RoundResult::kNonDealerWin;  // 庄家未听牌 ⇒ 轮庄（本场随之下庄清零）
-  }
-  if (result == RoundResult::kNonDealerWin) {
-    dealer_ = NextDealer(dealer_, result);
-    ++round_index_;
-    honba_ = 0;  // 闲家和牌 ⇒ 本场清零
-  } else {
-    ++renchan_count_;  // 庄家和牌或荒庄 ⇒ 连庄（round_index 不动）
-    ++honba_;          // 连庄每本 +300 点（支付在下一局的算分里）
+  // 击飞时**不推进**庄家与局号：本场到此为止，场面数字停在被打穿的那一局。
+  if (!busted) {
+    RoundResult result = ClassifyRound(settlement.reason, settlement.winner_seat, settlement.dealer);
+    if (mode_ == GameMode::kRiichi && result == RoundResult::kDrawExhausted && !draw_dealer_tenpai_) {
+      result = RoundResult::kNonDealerWin;  // 庄家未听牌 ⇒ 轮庄（本场随之下庄清零）
+    }
+    if (result == RoundResult::kNonDealerWin) {
+      dealer_ = NextDealer(dealer_, result);
+      ++round_index_;
+      honba_ = 0;  // 闲家和牌 ⇒ 本场清零
+    } else {
+      ++renchan_count_;  // 庄家和牌或荒庄 ⇒ 连庄（round_index 不动）
+      ++honba_;          // 连庄每本 +300 点（支付在下一局的算分里）
+    }
   }
   // B2 决策 D1：game_end.renchan_count 报**含本局触发**的累计值（post-increment）——
   // 这与 match_end.renchan_count「与最后一次 game_end 同值」的冻结约束一致（PROTOCOL §5.15）。
@@ -2033,9 +2105,37 @@ stdexec::task<void> RoomActor::AdvanceAfterRound(Settlement& settlement, const S
   // 日麻的连庄上限放宽到「局数」：真实规则里连庄不封顶，用 4（classic 的口径）会把
   // 半庄在第 5 局就砍断（实测种子 20260101：庄家连庄 5 次、round_index=5 就场终了）。
   const int renchan_limit = mode_ == GameMode::kRiichi ? round_count_ : kMaxRenchan;
-  const bool match_over = round_index_ >= round_count_ || renchan_count_ > renchan_limit;
+  const bool match_over = busted || round_index_ >= round_count_ || renchan_count_ > renchan_limit;
   settlement.match_will_continue = !match_over;
   settlement.renchan_count = renchan_count_;
+  if (busted) {
+    spdlog::info("room {}: match over by bust (round_index={}, points={},{},{},{})", room_id_,
+                 settlement.round_index, points_[0], points_[1], points_[2], points_[3]);
+  }
+
+  // v1.20（雀魂口径）：**场终时台面上的立直棒归一位**。
+  // 立直宣言的 1000 点当时就从持点里扣走了（记在 delta 里），棒挂在 kyoutaku_ 上等下一次和牌；
+  // 若本场以荒庄或击飞收尾，就没有和牌者来收，棒会凭空消失（四家持点之和不再等于 100000，
+  // 弹幕里也说不清少的那 1000 点去哪了）。收尾规则是「场供全给一位」，同点按起家优先。
+  // 归账要动四处：points_（终局持点）、match_totals_（本场累计得失分）、本局 delta / totals，
+  // 再重算 points_after —— 最后一局的 game_end 必须已经含这笔，否则它和 match_end.rankings
+  // 的 final_score 会打架（客户端按前者播报、按后者排名）。
+  if (match_over && mode_ == GameMode::kRiichi && kyoutaku_ > 0) {
+    const riichi::KyoutakuAward award = riichi::AwardLeftoverKyoutaku(points_, kyoutaku_);
+    if (award.seat >= 0) {
+      const size_t seat = static_cast<size_t>(award.seat);
+      points_[seat] += award.points;
+      match_totals_[seat] += award.points;
+      settlement.delta[seat] += award.points;
+      settlement.totals[seat] += award.points;
+      settlement.points_after = points_;
+      settlement.kyoutaku_award = award.sticks;
+      settlement.kyoutaku_award_seat = award.seat;
+      kyoutaku_ = 0;
+      spdlog::info("room {}: match over, {} leftover riichi stick(s) awarded to seat {} (+{} points)",
+                   room_id_, award.sticks, award.seat, award.points);
+    }
+  }
   if (match_over) {
     // B3 场终快照：与 match_end 同源（hands_played_ / dealer_hands_ / ComputeFinalRanks）。
     settlement.hands_played = hands_played_;

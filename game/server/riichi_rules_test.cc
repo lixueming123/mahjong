@@ -531,6 +531,34 @@ TEST(RiichiRiichi, CanDeclare) {
   EXPECT_FALSE(CanDeclareRiichi(not_tenpai, {}, 30));
 }
 
+// 立直宣言牌候选（v1.21）：只有「打出去仍在听牌」的牌面才算，且按牌面升序去重。
+TEST(RiichiRiichi, DiscardCandidatesOnlyTenpaiLeavingFaces) {
+  // 123456789m 11p 34p 9s：只有打 9s 之后仍听 2p/5p，其余牌打完都不听。
+  const std::vector<Tile> hand = Tiles({"1m", "2m", "3m", "4m", "5m", "6m", "7m",
+                                        "8m", "9m", "1p", "1p", "3p", "4p", "9s"});
+  const std::vector<Face> faces = RiichiDiscardFaces(hand, {});
+  ASSERT_EQ(faces.size(), 1u);
+  EXPECT_EQ(faces.front(), FaceOf(*ParseTile("9s")));
+
+  // 副露过（非门前）⇒ 一张宣言牌都没有
+  Meld pong;
+  pong.type = MeldType::kPong;
+  pong.tiles = {*ParseTile("1z"), *ParseTile("1z"), *ParseTile("1z")};
+  EXPECT_TRUE(RiichiDiscardFaces(hand, {pong}).empty());
+}
+
+TEST(RiichiRiichi, DiscardCandidatesSortedAndDeduplicated) {
+  // 七对子 14 张：打掉任意一面都还在单骑听，且**每面两张只收一次**（去重）。
+  const std::vector<Tile> hand = Tiles({"1z", "1z", "2z", "2z", "3z", "3z", "4z", "4z",
+                                        "5z", "5z", "6z", "6z", "7z", "7z"});
+  const std::vector<Face> faces = RiichiDiscardFaces(hand, {});
+  ASSERT_EQ(faces.size(), 7u) << "14 张 = 7 个牌面，不因为成对就出现 14 条";
+  for (size_t index = 0; index < faces.size(); ++index) {
+    const std::string code = std::to_string(index + 1) + "z";
+    EXPECT_EQ(faces[index], FaceOf(*ParseTile(code))) << "候选按牌面升序：" << code;
+  }
+}
+
 // 立直后不在打牌窗口提供杠；宣告前提供
 TEST(RiichiRiichi, DiscardOptionsDropKanAfterRiichi) {
   const std::vector<Tile> hand = Tiles({"1m", "1m", "1m", "1m", "2m", "3m", "4m",
@@ -703,6 +731,41 @@ TEST(RiichiYakuman, StackedYakumanAddsMultipliers) {
   EXPECT_EQ(score.yakuman_count, 3);
   EXPECT_EQ(score.han, 39);
   EXPECT_EQ(score.points, 96000);
+}
+
+// 击飞（v1.19）：严格负点才算；恰好 0 点继续对局。
+TEST(RiichiBust, OnlyNegativePointsBust) {
+  EXPECT_FALSE(IsBusted({25000, 25000, 25000, 25000}));
+  EXPECT_FALSE(IsBusted({25000, 25000, 25000, 0})) << "0 点不算击飞（雀魂口径）";
+  EXPECT_FALSE(IsBusted({1, 1, 1, 0}));
+  EXPECT_TRUE(IsBusted({25000, 25000, 25000, -1}));
+  EXPECT_TRUE(IsBusted({-9000, 25000, 25000, 25000}));
+  EXPECT_TRUE(IsBusted({0, 0, -100, 0}));
+}
+
+// 场终剩余供托归一位（v1.20，雀魂口径）：无棒可归 / 归最高持点 / 同点取起家 / 负点也算数。
+TEST(RiichiKyoutakuAward, LeftoverSticksGoToFirstPlace) {
+  // 没有棒：不归任何人
+  const KyoutakuAward none = AwardLeftoverKyoutaku({25000, 25000, 25000, 25000}, 0);
+  EXPECT_EQ(none.seat, -1);
+  EXPECT_EQ(none.sticks, 0);
+  EXPECT_EQ(none.points, 0);
+  EXPECT_EQ(AwardLeftoverKyoutaku({25000, 25000, 25000, 25000}, -3).seat, -1) << "负棒数按无棒处理";
+
+  // 正常：最高持点收棒，点数 = 根数 × 1000
+  const KyoutakuAward award = AwardLeftoverKyoutaku({25000, 31000, 20000, 24000}, 3);
+  EXPECT_EQ(award.seat, 1);
+  EXPECT_EQ(award.sticks, 3);
+  EXPECT_EQ(award.points, 3000);
+
+  // 同点：取席位号小的（起家优先），与 match_end.rankings 的「同分 seat 升序」一致
+  EXPECT_EQ(AwardLeftoverKyoutaku({30000, 30000, 25000, 15000}, 1).seat, 0);
+  EXPECT_EQ(AwardLeftoverKyoutaku({20000, 25000, 25000, 30000}, 1).seat, 3);
+
+  // 有人被打穿（负点）时，棒归活着的最高位；被击飞的那家不参与
+  const KyoutakuAward busted = AwardLeftoverKyoutaku({-9000, 40000, 35000, 34000}, 1);
+  EXPECT_EQ(busted.seat, 1);
+  EXPECT_EQ(busted.points, 1000);
 }
 
 }  // namespace

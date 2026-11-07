@@ -132,6 +132,12 @@ bool IsRiichiWinningHand(const std::vector<Tile>& concealed_with_winning_tile,
 std::vector<Tile> RiichiWaitingTiles(const std::vector<Tile>& concealed,
                                      const std::vector<Meld>& melds);
 
+// 可作立直宣言牌的牌面（v1.21）：`concealed_with_winning_tile` 里每一张「打出去之后仍在听牌」
+// 的牌面各收一次，升序去重。副露非门前时返回空。
+// 客户端拿它在手牌上做标记 —— 立直的宣言牌不是随便哪张都行，选错会被服务端拒（ILLEGAL_ACTION）。
+std::vector<Face> RiichiDiscardFaces(const std::vector<Tile>& concealed_with_winning_tile,
+                                     const std::vector<Meld>& melds);
+
 // 立直后能否暗杠这一面：暗杠**不得改变听牌**（等待牌型与等待张都要一致）。
 // `concealed_with_winning_tile` 是 14 张行动态，`drawn` 是刚摸到的那张（立直者必然有）。
 // 判据：暗杠前（14 张去掉刚摸的 = 13 张）与暗杠后（10 张 + 暗杠组）的 WaitingTiles 必须相同。
@@ -173,6 +179,22 @@ std::vector<Option> ChankanOptions(const std::vector<Tile>& hand, const std::vec
 // 流局听牌罚符：3000 点由未听牌家平摊给听牌家（1 家听 1000/家、2 家听 1500/家、3 家听 3000）。
 // 0 或 4 家听牌时无人收付。返回四家 delta，和恒为 0。
 std::array<int, 4> DrawPenalty(const std::array<bool, 4>& tenpai);
+
+// 击飞（v1.19，雀魂口径）：任一持点**严格小于 0** 即为击飞，本场立即终局。
+// 恰好 0 点不算（0 点继续对局，只是立直不了）；负点不截断，照实进顺位与精算。
+bool IsBusted(const std::array<int, 4>& points);
+
+// 场终的剩余供托归属（v1.20，雀魂口径）：台面上的立直棒全部归**一位**。
+// 立直宣言时那 1000 点已经从各家持点里扣走（delta 记 −1000），棒挂在供托上等下一次和牌；
+// 若本场以荒庄或击飞收尾，没有和牌者来收，棒就会凭空消失（四家持点之和不再等于 100000）。
+// 一位 = 持点最高者；**同点取席位号小的**（起家优先），与 match_end.rankings 的排序同口径。
+// `sticks <= 0` 时 seat = -1、points = 0（无棒可归）。`points` = sticks × 1000。
+struct KyoutakuAward {
+  int seat = -1;
+  int sticks = 0;
+  int points = 0;
+};
+KyoutakuAward AwardLeftoverKyoutaku(const std::array<int, 4>& points, int sticks);
 
 // 振听判定：门前手牌的听牌张里是否有任何一张已在自家牌河中（同巡振听的持久部分）。
 // `concealed` 为等待态（13 张口径）。

@@ -875,6 +875,27 @@ bool RemoveOneFaceIn(std::vector<Tile>* tiles, Face face) {
   return true;
 }
 
+std::vector<Face> RiichiDiscardFaces(const std::vector<Tile>& concealed_with_winning_tile,
+                                     const std::vector<Meld>& melds) {
+  std::vector<Face> faces;
+  if (!IsClosedHand(melds)) {
+    return faces;  // 鸣过牌就没有宣言牌可言
+  }
+  for (const Tile tile : concealed_with_winning_tile) {
+    const Face face = FaceOf(tile);
+    if (std::find(faces.begin(), faces.end(), face) != faces.end()) {
+      continue;  // 同面只看一次：赤 5 与普通 5 同面，打出后听不听牌完全一致
+    }
+    std::vector<Tile> rest = concealed_with_winning_tile;
+    RemoveOneFaceIn(&rest, face);
+    if (!RiichiWaitingTiles(rest, melds).empty()) {
+      faces.push_back(face);
+    }
+  }
+  std::sort(faces.begin(), faces.end());
+  return faces;
+}
+
 bool CanAnkanAfterRiichi(const std::vector<Tile>& concealed_with_winning_tile,
                          const std::vector<Meld>& melds, Tile drawn, Face face, int remaining) {
   if (remaining <= 0) {
@@ -985,6 +1006,33 @@ std::array<int, 4> DrawPenalty(const std::array<bool, 4>& tenpai) {
         tenpai[static_cast<size_t>(seat)] ? per_tenpai : -per_noten;
   }
   return delta;
+}
+
+bool IsBusted(const std::array<int, 4>& points) {
+  for (int value : points) {
+    if (value < 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+KyoutakuAward AwardLeftoverKyoutaku(const std::array<int, 4>& points, int sticks) {
+  if (sticks <= 0) {
+    return KyoutakuAward {};
+  }
+  int best = 0;
+  for (int seat = 1; seat < 4; ++seat) {
+    // 严格大于才替换 ⇒ 同点保留席位号小的那个（起家优先，与场终排名同口径）
+    if (points[static_cast<size_t>(seat)] > points[static_cast<size_t>(best)]) {
+      best = seat;
+    }
+  }
+  KyoutakuAward award;
+  award.seat = best;
+  award.sticks = sticks;
+  award.points = sticks * kRiichiStickPoints;
+  return award;
 }
 
 int RoundWindOf(int round_index) {

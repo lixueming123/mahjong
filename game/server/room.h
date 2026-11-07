@@ -340,6 +340,13 @@ class RoomActor {
   int renchan_count() const { return renchan_count_; }    // 本场累计连庄次数
   int hands_played() const { return hands_played_; }      // 已下发的 game_end 次数（含连庄）
   int match_total_of(int seat) const { return match_totals_[static_cast<size_t>(seat)]; }
+  // Test seam: 正常流程里持点只能由结算的 ApplyDeltaToPoints 改写，测试要构造「已被打穿」
+  // 或「恰好 0 点」这两种终局判定边界时没有别的入口。生产代码不得调用。
+  void SetPointsForTest(const std::array<int, kSeatCount>& points) { points_ = points; }
+  // Test seam: 供托只会在立直宣言时由玩家投入，房间层没有别的入口能造出「场终还剩棒」
+  // 这种局面（末局荒庄得靠发牌运气）。**不扣持点**，所以调用方算守恒时要把它加回去。
+  void SetKyoutakuForTest(int sticks) { kyoutaku_ = sticks; }
+  int kyoutaku() const { return kyoutaku_; }
   // "" when no window is open, otherwise "discard" or "claim" (PROTOCOL.md §5.7).
   std::string CurrentWindow() const {
     if (discard_window_open_) return "discard";
@@ -420,6 +427,8 @@ class RoomActor {
     int ura_dora = 0;
     int aka_dora = 0;                        // 赤宝牌张数（v1.18，classic 恒 0）
     int kyoutaku = 0;                        // 结算后剩余供托（通常 0）
+    int kyoutaku_award = 0;                  // v1.20：场终归一位的供托棒数（0 = 无）
+    int kyoutaku_award_seat = -1;            // 收下这些棒的座位（无则 -1）
     int honba = 0;                           // 本局本场数（支付已计入 delta）
     std::vector<Tile> dora_indicators;
     std::array<int, kSeatCount> points_after {};  // 本局结束后的持点（日麻排名口径）
@@ -526,7 +535,12 @@ class RoomActor {
 
   // ---- 日麻（mode == kRiichi）--------------------------------------------------------
   // 打牌 / 鸣牌窗口的选项：classic 直接转发规则库，日麻额外叠加立直与振听过滤。
-  std::vector<Option> DiscardOptionsFor(int seat) const;
+  // `riichi_tiles` 非空时（只有真正构造 action_request 的调用点才传）回填立直宣言牌候选，
+  // 并按候选是否为空裁剪 `riichi` 选项（v1.21 §4.4）。
+  std::vector<Option> DiscardOptionsFor(int seat, std::vector<Tile>* riichi_tiles = nullptr) const;
+  // 立直宣言牌候选（v1.21）：打出去之后仍在听牌、且不落振听的牌面，升序去重。
+  // 空 = 现在不能立直（未门清 / 牌山不足 / 点数不足 / 已立直 / 振听 / 怎么打都不听）。
+  std::vector<Tile> RiichiDiscardTilesFor(int seat) const;
   std::vector<Option> ClaimOptionsFor(int seat, Tile tile, bool is_next_player, int from_seat) const;
   // 日麻：没有役就不能和（宝牌不算役）。classic 恒 true。房间在这里用**完整上下文**判，
   // 这样立直/一发/海底/杠上开花这类「状态役」也能算进去。
