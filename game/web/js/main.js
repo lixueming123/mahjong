@@ -117,6 +117,7 @@ async function boot() {
     melds.render(app.state);
     hand.render(app.state);
     table.refreshBoard();
+    table.renderDora();          // 宝牌指示随 sync 更新（经典玩法为空 ⇒ 不画）
     ui.update(app.state);
   });
   app.on('discard', ({ code, from, seat }) => {

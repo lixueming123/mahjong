@@ -332,18 +332,6 @@ export class MahjongClient {
   }
 
   /** 一条 options 里候选动作可能有多条（多种吃法 / 多个暗杠面），用选中的手牌消歧 */
-  pickOption(list) {
-    if (list.length <= 1) return list[0] || null;
-    const index = this.state.selected;
-    const tile = index >= 0 ? this.state.hands[0][index] : null;
-    if (tile) {
-      const face = normTile(tile);
-      const hit = list.find((item) => (item.tiles || []).some((code) => normTile(code) === face));
-      if (hit) return hit;
-    }
-    return list[0];
-  }
-
   actionFromOptions(names) {
     const wanted = Array.isArray(names) ? names : [names];
     if (!this.window) return false;
@@ -355,7 +343,21 @@ export class MahjongClient {
       this.hint('这个动作现在不可用');
       return false;
     }
-    const option = this.pickOption(options);
+    // 多种吃法（如 3-4-5万 / 4-5-6万 / 5-6-7万 都含那张 5万）：
+    // 优先按玩家当前选中的手牌消歧 —— 点中了哪张就吃含它的那把；
+    // 没选中或选中的不在候选里 ⇒ 弹选择条让玩家自己点，**绝不悄悄替选第一种**。
+    if (options.length > 1) {
+      const index = this.state.selected;
+      const tile = index >= 0 ? this.state.hands[0][index] : null;
+      if (tile) {
+        const face = normTile(tile);
+        const hit = options.find((item) => (item.tiles || []).some((code) => normTile(code) === face));
+        if (hit) return this.action(hit.action, hit.tiles || []);
+      }
+      this.ui?.showOptionPicker?.(options, (opt) => this.action(opt.action, opt.tiles || []));
+      return true;
+    }
+    const option = options[0];
     return this.action(option.action, option.tiles || []);
   }
 
@@ -912,6 +914,12 @@ export class MahjongClient {
     this.expired = false;
     this.state.riichiTiles = riichiTiles;
     this.state.windowTile = this.window.tile;
+    // 鸣牌时在牌河里点亮被指的那张。打出者以 lastDiscard 为准：
+    // 只有吃限定上家；碰/和可鸣任何一家刚打出的牌，随局轮转。
+    const ld = this.state.lastDiscard;
+    this.state.claimTarget = frame.window === 'claim' && ld
+      ? { seat: ld.seat, index: (this.state.rivers[ld.seat] || []).length - 1 }
+      : null;
     this.state.selected = -1;          // 新窗口不继承上一手的选中（参考端同口径）
     this.applyButtons();
     this.app.changed();
@@ -935,7 +943,10 @@ export class MahjongClient {
 
     let tile = isValidTile(frame.tile) ? frame.tile : null;
     if (!tile) {
-      const river = this.state.rivers?.[3] || [];      // 视角 3 = 上家 = 打出者
+      // 打出者随局轮转（碰/和可鸣任何一家），以 lastDiscard 为准；
+      // claim 的猎物就是它牌河的末张
+      const ld = this.state.lastDiscard;
+      const river = ld ? this.state.rivers?.[ld.seat] || [] : [];
       if (river.length) tile = river[river.length - 1];
     }
     if (!tile) { this.ui.hideClaimTip?.(); return; }
@@ -952,6 +963,7 @@ export class MahjongClient {
     this.window = null;
     this.state.riichiTiles = [];
     this.state.windowTile = null;
+    this.state.claimTarget = null;
     this.ui?.hideClaimTip?.();
     this.riichiArming = false;
     this.state.riichiArming = false;

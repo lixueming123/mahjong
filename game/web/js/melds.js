@@ -77,9 +77,10 @@ export class MeldView {
         angle: -(L.tilt || 0),
       });
       // 平铺在桌面上；后面的组/牌略微抬高，深度测试自然分出前后
-      // 横放的牌短边朝上，竖直方向比邻居矮一截 —— 往下补半个高差，
-      // 底边才和同组竖牌落在同一条桌面上（对本家最明显）
-      const drop = (sideways && !L.far) ? (L.h - L.w) / 2 : 0;
+      // 横放的牌短边朝上：沿「垂直于排布方向」比邻居宽出一截。
+      // 中心不动会两侧各凸一半，看着像摆歪了；统一把多出来的部分
+      // 全部推到同一侧，让这一侧和同组竖牌对齐（底边落在同一条桌面上）。
+      const drop = sideways ? (L.h - L.w) / 2 : 0;
       tile.position.set(x - ay * drop, y + ax * drop, 6 + item.group * 2 + i * .6);
       tile.renderOrder = Z.RIVER + 2 + item.group * .1 + i * .01;
       this.group.add(tile);

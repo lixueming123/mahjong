@@ -257,7 +257,32 @@ export class UI {
   }
 
   hideClaimTip() {
-    if (this.el.claimTip) this.el.claimTip.hidden = true;
+    if (this.el.claimTip) {
+      this.el.claimTip.hidden = true;
+      this.el.claimTip.style.pointerEvents = '';
+    }
+  }
+
+  /**
+   * 多种吃法选择条：每种吃法一颗按钮，显示它的三张牌面
+   * （服务端 tiles[] 已含被鸣那张）。onPick(option) 由 client 发帧。
+   */
+  showOptionPicker(options, onPick) {
+    const el = this.el.claimTip;
+    if (!el) return;
+    const btns = (options || []).map((opt, i) => {
+      const faces = (opt.tiles || []).map((code) => tileLabel(code)).join('');
+      return `<button class="ct-pick" data-i="${i}">${esc(faces)}</button>`;
+    }).join('');
+    el.innerHTML = `<span class="ct-note">选一种吃</span>${btns}`;
+    el.hidden = false;
+    el.style.pointerEvents = 'auto';   // 提示条默认穿透，选择条必须可点
+    el.querySelectorAll('.ct-pick').forEach((b) => {
+      b.addEventListener('click', () => {
+        this.hideClaimTip();
+        onPick(options[+b.dataset.i]);
+      });
+    });
   }
 
   // ------------------------------------------------------------------ 结算

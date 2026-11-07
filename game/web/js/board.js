@@ -58,16 +58,14 @@ export class TableView {
   }
 
   /**
-   * 顶部偏左那一排小牌，严格按录像：
-   *   - 内容是**两组顺子**：2-3-4筒、6-7-8筒（用户点名的「上边的
-   *     二三四筒六七八筒」），不是随便挑几张筒子、也不能有重复牌。
-   *   - 清一色翻开的明牌，**没有任何橙金牌背**；
-   *     旧版「2 张牌背 + 3 张明牌」是照旧客户端口径自己加的，录像里不存在。
-   *   - 白牌身 + 下缘橙金厚边、紧贴成一排、位置贴画面上沿。
+   * 顶部偏左那一排小牌：**宝牌指示牌**，数据来自 game_start / state_sync 的
+   * dora_indicators[]（state.dora）。经典玩法 / 尚未下发时一只都不画 ——
+   * 旧版这里是一排写死的「2-3-4筒 6-7-8筒」假数据，对局里根本不更新，
+   * 玩家看它排牌完全没有信息量（用户：「没懂这个是什么」）。
    */
   renderDora() {
     this.dora.clear();
-    const codes = ['2p', '3p', '4p', '6p', '7p', '8p'];
+    const codes = (this.state.dora || []).filter(Boolean);
     codes.forEach((code, i) => {
       const t = makeMiniTile(code, 39, 40, Z.RIVER + i * .01);
       const [x, y] = P(385 + i * 40, 55);

@@ -171,6 +171,16 @@ body { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-s
   text-align: center; box-shadow: 0 2px 6px rgba(0,0,0,.45);
 }
 .ct-note { font-size: 13px; color: #9fb0c8; }
+/* 多种吃法的选择按钮：每种吃法一颗，点了直接发帧 */
+.ct-pick {
+  padding: 5px 12px; border-radius: 10px; cursor: pointer;
+  background: linear-gradient(180deg, #fdf7e8, #e9dfc8);
+  border: 1px solid rgba(230,180,90,.85); color: #2b1603;
+  font-size: 16px; font-weight: 800; letter-spacing: 1px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.45);
+}
+.ct-pick:hover { background: linear-gradient(180deg, #fff, #f6e9c8); border-color: #ffd479; }
+.ct-pick:active { transform: translateY(1px); }
 
 /* ---------- 底部 HUD ---------- */
 .hud, .hud-right {

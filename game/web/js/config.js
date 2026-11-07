@@ -186,10 +186,13 @@ export const MELD = {
       far: { x: 1600, y: 250 }, angle: 251.3 * DEG, w: 84, h: 52, rot: 1, d: 18, thick: 7, side: 5,
       tilt: -18.7 * DEG, gap: 16, seam: -3, swap: true, pinGap: 52, maxLen: 470,
     },
-    // 对家：手牌左前方摊开（他们的右手边），避开宝牌排和牌河
+    // 对家：牌河**右侧**沿同一条水平带摊开（他们的左手边）。
+    // 旧位置 far{812,128} 在牌河上方往右长，3 行舍牌（y≈68~215）一多
+    // 就整段压进副露带（y≈99~157）—— 用户截图顶部那团乱牌就是它。
+    // 现在挪到河外右翼：x 从牌河右沿（≈1155）之外起步，y 与牌河各行错开。
     2: {
-      far: { x: 812, y: 128 }, angle: 180 * DEG, w: 46, h: 58, rot: 2, d: 16, thick: 7, side: 5,
-      tilt: 0, gap: 12, seam: -2, swap: true, maxLen: 520,
+      far: { x: 1720, y: 150 }, angle: 0, w: 46, h: 58, rot: 2, d: 16, thick: 7, side: 5,
+      tilt: 0, gap: 12, seam: -2, swap: true, maxLen: 500,
     },
     // 上家：手牌下端往左下角摊开（录像实测坐标）
     3: {

@@ -92,6 +92,8 @@ export function createState() {
     riichiTiles: [],                  // v1.21：立直宣言牌候选（当前打牌窗口）
     riichiArming: false,              // 立直宣言模式：点候选牌才发帧（渲染层据此高亮）
     windowTile: null,                 // §12.10：抢杠窗口的被抢牌面（其余窗口为 null）
+    lastDiscard: null,                // 最近一次 discard_event 的打出者 {seat, code}（碰/和可鸣任何一家）
+    claimTarget: null,                // 鸣牌窗口：牌河里被指的那张 {seat, index}（渲染层据此打光）
     tenpai: { isTenpai: false, waits: [], noYaku: false },
     tenpaiSeq: null,                  // §5.16：独立的 tenpai_seq，不掺 room.seq
     tenpaiFlags: [],                  // §12.5：荒庄时四家是否听牌（game_end / state_sync 携带）
@@ -177,6 +179,8 @@ export function createState() {
     state.riichiTiles = [];
     state.riichiArming = false;
     state.windowTile = null;
+    state.lastDiscard = null;
+    state.claimTarget = null;
     state.tenpai = { isTenpai: false, waits: [], noYaku: false };
     state.tenpaiSeq = null;                       // 新场次：服务端计数器也不再生效（§5.16）
     state.tenpaiFlags = [];
@@ -343,6 +347,7 @@ export function createState() {
     river.push(tile);
 
     state.turn = (view + 1) % 4;
+    state.lastDiscard = { seat: view, code: tile };   // 碰/和可鸣任何一家刚打的这张
     state.riichiTiles = [];
     state.riichiArming = false;
     changed(`seat${view} 打出 ${tile}`);
@@ -433,6 +438,8 @@ export function createState() {
     state.riichiTiles = [];
     state.riichiArming = false;
     state.windowTile = null;
+    state.lastDiscard = null;
+    state.claimTarget = null;
     state.tenpai = { isTenpai: false, waits: [], noYaku: false };
 
     const win = frame.win;
@@ -491,6 +498,8 @@ export function createState() {
     state.riichiTiles = [];
     state.riichiArming = false;
     state.windowTile = null;
+    state.lastDiscard = null;
+    state.claimTarget = null;
     state.tenpai = { isTenpai: false, waits: [], noYaku: false };
     changed('场终');
   }
@@ -512,6 +521,8 @@ export function createState() {
     state.riichiTiles = [];
     state.riichiArming = false;
     state.windowTile = null;
+    state.lastDiscard = null;
+    state.claimTarget = null;
     state.tenpai = { isTenpai: false, waits: [], noYaku: false };
     state.tenpaiSeq = null;                       // 新场次：服务端计数器也不再生效（§5.16）
     state.tenpaiFlags = [];

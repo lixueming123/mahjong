@@ -9,7 +9,7 @@
  */
 import * as THREE from 'three';
 import { RIVER, BOARD, P, Z } from './config.js';
-import { makeRiverTile } from './tiles.js';
+import { makeRiverTile, rectMesh, flat } from './tiles.js';
 
 /** 第 n 张舍牌在 seat 家牌河里的设计像素位置 */
 export function riverSlot(seat, n) {
@@ -52,18 +52,30 @@ export class RiverView {
 
   render(state) {
     this.clear();
+    const target = state.claimTarget;   // 鸣牌窗口：牌河里被指的那张（打出者随局轮转）
     for (let seat = 0; seat < 4; seat++) {
       const cards = state.rivers[seat];
       for (let n = 0; n < cards.length; n++) {
         const p = riverSlot(seat, n);
         const tile = makeRiverTile(cards[n], seat);
         const [wx, wy] = P(p.x, p.y);
+        const isTarget = !!target && target.seat === seat && n === target.index;
         // 真 3D 牌：略微离桌，shadowMap 才投得出落影；
         // 后打出的牌 z 更高，深度测试自然决定前后，不再靠贴图层叠。
-        tile.position.set(wx, wy, 4 + n * .12);
+        // 被指的那张再抬高一些，和金光一起把「就是这张」说清楚。
+        tile.position.set(wx, wy, (isTarget ? 11 : 4) + n * .12);
         tile.renderOrder = Z.RIVER + n * .001;
         this.group.add(tile);
         this.meshes[seat].push(tile);
+        if (isTarget) {
+          // 鸣牌标记：牌脚下垫一块金光板。左右家的牌是横躺的，光板跟着换向。
+          const horizontal = seat === 1 || seat === 3;
+          const gw = (horizontal ? RIVER.hW : RIVER.vW) + 18;
+          const gh = (horizontal ? RIVER.hH : RIVER.vH) + 12;
+          const glow = rectMesh(gw, gh, flat(0xffc94d, .60), Z.RIVER - 1);
+          glow.position.set(wx, wy, 3.4);
+          this.group.add(glow);
+        }
       }
     }
   }
