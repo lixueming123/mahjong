@@ -1,7 +1,11 @@
 # 麻将里程碑协议（PROTOCOL）
 
 - 文档 ID：PROTOCOL
-- 版本：**v1.18（冻结）**
+- 版本：**v1.22（冻结）**
+  v1.22 **玩法徽标（纯客户端，零帧变化）**：`game_start` **不新增** `mode` 字段（classic 帧逐字节冻结、仍是 6 键），客户端按「帧里有没有 `points[4]`」判定玩法——日麻恒带、classic 恒不带——并在场况卡右上角画徽标（`日麻` 金色 / `经典` 灰色）。这条只为回答一个反复出现的问题：**「这里怎么不能立直」多数时候答案是「这是经典房」**。服务端一字节未改。见 §5.4
+  v1.21 **立直宣言牌候选**（`mode=riichi`）：`action_request` 新增**可选字段** `riichi_tiles`（牌面数组），只在 `window=="discard"` 且 `options` 含 `riichi` 时出现，值 = 手中「打出去之后仍在听牌且不落振听」的牌面（升序去重、恒用普通牌面码，赤 5 写 `5m`）。**候选为空时服务端不下发 `riichi` 选项**（不再出现"点了注定被拒"的按钮）。客户端据此在手牌上标记可宣言的牌，消除「选错宣言牌 → ILLEGAL_ACTION」的试错。**零新增帧、零新增错误码**；classic 与 v1.20 逐字节一致。见 §5.7、§12.5
+  v1.20 **场终剩棒归一位**（`mode=riichi`）：本场以**荒庄或击飞**收尾时，台面上还没被收走的立直棒（`kyoutaku`）不再凭空消失，而是**全部归一位**（持点最高者；同点按东一局座次 = seat 升序）。这笔点数**已计入**该局 `game_end.results[].delta_score` / `points_after[]` 与 `match_end.rankings[].final_score`（三者同源），并新增**可选字段** `game_end.kyoutaku_award`（`{seat, sticks, points}`，非场终局恒 `null`）供结算页显示「场供 N 根 → 一位」。classic 无供托概念、帧与 v1.19 逐字节一致。见 §12.13
+  v1.19 **击飞终局**（`mode=riichi`）：任一玩家持点 **< 0**（严格小于 0）⇒ 本场**立即终局**，优先级高于局数与连庄——庄家本可连庄也不再开下一局，`game_end.match_will_continue` 直接为 `false`、随后下发 `match_end`。恰好 **0 点继续对局**；负点**不截断**（箱下照实进 `points_after` / `match_end.rankings[].final_score` / 精算）。**零新增字段、零新增错误码**（客户端无需改动：早到的 `match_end` 就是终局信号），classic 无持点概念、完全不受影响。见 §12.12
   v1.18 **赤宝牌 + 双倍役满**（`mode=riichi`）：① 牌码新增 **`0m` / `0p` / `0s`** = **赤宝牌**（5 的第 4 张物理牌），每张 +1 番，计入 `win.yaku[]` 的 `aka_dora` 与新增字段 **`win.aka_dora`**；**classic 永不下发这三个牌码**（其帧与 v1.17 逐字节一致）。② 役满分档新增三个 **双倍**役满 id —— `kokushi_13`（国士十三面）、`suuankou_tanki`（四暗刻单骑）、`chuuren_junsei`（纯正九莲宝灯），并明确 `daisuushii`（大四喜）也是双倍；`win.yaku[].han` 对双倍役满记 **26**（13 × 2），`win.han` = Σ `yaku[].han` 的等式仍成立，`limit` 仍是 `yakuman`。**零新增帧、零新增错误码**。见 §2.1、§12.5、§12.11
   v1.17 **日麻规则补全**：① 立直合法性新增「**振听不可立直**」（舍て牌振听 / 见逃振听，违者 `ILLEGAL_ACTION`）；② 新增役满 `tenhou`（天和）/ `chiihou`（地和），会出现在 `game_end.win.yaku[]` 里；③ 修复国士无双此前**根本无法和牌**的缺陷（牌型门禁不认国士，连带听牌条、立直、荒庄听牌全错）。**零新增字段、零新增错误码**，classic 不受影响
   v1.16 **立直后暗杠**：立直状态下 `options` 重新允许 **`ankan`**，条件是「暗杠不改变听牌」（等待张集合与暗杠前完全一致）；`kakan` 仍不提供（立直手不可能有碰组）。判据需要「刚摸到的那张」，所以 `drawn_tile` 未知时一律不给。**classic 与其他玩法行为不变**，零新增错误码、零新增字段
@@ -13,7 +17,10 @@
   v1.6 **A 批增补**（番型表 + 番数结算 + 一场四局/连庄/场次总分 + 暗杠/加杠）：① `action` 动作词表 5 → **7**（+`ankan`、+`kakan`），**不新增窗口类型**（两者是 `discard` 窗口的附加 `options`）；② `melds[].type` 3 → **5**（+`ankan`、+`kakan`），暗杠对他家的 `tiles` 为**空数组**并在局终揭示（§5.9、§8.1）；③ `game_end` **只增字段**（`win.yaku[]` / `win.han_breakdown{base,tsumo,dealer,total}` / `win.han` / `win.dealer_bonus` / `win.rinshan` / `results[].match_total` / 顶层 `round_index` / `dealer` / `renchan_count` / `match_will_continue`），既有字段形状一律不动（**`win.tags` 保持旧语义**，仍是 `yaku[].id` 的子集）；④ 新增服务端帧 **`match_end`**（场终，§5.15）；⑤ **零新增错误码**（仍 14 条，§7.1）；⑥ 明确 `seq` **跨局单调不重置**（§6.2）。见附录 C v1.6 行。
   v1.5 大厅选房：新增 `list_rooms` / `room_list`；`join_room` 在开局前替换一个 AI 座位并回 `room_joined`；`create_room` 不自动开局；`ready` 仍是开局信号。错误码不新增。见 §3、§4.2–§4.4、§4.11、§5.14。
 - 状态：**已冻结**（t3 网关、t4 房间状态机、t5 客户端、t6 端到端脚本必须严格按本文实现；变更须走新的需求评审）
-- 修订：v1.18 增补 §2.1 的赤 5 牌码、§12.5 的 `win.aka_dora` 与 §12.11（双倍役满 id）
+- 修订：v1.22 增补 §5.4 的「玩法判定口径」（`game_start` 无 `mode` 键，客户端按 `points` 反推）
+  v1.21 增补 §5.7 的 `action_request.riichi_tiles`（立直宣言牌候选）与 §12.5 的客户端标记口径
+  v1.20 增补 §12.13（场终剩棒归一位）与 §5.10 的 `game_end.kyoutaku_award`
+  v1.18 增补 §2.1 的赤 5 牌码、§12.5 的 `win.aka_dora` 与 §12.11（双倍役满 id）
   v1.17 补「振听不可立直」与天和/地和，并修国士无双的和牌判定
   v1.16 放开「不影响听牌的暗杠」（§12.4）
   v1.15 依抢杠需求**增补** §12.10（`window:"chankan"`、`tile`、`is_chankan` 判番）
@@ -482,6 +489,10 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 - 起始牌山的剩余张数由 `RULESET.md` §1 冻结；服务端在首个 `state_sync` 中给出。
 - **v1.6 时序契约**：一场内每局开始时**各下发一次** `game_start`（第 2..4 局与第 1 局形状完全相同，仅字段值变化）。客户端收到 `game_start` 即视为"新一局开始，本地牌桌状态整体重置"；局间收到的 `state_sync` 不得跨局沿用。
 - `round_index` / `round_count` 是**低频**信息（每局一次）；`state_sync` **不携带**任何场次进度字段（见 §5.9 的性能注），场次总分只在 `game_end` / `match_end` 下发。
+- **玩法判定口径（v1.22，客户端必读）**：本帧**没有** `mode` 字段，也不允许加（classic 帧逐字节冻结、日麻只追加键）。判据只有一条：
+  **帧里有 `points` 数组 ⇒ 日麻；没有 ⇒ 经典**。理由：日麻 `game_start` 恒写 `points[4]`（§12.1），classic 无持点概念、从不写。
+  客户端据此画场况卡徽标（`日麻` / `经典`），并在经典房里**不显示**「立直」按钮——`riichi` 选项本来就只存在于日麻 `discard` 窗口。
+  不要用 `dora_indicators` 判断：日麻东一局可能只有一张指示牌，也可能因牌山口径差异缺省，而 `points` 是恒定的。
 
 ### 5.5 `draw`（H5）
 
@@ -517,6 +528,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | `deadline_ms` | 窗口截止时刻（epoch ms UTC） |
 | `window` | `"discard"` 或 `"claim"`（**仅此两值**；暗杠/加杠**不新增窗口类型**，它们是 `discard` 窗口的附加 `options`） |
 | `options` | 数组，元素为 `{"action":<动作>, "tiles":[...]}`；**顺序固定** `win → kong → ankan → kakan → pong → chow → pass`（v1.6 在 `kong` 与 `pong` 之间**插入**两项，原有五项的相对顺序逐字不变）；`chow` 可出现多条（每个合法组合一条）。每个窗口只出现其适用的子集 |
+| `riichi_tiles` | **v1.21（仅日麻）**：立直宣言牌的候选**牌面**数组，如 `["2m","5s","6z"]`。只在 `window=="discard"` **且** `options` 含 `{"action":"riichi"}` 时出现；其余情况**该键不写**（classic 帧逐字节不变） |
 
 - 收件人：`window=="claim"` 时**仅发给存在非 `pass` 选项的座位**；不存在非 `pass` 选项时**不下发任何帧**且窗口立即关闭。
 - `window=="discard"` 时**一定发给当前行动座位**，其 `options` 为以下动作的**子集**（各动作的出现条件由 `RULESET.md` §5.2 冻结）：
@@ -526,6 +538,11 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
   - **可能为空 `[]`**（只能打牌）。「打牌」本身**不进入 `options`**。
 - **v1.6 补充**：`options` 中出现 `ankan`/`kakan` 时，超时代打的默认动作仍然是「打牌」而**不是**杠（§6.4）——即**超时永不选杠**，选项存在只代表"可以选"，不代表"会被代选"。
 - 同一时刻全房间最多一个未决窗口（由 `seq` 唯一标识）。
+- **v1.21 · 立直宣言牌候选**（`mode=riichi`）：
+  - `options` 含 `{"action":"riichi"}` 时 **MUST** 同时带非空 `riichi_tiles`；**候选为空就不得给 `riichi` 选项**（服务端按与 `CanDeclareRiichiNow` 相同的口径算：门前、持点 ≥ 1000、牌山 ≥ 4 张、未振听、打出去仍在听牌）。
+  - 候选是**牌面**不是物理牌：同面只出现一次，恒写普通牌面码（赤 5 写 `5m`，**MUST NOT** 写 `0m`），按 §2.2 牌面升序。
+  - 立直动作本身不变：`action{action:"riichi",tiles:[T],seq}`（§4.6），`T` 必须是候选之一；不在此列 ⇒ `ILLEGAL_ACTION`（客户端在本地就会拦下，不依赖服务端拒）。
+  - 用途：客户端点「立直」后据此在手牌上**标记**可宣言的牌、压暗其余牌，点高亮牌即宣言并打出（`UI_UX_SPEC` §5.3.2）。
 - 超时代打口径见 §6.4。
 
 ### 5.8 `action_event`（H3、H5、H9）
@@ -1383,8 +1400,9 @@ remaining(tile) = 4
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `points_after` | int[4] | 本局结算后的持点（排名口径；不含供托的持有者变化） |
+| `points_after` | int[4] | 本局结算后的持点（排名口径；**场终那一局已含归一位的剩棒**，见 §12.13） |
 | `tenpai` | bool[4] | 荒庄时四家是否听牌；和牌局恒 `false` |
+| `kyoutaku_award` | object \| null | **v1.20**：场终剩下的立直棒归了谁（`{seat, sticks, points}`）；非场终局 / 无棒恒 `null`，见 §12.13 |
 
 `win` 追加：
 
@@ -1529,6 +1547,59 @@ remaining(tile) = 4
   客户端按 id 查表即可，**不需要**判断倍数。
 - **`kokushi` 与 `kokushi_13` 互斥**：十三面和牌只报 `kokushi_13`，不会两条都出现。
 
+### 12.12 击飞终局（**v1.19 增补**）
+
+| 条款 | 口径 |
+| --- | --- |
+| 触发条件 | 任一玩家持点 **< 0**（严格小于 0）。**恰好 0 点不算**，对局继续（只是立直不了：立直需要 ≥1000 点） |
+| 判定时机 | 每局**收付完成后**（和了的支付、荒庄听牌罚符分摊之后），即 `AdvanceAfterRound` 里一次判定；局中持点只有立直供托一次变化，且立直要求 ≥1000 点，到不了负点 |
+| 优先级 | **高于局数与连庄**：庄家本来能连庄也不再开下一局；`game_end.match_will_continue` 为 `false`，随后就是 `match_end` |
+| 场面数字 | 击飞那一局**不推进**庄家、局号与本场数（`round_index` / `dealer` / `renchan_count` 停在被打穿的那一局） |
+| 负点 | **不截断**（箱下照算）：`game_end.points_after[]`、`match_end.rankings[].final_score`、精算全部用真实负值 |
+| 顺位 | 与正常终局一致：按 `points_after` 降序，同分按东一局座次（seat 升序）；负点自然排到最后 |
+| classic | **不参与**：classic 没有持点概念（内部 `points_` 恒 0），加了判定会把每一场都截断在第 1 局 |
+
+- **客户端不需要改动**：没有新增字段，`match_end` 提前到达即为终局信号；结算页照常显示负点。
+- **`game_end.reason` 不变**：仍是被击飞那一局的真实结束方式（`win_*` 或 `draw_exhausted`），
+  击飞是**场次层**的终止条件，不新增 `reason` 值（老客户端不会遇到未知枚举）。
+- **和「终局损」的关系**：这是规则选定，不是缺陷 —— 被击飞的可能是第四名给第二名点炮，
+  第二名就此失去争一的机会；雀魂/天凤同口径，理由见 `GAME_DESIGN_RIICHI_DRAFT.md` §7.6。
+
+### 12.13 场终剩棒归一位（**v1.20 增补**）
+
+立直宣言的 1000 点当时就从持点里扣走了（`results[].delta_score` 记 −1000），棒挂在供托上等下一次和牌。
+只要有人和牌，棒就被和牌者收走；但如果本场以**荒庄**（末局流局）或**击飞**收尾，**没人来收**，
+棒就会凭空消失 —— 四家持点之和不再是 100000，客户端也算不出少的那 1000 点去了哪。
+
+| 条款 | 口径 |
+| --- | --- |
+| 触发时机 | 本场终局（`match_over`）时，且 `kyoutaku > 0`。**只可能出现在最后一局** |
+| 归属 | **一位**：持点最高者；**同点取 seat 号小的**（东一局座次 = 起家优先），与 `match_end.rankings` 的排序同口径 |
+| 归属金额 | `sticks × 1000` |
+| 落在哪 | 该局 `game_end.results[seat].delta_score` / `match_total` **各加上这笔**，`points_after[seat]` 同步；`match_end.rankings[].final_score` 与之**逐点一致** |
+| 供托清零 | 归账后房间供托归 0（不会再出现在任何帧里） |
+| classic | **不参与**：classic 没有持点与供托概念，帧与 v1.19 逐字节一致 |
+
+**新增可选字段**（`game_end`，仅 `mode=riichi`，其余玩法与其余局不出现）：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `kyoutaku_award` | object \| null | 场终剩棒的归属；**非场终局 / 无棒恒 `null`** |
+
+`kyoutaku_award` 的成员：
+
+| 成员 | 类型 | 说明 |
+| --- | --- | --- |
+| `seat` | int | 收棒的座位（0..3） |
+| `sticks` | int | 归了几根（≥1） |
+| `points` | int | 折合点数（= `sticks` × 1000，已计入 `points_after`） |
+
+- **仅报数、不另记账**：`kyoutaku_award.points` 是「这笔钱已经在 `delta_score` 里了」的说明，
+  客户端**不要**再往 `points_after` / `final_score` 上加一遍（会翻倍）。
+- **`win.kyoutaku` 仍表示「本局收走的棒数」**（§12.5），与本字段是两件事：有和牌者时用 `win.kyoutaku`，
+  场终没人收时才用 `kyoutaku_award`，两者**互斥**。
+- **老客户端无需改动**：未知字段照既有的「忽略未知键」处理，`points_after` 已经是含这笔的正确值。
+
 ## 附录 A：消息 × 字段速查
 
 | `type` | 方向 | 关键字段 | `seq` |
@@ -1573,6 +1644,8 @@ remaining(tile) = 4
 
 | 版本 | 内容 | 来源 |
 | --- | --- | --- |
+| **v1.20** | **场终剩棒归一位**（`mode=riichi`）：§12.13 新增整节 —— 本场以荒庄/击飞收尾时，台面剩下的立直棒全部归**一位**（持点最高，同点 seat 升序），点数计入该局 `results[].delta_score` / `match_total` / `points_after[]`，与 `match_end.rankings[].final_score` 逐点一致；新增**可选字段** `game_end.kyoutaku_award`（`{seat, sticks, points}`，非场终局恒 `null`）。**classic 逐字节不变**，零新增错误码 | 需求（场供归属）；规则口径见 `GAME_DESIGN_RIICHI_DRAFT.md` §7.7 |
+| **v1.19** | **击飞终局**（`mode=riichi`）：§12.12 新增整节 —— 任一持点 **< 0** ⇒ 本场立即终局，优先级高于局数与连庄（`match_will_continue=false`，随后 `match_end`）；击飞那一局**不推进**庄家/局号/本场；**恰好 0 点继续**；负点不截断（箱下照算，`points_after` / `rankings[].final_score` 用真实负值）。**classic 不参与**（无持点），**零新增字段、零新增错误码、零新增 `reason` 值** | 需求（击飞）；规则口径见 `GAME_DESIGN_RIICHI_DRAFT.md` §7.6 |
 | **v1.18** | **赤宝牌 + 双倍役满**（`mode=riichi`）：① §2.1 牌码新增 `0m`/`0p`/`0s` = 赤宝牌（5 的第 4 张物理牌，牌面仍是 5，每张 +1 番）；② §12.5 `win` 新增 `aka_dora`（张数），`win.yaku[]` 新增 `aka_dora` 条目（与 `dora`/`ura_dora` 同形）；③ §12.11 新增整节：赤牌的物理身份 / 下发位置 / 提交匹配 / 鸣牌扣牌顺序 / 听牌与指示牌口径，以及四个**双倍役满** id `kokushi_13`/`suuankou_tanki`/`chuuren_junsei`/`daisuushii`（`yaku[].han = 26`，多役满倍数相加，`limit` 仍是 `yakuman`）。**classic 帧逐字节不变**（同一张物理牌在 classic 里仍下发 `5m`），零新增帧、零新增错误码 | 需求（赤宝牌 / 双倍役满） |
 | **v1.17** | **日麻规则补全**：① §12.4 立直合法性加「振听不可立直」；② §12.5 `win.yaku[]` 新增 `tenhou`/`chiihou`（役满，第一巡自摸，要求本局无鸣牌）；③ 修复国士无双不可和牌（牌型门禁补国士，`IsKokushiHand`/`RiichiWaitingTiles`）。**classic 不变**，零新增字段/错误码 | 规则修正（振听立直、天和地和缺失、国士和不了） |
 | **v1.16** | **立直后暗杠**：§12.4 改为「`kakan` 永不提供 / `ankan` 仅在暗杠不改变听牌时提供」——判据是 14 张去掉刚摸牌（13 张）与暗杠后（10 张 + 暗杠组）的 `WaitingTiles` 完全相同；`drawn_tile` 未知时保守不给。**classic 不变**，零新增错误码/字段 | 规则修正（此前一律拒绝合法暗杠）；实现见 `riichi::CanAnkanAfterRiichi` |

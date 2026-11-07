@@ -308,6 +308,8 @@ M1 是纯重构，**必须独立提交**，不要和 M2 混在一个 PR 里—�
 | 振听（自家牌河 + 见逃，荣和过滤） | ✅ | `IsFuriten`、`ClaimOptionsFor` |
 | 持点 25000 / 供托 1000 / 本场 300 | ✅ | `points_`、`kyoutaku_`、`honba_` |
 | 场终排名按持点 | ✅ | `ComputeFinalRanks`、`BuildMatchEnd` |
+| 击飞终局（任一持点 < 0 即终局，0 点继续，箱下照算） | ✅ | `riichi::IsBusted`、`AdvanceAfterRound`（v1.19） |
+| 场终剩棒归一位（荒庄/击飞收尾时，供托不蒸发） | ✅ | `riichi::AwardLeftoverKyoutaku`、`AdvanceAfterRound`（v1.20） |
 | AI 立直（门清听牌即宣言） | ✅ | `PlayAutomatedDiscard` / `BotShouldRiichi` |
 | 房间冒烟（模式 / 牌山 / 立直拒绝） | ✅ | `game/server/riichi_room_test.cc` |
 | 端到端（真服务端 `mode=riichi` 打一局） | ✅ | `game/tests/riichi_e2e_test.py` |
@@ -390,18 +392,68 @@ M1 是纯重构，**必须独立提交**，不要和 M2 混在一个 PR 里—�
 5. **赤宝牌 / 双倍役满** ✅（v1.18 已完成，见 §7.3）。
 6. **`match_results` 有 mode 列** ✅（本轮已完成）：`matches` / `match_results` 都落 `mode`，
    `stats` 按 `classic` / `riichi` 分桶返回，`recent[].mode` 标注每局玩法；老库启动时自动 `ALTER TABLE` 补列。
-7. **`PROTOCOL.md` 已升到 v1.18** ✅（v1.12 = §12 日麻整章；v1.13 = §12.8 听牌提示口径；
+7. **`PROTOCOL.md` 已升到 v1.20** ✅（v1.12 = §12 日麻整章；v1.13 = §12.8 听牌提示口径；
    v1.14 = §12.9 半庄 / 场风 / 自风；v1.15 = §12.10 抢杠；v1.16 = §12.4 立直后暗杠；
    v1.17 = §12.4 振听不可立直 + 天和/地和 + 国士修复；v1.18 = §2.1 赤 5 牌码 + §12.5 `aka_dora`
-   + §12.11 赤宝牌与双倍役满）。
+   + §12.11 赤宝牌与双倍役满；v1.19 = §12.12 击飞终局；v1.20 = §12.13 场终剩棒归一位）。
+8. **击飞终局** ✅（v1.19 已完成，见 §7.6）。
+9. **场终剩棒归一位** ✅（v1.20 已完成，见 §7.7）。
 
 ### 7.5 测试入口
 
 ```
 cmake --build build --target riichi_rules_test riichi_room_test -j8
-./build/game/riichi_rules_test     # 40 项：符/番/点数/宝牌/赤宝牌/双倍役满/振听/立直/听牌罚符/无役/听牌有役/场风自风/抢杠/立直后暗杠
-./build/game/riichi_room_test      # 8 项：牌山切分 / 持点 / classic 帧不变 / 立直拒绝 / 局数 / 赤牌只发日麻 / 半庄打到南场
+./build/game/riichi_rules_test     # 42 项：符/番/点数/宝牌/赤宝牌/双倍役满/振听/立直/听牌罚符/无役/听牌有役/场风自风/抢杠/立直后暗杠/击飞/供托归一位
+./build/game/riichi_room_test      # 11 项：牌山切分 / 持点 / classic 帧不变 / 立直拒绝 / 局数 / 赤牌只发日麻 / win 帧自洽 / 半庄打到南场 / 击飞即终局 / 场终剩棒归一位
 ctest --test-dir build -R riichi   # 加上端到端 riichi_e2e_test（真服务端打一局）
 ./.venv/bin/python game/tests/client_headless_test.py      # 客户端组件（含大厅截图）
 ./.venv/bin/python game/tests/client_riichi_e2e_test.py    # 真客户端 + 真服务端：建日麻房→开局→立直→摸切
 ```
+
+### 7.6 击飞（v1.19）
+
+按雀魂口径落地：**任一持点 < 0 ⇒ 本场立即终局**，恰好 0 点继续，负点不截断。
+
+- 判定点：`RoomActor::AdvanceAfterRound`，即每局**收付完成后**（和了支付 / 荒庄听牌罚符之后）。
+  局中持点只有立直供托一次变化，而立直要求 ≥1000 点，所以到不了负点 —— 「局中击飞」不存在。
+- 优先级：**高于连庄与局数**。击飞那一局**不推进**庄家 / 局号 / 本场数（`if (!busted)` 包住整段
+  轮庄判定），`game_end.match_will_continue = false`，紧接 `match_end`。
+- classic 不参与：classic 没有持点概念（内部 `points_` 恒 0），不加 `mode` 判据会把每一场都截断在第 1 局。
+- 协议：**零新增字段**。`game_end.reason` 仍是被击飞那一局的真实结束方式（`win_*` / `draw_exhausted`），
+  击飞是场次层的终止条件，不新增 `reason` 值 —— 老客户端不会撞上未知枚举，`match_end` 提前到达即是信号。
+- **「终局损」是规则选定，不是缺陷**：第 4 名给第 2 名点炮时可能第 2 名就此失去争一的机会；
+  反过来说，若点炮的是第 2 名自己，他可以用「见逃」（代价是振听）拒绝提前终局。领先者则多了一个
+  「锁名次」的手段。雀魂 / 天凤同口径，理由是给对局一个**硬性时间边界**（日麻连庄不封顶，
+  没有击飞一场可以打很久）+ 让第 4 名**风险自负**（不能把「继续赌大牌」的成本转嫁给全桌）。
+  若将来要做「无击飞 / 打满规定局数」或是「建房开关 `bust_end`」，改动点是同一个 `match_over`
+  表达式，新增字段向后兼容。
+- 测试：`riichi_rules_test` 的 `RiichiBust.OnlyNegativePointsBust`（0 点不算 / -1 算，纯函数边界），
+  `riichi_room_test` 的 `BustEndsMatchImmediately`（`SetPointsForTest` 把一家打到 -100000，
+  半庄也只下发 1 份 `game_end` 就 `match_end`，`round_index` 不推进，`points_after` 保留负值）。
+
+### 7.7 场终剩棒归一位（v1.20）
+
+立直宣言的 1000 点**当时**就从持点里扣走了（`delta` 记 −1000），棒挂在 `kyoutaku_` 上等下一次和牌。
+只要有人和牌，棒就被和牌者收走；**但如果本场以荒庄（末局流局）或击飞收尾，没人来收** ——
+修正前这 1000 点就凭空蒸发了：四家持点之和不再是 100000，`points_after` 与玩家看到的收付对不上。
+
+- 口径（雀魂）：**台面上的棒全部归一位**。一位 = 持点最高者，**同点取 seat 号小的**（东一局座次 /
+  起家优先），与 `match_end.rankings` 的「分数降序、同分 seat 升序」**同一套排序**，
+  所以「场供归了一位」这件事永远不会改变名次（本来就归第一名）。
+- 落点：`riichi::AwardLeftoverKyoutaku(points, sticks)`（纯函数，返回 `{seat, sticks, points}`）
+  + `RoomActor::AdvanceAfterRound` 里 `match_over` 之后、`final_rank` 之前一次性归账。
+- 归账要动**四处**，否则各帧会互相打架：`points_`（终局持点）、`match_totals_`（本场累计得失分）、
+  本局 `settlement.delta` / `settlement.totals`、以及 `settlement.points_after` 的重算。
+  于是最后一局的 `game_end.results[].delta_score`、`points_after[]` 与 `match_end.rankings[].final_score`
+  三者逐点一致，客户端不需要自己补账。
+- 协议（v1.20）：新增**可选字段** `game_end.kyoutaku_award`（`{seat, sticks, points}`），
+  非场终局 / 无棒恒 `null`；`win.kyoutaku`（本局收走的棒数）语义不变，两者**互斥**。
+- 客户端：结算页在「流局 · 听牌 N 家」下面多一行「场供 2 根 → 太郎 +2000」（`result._kyoutaku_award_text`），
+  只在有归属时出现；classic 与普通局**不多画任何东西**。
+- 与「点数守恒」的关系：供托在宣言时离开玩家持点、在场终回到玩家持点，中间挂在房间上；
+  现在「四家持点之和 = 100000」在整个对局里**恒成立**（除了宣言到结算之间那一段，棒在台面上）。
+- 测试：`RiichiKyoutakuAward.LeftoverSticksGoToFirstPlace`（无棒 / 正常 / 同点取起家 / 有负点，
+  纯函数边界）、`LeftoverKyoutakuGoesToFirstPlace`（种子 20260101 的东场末局荒庄，`SetKyoutakuForTest`
+  在第 4 局塞 2 根 ⇒ `kyoutaku_award = {seat, 2, 2000}`，四家持点之和 = 100000 + 2000（注入不扣点），
+  收棒的是持点最高那家，`match_end` 的一位与 `points_after` 一致，房间供托清零）。
+  客户端侧 `client_headless_test` 增两条断言 + 产物 `artifacts/client_result_kyoutaku_award.png`。
