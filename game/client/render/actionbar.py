@@ -45,6 +45,10 @@ class ButtonSpec:
     enabled: bool
     tiles: list[str] = field(default_factory=list)
     win: bool = False
+    #: 禁用原因（`enabled=False` 时才有值）：点击它以 toast 说明「差哪一步」。
+    #: 禁用按钮静默吞掉点击会让玩家以为功能坏了（立直就是典型：它是「选宣言牌 + 打牌」
+    #: 两段式，没选牌时按钮是灰的，玩家只会觉得「这里不能立直吗」）。
+    reason: str = ""
 
 
 def bar_visible(state: GameState) -> bool:
@@ -106,9 +110,16 @@ def build_buttons(state: GameState, remaining_ms: float | None) -> list[ButtonSp
     out: list[ButtonSpec] = []
     x = T.R_BAR_BUTTONS[0]
     for kind, label, tiles, is_win in specs:
-        if kind in ("discard", "riichi"):
-            # 两者都要先选中一张手牌（立直 = 打牌 + 宣言）
+        reason = ""
+        if kind == "discard":
+            # 打牌要先把那张牌选出来（点手牌 → 点按钮）
             enabled = base and state.selected_index is not None
+            if base and state.selected_index is None:
+                reason = "先点选一张手牌再打牌"
+        elif kind == "riichi":
+            # v1.21 §5.3.2：立直按钮**不再要求先选牌** —— 点它进入「宣言模式」，
+            # 手牌上会标出哪几张能作宣言牌（服务端 `riichi_tiles`），点其中一张即宣言。
+            enabled = base
         else:
             enabled = base
         out.append(
@@ -119,6 +130,7 @@ def build_buttons(state: GameState, remaining_ms: float | None) -> list[ButtonSp
                 enabled=enabled,
                 tiles=list(tiles),
                 win=is_win,
+                reason=reason,
             )
         )
         x += width + T.BAR_BUTTON_GAP
@@ -256,6 +268,14 @@ def _status_text(state: GameState, ui: UiView) -> tuple[str, str, tuple]:
         if state.window.has("win"):
             # §5.3.1：打牌窗口不提供「过」按钮，用中性提示帮助理解
             return "也可直接点手牌打牌（本局不胡）", "也可直接点手牌打牌", T.TEXT_DIM
+        if state.window.has("riichi"):
+            # 立直 = 宣言牌 + 打牌 的合成动作（PROTOCOL §12.5）。v1.21 起按钮先可点、
+            # 点开后在手牌上高亮「能作宣言牌」的那几张，所以提示改成「点立直 → 点高亮的牌」。
+            if state.riichi_arming:
+                return "立直：只能打高亮的牌", "只能打高亮的牌", T.WARN
+            if state.selected_index is not None:
+                return "点立直：宣言并打出选中的牌", "再点立直", T.TEXT_DIM
+            return "点立直，再点一张高亮的牌", "立直→点高亮的牌", T.TEXT_DIM
         return "请打牌", "", T.TEXT_DIM
     if state.window.window == WINDOW_CHANKAN:
         # 抢杠的那张牌不在牌河里，玩家只能靠这行知道自己在抢什么

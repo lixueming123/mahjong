@@ -160,6 +160,26 @@ def _yaku_detail(win_diff: dict | None) -> str:
     return text
 
 
+def _kyoutaku_award_text(state: GameState) -> str:
+    """场终剩棒归一位（v1.20，PROTOCOL §12.13）：`场供 2 根 → 太郎 +2000`。
+
+    只有**场终那一局没人收供托**（末局荒庄 / 击飞）才会出现这个字段；
+    其余局 `game_end.kyoutaku_award` 恒 `null`，这里返回空串、结算页不多画一行。
+    """
+    result = state.result or {}
+    award = result.get("kyoutaku_award")
+    if not isinstance(award, dict):
+        return ""
+    sticks = award.get("sticks")
+    seat = award.get("seat")
+    if not isinstance(sticks, int) or sticks <= 0 or not isinstance(seat, int):
+        return ""
+    points = award.get("points")
+    if not isinstance(points, int):
+        points = sticks * 1000
+    return f"场供 {sticks} 根 → {state.name_of(seat)} +{points}"
+
+
 def _leader_text(state: GameState) -> str:
     """D-3（§9.2 收付文案末行，灰色）：「本场累计：<领先者昵称> 领先」。
 
@@ -406,14 +426,34 @@ def _render_round_end(surface: pygame.Surface, ui: UiView) -> None:
             f"流局 · 听牌 {sum(1 for flag in tenpai if flag is True)} 家"
             if isinstance(tenpai, list) else "本局不计分"
         )
-        W.draw_text(
-            surface,
-            draw_text,
-            fonts.get(T.FS_H2),
-            T.ZERO_SCORE,
-            T.R_RESULT_HAND,
-            W.ALIGN_CENTER,
-        )
+        award_text = _kyoutaku_award_text(state)
+        if award_text:
+            # v1.20：场终还剩立直棒时补一行归属（两行同块，避免一行过长被裁）
+            W.draw_text(
+                surface,
+                draw_text,
+                fonts.get(T.FS_H2),
+                T.ZERO_SCORE,
+                (T.R_RESULT_HAND[0], T.R_RESULT_HAND[1] + 6, T.R_RESULT_HAND[2], 44),
+                W.ALIGN_CENTER,
+            )
+            W.draw_text(
+                surface,
+                award_text,
+                fonts.get(T.FS_H3),
+                T.TEXT,
+                (T.R_RESULT_HAND[0], T.R_RESULT_HAND[1] + 56, T.R_RESULT_HAND[2], 30),
+                W.ALIGN_CENTER,
+            )
+        else:
+            W.draw_text(
+                surface,
+                draw_text,
+                fonts.get(T.FS_H2),
+                T.ZERO_SCORE,
+                T.R_RESULT_HAND,
+                W.ALIGN_CENTER,
+            )
     else:
         _render_win_block(surface, ui, win)
 

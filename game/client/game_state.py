@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from .tiles import is_valid_tile, remove_leftmost, sort_tiles
+from .tiles import is_valid_tile, remove_leftmost, sort_tiles, tile_face
 
 log = logging.getLogger("mahjong.client.state")
 
@@ -99,6 +99,9 @@ class ActionWindow:
     window_ms: int
     # 只有抢杠窗口带：被抢的那张牌（claim/discard 窗口为 None，语义不变）
     tile: str | None = None
+    # v1.21 §4.4：立直宣言牌的候选**牌面**（只有日麻打牌窗口带 `riichi` 选项时才有值）。
+    # 服务端按「打出后仍在听牌、且不落振听」算好再下发；空 = 不能立直。
+    riichi_tiles: list[str] = field(default_factory=list)
 
     def has(self, action: str, tiles: list[str] | None = None) -> bool:
         for opt in self.options:
@@ -154,6 +157,10 @@ class GameState:
         self.melds: list[Meld] = []
         self.seats: list[SeatView] = [SeatView(seat=i) for i in range(4)]
         self.remaining: int | None = None
+        # v1.22：当前房间玩法（`classic` / `riichi`）。协议里**没有** mode 字段（game_start
+        # 不得为 classic 加键——帧逐字节冻结），所以只能由「日麻独有字段」反推：
+        # 日麻恒带 points，classic 不带。用于场况卡徽标与「为什么没有立直」的解释。
+        self.mode: str = "classic"
         # 日麻（mode=riichi）：持点 / 宝牌指示牌 / 荒庄听牌标记。classic 下恒为 None/空。
         self.points: list[int] | None = None
         self.dora_indicators: list[str] = []
@@ -166,6 +173,9 @@ class GameState:
         self.pending_label: str | None = None
         self.pending_index: int | None = None
         self.selected_index: int | None = None
+        # v1.21：立直宣言模式（点了「立直」但还没选宣言牌）。开启后只有
+        # `window.riichi_tiles` 里的牌可点，点哪张就直接宣言并打出。
+        self.riichi_arming: bool = False
         self.drawn_index: int | None = None
         self.frozen: bool = False           # 收到 action_event{win} 后冻结牌桌输入
         self.result: dict | None = None     # game_end 原始载荷（局终页）
@@ -289,6 +299,9 @@ class GameState:
         round_count = frame.get("round_count")
         if isinstance(round_count, int) and round_count > 0:
             self.round_count = round_count
+        # v1.22：玩法反推（协议无 mode 键）。日麻的 game_start 恒写 `points`（4 家持点），
+        # classic 不写；这里以「有没有 points 数组」为唯一判据，别的地方不要再各自猜。
+        self.mode = "riichi" if isinstance(frame.get("points"), list) else "classic"
         self._absorb_riichi_fields(frame, reset=True)
         self.melds = []
         self.remaining = None
@@ -298,6 +311,7 @@ class GameState:
         self.pending = False
         self.pending_label = None
         self.selected_index = None
+        self.riichi_arming = False
         self.drawn_index = None
         self.frozen = False
         self.result = None
@@ -399,6 +413,19 @@ class GameState:
             log.warning("chankan 窗口缺少合法 tile：%r", chankan_tile)
             chankan_tile = None
 
+        # v1.21：立直宣言牌候选。服务端恒发普通牌面码（5m 而不是 0m），
+        # 这里仍归一化一次，免得老/新服务端的赤 5 写法差异让标记漏掉手上那张赤 5。
+        riichi_tiles: list[str] = []
+        raw_riichi_tiles = frame.get("riichi_tiles")
+        if isinstance(raw_riichi_tiles, list):
+            for code in raw_riichi_tiles:
+                if not is_valid_tile(code):
+                    log.warning("riichi_tiles 含非法牌码：%r（已忽略）", code)
+                    continue
+                face = tile_face(code)
+                if face not in riichi_tiles:
+                    riichi_tiles.append(face)
+
         self.last_seq = seq
         self.seq = seq
         self.window = ActionWindow(
@@ -410,10 +437,12 @@ class GameState:
             recv_epoch_ms=now_epoch,
             window_ms=window_ms,
             tile=chankan_tile if window == WINDOW_CHANKAN else None,
+            riichi_tiles=riichi_tiles,
         )
         self.pending = False
         self.pending_label = None
         self.selected_index = None
+        self.riichi_arming = False
         self.recv_ms[window] = now_mono
         log.debug("窗口开启 seq=%s window=%s options=%s", seq, window, [o["action"] for o in clean_options])
 
@@ -581,6 +610,7 @@ class GameState:
         self.pending = False
         self.pending_label = None
         self.selected_index = None
+        self.riichi_arming = False
         self.drawn_index = None
         self.frozen = True
         self.screen = SCREEN_RESULT
@@ -603,6 +633,7 @@ class GameState:
         self.pending = False
         self.pending_label = None
         self.selected_index = None
+        self.riichi_arming = False
         self.drawn_index = None
         self.frozen = True
         self.screen = SCREEN_RESULT
@@ -636,6 +667,7 @@ class GameState:
         self.pending_label = None
         self.pending_index = None
         self.selected_index = None
+        self.riichi_arming = False
         self.drawn_index = None
 
     def mark_pending(self, label: str, index: int | None = None) -> None:
@@ -643,6 +675,7 @@ class GameState:
         self.pending_label = label
         self.pending_index = index
         self.selected_index = None
+        self.riichi_arming = False
 
     def hide_window(self) -> None:
         self.window = None

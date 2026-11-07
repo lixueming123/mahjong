@@ -26,7 +26,7 @@ import pygame
 
 from .. import theme as T
 from ..game_state import SCREEN_TABLE, GameState
-from ..tiles import multiset_remove, tile_label
+from ..tiles import multiset_remove, tile_face, tile_label
 from ..view import UiView
 from . import art
 from . import broadcast as broadcast_view
@@ -491,6 +491,15 @@ def _ellipsize(text: str, font: pygame.font.Font, max_width: int) -> str:
     return ""
 
 
+def hud_mode_label(state) -> str:
+    """场况卡右上角的玩法徽标文案（v1.22）。
+
+    协议里没有 `mode` 键（classic 帧逐字节冻结），所以玩法由 `state.mode` 反推：
+    日麻恒带 `points`，classic 不带。这里是**唯一**的文案来源，别在别处再拼一遍。
+    """
+    return "日麻" if getattr(state, "mode", "classic") == "riichi" else "经典"
+
+
 def _draw_hud(surface: pygame.Surface, ui: UiView) -> None:
     """v4.0：参考帧的左上场况卡片 + 右上两枚圆按钮。
 
@@ -506,7 +515,24 @@ def _draw_hud(surface: pygame.Surface, ui: UiView) -> None:
         info.topleft,
     )
     W.draw_text(surface, "场况", fonts.get(T.FS_MICRO, bold=True), T.PLATE_GOLD,
-                (info.x + 10, info.y + 6, info.w - 20, 18), W.ALIGN_LEFT)
+                (info.x + 10, info.y + 6, info.w - 70, 18), W.ALIGN_LEFT)
+    # v1.22 玩法徽标：玩家在牌桌上最容易问的一句是「这里怎么不能立直」，
+    # 而答案往往只是「这是经典房」。玩法不在协议里（game_start 无 mode 键，
+    # classic 帧逐字节冻结），由 state.mode 依日麻独有字段反推，徽标负责把它说出口。
+    riichi_room = state.mode == "riichi"
+    badge = pygame.Rect(info.right - 10 - 44, info.y + 7, 44, 16)
+    surface.blit(
+        art.strip(
+            badge.w, badge.h,
+            (232, 192, 104, 46) if riichi_room else (255, 255, 255, 10),
+            edge=T.PLATE_GOLD if riichi_room else T.PANEL_EDGE, radius=4,
+        ),
+        badge.topleft,
+    )
+    W.draw_text(
+        surface, hud_mode_label(state), fonts.get(T.FS_MICRO, bold=True),
+        T.PLATE_GOLD if riichi_room else T.TEXT_DIM, badge, W.ALIGN_CENTER,
+    )
     pygame.draw.line(
         surface, (*T.PLATE_GOLD, 90),
         (info.x + 8, info.y + 26), (info.right - 8, info.y + 26), 1,
@@ -1563,6 +1589,11 @@ def _draw_self_hand(surface: pygame.Surface, ui: UiView, feel=None) -> None:
     faces = claim_hand_faces(state, state.window) if (
         claim_highlight_active(state) and getattr(feel, "claim_hints_on", True)
     ) else {}
+    # v1.21 §5.3.2：立直宣言模式下标记「能作宣言牌」的手牌（服务端 riichi_tiles 是权威），
+    # 其余牌压暗表示点不动 —— 立直只能打这几张，打错了服务端会拒。
+    riichi_faces: set[str] = set()
+    if state.riichi_arming and state.window is not None and state.window.riichi_tiles:
+        riichi_faces = {tile_face(code) for code in state.window.riichi_tiles}
     consumed: dict[str, int] = {}
     if not rects and state.game_started:
         W.draw_text(
@@ -1579,6 +1610,7 @@ def _draw_self_hand(surface: pygame.Surface, ui: UiView, feel=None) -> None:
             state.window is not None
             and not state.pending
             and state.selected_index != i
+            and (not riichi_faces or tile_face(face) in riichi_faces)
         )
         W.draw_tile(
             surface,
@@ -1605,6 +1637,19 @@ def _draw_self_hand(surface: pygame.Surface, ui: UiView, feel=None) -> None:
                     W.draw_border_alpha(surface, shifted, T.PANEL_EDGE, 1.0, width=1)
                 else:
                     W.draw_border_alpha(surface, shifted, T.WARN, 0.95, width=2)
+        if riichi_faces:
+            if tile_face(face) in riichi_faces:
+                # 可作宣言牌：金色描边 + 一枚角标，玩家一眼看出「只能点这几张」
+                W.draw_border_alpha(surface, shifted, T.WARN, 1.0, width=2)
+                badge = pygame.Surface((18, 18), pygame.SRCALPHA)
+                pygame.draw.circle(badge, (*T.WARN[:3], 235), (9, 9), 8)
+                surface.blit(badge, (shifted[0] + shifted[2] - 20, shifted[1] + 2))
+            else:
+                # 打出去不听牌：压暗 + 不加描边（点它会只弹提示，不发帧）
+                dim = pygame.Surface((shifted[2], shifted[3]), pygame.SRCALPHA)
+                pygame.draw.rect(dim, (6, 10, 18, 140), (0, 0, shifted[2], shifted[3]),
+                                 border_radius=6)
+                surface.blit(dim, (shifted[0], shifted[1]))
         if hovered:
             lift = T.HAND_DRAWN_LIFT if state.drawn_index == i else 0
             pygame.draw.rect(

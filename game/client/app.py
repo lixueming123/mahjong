@@ -29,7 +29,7 @@ from .login_store import LoginStore
 from .net_client import NetClient
 from .render import (actionbar, lobby as lobby_view, login as login_view, overlays, result as result_view,
                      stats as stats_view, table as table_view, tenpai as tenpai_view)
-from .tiles import button_label, tile_label
+from .tiles import button_label, tile_face, tile_label
 from .view import UiView
 
 log = logging.getLogger("mahjong.client.app")
@@ -1029,6 +1029,12 @@ class GameApp:
         )
         self.error_code = code
         self.error_message = message if isinstance(message, str) and message else ERROR_TEXT.get(code, code)
+        if code == "ILLEGAL_ACTION" and isinstance(message, str) and "riichi" in message:
+            # 立直被拒的最常见原因：选中的宣言牌打完不听牌（服务端用门前手牌重算过，
+            # 不听/振听/点数不足/牌山不足都归到同一句英文 message）。中文说清「换一张」，
+            # 否则玩家只会看到 cannot declare riichi now，不知道下一步该做什么。
+            self.error_message = "立直失败：这张牌打出后不听牌，换一张再点立直"
+            self._toast("立直失败：这张牌打出后不听牌", now)
         # 建桌/加入没成功时把按钮放开，否则会一直停在「正在建桌…」。
         if self.login_stage == "WAIT_ROOM_JOINED":
             self.login_stage = "IDLE"
@@ -1631,6 +1637,10 @@ class GameApp:
             if T.rect_contains(spec.rect, pos):
                 if spec.enabled:
                     self._dispatch_button(spec)
+                elif spec.reason:
+                    # 禁用态不能静默吞点击：日麻立直是「选宣言牌 + 打牌」两段式，
+                    # 没选牌时按钮必然灰着，不解释一句玩家会以为功能缺失。
+                    self._toast(spec.reason, self.now)
                 return
         if state.pending and table_view.hand_hit_test(state, pos) is not None:
             # §5.4：PENDING 期间再点手牌只抖一帧红框，不发牌。
@@ -1640,6 +1650,10 @@ class GameApp:
             return
         index = table_view.hand_hit_test(state, pos)
         if index is None:
+            return
+        if state.riichi_arming:
+            # 宣言模式：点一张牌 = 直接宣言立直并打出它（只有 riichi_tiles 里的牌可点）
+            self._commit_riichi_with(index)
             return
         if state.selected_index == index:
             self._confirm_discard()
@@ -1663,6 +1677,7 @@ class GameApp:
                 self.stats_open = False  # ESC 先关面板，再清选中
                 return
             state.selected_index = None
+            state.riichi_arming = False  # Esc 同时退出立直宣言模式
             return
         if state.frozen or self.disconnect_reason:
             return
@@ -1689,9 +1704,57 @@ class GameApp:
         if spec.kind == "discard":
             self._confirm_discard()
         elif spec.kind == "riichi":
-            self._confirm_riichi()
+            self._on_riichi_click()
         else:
             self._do_action(spec.kind, spec.tiles)
+
+    def _riichi_candidates(self) -> set[str]:
+        """本窗口能作宣言牌的牌面（服务端 `riichi_tiles`，v1.21 §4.4）。"""
+        window = self.state.window
+        if window is None:
+            return set()
+        return {tile_face(code) for code in window.riichi_tiles}
+
+    def _on_riichi_click(self) -> None:
+        """点「立直」：已选好合法宣言牌就直接宣言，否则进入宣言模式并在手牌上打标记。"""
+        state = self.state
+        window = state.window
+        if window is None or not window.has("riichi"):
+            return
+        index = state.selected_index
+        candidates = self._riichi_candidates()
+        if not candidates:
+            # 老服务端（v1.20 及以前）不下发 riichi_tiles：退回「先选牌再点立直」的旧路径，
+            # 不做标记（没有数据来源，标错比不标更糟）。
+            if index is None:
+                self._toast("立直：先点选一张手牌作为宣言牌", self.now)
+                return
+            self._confirm_riichi()
+            return
+        if index is not None and 0 <= index < len(state.hand):
+            if candidates and tile_face(state.hand[index]) not in candidates:
+                # 选中的那张打完不听牌 —— 直接进模式，让玩家点高亮的那几张
+                state.selected_index = None
+                state.riichi_arming = True
+                self._toast("这张牌打完不听牌：请点高亮的牌", self.now)
+                return
+            if self._confirm_riichi():
+                return
+        state.riichi_arming = True
+        state.selected_index = None
+        self._toast("立直：点一张高亮的牌（打出去仍听牌）", self.now)
+
+    def _commit_riichi_with(self, index: int) -> bool:
+        """宣言模式里点手牌：命中 `riichi_tiles` 才发帧，否则只提示（不碰服务端）。"""
+        state = self.state
+        if not 0 <= index < len(state.hand):
+            return False
+        candidates = self._riichi_candidates()
+        if candidates and tile_face(state.hand[index]) not in candidates:
+            self._toast("这张牌打完不听牌，换一张高亮的牌", self.now)
+            return False
+        state.selected_index = index
+        return self._confirm_riichi()
 
     def _confirm_discard(self) -> bool:
         state = self.state
@@ -1719,6 +1782,12 @@ class GameApp:
         if index is None or not 0 <= index < len(state.hand):
             return False
         tile = state.hand[index]
+        # 客户端先按服务端下发的候选拦一道：不在 `riichi_tiles` 里的牌打完不听，
+        # 发出去只会换回一条 ILLEGAL_ACTION。窗口没带候选时（老服务端）放行。
+        candidates = self._riichi_candidates()
+        if candidates and tile_face(tile) not in candidates:
+            self._toast("这张牌打完不听牌，换一张高亮的牌", self.now)
+            return False
         seq = state.window.seq if state.window else None
         if seq is None:
             return False
