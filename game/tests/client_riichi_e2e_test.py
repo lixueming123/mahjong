@@ -35,6 +35,7 @@ import pygame  # noqa: E402
 
 from client.app import GameApp  # noqa: E402
 from client.game_state import SCREEN_LOBBY, SCREEN_TABLE  # noqa: E402
+from client.tiles import tile_face  # noqa: E402
 
 FAILURES: list[str] = []
 
@@ -278,16 +279,23 @@ def main() -> int:
                 continue
             if win.has("riichi"):
                 offered = True
-                # 服务端只接受「打出后仍听牌」的那张：逐个候选试，最多 6 次
-                # （每次拒绝只记 1 次非法操作，配额 10，留足余量）。
+                # v1.21：服务端直接下发「哪些牌能作宣言牌」，客户端照它挑，一次点对。
+                check(
+                    bool(win.riichi_tiles),
+                    f"动作窗口带 riichi_tiles（服务端权威候选）= {win.riichi_tiles}",
+                )
+                # 服务端只接受「打出后仍听牌」的那张；没有候选时退回本地自算逐个试。
                 def riichi_broadcast() -> bool:
                     return any(
                         f.get("type") == "action_event" and f.get("action") == "riichi"
                         for f in frames
                     )
 
-                # 精确算出「打出后仍听牌」的那几张（与服务端口径一致），逐个试
-                candidates = riichi_discards(app.state.hand) or discard_order(app.state.hand)[:4]
+                faces = {tile_face(code) for code in win.riichi_tiles}
+                candidates = [i for i, code in enumerate(app.state.hand)
+                              if tile_face(code) in faces]
+                if not candidates:
+                    candidates = riichi_discards(app.state.hand) or discard_order(app.state.hand)[:4]
                 for index in candidates[:8]:
                     app.state.selected_index = index
                     if not app._confirm_riichi():

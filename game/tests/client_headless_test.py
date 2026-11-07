@@ -556,6 +556,24 @@ def main() -> int:
     pygame.image.save(aka_app.render_frame(present=False), aka_path)
     check(os.path.getsize(aka_path) > 1000, f"日麻赤 5 牌桌 PNG 已保存：{aka_path}")
 
+    print("[2c] 场况卡玩法徽标：经典房 / 日麻房一眼可分（v1.22）")
+    # 玩法不在协议里（game_start 无 mode 键，classic 帧逐字节冻结），只能靠日麻独有字段反推。
+    check(app.state.mode == "classic", f"classic game_start（无 points）⇒ state.mode = {app.state.mode!r}")
+    check(table_view.hud_mode_label(app.state) == "经典", "经典房徽标文案 = 「经典」")
+    check(aka_app.state.mode == "riichi", f"日麻 game_start（带 points）⇒ state.mode = {aka_app.state.mode!r}")
+    check(table_view.hud_mode_label(aka_app.state) == "日麻", "日麻房徽标文案 = 「日麻」")
+    mode_path = os.path.join(ARTIFACTS, "client_hud_mode.png")
+    app.now = time.monotonic()
+    pygame.image.save(app.render_frame(present=False).subsurface((0, 0, 260, 140)).copy(), mode_path)
+    check(os.path.getsize(mode_path) > 500, f"场况卡（经典徽标）PNG 已保存：{mode_path}")
+
+    mode_riichi_path = os.path.join(ARTIFACTS, "client_hud_mode_riichi.png")
+    aka_app.now = time.monotonic()
+    pygame.image.save(
+        aka_app.render_frame(present=False).subsurface((0, 0, 260, 140)).copy(), mode_riichi_path
+    )
+    check(os.path.getsize(mode_riichi_path) > 500, f"场况卡（日麻徽标）PNG 已保存：{mode_riichi_path}")
+
     print("[3] 打牌窗口：手牌可点选、无「过」按钮（H1）")
     app.state.apply(DISCARD_REQUEST)
     app.now = time.monotonic()
@@ -574,6 +592,115 @@ def main() -> int:
         and actionbar.countdown_color(1000) == T.NEG and actionbar.countdown_color(0) == T.NEG,
         "倒计时颜色分级：>10s 绿 / 3-10s 黄 / <3s 红 / 0 红",
     )
+
+    print("[3b] 立直：按钮直接可点 → 宣言模式标记能打的牌 → 点高亮牌即宣言")
+    riichi_app = make_app()
+    riichi_app.state.apply(ROOM_JOINED)
+    riichi_app.state.apply(
+        dict(GAME_START, mode="riichi", points=[25000, 25000, 25000, 25000])
+    )
+    riichi_app.state.apply({
+        "type": "action_request",
+        "seq": 8,
+        "deadline_ms": int(time.time() * 1000) + 15000,
+        "window": "discard",
+        "options": [{"action": "riichi", "tiles": []}],
+        # 服务端下发「能作宣言牌」的牌面；协议里恒写普通牌面码（赤 5 也写 5m）
+        "riichi_tiles": ["1m", "2m", "0p"],
+    })
+    riichi_app.now = time.monotonic()
+    window = riichi_app.state.window
+    check(
+        window is not None and window.riichi_tiles == ["1m", "2m", "5p"],
+        f"解析 riichi_tiles（0p 归一为 5p）：{getattr(window, 'riichi_tiles', None)}",
+    )
+    specs = actionbar.build_buttons(riichi_app.state, riichi_app._remaining_ms())
+    riichi_spec = next((b for b in specs if b.kind == "riichi"), None)
+    check(riichi_spec is not None, "日麻打牌窗口的 riichi 选项生成「立直」按钮")
+    check(
+        riichi_spec is not None and riichi_spec.enabled,
+        "立直按钮**不需要先选牌**就点亮（v1.21：点它进入宣言模式）",
+    )
+    assert riichi_spec is not None
+
+    sent: list[tuple[str, dict]] = []
+
+    def _record_send(kind, **kwargs):
+        sent.append((kind, kwargs))
+        return True
+
+    riichi_app.send_frame = _record_send  # type: ignore[assignment]
+
+    riichi_app.toast_text = ""
+    riichi_app._table_click((riichi_spec.rect[0] + 4, riichi_spec.rect[1] + 4))
+    check(riichi_app.state.riichi_arming, "点「立直」进入宣言模式（手牌开始标记）")
+    check(not sent and not riichi_app.state.pending, "进入宣言模式本身不发帧")
+    check("高亮" in riichi_app.toast_text, f"点立直后的提示：{riichi_app.toast_text!r}")
+    hint_text, _, _ = actionbar._status_text(riichi_app.state, riichi_app.build_ui())
+    check("高亮的牌" in hint_text, f"宣言模式的状态提示：{hint_text!r}")
+
+    rects = table_view.hand_layout(riichi_app.state)
+    check(riichi_app.state.hand[3] == "3m", f"测试手牌 index=3 应为 3m，实际 {riichi_app.state.hand[3]}")
+    riichi_app.toast_text = ""
+    riichi_app._table_click((rects[3][0] + 2, rects[3][1] + 2))
+    check(
+        not sent and not riichi_app.state.pending and "不听牌" in riichi_app.toast_text,
+        f"宣言模式点非候选牌只提示、不发帧：{riichi_app.toast_text!r}",
+    )
+    riichi_app._table_click((rects[0][0] + 2, rects[0][1] + 2))
+    check(
+        bool(sent) and sent[0][0] == "action" and sent[0][1].get("action") == "riichi"
+        and sent[0][1].get("tiles") == [riichi_app.state.hand[0]],
+        f"点高亮的牌即宣言并打出它：{sent[:1]}",
+    )
+    check(riichi_app.state.pending and riichi_app.state.pending_label == "立直", "宣言后进入 PENDING「已提交：立直」")
+
+    # 老服务端（v1.20 及以前）不下发 riichi_tiles：必须退回「先选牌再立直」，且不做标记
+    legacy_app = make_app()
+    legacy_app.state.apply(ROOM_JOINED)
+    legacy_app.state.apply(dict(GAME_START, mode="riichi", points=[25000, 25000, 25000, 25000]))
+    legacy_app.state.apply({
+        "type": "action_request",
+        "seq": 11,
+        "deadline_ms": int(time.time() * 1000) + 15000,
+        "window": "discard",
+        "options": [{"action": "riichi", "tiles": []}],
+    })
+    legacy_app.now = time.monotonic()
+    legacy_spec = next(
+        b for b in actionbar.build_buttons(legacy_app.state, legacy_app._remaining_ms())
+        if b.kind == "riichi"
+    )
+    legacy_app.toast_text = ""
+    legacy_app._table_click((legacy_spec.rect[0] + 4, legacy_spec.rect[1] + 4))
+    check(
+        not legacy_app.state.riichi_arming and "先点选" in legacy_app.toast_text,
+        f"老服务端（无 riichi_tiles）退回「先选牌」：{legacy_app.toast_text!r}",
+    )
+
+    # 再开一个窗口用于出图：宣言模式 + 候选标记 + 其余牌压暗
+    riichi_app.state.apply({
+        "type": "action_request",
+        "seq": 9,
+        "deadline_ms": int(time.time() * 1000) + 15000,
+        "window": "discard",
+        "options": [{"action": "riichi", "tiles": []}],
+        "riichi_tiles": ["1m", "2m", "5m"],
+    })
+    riichi_app.state.riichi_arming = True
+    riichi_png = os.path.join(ARTIFACTS, "client_riichi_prompt.png")
+    riichi_app.now = time.monotonic()
+    pygame.image.save(riichi_app.render_frame(present=False), riichi_png)
+    check(os.path.getsize(riichi_png) > 1000, f"立直标记产物：{riichi_png}")
+    # 服务端仍可能拒绝（例如振听口径差异）→ 错误文案必须中文化，不能只留英文 message
+    riichi_app._on_error(
+        {"code": "ILLEGAL_ACTION", "message": "cannot declare riichi now"}, time.monotonic()
+    )
+    check(
+        "换一张" in (riichi_app.error_message or ""),
+        f"立直被拒：错误条中文化 = {riichi_app.error_message!r}",
+    )
+    check("不听牌" in riichi_app.toast_text, f"立直被拒：同时弹 toast = {riichi_app.toast_text!r}")
 
     print("[4] 结算界面渲染（不落盘）")
     app.state.apply(GAME_END)
@@ -1590,6 +1717,34 @@ def main() -> int:
     tie_text = result_view._leader_text(tie_state.state)
     check(tie_text.endswith("并列领先") and "、" in tie_text,
           f"D-3: 并列最大 → 「XX、YY 并列领先」，got {tie_text!r}")
+    # v1.20（PROTOCOL §12.13）：场终剩棒归一位 —— 只在「末局没人收供托」时出现
+    award_app = make_app()
+    award_app._on_frame({"type": "login_ok", "player_id": "p-3f2a1c", "name": "玩家_"}, time.monotonic())
+    award_app._on_frame(dict(ROOM_JOINED), time.monotonic())
+    award_app._on_frame(dict(GAME_START), time.monotonic())
+    draw_end = dict(GAME_END)
+    draw_end.update({
+        "reason": "draw_exhausted", "win": None, "match_will_continue": False,
+        "tenpai": [False, True, True, False],
+        "points_after": [24000, 26000, 25000, 25000],
+        "kyoutaku_award": {"seat": 1, "sticks": 2, "points": 2000},
+    })
+    draw_end["results"] = [dict(entry, match_total=0) for entry in GAME_END["results"]]
+    award_app._on_frame(draw_end, time.monotonic())
+    award_text = result_view._kyoutaku_award_text(award_app.state)
+    check(award_text == "场供 2 根 → AI-1 +2000", f"v1.20: 场供归属文案，got {award_text!r}")
+    check(result_view._kyoutaku_award_text(round_app.state) == "",
+          "v1.20: 非场终局（无 kyoutaku_award）不得多画一行")
+    # 播报结束后（阶段 B）才看得到结算页本体：跳过播报再推进时间轴
+    future = time.monotonic() + 300.0
+    award_app.bc.skip(future)
+    for _ in range(5):
+        award_app.bc.update(future + 1.0)
+    award_app.now = future
+    award_surface = award_app.render_frame(present=True)
+    award_path = os.path.join(ARTIFACTS, "client_result_kyoutaku_award.png")
+    pygame.image.save(award_surface, award_path)
+    check(os.path.getsize(award_path) > 1000, f"场供归一位的结算 PNG 已保存：{award_path}")
     check(round_app.state.renchan_count == 0, "局终帧的 renchan_count 已入状态")
     round_app.now = time.monotonic()
     round_app.render_frame(present=False)
