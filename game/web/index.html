@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>雀魂式牌桌 · Three.js 复刻</title>
+<link rel="stylesheet" href="./css/ui.css">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js" } }
+</script>
+</head>
+<body>
+
+<canvas id="stage"></canvas>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="avatar" viewBox="0 0 100 100">
+    <rect width="100" height="100" fill="#141a2b"/>
+    <circle cx="50" cy="46" r="31" fill="currentColor"/>
+    <ellipse cx="50" cy="57" rx="23" ry="25" fill="#f7dfc8"/>
+    <path d="M26 46 Q29 15 50 15 Q71 15 74 46 Q61 34 50 37 Q39 34 26 46Z" fill="currentColor"/>
+    <circle cx="41" cy="59" r="3.2" fill="#2a3f5f"/>
+    <circle cx="59" cy="59" r="3.2" fill="#2a3f5f"/>
+    <path d="M45 70 Q50 74 55 70" stroke="#c9737a" stroke-width="2" fill="none" stroke-linecap="round"/>
+    <rect x="18" y="82" width="64" height="20" rx="9" fill="#2b3b58"/>
+  </symbol>
+</defs></svg>
+
+<div id="overlay">
+
+  <!-- 左上：场况卡 -->
+  <div class="round-card" style="left:20px;top:22px">
+    <div class="round-row">
+      <div class="round-mark" id="round-mark">東</div>
+      <div class="round-bars"><i></i><i></i><i></i><i></i></div>
+    </div>
+    <div class="round-sub"><b>连庄 ✕ <span id="honba">0</span></b><b>余 <span id="remaining-top">0</span></b></div>
+    <div class="round-title" id="round-title">銅之間 <span>·</span> 四人麻将</div>
+  </div>
+
+  <!-- 右上：系统按钮 -->
+  <div class="top-right" style="left:1690px;top:22px">
+    <button class="icon-btn" id="btn-help" title="操作说明">?</button>
+    <button class="icon-btn" id="btn-sound" title="音效开关">♪</button>
+  </div>
+
+  <!-- 四家名牌 -->
+  <div class="seat" id="seat-2" style="left:1345px;top:28px">
+    <div class="avatar" style="color:#5b2b45"><svg viewBox="0 0 100 100"><use href="#avatar"/></svg></div>
+    <div class="seat-name">对家</div>
+    <div class="seat-meta"><span class="seat-wind" id="seat-wind-2"></span><span class="seat-score" id="seat-score-2"></span></div>
+    <div class="seat-tags" id="seat-tags-2"></div>
+  </div>
+  <div class="seat" id="seat-3" style="left:38px;top:268px">
+    <div class="avatar" style="color:#6a3242"><svg viewBox="0 0 100 100"><use href="#avatar"/></svg></div>
+    <div class="seat-name">上家</div>
+    <div class="seat-meta"><span class="seat-wind" id="seat-wind-3"></span><span class="seat-score" id="seat-score-3"></span></div>
+    <div class="seat-tags" id="seat-tags-3"></div>
+  </div>
+  <div class="seat" id="seat-1" style="left:1706px;top:268px">
+    <div class="avatar" style="color:#6a3242"><svg viewBox="0 0 100 100"><use href="#avatar"/></svg></div>
+    <div class="seat-name">下家</div>
+    <div class="seat-meta"><span class="seat-wind" id="seat-wind-1"></span><span class="seat-score" id="seat-score-1"></span></div>
+    <div class="seat-tags" id="seat-tags-1"></div>
+  </div>
+  <div class="seat" id="seat-0" style="left:382px;top:672px">
+    <div class="avatar" style="color:#b98b5e"><svg viewBox="0 0 100 100"><use href="#avatar"/></svg></div>
+    <div class="seat-name">本家</div>
+    <div class="seat-meta"><span class="seat-wind" id="seat-wind-0"></span><span class="seat-score" id="seat-score-0"></span></div>
+    <div class="seat-tags" id="seat-tags-0"></div>
+  </div>
+
+  <!-- 左右竖栏 -->
+  <div class="side-bar side-left" style="left:0;top:420px"><span>理</span><span>和</span><span>鸣</span><span>切</span><em>▶</em></div>
+  <div class="side-bar side-right" style="left:1858px;top:455px"><span>表</span><span>情</span></div>
+
+  <!-- 右下操作栏 -->
+  <div class="action-bar" style="left:1180px;top:762px">
+    <button class="call-btn" disabled>吃</button>
+    <button class="call-btn" disabled>碰</button>
+    <button class="call-btn" disabled>杠</button>
+    <button class="call-btn" disabled>立直</button>
+    <button class="call-btn win" disabled>和</button>
+    <button class="call-btn" id="btn-pass">过</button>
+    <button class="call-btn primary" id="btn-discard" disabled>打出</button>
+  </div>
+
+  <!-- 鸣牌提示：这次到底吃/碰/和哪一张 -->
+  <div id="claim-tip" class="claim-tip" hidden></div>
+
+  <!-- 出牌倒计时：环 + 秒数 -->
+  <div id="countdown" class="countdown" hidden>
+    <svg viewBox="0 0 100 100" class="cd-svg">
+      <circle class="cd-track" cx="50" cy="50" r="43"></circle>
+      <circle class="cd-bar" id="cd-bar" cx="50" cy="50" r="43"></circle>
+    </svg>
+    <span class="cd-num" id="cd-num">15</span>
+  </div>
+
+  <!-- 听牌条（手牌正上方） -->
+  <div id="tenpai-bar" class="tenpai-bar" hidden>
+    <span class="tp-badge">听</span>
+    <span class="tp-label">听牌</span>
+    <div class="tp-waits" id="tp-waits"></div>
+    <span class="tp-note" id="tp-note"></span>
+  </div>
+
+  <!-- 播报 -->
+  <div id="broadcast" class="broadcast" hidden>
+    <div class="bc-main" id="bc-main"></div>
+    <div class="bc-sub" id="bc-sub"></div>
+  </div>
+
+  <!-- 轻提示 -->
+  <div id="toast" class="toast" hidden></div>
+
+  <!-- 底部信息条 -->
+  <div class="hud" style="left:20px;top:878px">
+    <span id="round-name">—</span><span class="sep">│</span>
+    <span>余 <b id="remaining">0</b></span><span class="sep">│</span>
+    <span>手牌 <b id="hand-count">0</b></span><span class="sep">│</span>
+    <span id="log-text">—</span>
+  </div>
+  <div class="hud-right" style="left:1450px;top:878px">
+    <button class="mini-btn" id="btn-sfx">♪ 音效开</button>
+    <span id="stats">— draw calls</span>
+  </div>
+  <div class="signal" style="left:1876px;top:1020px"><i></i><i></i><i></i><i></i></div>
+
+  <!-- 局终 / 场终结算 -->
+  <div id="result" class="modal-layer" hidden>
+    <div class="result-card">
+      <div class="rs-head">
+        <div class="rs-kind" id="rs-kind">荣和</div>
+        <div class="rs-title" id="rs-title"></div>
+      </div>
+      <div class="rs-winner" id="rs-winner" hidden></div>
+      <div class="rs-rows" id="rs-rows"></div>
+      <div class="rs-foot">
+        <span class="rs-next" id="rs-next"></span>
+        <button class="rs-btn ghost" id="rs-close">收起</button>
+        <button class="rs-btn" id="rs-lobby">返回大厅</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 登录 / 大厅 -->
+  <div id="lobby" class="modal-layer" hidden>
+    <div class="lobby-card">
+
+      <!-- 登录 -->
+      <section class="lobby-view" id="view-login">
+        <div class="brand">
+          <div class="brand-mark">雀</div>
+          <div class="brand-text">
+            <h1>雀魂式牌桌</h1>
+            <p>四人麻将 · 联机对战</p>
+          </div>
+        </div>
+        <div class="tabs">
+          <button class="tab active" data-tab="guest">游客进入</button>
+          <button class="tab" data-tab="account">账号登录</button>
+        </div>
+        <div class="pane" id="pane-guest">
+          <label class="field">
+            <span>昵称</span>
+            <input id="in-name" maxlength="16" placeholder="1~16 个字符" autocomplete="nickname">
+          </label>
+          <button class="lobby-btn primary wide" id="btn-guest">进入游戏</button>
+        </div>
+        <div class="pane" id="pane-account" hidden>
+          <label class="field"><span>账号</span>
+            <input id="in-user" maxlength="16" placeholder="3~16 位字母/数字/下划线" autocomplete="username">
+          </label>
+          <label class="field"><span>密码</span>
+            <input id="in-pass" type="password" maxlength="64" placeholder="6~64 位" autocomplete="current-password">
+          </label>
+          <div class="row">
+            <button class="lobby-btn primary" id="btn-login">登录</button>
+            <button class="lobby-btn ghost" id="btn-register">注册并登录</button>
+          </div>
+        </div>
+        <div class="lobby-msg" id="lobby-msg"></div>
+      </section>
+
+      <!-- 大厅 -->
+      <section class="lobby-view" id="view-hall" hidden>
+        <header class="hall-head">
+          <div class="hall-user">
+            <b id="hall-name">玩家</b>
+            <span class="hall-kind" id="hall-kind">游客</span>
+          </div>
+          <div class="hall-actions">
+            <span class="hall-conn" id="hall-conn">连接中…</span>
+            <button class="lobby-btn ghost small" id="btn-logout">退出登录</button>
+          </div>
+        </header>
+
+        <div class="hall-modes" id="hall-modes">
+          <button class="mode-card" data-mode="classic">
+            <b>经典麻将</b><span>東風 · 4 局</span>
+          </button>
+          <button class="mode-card" data-mode="riichi" data-length="tonpu">
+            <b>日麻 · 東風</b><span>4 局 · 25000 起</span>
+          </button>
+          <button class="mode-card" data-mode="riichi" data-length="hanchan">
+            <b>日麻 · 半庄</b><span>8 局 · 25000 起</span>
+          </button>
+        </div>
+
+        <div class="hall-start">
+          <button class="lobby-btn primary wide" id="btn-create">创建房间并开始</button>
+          <span class="hall-tip" id="hall-tip">空位由 AI 自动补齐</span>
+        </div>
+
+        <div class="hall-cols">
+          <div class="hall-col">
+            <div class="col-head">房间列表
+              <button class="mini" id="btn-refresh">刷新</button>
+            </div>
+            <div class="room-list" id="room-list"><div class="empty">暂无等待中的房间</div></div>
+          </div>
+          <div class="hall-col">
+            <div class="col-head">战绩 <span class="mini-note" id="stats-kind"></span></div>
+            <div class="stats" id="stats"><div class="empty">游客不计战绩</div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 房间等待 -->
+      <section class="lobby-view" id="view-room" hidden>
+        <header class="hall-head">
+          <div class="hall-user">
+            <b>房间已创建</b>
+            <span class="hall-kind" id="room-mode">经典麻将</span>
+          </div>
+          <div class="hall-actions">
+            <button class="lobby-btn ghost small" id="btn-copy-room">复制房间号</button>
+            <button class="lobby-btn ghost small" id="btn-leave-room">返回大厅</button>
+          </div>
+        </header>
+        <div class="room-code">
+          <span class="room-code-label">房间号</span>
+          <code id="room-code">—</code>
+          <span class="room-code-tip">把房间号发给好友，或直接开始（空位由 AI 补齐）</span>
+        </div>
+        <div class="room-seats" id="room-seats"></div>
+        <div class="hall-start">
+          <button class="lobby-btn primary wide" id="btn-ready">开始对局</button>
+          <span class="hall-tip" id="room-tip">等待其他玩家加入…</span>
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <div id="boot">加载牌桌…</div>
+</div>
+
+<script type="module" src="./js/main.js"></script>
+</body>
+</html>
