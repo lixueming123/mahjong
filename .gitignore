@@ -21,3 +21,4 @@ vcpkg
 .workbuddy/
 __pycache__/
 game/tests/artifacts/
+.run/
