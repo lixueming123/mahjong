@@ -1,0 +1,71 @@
+// Behaviour test for the frozen PROTOCOL v2.0 wire enums. The numeric values themselves
+// are guarded against game/protocol/enums.json (and the Python/JS/doc tables) by
+// tests/protocol_enums_consistency_test.py; this test covers parsing, names and boundaries.
+
+#include <cstdint>
+#include <optional>
+#include <string_view>
+
+#include <gtest/gtest.h>
+
+#include "protocol_enums.h"
+
+namespace mahjong::protocol {
+namespace {
+
+template <typename E>
+void CheckDomain(std::optional<E> (*parse)(int64_t)) {
+  const int max_value = WireTable<E>::kMax;
+  EXPECT_FALSE(ParseWire<E>(0).has_value());
+  EXPECT_FALSE(ParseWire<E>(-1).has_value());
+  EXPECT_FALSE(ParseWire<E>(max_value + 1).has_value());
+  EXPECT_EQ(NameOf(E::kInvalid), "INVALID");
+  EXPECT_FALSE(FromName<E>("INVALID").has_value());
+  for (int value = 1; value <= max_value; ++value) {
+    const std::optional<E> parsed = parse(value);
+    ASSERT_TRUE(parsed.has_value()) << "value " << value;
+    EXPECT_EQ(WireOf(*parsed), value);
+    const std::string_view name = NameOf(*parsed);
+    EXPECT_NE(name, "INVALID") << "value " << value;
+    const std::optional<E> reversed = FromName<E>(name);
+    ASSERT_TRUE(reversed.has_value()) << "name " << name;
+    EXPECT_EQ(*reversed, *parsed);
+  }
+}
+
+TEST(ProtocolEnumsTest, EveryDomainRoundTrips) {
+  CheckDomain<FrameType>(ParseFrameType);
+  CheckDomain<Action>(ParseAction);
+  CheckDomain<Window>(ParseWindow);
+  CheckDomain<WireMode>(ParseWireMode);
+  CheckDomain<WireLength>(ParseWireLength);
+  CheckDomain<WireMeldType>(ParseWireMeldType);
+  CheckDomain<RoundEndReason>(ParseReason);
+  CheckDomain<ErrorCode>(ParseErrorCode);
+}
+
+TEST(ProtocolEnumsTest, ClientFrameTypesCoverOneToEleven) {
+  EXPECT_EQ(kClientFrameTypes.size(), static_cast<size_t>(kClientFrameTypeMax));
+  for (size_t index = 0; index < kClientFrameTypes.size(); ++index) {
+    EXPECT_EQ(WireOf(kClientFrameTypes[index]), static_cast<int>(index) + 1);
+    EXPECT_TRUE(IsClientFrameType(kClientFrameTypes[index]));
+    EXPECT_FALSE(IsServerFrameType(kClientFrameTypes[index]));
+  }
+  EXPECT_TRUE(IsServerFrameType(FrameType::kLoginOk));
+  EXPECT_TRUE(IsServerFrameType(FrameType::kRoomUpdate));
+  EXPECT_FALSE(IsClientFrameType(FrameType::kGameStart));
+  EXPECT_FALSE(IsServerFrameType(FrameType::kInvalid));
+}
+
+TEST(ProtocolEnumsTest, SameWordHasIndependentValuesPerDomain) {
+  // `pong` is a server frame, an action and a meld type — three different numbers.
+  EXPECT_EQ(WireOf(FrameType::kPong), 22);
+  EXPECT_EQ(WireOf(Action::kPong), 2);
+  EXPECT_EQ(WireOf(WireMeldType::kPong), 1);
+  // `discard` is a client frame and a window.
+  EXPECT_EQ(WireOf(FrameType::kDiscard), 10);
+  EXPECT_EQ(WireOf(Window::kDiscard), 1);
+}
+
+}  // namespace
+}  // namespace mahjong::protocol

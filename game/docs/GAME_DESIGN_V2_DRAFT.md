@@ -321,7 +321,7 @@ S5b 场终（match_end 广播）     副作用：按 match_total_ 排名 → 通
 
 ```json
 {
-  "type": "match_end",
+  "type":25,
   "hands_played": 5,
   "renchan_count": 2,
   "rankings": [
@@ -396,11 +396,11 @@ CREATE TABLE IF NOT EXISTS match_results (
 | 时机 | **仅本家行动态**（`concealed + 3×melds == 14`）：正常摸牌后、或上一次杠补牌后的打牌窗口内 |
 | 不可用的场合 | 鸣牌窗口（不能对他人打出的牌暗杠）；等待态；`kHandSettled`/`kMatchFinished` |
 | 条件 | 手中恰好存在某牌面 `F` 且 `count(F, concealed) == 4`；**且 `remaining ≥ 1`**（无牌可补则不提供选项，与现有 `CanKong` 的 `remaining >= 1` 守卫同源，`mahjong_rules.cc:295`） |
-| 动作 | 手牌移除 4 张 `F` → 新增副露 `{"type":"ankan","tiles":[F,F,F,F]}`（**已排序**）；`melds++`、`kans++` |
+| 动作 | 手牌移除 4 张 `F` → 新增副露 `{"type":4,"tiles":[F,F,F,F]}`（**已排序**）；`melds++`、`kans++` |
 | 补牌 | **立即**从**牌山头**取 `wall_[next_index_]`（与明杠同源，`room.cc:973`），`next_index_++`，`remaining_ = kTileCount - next_index_` |
 | 之后 | **重新打开打牌窗口**（该窗口内可继续暗杠/加杠/杠上开花和牌/打牌） |
 | 张数推导 | 暗杠前 `c + 3m = 14` → 扣 4 张、`m+1` ⇒ `(c−4) + 3(m+1) = 13` → 补 1 张 ⇒ **14** ✅ |
-| 可见性 | **自家**视图：4 张牌面。**其他三家**视图：`{"type":"ankan","tiles":[]}` —— 只给「此处有一组暗杠」，不给牌面（`GAME_DESIGN.md` §8.2 私有信息约束） |
+| 可见性 | **自家**视图：4 张牌面。**其他三家**视图：`{"type":4,"tiles":[]}` —— 只给「此处有一组暗杠」，不给牌面（`GAME_DESIGN.md` §8.2 私有信息约束） |
 | 协议形状（**关键：两种实现都合法，不需返工**） | `melds[]` 元素的 `tiles` 对 `ankan` 允许 **长度 0 或 4**：`0` = 打码（隐藏），`4` = 可见。**客户端两种都要能渲染**（0 张 ⇒ 画 4 张牌背；4 张 ⇒ 画牌面）。因此「隐藏 vs 可见」是**服务端一处渲染策略**，可分批实现：B1 先发 4 张（=可见，成本最低），后续补隐藏时只改 `BuildSeatsArray`，**协议与客户端一行不改** |
 | 隐藏的实现路径（成本受控） | 不大改整块 `seats` 数组：`BuildSeatsArray()` 产出**共享打码版**（`ankan.tiles: []`），随后**仅对「持有暗杠的座位」**额外构建一份带牌面的版本并替换自己那一项。额外构建次数 = 场上暗杠持有者数（实战 ≤ 2），**不是 4 份全量重建** |
 | 揭示时机 | 局终时由最后一份 `state_sync`（`PROTOCOL.md` §5.12 已有「`game_end` 前必发一次 `state_sync`」）把 `tiles` 由 `[]` 填满。**不新增字段、不新增帧**。若 B1 采用「可见」策略，此步自然成立（本就是 4 张） |
@@ -412,7 +412,7 @@ CREATE TABLE IF NOT EXISTS match_results (
 | --- | --- |
 | 时机 | **仅本家行动态**（同暗杠） |
 | 条件 | `melds` 中存在 `type == "pong"` 且牌面为 `F` 的组；**且** `count(F, concealed) ≥ 1`；**且** `remaining ≥ 1` |
-| 动作 | 手牌移除 1 张 `F`；该 `pong` 组**就地**升级为 `{"type":"kakan","tiles":[F,F,F,F]}`（**组序不变**，第 4 张追加在末尾）；`melds` 不变、`kans++` |
+| 动作 | 手牌移除 1 张 `F`；该 `pong` 组**就地**升级为 `{"type":5,"tiles":[F,F,F,F]}`（**组序不变**，第 4 张追加在末尾）；`melds` 不变、`kans++` |
 | 补牌 | 同暗杠（牌山头，`remaining_` 用同一派生公式） |
 | 之后 | **重新打开打牌窗口** |
 | 张数推导 | 加杠前 `c + 3m = 14` → 扣 1 张、`m` 不变 ⇒ `13` → 补 1 张 ⇒ **14** ✅；`kans+1` 使物理张数守恒 ✅ |
@@ -424,7 +424,7 @@ CREATE TABLE IF NOT EXISTS match_results (
 | 项 | 规则 |
 | --- | --- |
 | 定义 | 自摸，**且和牌张就是本次杠的补牌** |
-| 计数 | **算自摸**：`tsumo` 1 番照计（`win.tsumo = true`、`reason = "win_tsumo"` 均不变），额外加 `rinshan` 1 番 ⇒ 杠上开花自摸本身 = 2 番 |
+| 计数 | **算自摸**：`tsumo` 1 番照计（`win.tsumo = true`、`reason = 2` 均不变），额外加 `rinshan` 1 番 ⇒ 杠上开花自摸本身 = 2 番 |
 | 判定实现 | `RoomActor` 在杠后打开打牌窗口时把本次补牌记为 `kong_draw_tile_`；该窗口内自摸和牌且 `winning_tile == *kong_draw_tile_` ⇒ `is_rinshan = true`。**下一个动作（打牌/再杠/进入下一家）即清空该记录** |
 | 荣和 | **永不成立**（荣和没有「本次补牌」） |
 | 吃和牌张 | **是** —— 本表唯一两个吃和牌张的番种之一（另一个是三暗刻） |
@@ -502,7 +502,7 @@ CREATE TABLE IF NOT EXISTS match_results (
 | 同上 | §7 一局结束条件 | 新增「局终 ≠ 场终」；新增场次层的 7 条转移判据（§3.3） |
 | 同上 | §9 规则库 API | `ScoreWin` → `ScoreHand`；`ScoreResult.multiplier` 语义由 `M ∈ {1,4,16}` 改为 `R ∈ {1..64}` |
 | `PROTOCOL.md` | `action` 枚举 | 新增 `"ankan"`、`"kakan"` |
-| 同上 | `action_request`（`window=="discard"`） | options 允许出现 `ankan`/`kakan` |
+| 同上 | `action_request`（`window==1`） | options 允许出现 `ankan`/`kakan` |
 | 同上 | `melds[]` 元素 | `type` 枚举由 `pong|chow|kong` 扩为 `pong|chow|kong|ankan|kakan`；`ankan` 的 `tiles` **允许长度 0 或 4**（0 = 打码，4 = 可见，见 §4.2），**私有信息矩阵（§711-724）需要新增一行**：「暗杠牌面：自家可见 / 他家打码（若该里程碑采用隐藏策略）」 |
 | 同上 | `game_end` | 只增字段（§5.1 #13），不改既有字段形状与取值域之外的含义 |
 | 同上 | 新增帧 | `match_end`（§3.4） |

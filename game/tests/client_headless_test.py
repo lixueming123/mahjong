@@ -45,6 +45,7 @@ from client.game_state import SCREEN_LOBBY, SCREEN_LOGIN, SCREEN_RESULT, SCREEN_
 from client.render import actionbar, result as result_view, table as table_view  # noqa: E402
 from client.render import widgets as widgets_view  # noqa: E402
 from client.tiles import button_label, honor_glyph, is_valid_tile, sort_tiles, tile_label  # noqa: E402
+from protocol.enums import ACTION, ERROR_CODE, FRAME_TYPE, MELD_TYPE, REASON, WINDOW  # noqa: E402
 
 FAILURES: list[str] = []
 
@@ -63,7 +64,7 @@ def make_app() -> GameApp:
 # ---------------------------------------------------------------- 合成状态
 
 ROOM_JOINED = {
-    "type": "room_joined",
+    "type": FRAME_TYPE.ROOM_JOINED,
     "room_id": "r-0001",
     "seat": 0,
     "seats": [
@@ -75,7 +76,7 @@ ROOM_JOINED = {
 }
 
 GAME_START = {
-    "type": "game_start",
+    "type": FRAME_TYPE.GAME_START,
     "seat": 0,
     "dealer": 0,
     # v2.0（PROTOCOL v1.6 §5.4）：场次进度；0 基 round_index + 恒 4 的 round_count
@@ -88,56 +89,56 @@ GAME_START = {
 
 # 136 口径（UI v1.3 §0.1）：牌山初始 83；自带 2 组副露（数牌碰 + 字牌杠）= 7 张门前手牌
 STATE_SYNC = {
-    "type": "state_sync",
+    "type": FRAME_TYPE.STATE_SYNC,
     "seq": 5,
     "remaining": 83,
     "current_seat": 1,
     "hand": ["1m", "1m", "2m", "9s", "1z", "5z", "5z"],
     "melds": [
-        {"type": "pong", "tiles": ["6p", "6p", "6p"]},
-        {"type": "kong", "tiles": ["7z", "7z", "7z", "7z"]},
+        {"type": MELD_TYPE.PONG, "tiles": ["6p", "6p", "6p"]},
+        {"type": MELD_TYPE.KONG, "tiles": ["7z", "7z", "7z", "7z"]},
     ],
     "seats": [
         {"seat": 0, "name": "玩家_", "is_bot": False, "hand_count": 7,
-         "discards": ["9s", "4p", "1z"], "melds": [{"type": "pong", "tiles": ["6p", "6p", "6p"]}],
+         "discards": ["9s", "4p", "1z"], "melds": [{"type": MELD_TYPE.PONG, "tiles": ["6p", "6p", "6p"]}],
          "disconnected": False},
         {"seat": 1, "name": "AI-1", "is_bot": True, "hand_count": 13,
          "discards": ["3m", "5p", "7z"],
-         "melds": [{"type": "pong", "tiles": ["3z", "3z", "3z"]}], "disconnected": False},
+         "melds": [{"type": MELD_TYPE.PONG, "tiles": ["3z", "3z", "3z"]}], "disconnected": False},
         {"seat": 2, "name": "AI-2", "is_bot": True, "hand_count": 11,
          "discards": ["7m", "2s", "2s", "5z"],
-         "melds": [{"type": "chow", "tiles": ["3p", "4p", "5p"]},
-                   {"type": "kong", "tiles": ["1z", "1z", "1z", "1z"]}],
+         "melds": [{"type": MELD_TYPE.CHOW, "tiles": ["3p", "4p", "5p"]},
+                   {"type": MELD_TYPE.KONG, "tiles": ["1z", "1z", "1z", "1z"]}],
          "disconnected": False},
         {"seat": 3, "name": "AI-3", "is_bot": True, "hand_count": 13,
          "discards": ["1s", "6z"],
-         "melds": [{"type": "kong", "tiles": ["5z", "5z", "5z", "5z"]}], "disconnected": True},
+         "melds": [{"type": MELD_TYPE.KONG, "tiles": ["5z", "5z", "5z", "5z"]}], "disconnected": True},
     ],
 }
 
 CLAIM_REQUEST = {
-    "type": "action_request",
+    "type": FRAME_TYPE.ACTION_REQUEST,
     "seq": 6,
     "deadline_ms": int(time.time() * 1000) + 15000,
-    "window": "claim",
+    "window": WINDOW.CLAIM,
     "options": [
-        {"action": "win", "tiles": []},
-        {"action": "pong", "tiles": ["2s"]},
-        {"action": "pass", "tiles": []},
+        {"action": ACTION.WIN, "tiles": []},
+        {"action": ACTION.PONG, "tiles": ["2s"]},
+        {"action": ACTION.PASS, "tiles": []},
     ],
 }
 
 DISCARD_REQUEST = {
-    "type": "action_request",
+    "type": FRAME_TYPE.ACTION_REQUEST,
     "seq": 7,
     "deadline_ms": int(time.time() * 1000) + 15000,
-    "window": "discard",
-    "options": [{"action": "win", "tiles": []}],
+    "window": WINDOW.DISCARD,
+    "options": [{"action": ACTION.WIN, "tiles": []}],
 }
 
 GAME_END = {
-    "type": "game_end",
-    "reason": "win_ron",
+    "type": FRAME_TYPE.GAME_END,
+    "reason": REASON.WIN_RON,
     # v2.0（PROTOCOL v1.6 §5.10）：局终帧新增字段
     "round_index": 0,
     "dealer": 0,
@@ -161,7 +162,7 @@ GAME_END = {
 
 # v2.0（PROTOCOL v1.6 §5.15）：场终帧（每场恰好 1 次）
 MATCH_END = {
-    "type": "match_end",
+    "type": FRAME_TYPE.MATCH_END,
     "hands_played": 5,   # D2 终裁：= game_end 下发手数（4..8，含连庄）
     "renchan_count": 1,
     "rankings": [
@@ -174,7 +175,7 @@ MATCH_END = {
 
 # 战绩用例（ACCOUNT_DESIGN §3.4 / UI_UX_SPEC v1.7）：四个汇总数字 + 最近 ≤10 局，倒序。
 STATS_FRAME = {
-    "type": "stats",
+    "type": FRAME_TYPE.STATS,
     "games": 12,
     "wins": 5,
     "draws": 3,
@@ -183,8 +184,8 @@ STATS_FRAME = {
         {"room_id": f"r-{1000 + i:04d}", "reason": reason, "delta_score": delta, "win": delta > 0,
          "ended_at": 1759900000 + i * 600}
         for i, (reason, delta) in enumerate([
-            ("win_ron", 12), ("draw_exhausted", 0), ("win_tsumo", 16), ("win_ron", -1), ("win_ron", -1),
-            ("draw_exhausted", 0), ("win_ron", -1), ("win_tsumo", 32), ("win_ron", -1), ("draw_exhausted", 0),
+            (REASON.WIN_RON, 12), (REASON.DRAW_EXHAUSTED, 0), (REASON.WIN_TSUMO, 16), (REASON.WIN_RON, -1), (REASON.WIN_RON, -1),
+            (REASON.DRAW_EXHAUSTED, 0), (REASON.WIN_RON, -1), (REASON.WIN_TSUMO, 32), (REASON.WIN_RON, -1), (REASON.DRAW_EXHAUSTED, 0),
         ])
     ],
 }
@@ -196,27 +197,27 @@ HONOR_WIN_HAND = ["7m", "7m", "7m", "3p", "4p", "5p",
                   "1z", "1z", "1z", "1z", "2z", "2z", "2z", "5z", "5z"]
 
 HONOR_MELDS_SEAT1 = [
-    {"type": "kong", "tiles": ["1z", "1z", "1z", "1z"]},
-    {"type": "pong", "tiles": ["2z", "2z", "2z"]},
-    {"type": "chow", "tiles": ["3p", "4p", "5p"]},
-    {"type": "pong", "tiles": ["7m", "7m", "7m"]},
+    {"type": MELD_TYPE.KONG, "tiles": ["1z", "1z", "1z", "1z"]},
+    {"type": MELD_TYPE.PONG, "tiles": ["2z", "2z", "2z"]},
+    {"type": MELD_TYPE.CHOW, "tiles": ["3p", "4p", "5p"]},
+    {"type": MELD_TYPE.PONG, "tiles": ["7m", "7m", "7m"]},
 ]
 
 HONOR_STATE_SYNC = {
-    "type": "state_sync",
+    "type": FRAME_TYPE.STATE_SYNC,
     "seq": 9,
     "remaining": 40,
     "current_seat": 1,
     "hand": ["1m", "1m", "2m", "9s", "1z", "5z", "5z"],
     "melds": [
-        {"type": "pong", "tiles": ["6p", "6p", "6p"]},
-        {"type": "kong", "tiles": ["7z", "7z", "7z", "7z"]},
+        {"type": MELD_TYPE.PONG, "tiles": ["6p", "6p", "6p"]},
+        {"type": MELD_TYPE.KONG, "tiles": ["7z", "7z", "7z", "7z"]},
     ],
     "seats": [
         {"seat": 0, "name": "玩家_", "is_bot": False, "hand_count": 7,
          "discards": ["9s", "4p", "1z"],
-         "melds": [{"type": "pong", "tiles": ["6p", "6p", "6p"]},
-                   {"type": "kong", "tiles": ["7z", "7z", "7z", "7z"]}],
+         "melds": [{"type": MELD_TYPE.PONG, "tiles": ["6p", "6p", "6p"]},
+                   {"type": MELD_TYPE.KONG, "tiles": ["7z", "7z", "7z", "7z"]}],
          "disconnected": False},
         {"seat": 1, "name": "AI-1", "is_bot": True, "hand_count": 2,
          "discards": ["5z"], "melds": HONOR_MELDS_SEAT1, "disconnected": False},
@@ -228,8 +229,8 @@ HONOR_STATE_SYNC = {
 }
 
 HONOR_GAME_END = {
-    "type": "game_end",
-    "reason": "win_ron",
+    "type": FRAME_TYPE.GAME_END,
+    "reason": REASON.WIN_RON,
     "results": [
         {"seat": 0, "delta_score": -16, "hand": [], "win_type": []},
         {"seat": 1, "delta_score": 16, "hand": HONOR_WIN_HAND, "win_type": ["ron"]},
@@ -289,7 +290,7 @@ class StubServer(threading.Thread):
         self.auto_pong = auto_pong
         self.logged_in = False
         self.login_received = False
-        self.pre_login_frames: list[str] = []   # 登录登记完成前收到的非 login 帧（应为空）
+        self.pre_login_frames: list[int] = []   # 登录登记完成前收到的非 login 帧（应为空）
         self._stop = threading.Event()
 
     def run(self) -> None:
@@ -322,19 +323,19 @@ class StubServer(threading.Thread):
     def _react(self, frame: dict) -> None:
         """按 PROTOCOL §4.1 语义回应（登录登记前保护 + pong）。"""
         ftype = frame.get("type")
-        if ftype == "login":
+        if ftype == FRAME_TYPE.LOGIN:
             self.login_received = True     # 仅表示「收到」，登录登记以发出 login_ok 为准
             return
         if not self.logged_in:
-            self.pre_login_frames.append(str(ftype))
+            self.pre_login_frames.append(ftype)
             if self.enforce_login:
-                self.send({"type": "error", "code": "NOT_LOGGED_IN", "message": "send login first"})
+                self.send({"type": FRAME_TYPE.ERROR, "code": ERROR_CODE.NOT_LOGGED_IN, "message": "send login first"})
             return
-        if ftype == "ping" and self.auto_pong:
-            self.send({"type": "pong"})
+        if ftype == FRAME_TYPE.PING and self.auto_pong:
+            self.send({"type": FRAME_TYPE.PONG})
 
     def send(self, frame: dict) -> None:
-        if frame.get("type") == "login_ok":
+        if frame.get("type") == FRAME_TYPE.LOGIN_OK:
             self.logged_in = True          # 登录登记完成（与服务端回 login_ok 等价）
         if self.conn is None:
             return
@@ -343,13 +344,13 @@ class StubServer(threading.Thread):
         except OSError:
             pass
 
-    def types(self) -> list[str]:
+    def types(self) -> list[int]:
         return [f.get("type") for f in list(self.received)]
 
-    def type_count(self, ftype: str) -> int:
+    def type_count(self, ftype: int) -> int:
         return sum(1 for f in list(self.received) if f.get("type") == ftype)
 
-    def wait_for(self, ftype: str, timeout: float = 3.0) -> bool:
+    def wait_for(self, ftype: int, timeout: float = 3.0) -> bool:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if ftype in self.types():
@@ -386,7 +387,7 @@ def _legacy_heartbeat_ping(app: GameApp, now: float) -> None:
 
     原实现只判断 `connected`，而 `network` 一连上即为真、`last_ping` 初始为 None，
     于是**第一次心跳 tick 立即发 ping** —— 请求/响应落在 `connect()` 与
-    `send_frame("login")` 之间的十几毫秒窗口内，服务端按 PROTOCOL §4.1 回
+    `send_frame(FRAME_TYPE.LOGIN)` 之间的十几毫秒窗口内，服务端按 PROTOCOL §4.1 回
     `NOT_LOGGED_IN`，破坏 GD-C1「全程零 error 帧」。
     """
     if not app.connected or app.net is None:
@@ -394,7 +395,7 @@ def _legacy_heartbeat_ping(app: GameApp, now: float) -> None:
     if app.last_ping is None or now - app.last_ping >= HEARTBEAT_INTERVAL:
         app.last_ping = now
         app.ping_sent_at = now
-        app.send_frame("ping")
+        app.send_frame(FRAME_TYPE.PING)
 
 
 def _free_port() -> int:
@@ -460,15 +461,15 @@ def handshake(app: GameApp, server: "StubServer", step_times: list[float]) -> No
     大厅按钮「新建房间」不走这里，也不会自动 ready。
     """
     app.connect()
-    pump(app, 3.0, until=lambda: server.wait_for("login", 0.01), max_step=step_times)
-    server.send({"type": "login_ok", "player_id": "p-3f2a1c", "name": "玩家_"})
+    pump(app, 3.0, until=lambda: server.wait_for(FRAME_TYPE.LOGIN, 0.01), max_step=step_times)
+    server.send({"type": FRAME_TYPE.LOGIN_OK, "player_id": "p-3f2a1c", "name": "玩家_"})
     pump(app, 2.0, until=lambda: app.state.screen == SCREEN_LOBBY, max_step=step_times)
     check(app.state.screen == SCREEN_LOBBY, "login_ok → 停在大厅（v1.8 §12）")
-    check(not server.wait_for("create_room", 0.2), "大厅里没有玩家指令前不发 create_room")
+    check(not server.wait_for(FRAME_TYPE.CREATE_ROOM, 0.2), "大厅里没有玩家指令前不发 create_room")
     app.start_game()
-    pump(app, 2.0, until=lambda: server.wait_for("create_room", 0.01), max_step=step_times)
+    pump(app, 2.0, until=lambda: server.wait_for(FRAME_TYPE.CREATE_ROOM, 0.01), max_step=step_times)
     server.send(ROOM_JOINED)
-    pump(app, 2.0, until=lambda: server.wait_for("ready", 0.01), max_step=step_times)
+    pump(app, 2.0, until=lambda: server.wait_for(FRAME_TYPE.READY, 0.01), max_step=step_times)
     server.send(GAME_START)
     pump(app, 2.0, until=lambda: app.state.screen == SCREEN_TABLE, max_step=step_times)
 
@@ -500,13 +501,13 @@ def main() -> int:
     check(len(app.state.hand) == 7, f"state_sync 覆盖手牌：len={len(app.state.hand)}（13 − 3×2 组副露）")
     check(not app.state.hand_warning, "手牌张数交叉校验通过（len(hand) + 3×melds = 13）")
     check(
-        [m.type for m in app.state.melds] == ["pong", "kong"],
+        [m.type for m in app.state.melds] == [MELD_TYPE.PONG, MELD_TYPE.KONG],
         f"本家副露分组可还原（含字牌杠 4 张）：{[m.type for m in app.state.melds]}",
     )
     check(app.state.remaining == 83, f"牌山剩余 = {app.state.remaining}（136 口径）")
     check(app.state.current_seat == 1, f"当前行动座位 = {app.state.current_seat}")
     check(
-        len(app.state.seat_view(2).melds) == 2 and app.state.seat_view(2).melds[0].type == "chow",
+        len(app.state.seat_view(2).melds) == 2 and app.state.seat_view(2).melds[0].type == MELD_TYPE.CHOW,
         "他家副露分组可还原（chow）",
     )
     check(
@@ -515,7 +516,7 @@ def main() -> int:
     )
     buttons = actionbar.build_buttons(app.state, app._remaining_ms())
     kinds = [b.kind for b in buttons]
-    check(kinds == ["win", "pong", "pass"], f"claim 窗口按钮 = {kinds}（打牌/杠/吃 不可见）")
+    check(kinds == [ACTION.WIN, ACTION.PONG, ACTION.PASS], f"claim 窗口按钮 = {kinds}（打牌/杠/吃 不可见）")
     check(all(b.enabled for b in buttons), "claim 窗口按钮均可点击")
 
     table_path = os.path.join(ARTIFACTS, "client_table.png")
@@ -532,7 +533,7 @@ def main() -> int:
                              hand=["0m", "5m", "1m", "2m", "3m", "0p",
                                    "5p", "6p", "0s", "5s", "7s", "1z", "1z"]))
     aka_app.state.apply({
-        "type": "state_sync",
+        "type": FRAME_TYPE.STATE_SYNC,
         "seq": 9,
         "remaining": 45,
         "current_seat": 0,
@@ -578,7 +579,7 @@ def main() -> int:
     app.state.apply(DISCARD_REQUEST)
     app.now = time.monotonic()
     kinds = [b.kind for b in actionbar.build_buttons(app.state, app._remaining_ms())]
-    check(kinds == ["discard", "win"], f"discard 窗口按钮 = {kinds}")
+    check(kinds == [FRAME_TYPE.DISCARD, ACTION.WIN], f"discard 窗口按钮 = {kinds}")
     rects = table_view.hand_layout(app.state)
     check(len(rects) == len(app.state.hand), "手牌区逐张计算 rect")
     hit = table_view.hand_hit_test(app.state, (rects[0][0] + 2, rects[0][1] + 2))
@@ -600,11 +601,11 @@ def main() -> int:
         dict(GAME_START, mode="riichi", points=[25000, 25000, 25000, 25000])
     )
     riichi_app.state.apply({
-        "type": "action_request",
+        "type": FRAME_TYPE.ACTION_REQUEST,
         "seq": 8,
         "deadline_ms": int(time.time() * 1000) + 15000,
-        "window": "discard",
-        "options": [{"action": "riichi", "tiles": []}],
+        "window": WINDOW.DISCARD,
+        "options": [{"action": ACTION.RIICHI, "tiles": []}],
         # 服务端下发「能作宣言牌」的牌面；协议里恒写普通牌面码（赤 5 也写 5m）
         "riichi_tiles": ["1m", "2m", "0p"],
     })
@@ -615,7 +616,7 @@ def main() -> int:
         f"解析 riichi_tiles（0p 归一为 5p）：{getattr(window, 'riichi_tiles', None)}",
     )
     specs = actionbar.build_buttons(riichi_app.state, riichi_app._remaining_ms())
-    riichi_spec = next((b for b in specs if b.kind == "riichi"), None)
+    riichi_spec = next((b for b in specs if b.kind == ACTION.RIICHI), None)
     check(riichi_spec is not None, "日麻打牌窗口的 riichi 选项生成「立直」按钮")
     check(
         riichi_spec is not None and riichi_spec.enabled,
@@ -623,7 +624,7 @@ def main() -> int:
     )
     assert riichi_spec is not None
 
-    sent: list[tuple[str, dict]] = []
+    sent: list[tuple[int, dict]] = []
 
     def _record_send(kind, **kwargs):
         sent.append((kind, kwargs))
@@ -649,7 +650,7 @@ def main() -> int:
     )
     riichi_app._table_click((rects[0][0] + 2, rects[0][1] + 2))
     check(
-        bool(sent) and sent[0][0] == "action" and sent[0][1].get("action") == "riichi"
+        bool(sent) and sent[0][0] == FRAME_TYPE.ACTION and sent[0][1].get("action") == ACTION.RIICHI
         and sent[0][1].get("tiles") == [riichi_app.state.hand[0]],
         f"点高亮的牌即宣言并打出它：{sent[:1]}",
     )
@@ -660,16 +661,16 @@ def main() -> int:
     legacy_app.state.apply(ROOM_JOINED)
     legacy_app.state.apply(dict(GAME_START, mode="riichi", points=[25000, 25000, 25000, 25000]))
     legacy_app.state.apply({
-        "type": "action_request",
+        "type": FRAME_TYPE.ACTION_REQUEST,
         "seq": 11,
         "deadline_ms": int(time.time() * 1000) + 15000,
-        "window": "discard",
-        "options": [{"action": "riichi", "tiles": []}],
+        "window": WINDOW.DISCARD,
+        "options": [{"action": ACTION.RIICHI, "tiles": []}],
     })
     legacy_app.now = time.monotonic()
     legacy_spec = next(
         b for b in actionbar.build_buttons(legacy_app.state, legacy_app._remaining_ms())
-        if b.kind == "riichi"
+        if b.kind == ACTION.RIICHI
     )
     legacy_app.toast_text = ""
     legacy_app._table_click((legacy_spec.rect[0] + 4, legacy_spec.rect[1] + 4))
@@ -680,11 +681,11 @@ def main() -> int:
 
     # 再开一个窗口用于出图：宣言模式 + 候选标记 + 其余牌压暗
     riichi_app.state.apply({
-        "type": "action_request",
+        "type": FRAME_TYPE.ACTION_REQUEST,
         "seq": 9,
         "deadline_ms": int(time.time() * 1000) + 15000,
-        "window": "discard",
-        "options": [{"action": "riichi", "tiles": []}],
+        "window": WINDOW.DISCARD,
+        "options": [{"action": ACTION.RIICHI, "tiles": []}],
         "riichi_tiles": ["1m", "2m", "5m"],
     })
     riichi_app.state.riichi_arming = True
@@ -694,7 +695,7 @@ def main() -> int:
     check(os.path.getsize(riichi_png) > 1000, f"立直标记产物：{riichi_png}")
     # 服务端仍可能拒绝（例如振听口径差异）→ 错误文案必须中文化，不能只留英文 message
     riichi_app._on_error(
-        {"code": "ILLEGAL_ACTION", "message": "cannot declare riichi now"}, time.monotonic()
+        {"code": ERROR_CODE.ILLEGAL_ACTION, "message": "cannot declare riichi now"}, time.monotonic()
     )
     check(
         "换一张" in (riichi_app.error_message or ""),
@@ -863,7 +864,7 @@ def main() -> int:
     check(app.state.screen == SCREEN_RESULT, "含字牌的 game_end 进入结算界面")
     honor_groups, honor_concealed = result_view.group_winner_hand(app.state, 1)
     check(
-        [m.type for m in honor_groups] == ["kong", "pong", "chow", "pong"],
+        [m.type for m in honor_groups] == [MELD_TYPE.KONG, MELD_TYPE.PONG, MELD_TYPE.CHOW, MELD_TYPE.PONG],
         f"结算分组还原 = {[m.type for m in honor_groups]}（含字牌杠/字牌刻子）",
     )
     check(honor_concealed == ["5z", "5z"], f"结算门前手牌 = {honor_concealed}（字牌做将）")
@@ -888,15 +889,15 @@ def main() -> int:
     app.nickname = "玩家_"
     app.host, app.port = "127.0.0.1", server.port
     handshake(app, server, step_times)
-    check(server.wait_for("login", 0.01), f"客户端发出 login；已收到 {server.types()}")
-    login_frame = next((f for f in server.received if f.get("type") == "login"), {})
+    check(server.wait_for(FRAME_TYPE.LOGIN, 0.01), f"客户端发出 login；已收到 {server.types()}")
+    login_frame = next((f for f in server.received if f.get("type") == FRAME_TYPE.LOGIN), {})
     check(login_frame.get("name") == "玩家_", f"login.name = {login_frame.get('name')!r}")
     if server.raw_lines:
         raw = server.raw_lines[0]
         check(raw.endswith(b"\n"), "出站帧以单个 \\n 结尾（NDJSON）")
         check(raw.decode("utf-8").strip().startswith("{"), "出站帧为 UTF-8 JSON 对象")
-    check(server.type_count("create_room") == 1, "整条握手链只发过一次 create_room（大厅点一次）")
-    check(server.wait_for("ready", 0.01), "room_joined → 自动 ready")
+    check(server.type_count(FRAME_TYPE.CREATE_ROOM) == 1, "整条握手链只发过一次 create_room（大厅点一次）")
+    check(server.wait_for(FRAME_TYPE.READY, 0.01), "room_joined → 自动 ready")
     check(app.state.room_id == "r-0001" and app.state.my_seat == 0, "room_joined 已缓存 room_id/seat")
     check(app.state.screen == SCREEN_TABLE, "game_start → 进入牌桌界面")
     check(len(app.state.hand) == 14, f"庄家手牌 14 张：len={len(app.state.hand)}")
@@ -910,15 +911,15 @@ def main() -> int:
     window = dict(DISCARD_REQUEST)
     window["deadline_ms"] = int(time.time() * 1000) + 15000
     server.send(window)
-    pump(app, 1.0, until=lambda: app.state.window is not None and app.state.window.window == "discard",
+    pump(app, 1.0, until=lambda: app.state.window is not None and app.state.window.window == WINDOW.DISCARD,
          max_step=step_times)
     check(app.state.window is not None, "收到打牌窗口 action_request")
     app.state.selected_index = 1
     tile_to_discard = app.state.hand[1]
     seq_before = app.state.window.seq
     check(app._confirm_discard(), f"确认打牌 → 发送 discard（tile={tile_to_discard}）")
-    pump(app, 1.0, until=lambda: server.wait_for("discard", 0.01), max_step=step_times)
-    sent = next((f for f in server.received if f.get("type") == "discard"), None)
+    pump(app, 1.0, until=lambda: server.wait_for(FRAME_TYPE.DISCARD, 0.01), max_step=step_times)
+    sent = next((f for f in server.received if f.get("type") == FRAME_TYPE.DISCARD), None)
     check(sent is not None, "服务端已收到 discard")
     if sent is not None:
         check(sent.get("tile") == tile_to_discard, f"discard.tile = {sent.get('tile')}")
@@ -940,7 +941,7 @@ def main() -> int:
          max_step=step_times)
     app.state.selected_index = honor_index
     check(app._confirm_discard(), "字牌可选并确认打出（发送 discard）")
-    pump(app, 1.0, until=lambda: any(f.get("type") == "discard" and f.get("tile", "").endswith("z")
+    pump(app, 1.0, until=lambda: any(f.get("type") == FRAME_TYPE.DISCARD and f.get("tile", "").endswith("z")
                                      for f in server.received), max_step=step_times)
     honor_sent = next((f for f in server.received if str(f.get("tile", "")).endswith("z")), None)
     check(
@@ -952,14 +953,14 @@ def main() -> int:
     claim["seq"] = seq_before + 2
     claim["deadline_ms"] = int(time.time() * 1000) + 15000
     server.send(claim)
-    pump(app, 1.0, until=lambda: app.state.window is not None and app.state.window.window == "claim",
+    pump(app, 1.0, until=lambda: app.state.window is not None and app.state.window.window == WINDOW.CLAIM,
          max_step=step_times)
-    check(not app._do_action("pong", ["1m"]), "动作不在 options 内 → 拒绝发送（不产生 error 帧）")
-    check(not app._do_action("kong", ["6p"]), "claim 窗口无 kong 选项 → 拒绝发送")
-    check(app._do_action("pass", []), "claim 窗口的 pass 可发送")
-    pump(app, 1.0, until=lambda: server.wait_for("action", 0.01), max_step=step_times)
-    act = next((f for f in server.received if f.get("type") == "action"), None)
-    check(act is not None and act.get("action") == "pass", f"action 帧 = {act}")
+    check(not app._do_action(ACTION.PONG, ["1m"]), "动作不在 options 内 → 拒绝发送（不产生 error 帧）")
+    check(not app._do_action(ACTION.KONG, ["6p"]), "claim 窗口无 kong 选项 → 拒绝发送")
+    check(app._do_action(ACTION.PASS, []), "claim 窗口的 pass 可发送")
+    pump(app, 1.0, until=lambda: server.wait_for(FRAME_TYPE.ACTION, 0.01), max_step=step_times)
+    act = next((f for f in server.received if f.get("type") == FRAME_TYPE.ACTION), None)
+    check(act is not None and act.get("action") == ACTION.PASS, f"action 帧 = {act}")
     if act is not None:
         check(isinstance(act.get("seq"), int), "action 帧携带 seq（H2）")
         check(act.get("tiles") == [], "pass 的 tiles = []")
@@ -1019,35 +1020,35 @@ def main() -> int:
     race_stub.start()
     legacy_app = GameApp(host="127.0.0.1", port=race_stub.port, auto_scale=False)
     legacy_app.nickname = "玩家_"
-    legacy_inbound: list[str] = []
-    legacy_errors: list[str] = []
+    legacy_inbound: list[int] = []
+    legacy_errors: list[int] = []
     _legacy_orig_on_frame = legacy_app._on_frame
 
     def _legacy_spy(frame, now, _orig=_legacy_orig_on_frame, _sink=legacy_inbound, _err=legacy_errors):
         if isinstance(frame, dict):
-            _sink.append(str(frame.get("type")))
-            if frame.get("type") == "error":
-                _err.append(str(frame.get("code")))
+            _sink.append(frame.get("type"))
+            if frame.get("type") == FRAME_TYPE.ERROR:
+                _err.append(frame.get("code"))
         return _orig(frame, now)
 
     legacy_app._on_frame = _legacy_spy
     legacy_app.connect()
-    pump(legacy_app, 3.0, until=lambda: race_stub.wait_for("login", 0.01))
-    check(race_stub.wait_for("login", 0.01), "反事实场景：TCP 已连且 login 已发出")
+    pump(legacy_app, 3.0, until=lambda: race_stub.wait_for(FRAME_TYPE.LOGIN, 0.01))
+    check(race_stub.wait_for(FRAME_TYPE.LOGIN, 0.01), "反事实场景：TCP 已连且 login 已发出")
     check(legacy_app.login_stage == "WAIT_LOGIN_OK", "反事实场景：仍在等待 login_ok（正是竞态窗口）")
     legacy_app.last_ping = None          # 与真实窗口一致：心跳从未发过
     _legacy_heartbeat_ping(legacy_app, time.monotonic())
-    pump(legacy_app, 1.0, until=lambda: "error" in legacy_inbound)
+    pump(legacy_app, 1.0, until=lambda: FRAME_TYPE.ERROR in legacy_inbound)
     check(
-        race_stub.wait_for("ping", 0.01),
+        race_stub.wait_for(FRAME_TYPE.PING, 0.01),
         f"反事实复现：修复前实现在该窗口发出 ping（服务端收到 {race_stub.types()}）",
     )
     check(
-        "ping" in race_stub.pre_login_frames,
+        FRAME_TYPE.PING in race_stub.pre_login_frames,
         f"反事实复现：该 ping 落在登录登记生效前（pre_login_frames={race_stub.pre_login_frames}）",
     )
     check(
-        legacy_errors[:1] == ["NOT_LOGGED_IN"],
+        legacy_errors[:1] == [ERROR_CODE.NOT_LOGGED_IN],
         f"反事实复现：服务端回 error{{NOT_LOGGED_IN}} —— 复现 captain 实测症状（客户端收到 {legacy_inbound}）",
     )
     legacy_app.close_socket("反事实场景结束")
@@ -1059,7 +1060,7 @@ def main() -> int:
     fix_app = GameApp(host="127.0.0.1", port=fix_stub.port, auto_scale=False)
     fix_app.nickname = "玩家_"
     fix_app.connect()
-    pump(fix_app, 3.0, until=lambda: fix_stub.wait_for("login", 0.01))
+    pump(fix_app, 3.0, until=lambda: fix_stub.wait_for(FRAME_TYPE.LOGIN, 0.01))
     check(fix_app.login_stage == "WAIT_LOGIN_OK", "修复后场景：同样处于等待 login_ok 的窗口")
     check(fix_app.logged_in is False, "修复后场景：logged_in 仍为 False（login_ok 未到）")
     # 推进真实心跳若干 tick，并把心跳时钟人为前推 10 s（窗口拖长也不许发 ping）
@@ -1067,7 +1068,7 @@ def main() -> int:
     for delta in (0.0, HEARTBEAT_INTERVAL * 2, HEARTBEAT_INTERVAL * 4):
         fix_app._heartbeat(time.monotonic() + delta)
     pump(fix_app, 1.0)
-    pre_login_out = [t for t in fix_stub.types() if t != "login"]
+    pre_login_out = [t for t in fix_stub.types() if t != FRAME_TYPE.LOGIN]
     check(
         pre_login_out == [] and fix_stub.pre_login_frames == [],
         f"修复后：握手完成前零出站帧（服务端仅收到 {fix_stub.types()}，非 login 帧 {fix_stub.pre_login_frames}）",
@@ -1078,33 +1079,33 @@ def main() -> int:
     )
 
     # ③ 登录后心跳必须继续工作：间隔 >= HEARTBEAT_INTERVAL，且 pong 更新 RTT
-    fix_inbound: list[str] = []
+    fix_inbound: list[int] = []
     _fix_orig_on_frame = fix_app._on_frame
 
     def _fix_spy(frame, now, _orig=_fix_orig_on_frame, _sink=fix_inbound):
         if isinstance(frame, dict):
-            _sink.append(str(frame.get("type")))
+            _sink.append(frame.get("type"))
         return _orig(frame, now)
 
     fix_app._on_frame = _fix_spy
-    fix_stub.send({"type": "login_ok", "player_id": "p-race", "name": "玩家_"})
+    fix_stub.send({"type": FRAME_TYPE.LOGIN_OK, "player_id": "p-race", "name": "玩家_"})
     pump(fix_app, 2.0, until=lambda: fix_app.state.screen == SCREEN_LOBBY)
     check(fix_app.logged_in and fix_app.state.screen == SCREEN_LOBBY, "login_ok 后：logged_in=True 且进入大厅")
     fix_app.start_game()   # 旧握手 / 再来一局：create_room 后自动 ready
-    pump(fix_app, 2.0, until=lambda: fix_stub.wait_for("create_room", 0.01))
-    check(fix_stub.wait_for("create_room", 0.01), "start_game() 继续握手（create_room）")
-    pings_before = fix_stub.type_count("ping")
+    pump(fix_app, 2.0, until=lambda: fix_stub.wait_for(FRAME_TYPE.CREATE_ROOM, 0.01))
+    check(fix_stub.wait_for(FRAME_TYPE.CREATE_ROOM, 0.01), "start_game() 继续握手（create_room）")
+    pings_before = fix_stub.type_count(FRAME_TYPE.PING)
     fix_app._heartbeat(fix_app.last_ping + HEARTBEAT_INTERVAL - 0.5)     # 未到间隔
     pump(fix_app, 0.4)
     check(
-        fix_stub.type_count("ping") == pings_before,
+        fix_stub.type_count(FRAME_TYPE.PING) == pings_before,
         f"登录后：未到 HEARTBEAT_INTERVAL 不发 ping（间隔下限生效，ping={fix_stub.type_count('ping')}）",
     )
     # 回拨心跳时钟使间隔已到（用真实时间，避免污染 RTT 的 ping_sent_at）
     fix_app.last_ping = time.monotonic() - HEARTBEAT_INTERVAL - 1.0
-    pump(fix_app, 1.5, until=lambda: fix_stub.type_count("ping") > pings_before)
+    pump(fix_app, 1.5, until=lambda: fix_stub.type_count(FRAME_TYPE.PING) > pings_before)
     check(
-        fix_stub.type_count("ping") == pings_before + 1,
+        fix_stub.type_count(FRAME_TYPE.PING) == pings_before + 1,
         "登录后：达到 HEARTBEAT_INTERVAL 即恢复发送 ping（心跳未退化）",
     )
     pump(fix_app, 1.5, until=lambda: fix_app.rtt_ms is not None)
@@ -1112,7 +1113,7 @@ def main() -> int:
         fix_app.rtt_ms is not None and fix_app.rtt_ms >= 0,
         f"登录后：收到 pong 后 RTT 更新（rtt={fix_app.rtt_ms:.2f} ms）",
     )
-    check("error" not in fix_inbound, f"整段竞态用例结束仍为零 error 帧（收到 {fix_inbound}）")
+    check(FRAME_TYPE.ERROR not in fix_inbound, f"整段竞态用例结束仍为零 error 帧（收到 {fix_inbound}）")
     fix_app.close_socket("竞态用例结束")
     fix_stub.close()
 
@@ -1141,13 +1142,13 @@ def main() -> int:
             check(up, f"真实服务端已启动：{server_bin} --port {real_port} --seed 199")
             real_app = GameApp(host="127.0.0.1", port=real_port, auto_scale=False)
             real_app.nickname = "真实客户端"
-            inbound: list[str] = []
-            outbound: list[tuple[str, bool]] = []
+            inbound: list[int] = []
+            outbound: list[tuple[int, bool]] = []
             orig_on_frame, orig_send_frame = real_app._on_frame, real_app.send_frame
 
             def spy_on_frame(frame, now, _orig=orig_on_frame, _sink=inbound):
                 if isinstance(frame, dict):
-                    _sink.append(str(frame.get("type")))
+                    _sink.append(frame.get("type"))
                 return _orig(frame, now)
 
             def spy_send_frame(ftype, _orig=orig_send_frame, _sink=outbound, _app=real_app, **fields):
@@ -1165,17 +1166,17 @@ def main() -> int:
             pump(real_app, 20.0, until=lambda: real_app.state.screen == SCREEN_TABLE)
             check(real_app.state.screen == SCREEN_TABLE, "真实客户端走完 连接→登录→大厅→开局（进入牌桌界面）")
             check(
-                real_app.state.error_count == 0 and "error" not in inbound,
+                real_app.state.error_count == 0 and FRAME_TYPE.ERROR not in inbound,
                 f"端到端零 error 帧：收到 {len(inbound)} 帧、error_count={real_app.state.error_count}"
                 f"（帧序 {inbound[:6]}）",
             )
-            pre_login_sends = [t for t, logged_in in outbound if t != "login" and not logged_in]
+            pre_login_sends = [t for t, logged_in in outbound if t != FRAME_TYPE.LOGIN and not logged_in]
             check(
                 pre_login_sends == [],
                 f"真实路径握手期零非 login 出站帧（出站序 {[t for t, _ in outbound]}）",
             )
-            order_ok = all(x in inbound for x in ("login_ok", "room_joined", "game_start"))
-            check(order_ok, f"真实握手链完整：login_ok → room_joined → game_start（{ [x for x in inbound if x in ('login_ok','room_joined','game_start')] }）")
+            order_ok = all(x in inbound for x in (FRAME_TYPE.LOGIN_OK, FRAME_TYPE.ROOM_JOINED, FRAME_TYPE.GAME_START))
+            check(order_ok, f"真实握手链完整：login_ok → room_joined → game_start（{ [x for x in inbound if x in (FRAME_TYPE.LOGIN_OK, FRAME_TYPE.ROOM_JOINED, FRAME_TYPE.GAME_START)] }）")
             # 固化为可复现证据
             evidence = {
                 "server_bin": server_bin,
@@ -1256,11 +1257,11 @@ def main() -> int:
         pass
 
     # 按钮文案公式逐字对齐 §5.3
-    check(button_label("kong", ["5p"]) == "杠 5 筒", f"kong 文案 = {button_label('kong', ['5p'])}")
-    check(button_label("pong", ["2s"]) == "碰 2 条", f"pong 文案 = {button_label('pong', ['2s'])}")
-    check(button_label("pong", ["1z"]) == "碰 東", f"pong（字牌）文案 = {button_label('pong', ['1z'])}")
-    check(button_label("kong", ["7z"]) == "杠 中", f"kong（字牌）文案 = {button_label('kong', ['7z'])}")
-    chow_label = button_label("chow", ["3p", "4p"])
+    check(button_label(ACTION.KONG, ["5p"]) == "杠 5 筒", f"kong 文案 = {button_label(ACTION.KONG, ['5p'])}")
+    check(button_label(ACTION.PONG, ["2s"]) == "碰 2 条", f"pong 文案 = {button_label(ACTION.PONG, ['2s'])}")
+    check(button_label(ACTION.PONG, ["1z"]) == "碰 東", f"pong（字牌）文案 = {button_label(ACTION.PONG, ['1z'])}")
+    check(button_label(ACTION.KONG, ["7z"]) == "杠 中", f"kong（字牌）文案 = {button_label(ACTION.KONG, ['7z'])}")
+    chow_label = button_label(ACTION.CHOW, ["3p", "4p"])
     check(chow_label == "吃 3 筒 4 筒", f"chow 文案 = {chow_label}")
     # 被鸣牌由 action_event.from_seat 的牌河确定（§4.7），故文案不得出现它（这里以 2p 为例）
     claimed_tile_label = tile_label("2p")
@@ -1272,21 +1273,21 @@ def main() -> int:
         f"chow 只列手中消耗的两张（不含被鸣牌 {claimed_tile_label}，§4.7）",
     )
     check(
-        [button_label(a) for a in ("win", "pass", "discard")] == ["胡", "过", "打牌"],
+        [button_label(a) for a in (ACTION.WIN, ACTION.PASS, FRAME_TYPE.DISCARD)] == ["胡", "过", "打牌"],
         "win/pass/discard 文案 = ['胡', '过', '打牌']",
     )
 
     # 操作栏按钮实渲染：6 按钮满配（含字牌杠 + 数牌碰 + 两条吃）
     label_window = {
-        "type": "action_request", "seq": 31,
-        "deadline_ms": int(time.time() * 1000) + 15000, "window": "claim",
+        "type": FRAME_TYPE.ACTION_REQUEST, "seq": 31,
+        "deadline_ms": int(time.time() * 1000) + 15000, "window": WINDOW.CLAIM,
         "options": [
-            {"action": "win", "tiles": []},
-            {"action": "kong", "tiles": ["7z"]},
-            {"action": "pong", "tiles": ["2s"]},
-            {"action": "chow", "tiles": ["3p", "4p"]},
-            {"action": "chow", "tiles": ["4p", "5p"]},
-            {"action": "pass", "tiles": []},
+            {"action": ACTION.WIN, "tiles": []},
+            {"action": ACTION.KONG, "tiles": ["7z"]},
+            {"action": ACTION.PONG, "tiles": ["2s"]},
+            {"action": ACTION.CHOW, "tiles": ["3p", "4p"]},
+            {"action": ACTION.CHOW, "tiles": ["4p", "5p"]},
+            {"action": ACTION.PASS, "tiles": []},
         ],
     }
     label_app = make_app()
@@ -1300,7 +1301,7 @@ def main() -> int:
         f"按钮文案 = {[s.label for s in label_specs]}",
     )
     check(
-        [s.kind for s in label_specs] == ["win", "kong", "pong", "chow", "chow", "pass"],
+        [s.kind for s in label_specs] == [ACTION.WIN, ACTION.KONG, ACTION.PONG, ACTION.CHOW, ACTION.CHOW, ACTION.PASS],
         f"按钮顺序/类型未变 = {[s.kind for s in label_specs]}",
     )
     # 文案宽度不得溢出按钮可用宽度（不得换行、不得溢出）
@@ -1332,15 +1333,15 @@ def main() -> int:
     handshake(payload_app, payload_stub, step_times)
     seq = 40
     for action, tiles, expected_label in (
-        ("pong", ["9s"], "碰 9 条"),
-        ("kong", ["1z"], "杠 東"),
-        ("chow", ["3p", "4p"], "吃 3 筒 4 筒"),
+        (ACTION.PONG, ["9s"], "碰 9 条"),
+        (ACTION.KONG, ["1z"], "杠 東"),
+        (ACTION.CHOW, ["3p", "4p"], "吃 3 筒 4 筒"),
     ):
         seq += 1
         payload_stub.send({
-            "type": "action_request", "seq": seq,
-            "deadline_ms": int(time.time() * 1000) + 15000, "window": "claim",
-            "options": [{"action": action, "tiles": tiles}, {"action": "pass", "tiles": []}],
+            "type": FRAME_TYPE.ACTION_REQUEST, "seq": seq,
+            "deadline_ms": int(time.time() * 1000) + 15000, "window": WINDOW.CLAIM,
+            "options": [{"action": action, "tiles": tiles}, {"action": ACTION.PASS, "tiles": []}],
         })
         pump(payload_app, 1.0, until=lambda: payload_app.state.window is not None
              and payload_app.state.window.seq == seq, max_step=step_times)
@@ -1350,12 +1351,12 @@ def main() -> int:
             button is not None and button.label == expected_label,
             f"按钮文案（显示层）= {button.label if button else None!r}",
         )
-        sent_before = [f for f in payload_stub.received if f.get("type") == "action"]
+        sent_before = [f for f in payload_stub.received if f.get("type") == FRAME_TYPE.ACTION]
         check(payload_app._do_action(action, tiles), f"提交 {action} {tiles}")
         pump(payload_app, 1.0,
-             until=lambda: len([f for f in payload_stub.received if f.get("type") == "action"]) > len(sent_before),
+             until=lambda: len([f for f in payload_stub.received if f.get("type") == FRAME_TYPE.ACTION]) > len(sent_before),
              max_step=step_times)
-        sent = [f for f in payload_stub.received if f.get("type") == "action"][-1]
+        sent = [f for f in payload_stub.received if f.get("type") == FRAME_TYPE.ACTION][-1]
         check(
             sent.get("tiles") == tiles and sent.get("action") == action,
             f"出站帧载荷仍为线上牌码：action={sent.get('action')} tiles={sent.get('tiles')}（显示「{expected_label}」）",
@@ -1388,13 +1389,13 @@ def main() -> int:
         return toast_app.toast_text
 
     # ① 摸牌提示（数牌 + 字牌繁體）：显示中文牌名，而帧内载荷仍是线上牌码
-    draw_frame = {"type": "draw", "tile": "7m", "seat": 0, "seq": 51}
+    draw_frame = {"type": FRAME_TYPE.DRAW, "tile": "7m", "seat": 0, "seq": 51}
     toast = drive_toast(draw_frame)
     check(
         toast == "你摸到 7 万" and draw_frame["tile"] == "7m" and "7m" not in toast,
         f"摸牌提示显示「{toast}」而载荷 tile={draw_frame['tile']!r}",
     )
-    honor_draw = {"type": "draw", "tile": "1z", "seat": 0, "seq": 52}
+    honor_draw = {"type": FRAME_TYPE.DRAW, "tile": "1z", "seat": 0, "seq": 52}
     toast = drive_toast(honor_draw)
     check(
         toast == "你摸到 東" and honor_draw["tile"] == "1z",
@@ -1402,13 +1403,13 @@ def main() -> int:
     )
 
     # ② 打牌提示（本家 / 他家）
-    self_discard = {"type": "discard_event", "seat": 0, "tile": "4p", "seq": 53}
+    self_discard = {"type": FRAME_TYPE.DISCARD_EVENT, "seat": 0, "tile": "4p", "seq": 53}
     toast = drive_toast(self_discard)
     check(
         toast == "你打出 4 筒" and self_discard["tile"] == "4p" and "4p" not in toast,
         f"本家打牌提示显示「{toast}」而载荷 tile={self_discard['tile']!r}",
     )
-    other_discard = {"type": "discard_event", "seat": 1, "tile": "2s", "seq": 54}
+    other_discard = {"type": FRAME_TYPE.DISCARD_EVENT, "seat": 1, "tile": "2s", "seq": 54}
     toast = drive_toast(other_discard)
     check(
         toast == "下家 打出 2 条" and other_discard["tile"] == "2s" and "2s" not in toast,
@@ -1417,13 +1418,13 @@ def main() -> int:
 
     # ③ 鸣牌事件提示条：结构 `<座位> <动作> <牌名>` 不变，牌名为中文（含字牌繁體）
     for frame, expected, wire in (
-        ({"type": "action_event", "seat": 1, "action": "pong", "tiles": ["9s"],
+        ({"type": FRAME_TYPE.ACTION_EVENT, "seat": 1, "action": ACTION.PONG, "tiles": ["9s"],
           "from_seat": 0, "seq": 55}, "下家 碰 9 条", "9s"),
-        ({"type": "action_event", "seat": 2, "action": "kong", "tiles": ["1z"],
+        ({"type": FRAME_TYPE.ACTION_EVENT, "seat": 2, "action": ACTION.KONG, "tiles": ["1z"],
           "from_seat": 0, "seq": 56}, "对家 杠 東", "1z"),
-        ({"type": "action_event", "seat": 3, "action": "chow", "tiles": ["3p", "4p"],
+        ({"type": FRAME_TYPE.ACTION_EVENT, "seat": 3, "action": ACTION.CHOW, "tiles": ["3p", "4p"],
           "from_seat": 0, "seq": 57}, "上家 吃 3 筒 4 筒", "3p"),
-        ({"type": "action_event", "seat": 1, "action": "win", "tiles": ["8p"],
+        ({"type": FRAME_TYPE.ACTION_EVENT, "seat": 1, "action": ACTION.WIN, "tiles": ["8p"],
           "from_seat": 0, "seq": 58}, "下家 胡 8 筒", "8p"),
     ):
         toast = drive_toast(frame)
@@ -1445,7 +1446,7 @@ def main() -> int:
     # 渲染前把本家用例手牌复位为一致值，避免本节额外下发的 draw 帧造成 HUD「张数异常」干扰目视
     toast_app.state.hand = list(GAME_START["hand"])
     toast_app.state.check_hand_count()
-    toast_stub.send({"type": "action_event", "seat": 2, "action": "kong", "tiles": ["1z"],
+    toast_stub.send({"type": FRAME_TYPE.ACTION_EVENT, "seat": 2, "action": ACTION.KONG, "tiles": ["1z"],
                      "from_seat": 0, "seq": 60})
     pump(toast_app, 1.0, until=lambda: toast_app.toast_text == "对家 杠 東", max_step=step_times)
     toast_app.now = time.monotonic()
@@ -1469,16 +1470,16 @@ def main() -> int:
     build_table_state(stats_app)
 
     # 入口只对账号会话出现：判据是服务端下发的 player_id 前缀（ACCOUNT_DESIGN §1.2）。
-    stats_app._on_frame({"type": "login_ok", "player_id": "p-3f2a1c", "name": "游客_"}, time.monotonic())
+    stats_app._on_frame({"type": FRAME_TYPE.LOGIN_OK, "player_id": "p-3f2a1c", "name": "游客_"}, time.monotonic())
     check(not stats_app.has_account, "游客会话（p- 前缀）不显示战绩入口")
     check(not stats_app.build_ui().has_account_session, "游客会话 HUD 不画「战绩」按钮")
-    stats_app._on_frame({"type": "login_ok", "player_id": "u-000042", "name": "lixueming"}, time.monotonic())
+    stats_app._on_frame({"type": FRAME_TYPE.LOGIN_OK, "player_id": "u-000042", "name": "lixueming"}, time.monotonic())
     check(stats_app.has_account, "账号会话（u- 前缀）显示战绩入口")
     check(stats_app.state.screen == SCREEN_LOBBY, "账号会话登录后同样先进大厅")
     stats_app.state.screen = SCREEN_TABLE  # 本段要验证的是牌桌上的战绩弹窗
 
     # stats 帧：合法载荷留存、非法载荷忽略（渲染层不做协议校验，但也不该被脏数据打崩）。
-    stats_app._on_frame({"type": "stats", "games": "x", "wins": 0, "draws": 0, "net_score": 0, "recent": []},
+    stats_app._on_frame({"type": FRAME_TYPE.STATS, "games": "x", "wins": 0, "draws": 0, "net_score": 0, "recent": []},
                         time.monotonic())
     check(stats_app.stats is None, "字段类型不对的 stats 被忽略（不影响画面）")
     stats_app._on_frame(STATS_FRAME, time.monotonic())
@@ -1490,7 +1491,7 @@ def main() -> int:
     stats_app.send_frame = lambda ftype, **fields: (sent.append((ftype, fields)) or True)
     stats_app.toggle_stats()
     check(stats_app.stats_open, "点「战绩」打开面板")
-    check(sent == [("stats_request", {})], f"打开面板只发一次 stats_request：{sent}")
+    check(sent == [(FRAME_TYPE.STATS_REQUEST, {})], f"打开面板只发一次 stats_request：{sent}")
     stats_app.stats_open = False
     stats_app.send_frame = original_send
 
@@ -1531,11 +1532,11 @@ def main() -> int:
     lobby_app.connected = True
 
     logged_at = time.monotonic()
-    lobby_app._on_frame({"type": "login_ok", "player_id": "u-000001", "name": "lixueming"}, logged_at)
+    lobby_app._on_frame({"type": FRAME_TYPE.LOGIN_OK, "player_id": "u-000001", "name": "lixueming"}, logged_at)
     check(lobby_app.state.screen == SCREEN_LOBBY, "账号登录后进入大厅")
     check(lobby_app.state.phase == "大厅", "大厅阶段文案 = 大厅")
     check(
-        sent_frames == [("stats_request", {}), ("list_rooms", {})],
+        sent_frames == [(FRAME_TYPE.STATS_REQUEST, {}), (FRAME_TYPE.LIST_ROOMS, {})],
         f"大厅为账号会话拉战绩，并立刻拉房间列表：{sent_frames}",
     )
     check(not lobby_app._lobby_begin_enabled(), "还没入座时「开始对局」禁用")
@@ -1545,14 +1546,14 @@ def main() -> int:
     lobby_app._poll_room_list(logged_at)
     check(sent_frames == [], "不到 1 秒不重复发 list_rooms")
     lobby_app._poll_room_list(logged_at + 1.0)
-    check(sent_frames == [("list_rooms", {})], f"满 1 秒再发 list_rooms：{sent_frames}")
+    check(sent_frames == [(FRAME_TYPE.LIST_ROOMS, {})], f"满 1 秒再发 list_rooms：{sent_frames}")
 
     sent_frames.clear()
     lobby_app._lobby_click((T.LB_START_BTN[0] + 4, T.LB_START_BTN[1] + 4))
     check(sent_frames == [], "未入座时点「开始对局」不发帧")
 
     lobby_app._lobby_click((T.LB_NEW_BTN[0] + 4, T.LB_NEW_BTN[1] + 4))
-    check(sent_frames == [("create_room", {})], f"「新建房间」只发 create_room：{sent_frames}")
+    check(sent_frames == [(FRAME_TYPE.CREATE_ROOM, {})], f"「新建房间」只发 create_room：{sent_frames}")
     sent_frames.clear()
     lobby_app._lobby_click((T.LB_NEW_BTN[0] + 4, T.LB_NEW_BTN[1] + 4))
     check(sent_frames == [], "建桌在途时再点不重复发帧（防连点）")
@@ -1569,17 +1570,17 @@ def main() -> int:
     check(not lobby_app._lobby_create_enabled(), "已在房间里时「新建房间」禁用")
 
     lobby_app._lobby_click((T.LB_START_BTN[0] + 4, T.LB_START_BTN[1] + 4))
-    check(sent_frames == [("ready", {})], f"「开始对局」只发 ready：{sent_frames}")
+    check(sent_frames == [(FRAME_TYPE.READY, {})], f"「开始对局」只发 ready：{sent_frames}")
 
     # 未入座时 Enter = 新建房间；入座后点别的房间不发 join_room。
     pick_app = make_app()
     pick_frames: list[tuple] = []
     pick_app.send_frame = lambda ftype, **fields: (pick_frames.append((ftype, fields)) or True)
     pick_app.connected = True
-    pick_app._on_frame({"type": "login_ok", "player_id": "p-3f2a1c", "name": "玩家_"}, time.monotonic())
+    pick_app._on_frame({"type": FRAME_TYPE.LOGIN_OK, "player_id": "p-3f2a1c", "name": "玩家_"}, time.monotonic())
     pick_frames.clear()
     pick_app._lobby_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RETURN, unicode=""))
-    check(pick_frames == [("create_room", {})], f"未入座时 Enter 等于新建房间：{pick_frames}")
+    check(pick_frames == [(FRAME_TYPE.CREATE_ROOM, {})], f"未入座时 Enter 等于新建房间：{pick_frames}")
     pick_frames.clear()
     pick_app._on_frame(ROOM_JOINED, time.monotonic())
     check(pick_frames == [], "Enter 建桌成功后不自动 ready")
@@ -1588,7 +1589,7 @@ def main() -> int:
         {"room_id": "r-0002", "host": "甲", "players": 1, "seats": 4},
     ]
     pick_app._on_frame(
-        {"type": "room_list", "rooms": [
+        {"type": FRAME_TYPE.ROOM_LIST, "rooms": [
             {"room_id": "r-0002", "host": "甲", "players": 1, "seats": 4},
             {"room_id": "r-0009", "host": "乙", "players": 2, "seats": 4},
         ]},
@@ -1613,11 +1614,11 @@ def main() -> int:
     join_frames: list[tuple] = []
     join_app.send_frame = lambda ftype, **fields: (join_frames.append((ftype, fields)) or True)
     join_app.connected = True
-    join_app._on_frame({"type": "login_ok", "player_id": "p-aabbcc", "name": "加入者"}, time.monotonic())
+    join_app._on_frame({"type": FRAME_TYPE.LOGIN_OK, "player_id": "p-aabbcc", "name": "加入者"}, time.monotonic())
     join_app.open_rooms = [{"room_id": "r-0007", "host": "房主", "players": 1, "seats": 4}]
     join_frames.clear()
     join_app._lobby_click((T.LB_ROOMS_X + 8, T.LB_ROOMS_Y + 8))
-    check(join_frames == [("join_room", {"room_id": "r-0007"})], f"点空闲房间发 join_room：{join_frames}")
+    check(join_frames == [(FRAME_TYPE.JOIN_ROOM, {"room_id": "r-0007"})], f"点空闲房间发 join_room：{join_frames}")
     joined = dict(ROOM_JOINED)
     joined["room_id"] = "r-0007"
     joined["seat"] = 1
@@ -1631,7 +1632,7 @@ def main() -> int:
     )
     join_frames.clear()
     join_app._lobby_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RETURN, unicode=""))
-    check(join_frames == [("ready", {})], f"已入座时 Enter 只发 ready：{join_frames}")
+    check(join_frames == [(FRAME_TYPE.READY, {})], f"已入座时 Enter 只发 ready：{join_frames}")
 
     # 登录界面 → 大厅之后，「返回登录」必须断开并回到登录界面（而不是留在半连接状态）
     lobby_app.state.enter_lobby()
@@ -1648,18 +1649,18 @@ def main() -> int:
     rematch_app.send_frame = lambda ftype, **fields: (sent_frames.append((ftype, fields)) or True)
     rematch_app.connected = True
     rematch_app.auto_start_after_login = True
-    rematch_app._on_frame({"type": "login_ok", "player_id": "p-3f2a1c", "name": "玩家_"}, time.monotonic())
-    check(sent_frames == [("create_room", {})], f"「再来一局」跳过大厅直接建桌：{sent_frames}")
+    rematch_app._on_frame({"type": FRAME_TYPE.LOGIN_OK, "player_id": "p-3f2a1c", "name": "玩家_"}, time.monotonic())
+    check(sent_frames == [(FRAME_TYPE.CREATE_ROOM, {})], f"「再来一局」跳过大厅直接建桌：{sent_frames}")
     check(not rematch_app.auto_start_after_login, "自动开局标记用后即清（下次登录回大厅）")
     sent_frames.clear()
     rematch_app._on_frame(ROOM_JOINED, time.monotonic())
-    check(sent_frames == [("ready", {})], f"「再来一局」在 room_joined 后自动 ready：{sent_frames}")
+    check(sent_frames == [(FRAME_TYPE.READY, {})], f"「再来一局」在 room_joined 后自动 ready：{sent_frames}")
 
     # 大厅里断线：还没有对局在进行，不该套「对局进行中，服务端将托管你的座位」那层蒙层
     drop_app = make_app()
     drop_app.nickname = "玩家_"
     drop_app.connected = True
-    drop_app._on_frame({"type": "login_ok", "player_id": "p-3f2a1c", "name": "玩家_"}, time.monotonic())
+    drop_app._on_frame({"type": FRAME_TYPE.LOGIN_OK, "player_id": "p-3f2a1c", "name": "玩家_"}, time.monotonic())
     drop_app._on_closed("服务端关闭了连接", time.monotonic())
     check(drop_app.state.screen == SCREEN_LOGIN, "大厅断线 → 回登录界面")
     check(drop_app.disconnect_reason is None, "大厅断线不显示断线蒙层")
@@ -1673,7 +1674,7 @@ def main() -> int:
     sent: list[tuple] = []
     round_app.send_frame = lambda ftype, **fields: (sent.append((ftype, fields)) or True)
     round_app.connected = True
-    round_app._on_frame({"type": "login_ok", "player_id": "p-3f2a1c", "name": "玩家_"}, time.monotonic())
+    round_app._on_frame({"type": FRAME_TYPE.LOGIN_OK, "player_id": "p-3f2a1c", "name": "玩家_"}, time.monotonic())
     round_app._on_frame(dict(ROOM_JOINED), time.monotonic())
     round_app._on_frame(dict(GAME_START), time.monotonic())
     round_app._on_frame(dict(STATE_SYNC), time.monotonic())
@@ -1719,12 +1720,12 @@ def main() -> int:
           f"D-3: 并列最大 → 「XX、YY 并列领先」，got {tie_text!r}")
     # v1.20（PROTOCOL §12.13）：场终剩棒归一位 —— 只在「末局没人收供托」时出现
     award_app = make_app()
-    award_app._on_frame({"type": "login_ok", "player_id": "p-3f2a1c", "name": "玩家_"}, time.monotonic())
+    award_app._on_frame({"type": FRAME_TYPE.LOGIN_OK, "player_id": "p-3f2a1c", "name": "玩家_"}, time.monotonic())
     award_app._on_frame(dict(ROOM_JOINED), time.monotonic())
     award_app._on_frame(dict(GAME_START), time.monotonic())
     draw_end = dict(GAME_END)
     draw_end.update({
-        "reason": "draw_exhausted", "win": None, "match_will_continue": False,
+        "reason": REASON.DRAW_EXHAUSTED, "win": None, "match_will_continue": False,
         "tenpai": [False, True, True, False],
         "points_after": [24000, 26000, 25000, 25000],
         "kyoutaku_award": {"seat": 1, "sticks": 2, "points": 2000},
@@ -1753,7 +1754,7 @@ def main() -> int:
     round_app._on_left_click((btn[0] + btn[2] / 2, btn[1] + btn[3] / 2))
     check(round_app.state.screen == SCREEN_RESULT and round_app.state.match_end is None,
           "局终页点「再来一局」必须无效果")
-    check(not any(f[0] in ("create_room", "ready") for f in sent), "局终页出口不发出站帧")
+    check(not any(f[0] in (FRAME_TYPE.CREATE_ROOM, FRAME_TYPE.READY) for f in sent), "局终页出口不发出站帧")
     # D-1：键盘出口同规则——局终页 Enter/ESC 必须无效果
     import pygame as _pg
     round_app._on_key(_pg.event.Event(_pg.KEYDOWN, key=_pg.K_RETURN))
@@ -1785,47 +1786,47 @@ def main() -> int:
     # --- 自理杠（v2.0 §5.3/§4.6）：按钮顺序 + 提交 tiles 恰 1 牌面 ---
     kan_sync = dict(STATE_SYNC)
     kan_sync["melds"] = [
-        {"type": "ankan", "tiles": ["1z", "1z", "1z", "1z"]},   # 本家暗杠：4 张牌面形态
+        {"type": MELD_TYPE.ANKAN, "tiles": ["1z", "1z", "1z", "1z"]},   # 本家暗杠：4 张牌面形态
     ]
     kan_sync["seats"] = [
-        dict(STATE_SYNC["seats"][0], melds=[{"type": "ankan", "tiles": ["1z", "1z", "1z", "1z"]}]),
-        dict(STATE_SYNC["seats"][1], melds=[{"type": "ankan", "tiles": []}]),  # 他家暗杠：空数组形态
-        dict(STATE_SYNC["seats"][2], melds=[{"type": "kakan", "tiles": ["3p", "3p", "3p", "3p"]}]),
+        dict(STATE_SYNC["seats"][0], melds=[{"type": MELD_TYPE.ANKAN, "tiles": ["1z", "1z", "1z", "1z"]}]),
+        dict(STATE_SYNC["seats"][1], melds=[{"type": MELD_TYPE.ANKAN, "tiles": []}]),  # 他家暗杠：空数组形态
+        dict(STATE_SYNC["seats"][2], melds=[{"type": MELD_TYPE.KAKAN, "tiles": ["3p", "3p", "3p", "3p"]}]),
         dict(STATE_SYNC["seats"][3]),
     ]
     round_app._on_frame(kan_sync, time.monotonic())
-    check(round_app.state.melds[0].type == "ankan" and len(round_app.state.melds[0].tiles) == 4,
+    check(round_app.state.melds[0].type == MELD_TYPE.ANKAN and len(round_app.state.melds[0].tiles) == 4,
           "本家暗杠解析：4 张牌面形态")
-    check(round_app.state.seat_view(1).melds[0].type == "ankan"
+    check(round_app.state.seat_view(1).melds[0].type == MELD_TYPE.ANKAN
           and round_app.state.seat_view(1).melds[0].tiles == [],
           "他家暗杠解析：tiles == [] 空数组形态（两种都必须可解析）")
-    check(round_app.state.seat_view(2).melds[0].type == "kakan", "加杠组解析（type=kakan）")
+    check(round_app.state.seat_view(2).melds[0].type == MELD_TYPE.KAKAN, "加杠组解析（type=kakan）")
     kan_request = {
-        "type": "action_request",
+        "type": FRAME_TYPE.ACTION_REQUEST,
         "seq": 8,
         "deadline_ms": int(time.time() * 1000) + 15000,
-        "window": "discard",
+        "window": WINDOW.DISCARD,
         "options": [
-            {"action": "ankan", "tiles": ["1z"]},
-            {"action": "kakan", "tiles": ["6p"]},
+            {"action": ACTION.ANKAN, "tiles": ["1z"]},
+            {"action": ACTION.KAKAN, "tiles": ["6p"]},
         ],
     }
     round_app._on_frame(kan_request, time.monotonic())
     buttons = actionbar.build_buttons(round_app.state, round_app._remaining_ms())
     kinds = [b.kind for b in buttons]
-    check(kinds == ["discard", "ankan", "kakan"], f"打牌窗口按钮顺序（§5.3 v2.0）= {kinds}")
+    check(kinds == [FRAME_TYPE.DISCARD, ACTION.ANKAN, ACTION.KAKAN], f"打牌窗口按钮顺序（§5.3 v2.0）= {kinds}")
     labels = [b.label for b in buttons]
     check(labels[1] == "暗杠", f"暗杠按钮文案不显示牌名（防录屏泄露）：{labels[1]!r}")
     check(labels[2].startswith("加杠 "), f"加杠按钮显示牌名：{labels[2]!r}")
     sent.clear()
-    check(round_app._do_action("ankan", ["1z"]), "暗杠可提交")
+    check(round_app._do_action(ACTION.ANKAN, ["1z"]), "暗杠可提交")
     round_app.state.clear_pending()  # PENDING 守卫：同窗口第二个动作前先清（真实流程由服务端帧推进）
-    check(round_app._do_action("kakan", ["6p"]), "加杠可提交")
-    kan_frames = [f for f in ([{"type": t, **fields} for t, fields in sent]) if f.get("type") == "action"]
+    check(round_app._do_action(ACTION.KAKAN, ["6p"]), "加杠可提交")
+    kan_frames = [f for f in ([{"type": t, **fields} for t, fields in sent]) if f.get("type") == FRAME_TYPE.ACTION]
     check(all(len(f.get("tiles") or []) == 1 for f in kan_frames),
           f"ankan/kakan 出站 tiles 恰好 1 个牌面元素：{[f.get('tiles') for f in kan_frames]}")
-    check(not round_app._do_action("ankan", ["1z", "1z"]), "暗杠 tiles 多于 1 个 → 拒绝发送")
-    check(not round_app._do_action("ankan", []), "暗杠 tiles 为空 → 拒绝发送")
+    check(not round_app._do_action(ACTION.ANKAN, ["1z", "1z"]), "暗杠 tiles 多于 1 个 → 拒绝发送")
+    check(not round_app._do_action(ACTION.ANKAN, []), "暗杠 tiles 为空 → 拒绝发送")
 
     # --- 他家牌背容量 14 → 18（§4.6 v2.0：15..18 换行第二行）---
     check(T.OPP_BACK_MAX == 18 and T.OPP_BACK_ROW_CAPACITY == 14, "牌背容量常量 = 18（首行 14）")
@@ -1914,20 +1915,20 @@ def main() -> int:
     # --- 听牌帧 → 状态（§5.16）---
     tp_app = make_app()
     build_table_state(tp_app)
-    tp_app.state.apply({"type": "tenpai", "tenpai_seq": 1, "is_tenpai": True,
+    tp_app.state.apply({"type": FRAME_TYPE.TENPAI, "tenpai_seq": 1, "is_tenpai": True,
                         "waits": [{"tile": "3p", "remaining": 2}, {"tile": "1z", "remaining": 1}]})
     check(tp_app.state.is_tenpai, "tenpai{is_tenpai:true} ⇒ 状态置位")
     check([w["tile"] for w in tp_app.state.tenpai_waits] == ["3p", "1z"],
           "waits 顺序与服务端一致（客户端不排序，F-TP-03/FE-A1）")
     # 乱序 / 重放：tenpai_seq 不递增 ⇒ 丢弃（§7 R6）
-    tp_app.state.apply({"type": "tenpai", "tenpai_seq": 1, "is_tenpai": False, "waits": []})
+    tp_app.state.apply({"type": FRAME_TYPE.TENPAI, "tenpai_seq": 1, "is_tenpai": False, "waits": []})
     check(tp_app.state.is_tenpai is True, "过期 tenpai 帧（seq 不递增）被丢弃（§7 R6）")
     # 清空信号
-    tp_app.state.apply({"type": "tenpai", "tenpai_seq": 2, "is_tenpai": False, "waits": []})
+    tp_app.state.apply({"type": FRAME_TYPE.TENPAI, "tenpai_seq": 2, "is_tenpai": False, "waits": []})
     check(not tp_app.state.is_tenpai and tp_app.state.tenpai_waits == [],
           "is_tenpai=false ⇒ 清空（F-TP-11 ⑧）")
     # remaining 越界（>4）照画不崩
-    tp_app.state.apply({"type": "tenpai", "tenpai_seq": 3, "is_tenpai": True,
+    tp_app.state.apply({"type": FRAME_TYPE.TENPAI, "tenpai_seq": 3, "is_tenpai": True,
                         "waits": [{"tile": "5m", "remaining": 77}]})
     check(tp_app.state.tenpai_waits[0]["remaining"] == 77,
           "remaining 越界（>4）照画不崩（两个 remaining 混用的探测器）")
@@ -1939,11 +1940,11 @@ def main() -> int:
     ck_app = make_app()
     build_table_state(ck_app)
     ck_app.state.apply({
-        "type": "action_request", "seq": 41, "deadline_ms": int(time.time() * 1000) + 15000,
-        "window": "chankan", "tile": "5m",
-        "options": [{"action": "win", "tiles": []}, {"action": "pass", "tiles": []}],
+        "type": FRAME_TYPE.ACTION_REQUEST, "seq": 41, "deadline_ms": int(time.time() * 1000) + 15000,
+        "window": WINDOW.CHANKAN, "tile": "5m",
+        "options": [{"action": ACTION.WIN, "tiles": []}, {"action": ACTION.PASS, "tiles": []}],
     })
-    check(ck_app.state.window is not None and ck_app.state.window.window == "chankan",
+    check(ck_app.state.window is not None and ck_app.state.window.window == WINDOW.CHANKAN,
           "chankan 窗口被接受（不是「window 非法」）")
     check(getattr(ck_app.state.window, "tile", None) == "5m",
           f"抢杠牌面来自帧：{getattr(ck_app.state.window, 'tile', None)}")
@@ -1951,7 +1952,7 @@ def main() -> int:
     ck_app.now = time.monotonic()
     buttons = actionbar.build_buttons(ck_app.state, 10000)
     kinds = [b.kind for b in buttons]
-    check("win" in kinds and "pass" in kinds,
+    check(ACTION.WIN in kinds and ACTION.PASS in kinds,
           f"抢杠窗口同时给「胡」和「过」：{kinds}")
     # `_status_text` 只读 ui.illegal_count，用一个最小替身即可（渲染层其余部分不参与）
     status = actionbar._status_text(ck_app.state, types.SimpleNamespace(illegal_count=0))[0]
@@ -1966,7 +1967,7 @@ def main() -> int:
     check(tp_app.state.tenpai_waits[0].get("yaku", None) is None
           or tp_app.state.tenpai_waits[0]["yaku"] is True and tp_app.state.tenpai_no_yaku is False,
           "classic tenpai 帧不含 yaku 键时按「都有役」渲染")
-    tp_app.state.apply({"type": "tenpai", "tenpai_seq": 4, "is_tenpai": True, "no_yaku": True,
+    tp_app.state.apply({"type": FRAME_TYPE.TENPAI, "tenpai_seq": 4, "is_tenpai": True, "no_yaku": True,
                         "waits": [{"tile": "6s", "remaining": 3, "yaku": False},
                                   {"tile": "9s", "remaining": 2, "yaku": False}]})
     check(tp_app.state.tenpai_no_yaku is True, "no_yaku=true ⇒ 无役提示置位")
@@ -1976,7 +1977,7 @@ def main() -> int:
     tp_app.now = time.monotonic()
     tp_app.render_frame(present=False)   # 灰牌 + 红字 + 尾巴渲染不崩溃
     check(True, "无役听牌条渲染不崩溃")
-    tp_app.state.apply({"type": "tenpai", "tenpai_seq": 5, "is_tenpai": True, "no_yaku": False,
+    tp_app.state.apply({"type": FRAME_TYPE.TENPAI, "tenpai_seq": 5, "is_tenpai": True, "no_yaku": False,
                         "waits": [{"tile": "1p", "remaining": 3, "yaku": False},
                                   {"tile": "4p", "remaining": 2, "yaku": True}]})
     check([w["yaku"] for w in tp_app.state.tenpai_waits] == [False, True],
@@ -1988,22 +1989,22 @@ def main() -> int:
 
     # F-TP-11 硬列表：game_end / game_start / match_end / 本家副露 / win 均清零
     for name, frame in (
-        ("game_end", {"type": "game_end", "reason": "win", "results": []}),
+        ("game_end", {"type": FRAME_TYPE.GAME_END, "reason": REASON.WIN_RON, "results": []}),
         ("game_start（下一局）", GAME_START),
-        ("match_end", {"type": "match_end", "hands_played": 4, "renchan_count": 0, "rankings": []}),
+        ("match_end", {"type": FRAME_TYPE.MATCH_END, "hands_played": 4, "renchan_count": 0, "rankings": []}),
     ):
-        tp_app.state.apply({"type": "tenpai", "tenpai_seq": 90, "is_tenpai": True,
+        tp_app.state.apply({"type": FRAME_TYPE.TENPAI, "tenpai_seq": 90, "is_tenpai": True,
                             "waits": [{"tile": "2m", "remaining": 3}]})
         tp_app.state.apply(frame)
         check(tp_app.state.tenpai_waits == [], f"F-TP-11：{name} ⇒ 听牌清空")
-    tp_app.state.apply({"type": "tenpai", "tenpai_seq": 91, "is_tenpai": True,
+    tp_app.state.apply({"type": FRAME_TYPE.TENPAI, "tenpai_seq": 91, "is_tenpai": True,
                         "waits": [{"tile": "2m", "remaining": 3}]})
-    tp_app.state.apply({"type": "action_event", "seat": 0, "action": "pong",
+    tp_app.state.apply({"type": FRAME_TYPE.ACTION_EVENT, "seat": 0, "action": ACTION.PONG,
                         "tiles": ["2m", "2m"], "from_seat": 3})
     check(tp_app.state.tenpai_waits == [], "F-TP-11：本家副露 action_event ⇒ 听牌清空")
-    tp_app.state.apply({"type": "tenpai", "tenpai_seq": 92, "is_tenpai": True,
+    tp_app.state.apply({"type": FRAME_TYPE.TENPAI, "tenpai_seq": 92, "is_tenpai": True,
                         "waits": [{"tile": "2m", "remaining": 3}]})
-    tp_app.state.apply({"type": "action_event", "seat": 2, "action": "win",
+    tp_app.state.apply({"type": FRAME_TYPE.ACTION_EVENT, "seat": 2, "action": ACTION.WIN,
                         "tiles": ["2m"], "from_seat": None})
     check(tp_app.state.tenpai_waits == [], "F-TP-11：和牌 action_event ⇒ 听牌清空")
     tp_app.close_socket("听牌用例结束")
@@ -2022,9 +2023,9 @@ def main() -> int:
           "提示层不改 options（§3.1 红线 1）")
     chow_state = cl_app.state
     chow_state.window.options = [
-        {"action": "chow", "tiles": ["1m", "2m"]},
-        {"action": "chow", "tiles": ["2m", "3m"]},
-        {"action": "pass", "tiles": []},
+        {"action": ACTION.CHOW, "tiles": ["1m", "2m"]},
+        {"action": ACTION.CHOW, "tiles": ["2m", "3m"]},
+        {"action": ACTION.PASS, "tiles": []},
     ]
     union = claim_hand_faces(chow_state, chow_state.window)
     check(set(union) == {"1m", "2m", "3m"}, f"吃多解取并集：{sorted(union)}")
@@ -2033,7 +2034,7 @@ def main() -> int:
     # --- 听牌条渲染：开 / 关 / 未听牌隐藏（F-TP-05 / F-TP-10）---
     bar_app = make_app()
     build_table_state(bar_app)
-    bar_app.state.apply({"type": "tenpai", "tenpai_seq": 1, "is_tenpai": True,
+    bar_app.state.apply({"type": FRAME_TYPE.TENPAI, "tenpai_seq": 1, "is_tenpai": True,
                          "waits": [{"tile": "3p", "remaining": 3}, {"tile": "7s", "remaining": 1}]})
     bar_app.now = time.monotonic()
     # ⚠️ `render_frame()` 返回的是**复用的同一张** `logical` 画布，比较前必须 `.copy()`，
@@ -2057,7 +2058,7 @@ def main() -> int:
     check(diff > 50, f"听牌条开/关在 F-TP-01 区域有可见差异（{diff} 个采样点）")
     check(bar_app.state.is_tenpai is True, "F-TP-10：关闭听牌条后**仍消费** tenpai 帧（缓存不丢）")
     bar_app.feel.toggle_tenpai()
-    bar_app.state.apply({"type": "tenpai", "tenpai_seq": 2, "is_tenpai": False, "waits": []})
+    bar_app.state.apply({"type": FRAME_TYPE.TENPAI, "tenpai_seq": 2, "is_tenpai": False, "waits": []})
     bar_app.now = time.monotonic()
     bar_app.feel.tenpai_anim = None      # 跳过淡出，直接看「隐藏」终态
     surface_hidden = bar_app.render_frame(present=False).copy()
@@ -2070,7 +2071,7 @@ def main() -> int:
     check(diff2 > 50, f"未听牌时整条隐藏（F-TP-05，{diff2} 个采样点差异）")
 
     # 落盘：听牌条可见 / 关闭 两版牌桌（供人工目视核对 F-TP-01/03 的版位与文案）
-    bar_app.state.apply({"type": "tenpai", "tenpai_seq": 3, "is_tenpai": True,
+    bar_app.state.apply({"type": FRAME_TYPE.TENPAI, "tenpai_seq": 3, "is_tenpai": True,
                          "waits": [{"tile": "3p", "remaining": 3}, {"tile": "7s", "remaining": 1},
                                    {"tile": "1z", "remaining": 2}]})
     bar_app.feel.tenpai_bar_on = True
@@ -2124,15 +2125,15 @@ def main() -> int:
             self.muted = muted
 
     win_app.audio = _RecAudio()
-    win_app._action_event_feel({"type": "action_event", "seat": 2, "action": "win",
+    win_app._action_event_feel({"type": FRAME_TYPE.ACTION_EVENT, "seat": 2, "action": ACTION.WIN,
                                 "tiles": ["2m"], "from_seat": 1}, time.monotonic())
     check(played == ["win_ron"], f"有 from_seat ⇒ 荣和音（F-AU-09）：{played}")
     played.clear()
-    win_app._action_event_feel({"type": "action_event", "seat": 2, "action": "win",
+    win_app._action_event_feel({"type": FRAME_TYPE.ACTION_EVENT, "seat": 2, "action": ACTION.WIN,
                                 "tiles": ["2m"], "from_seat": None}, time.monotonic())
     check(played == ["win_tsumo"], f"无 from_seat ⇒ 自摸音（F-AU-10）：{played}")
     played.clear()
-    win_app._action_event_feel({"type": "action_event", "seat": 1, "action": "pong",
+    win_app._action_event_feel({"type": FRAME_TYPE.ACTION_EVENT, "seat": 1, "action": ACTION.PONG,
                                 "tiles": ["2m", "2m"], "from_seat": 2}, time.monotonic())
     check(played == ["call_pong"], f"碰 ⇒ 碰音（F-AU-04）：{played}")
     win_app.close_socket("和牌音用例结束")
@@ -2143,7 +2144,7 @@ def main() -> int:
     now_m = time.monotonic()
     misc_app._start_discard_flight(0)
     check(len(misc_app.feel.flights) <= 3, "discard_event ⇒ 起飞（≤3 个飞行体）")
-    misc_app._on_frame({"type": "state_sync", "seq": 99999, "hand": list(misc_app.state.hand),
+    misc_app._on_frame({"type": FRAME_TYPE.STATE_SYNC, "seq": 99999, "hand": list(misc_app.state.hand),
                         "melds": [], "seats": [], "remaining": 40, "current_seat": 0}, now_m)
     check(not misc_app.feel.flights, "state_sync ⇒ 动画 snap（§7 R2 / F-AN-03）")
     played_screen: list[str] = []
@@ -2160,7 +2161,7 @@ def main() -> int:
         sent_frames: list[tuple] = []
         app.send_frame = lambda ftype, **fields: (sent_frames.append((ftype, fields)) or True)
         app.connected = True
-        app._on_frame({"type": "login_ok", "player_id": "p-3f2a1c", "name": "玩家_"}, time.monotonic())
+        app._on_frame({"type": FRAME_TYPE.LOGIN_OK, "player_id": "p-3f2a1c", "name": "玩家_"}, time.monotonic())
         app._on_frame(dict(ROOM_JOINED), time.monotonic())
         app._on_frame(dict(GAME_START), time.monotonic())
         app._on_frame(dict(STATE_SYNC), time.monotonic())
@@ -2207,7 +2208,7 @@ def main() -> int:
 
     def _ge(yaku: list, base: int, dealer: int, total: int, mult: int, per: int, tsumo: bool) -> dict:
         return {
-            "type": "game_end", "reason": "win_tsumo" if tsumo else "win_ron",
+            "type": FRAME_TYPE.GAME_END, "reason": REASON.WIN_TSUMO if tsumo else REASON.WIN_RON,
             "round_index": 0, "dealer": 0, "renchan_count": 0, "match_will_continue": True,
             "interlude_ms": 12000,
             "results": [{"seat": i, "delta_score": 0, "match_total": 0} for i in range(4)],
@@ -2230,7 +2231,7 @@ def main() -> int:
     for per in (1, 2, 4, 8, 16, 32, 64, 128):
         probes.append(_ge([("menzen", 1)], 1, 0, 1, per, per, per != 1))
     probes.append(_ge([("menzen", 1)], 8, 1, 6, 64, 128, True))          # 封顶(8+1>6) + 庄家
-    probes.append({"type": "game_end", "reason": "draw_exhausted", "round_index": 0, "dealer": 0,
+    probes.append({"type": FRAME_TYPE.GAME_END, "reason": REASON.DRAW_EXHAUSTED, "round_index": 0, "dealer": 0,
                    "renchan_count": 0, "match_will_continue": True, "interlude_ms": 12000,
                    "results": [{"seat": i, "delta_score": 0, "match_total": 0} for i in range(4)],
                    "win": None})
@@ -2331,7 +2332,7 @@ def main() -> int:
 
     # 跳过：起播 100ms 内不响应；之后一次走完；**全程不发任何帧**
     early = make_app()
-    early.bc.start({"type": "game_end", "reason": "win_ron", "interlude_ms": 12000}, time.monotonic())
+    early.bc.start({"type": FRAME_TYPE.GAME_END, "reason": REASON.WIN_RON, "interlude_ms": 12000}, time.monotonic())
     check(not early.bc.skip(time.monotonic()), "起播 100ms 内不响应跳过（防连点穿透）")
     early_sent: list[tuple] = []
     early.send_frame = lambda ftype, **fields: (early_sent.append((ftype, fields)) or True)
@@ -2373,7 +2374,7 @@ def main() -> int:
             "dealer_bonus": True, "fu": fu, "points": points, "limit": limit,
         }
         return {
-            "type": "game_end", "reason": "win_tsumo" if tsumo else "win_ron",
+            "type": FRAME_TYPE.GAME_END, "reason": REASON.WIN_TSUMO if tsumo else REASON.WIN_RON,
             "round_index": 0, "dealer": 0, "renchan_count": 0, "match_will_continue": True,
             "interlude_ms": 12000, "win": win,
             "results": [{"seat": i, "delta_score": 0, "match_total": 0} for i in range(4)],
@@ -2421,7 +2422,7 @@ def main() -> int:
 
     # 日麻流局有听牌罚符，「本局不计分 / 四家均不计分」是假话
     riichi_draw = {
-        "type": "game_end", "reason": "draw_exhausted", "round_index": 0, "dealer": 0,
+        "type": FRAME_TYPE.GAME_END, "reason": REASON.DRAW_EXHAUSTED, "round_index": 0, "dealer": 0,
         "renchan_count": 0, "match_will_continue": True, "interlude_ms": 12000,
         "win": None, "tenpai": [True, False, True, False],
         "points_after": [26000, 24000, 26000, 24000],
@@ -2481,7 +2482,7 @@ def main() -> int:
         shot.nickname = "lixueming" if account else "游客_"
         shot.connected = True
         shot._on_frame(
-            {"type": "login_ok", "player_id": "u-000001" if account else "p-3f2a1c",
+            {"type": FRAME_TYPE.LOGIN_OK, "player_id": "u-000001" if account else "p-3f2a1c",
              "name": "lixueming" if account else "游客_"},
             time.monotonic(),
         )

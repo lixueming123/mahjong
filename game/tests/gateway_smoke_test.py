@@ -30,6 +30,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from protocol.enums import ACTION, ERROR_CODE, FRAME_TYPE, WINDOW
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_BIN_CANDIDATES = (
@@ -97,14 +101,14 @@ class Client:
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise TestFailure(f"{self.name}: server sent a non-JSON frame {line!r}: {exc}")
 
-    def expect_type(self, expected: str, timeout: float = 5.0) -> dict:
+    def expect_type(self, expected: int, timeout: float = 5.0) -> dict:
         frame = self.recv_frame(timeout)
         if frame.get("type") != expected:
             raise TestFailure(f"{self.name}: expected type={expected!r}, got {frame!r}")
         return frame
 
-    def expect_error(self, code: str, timeout: float = 5.0) -> dict:
-        frame = self.expect_type("error", timeout)
+    def expect_error(self, code: int, timeout: float = 5.0) -> dict:
+        frame = self.expect_type(FRAME_TYPE.ERROR, timeout)
         if frame.get("code") != code:
             raise TestFailure(f"{self.name}: expected error code {code!r}, got {frame!r}")
         if not isinstance(frame.get("message"), str) or not frame["message"]:
@@ -172,8 +176,8 @@ def frames_of(payload: bytes) -> list:
 
 
 def login(client: Client, name: str = "玩家_") -> dict:
-    client.send_frame({"type": "login", "name": name})
-    frame = client.expect_type("login_ok")
+    client.send_frame({"type": FRAME_TYPE.LOGIN, "name": name})
+    frame = client.expect_type(FRAME_TYPE.LOGIN_OK)
     if not frame.get("player_id"):
         raise TestFailure(f"{client.name}: login_ok.player_id must be non-empty: {frame!r}")
     if frame.get("name") != name:
@@ -194,17 +198,17 @@ def test_login_ping_and_frame_shape(port: int) -> None:
         frame = login(client)
         if not isinstance(frame["player_id"], str):
             raise TestFailure("player_id must be a string")
-        client.send({"type": "ping"})
-        client.expect_type("pong")
+        client.send({"type": FRAME_TYPE.PING})
+        client.expect_type(FRAME_TYPE.PONG)
         # Two frames in one TCP segment must both be processed, in order.
-        client.send(b'{"type":"ping"}\n{"type":"ping"}\n')
-        client.expect_type("pong")
-        client.expect_type("pong")
+        client.send(b'{"type":%d}\n{"type":%d}\n' % (FRAME_TYPE.PING, FRAME_TYPE.PING))
+        client.expect_type(FRAME_TYPE.PONG)
+        client.expect_type(FRAME_TYPE.PONG)
         # A second login on the same connection is a BAD_REQUEST (§4.1) and keeps it open.
-        client.send({"type": "login", "name": "重复登录"})
-        client.expect_error("BAD_REQUEST")
-        client.send({"type": "ping"})
-        client.expect_type("pong")
+        client.send({"type": FRAME_TYPE.LOGIN, "name": "重复登录"})
+        client.expect_error(ERROR_CODE.BAD_REQUEST)
+        client.send({"type": FRAME_TYPE.PING})
+        client.expect_type(FRAME_TYPE.PONG)
     finally:
         client.close()
 
@@ -215,16 +219,16 @@ def test_frames_split_across_segments(port: int) -> None:
     try:
         login(client, "分片帧")
         # 1. Byte-by-byte delivery of a short frame.
-        for byte in b'{"type":"ping"}\n':
+        for byte in b'{"type":%d}\n' % FRAME_TYPE.PING:
             client.send_raw(bytes([byte]))
-        client.expect_type("pong")
+        client.expect_type(FRAME_TYPE.PONG)
         # 2. A >16 KB frame split into three writes (forces several read() calls).
-        big = json.dumps({"type": "ping", "pad": "b" * 40000}).encode("utf-8") + b"\n"
+        big = json.dumps({"type": FRAME_TYPE.PING, "pad": "b" * 40000}).encode("utf-8") + b"\n"
         third = len(big) // 3
         for chunk in (big[:third], big[third:2 * third], big[2 * third:]):
             client.send_raw(chunk)
             time.sleep(0.05)
-        client.expect_type("pong")
+        client.expect_type(FRAME_TYPE.PONG)
     finally:
         client.close()
 
@@ -232,10 +236,10 @@ def test_frames_split_across_segments(port: int) -> None:
 def test_not_logged_in(port: int) -> None:
     client = Client(port, "not-logged-in")
     try:
-        client.send({"type": "ping"})
-        client.expect_error("NOT_LOGGED_IN")
-        client.send({"type": "create_room"})
-        client.expect_error("NOT_LOGGED_IN")
+        client.send({"type": FRAME_TYPE.PING})
+        client.expect_error(ERROR_CODE.NOT_LOGGED_IN)
+        client.send({"type": FRAME_TYPE.CREATE_ROOM})
+        client.expect_error(ERROR_CODE.NOT_LOGGED_IN)
         # The connection survives and can still log in.
         login(client, "迟到玩家")
     finally:
@@ -245,15 +249,15 @@ def test_not_logged_in(port: int) -> None:
 def test_invalid_name_quota(port: int) -> None:
     client = Client(port, "invalid-name")
     try:
-        client.send({"type": "login", "name": ""})
-        client.expect_error("INVALID_NAME")
-        client.send({"type": "login", "name": "x" * 17})
-        client.expect_error("INVALID_NAME")
+        client.send({"type": FRAME_TYPE.LOGIN, "name": ""})
+        client.expect_error(ERROR_CODE.INVALID_NAME)
+        client.send({"type": FRAME_TYPE.LOGIN, "name": "x" * 17})
+        client.expect_error(ERROR_CODE.INVALID_NAME)
         # The 4th invalid name drops the connection (§1.7).
-        client.send({"type": "login", "name": "\u0007bad"})
-        client.expect_error("INVALID_NAME")
-        client.send({"type": "login", "name": ""})
-        client.expect_error("INVALID_NAME")
+        client.send({"type": FRAME_TYPE.LOGIN, "name": "\u0007bad"})
+        client.expect_error(ERROR_CODE.INVALID_NAME)
+        client.send({"type": FRAME_TYPE.LOGIN, "name": ""})
+        client.expect_error(ERROR_CODE.INVALID_NAME)
         payload = client.expect_closed()
         if payload:
             raise TestFailure(f"invalid-name quota: unexpected trailing payload {payload!r}")
@@ -264,8 +268,8 @@ def test_invalid_name_quota(port: int) -> None:
     try:
         # Three invalid names keep the connection usable.
         for _ in range(3):
-            client.send({"type": "login", "name": "x" * 17})
-            client.expect_error("INVALID_NAME")
+            client.send({"type": FRAME_TYPE.LOGIN, "name": "x" * 17})
+            client.expect_error(ERROR_CODE.INVALID_NAME)
         login(client, "正常玩家")
     finally:
         client.close()
@@ -274,16 +278,16 @@ def test_invalid_name_quota(port: int) -> None:
 def test_invalid_json_keeps_connection(port: int) -> None:
     client = Client(port, "bad-json")
     try:
-        client.send(b'{"type":"login",\n')
-        client.expect_error("BAD_REQUEST")
+        client.send(b'{"type":%d,\n' % FRAME_TYPE.LOGIN)
+        client.expect_error(ERROR_CODE.BAD_REQUEST)
         client.send("{not json at all}\n")
-        client.expect_error("BAD_REQUEST")
+        client.expect_error(ERROR_CODE.BAD_REQUEST)
         client.send("[]\n")  # valid JSON but not an object
-        client.expect_error("BAD_REQUEST")
+        client.expect_error(ERROR_CODE.BAD_REQUEST)
         client.send('{"name":"no-type"}\n')  # missing "type"
-        client.expect_error("BAD_REQUEST")
+        client.expect_error(ERROR_CODE.BAD_REQUEST)
         client.send('{"type":42}\n')  # non-string "type"
-        client.expect_error("BAD_REQUEST")
+        client.expect_error(ERROR_CODE.BAD_REQUEST)
         login(client, "坏帧之后")
     finally:
         client.close()
@@ -294,9 +298,9 @@ def test_unknown_type(port: int) -> None:
     try:
         login(client, "未知类型")
         client.send({"type": "definitely_not_a_frame"})
-        client.expect_error("BAD_REQUEST")
-        client.send({"type": "ping"})
-        client.expect_type("pong")
+        client.expect_error(ERROR_CODE.BAD_REQUEST)
+        client.send({"type": FRAME_TYPE.PING})
+        client.expect_type(FRAME_TYPE.PONG)
     finally:
         client.close()
 
@@ -307,13 +311,13 @@ def test_bad_frame_quota(port: int) -> None:
         login(client, "坏帧预算")
         for _ in range(9):
             client.send({"type": "nope"})
-            client.expect_error("BAD_REQUEST")
+            client.expect_error(ERROR_CODE.BAD_REQUEST)
         client.send({"type": "nope"})
-        client.expect_error("BAD_REQUEST")  # 10th bad frame: error, then close
+        client.expect_error(ERROR_CODE.BAD_REQUEST)  # 10th bad frame: error, then close
         payload = client.expect_closed()
         frames = frames_of(payload)
         for frame in frames:
-            if frame.get("type") != "error" or frame.get("code") != "BAD_REQUEST":
+            if frame.get("type") != FRAME_TYPE.ERROR or frame.get("code") != ERROR_CODE.BAD_REQUEST:
                 raise TestFailure(f"bad-frame quota: unexpected trailing frame {frame!r}")
     finally:
         client.close()
@@ -322,10 +326,10 @@ def test_bad_frame_quota(port: int) -> None:
 def test_invalid_utf8(port: int) -> None:
     client = Client(port, "bad-utf8")
     try:
-        client.send_raw(b'{"type":"login","name":"\xff\xfe"}\n')
-        client.expect_error("BAD_REQUEST")
-        client.send_raw(b'{"type":"login","name":"\xc0\xaf"}\n')  # overlong encoding
-        client.expect_error("BAD_REQUEST")
+        client.send_raw(b'{"type":%d,"name":"\xff\xfe"}\n' % FRAME_TYPE.LOGIN)
+        client.expect_error(ERROR_CODE.BAD_REQUEST)
+        client.send_raw(b'{"type":%d,"name":"\xc0\xaf"}\n' % FRAME_TYPE.LOGIN)  # overlong encoding
+        client.expect_error(ERROR_CODE.BAD_REQUEST)
         login(client, "UTF8之后")
     finally:
         client.close()
@@ -337,10 +341,10 @@ def test_oversized_frame(port: int) -> None:
     try:
         login(client, "超长帧")
         padding = "a" * (MAX_FRAME_BYTES + 1024)
-        client.send({"type": "ping", "pad": padding})
+        client.send({"type": FRAME_TYPE.PING, "pad": padding})
         payload = client.expect_closed()
         frames = frames_of(payload)
-        if frames and frames[0].get("code") != "FRAME_TOO_LARGE":
+        if frames and frames[0].get("code") != ERROR_CODE.FRAME_TOO_LARGE:
             raise TestFailure(f"oversized frame: expected FRAME_TOO_LARGE, got {frames!r}")
     finally:
         client.close()
@@ -351,7 +355,7 @@ def test_oversized_frame(port: int) -> None:
         client.send_raw(b"a" * (MAX_FRAME_BYTES + 4096))
         payload = client.expect_closed()
         frames = frames_of(payload)
-        if frames and frames[0].get("code") != "FRAME_TOO_LARGE":
+        if frames and frames[0].get("code") != ERROR_CODE.FRAME_TOO_LARGE:
             raise TestFailure(f"unterminated oversized frame: expected FRAME_TOO_LARGE, got {frames!r}")
     finally:
         client.close()
@@ -366,8 +370,8 @@ def test_two_connections_are_isolated(port: int) -> None:
         if alpha_frame["player_id"] == beta_frame["player_id"]:
             raise TestFailure("two connections must get distinct player ids")
 
-        alpha.send({"type": "create_room"})
-        joined = alpha.expect_type("room_joined")
+        alpha.send({"type": FRAME_TYPE.CREATE_ROOM})
+        joined = alpha.expect_type(FRAME_TYPE.ROOM_JOINED)
         if not isinstance(joined.get("room_id"), str) or not ROOM_ID_PATTERN.fullmatch(joined["room_id"]):
             raise TestFailure(f"room_joined.room_id must look like r-<13 base36>: {joined!r}")
         if joined.get("seat") != 0:
@@ -383,16 +387,16 @@ def test_two_connections_are_isolated(port: int) -> None:
 
         # beta must see nothing of alpha's room and must still be able to talk.
         beta.expect_no_frame()
-        alpha.send({"type": "create_room"})
-        alpha.expect_error("BAD_REQUEST")  # already in a room
-        beta.send({"type": "ping"})
-        beta.expect_type("pong")
+        alpha.send({"type": FRAME_TYPE.CREATE_ROOM})
+        alpha.expect_error(ERROR_CODE.BAD_REQUEST)  # already in a room
+        beta.send({"type": FRAME_TYPE.PING})
+        beta.expect_type(FRAME_TYPE.PONG)
 
         # Closing beta must not disturb alpha.
         beta.close()
         time.sleep(0.2)
-        alpha.send({"type": "ping"})
-        alpha.expect_type("pong")
+        alpha.send({"type": FRAME_TYPE.PING})
+        alpha.expect_type(FRAME_TYPE.PONG)
     finally:
         alpha.close()
         beta.close()
@@ -404,27 +408,27 @@ def test_room_not_found(port: int) -> None:
     late = Client(port, "room-late")
     try:
         login(client, "找房间")
-        client.send({"type": "join_room", "room_id": "r-9999"})
-        client.expect_error("ROOM_NOT_FOUND")
-        client.send({"type": "ready"})  # not in a room yet
-        client.expect_error("ROOM_NOT_FOUND")
-        client.send({"type": "join_room", "room_id": 7})
-        client.expect_error("BAD_REQUEST")
+        client.send({"type": FRAME_TYPE.JOIN_ROOM, "room_id": "r-9999"})
+        client.expect_error(ERROR_CODE.ROOM_NOT_FOUND)
+        client.send({"type": FRAME_TYPE.READY})  # not in a room yet
+        client.expect_error(ERROR_CODE.ROOM_NOT_FOUND)
+        client.send({"type": FRAME_TYPE.JOIN_ROOM, "room_id": 7})
+        client.expect_error(ERROR_CODE.BAD_REQUEST)
 
         # Before ready, joining a live room takes an AI seat (PROTOCOL §4.3).
         login(owner, "房主")
-        owner.send({"type": "create_room"})
-        room_id = owner.expect_type("room_joined")["room_id"]
-        client.send({"type": "join_room", "room_id": room_id})
-        joined = client.expect_type("room_joined")
+        owner.send({"type": FRAME_TYPE.CREATE_ROOM})
+        room_id = owner.expect_type(FRAME_TYPE.ROOM_JOINED)["room_id"]
+        client.send({"type": FRAME_TYPE.JOIN_ROOM, "room_id": room_id})
+        joined = client.expect_type(FRAME_TYPE.ROOM_JOINED)
         seat = joined.get("seat")
         if joined.get("room_id") != room_id or not isinstance(seat, int) or seat < 1:
             raise TestFailure(f"join before ready must return room_joined seat>=1: {joined!r}")
 
         # PROTOCOL §5.17 (v1.23): a pre-game join broadcasts one room_update to every
         # human in the room. Both connections must consume it before the game_start frames.
-        owner_update = owner.expect_type("room_update")
-        client_update = client.expect_type("room_update")
+        owner_update = owner.expect_type(FRAME_TYPE.ROOM_UPDATE)
+        client_update = client.expect_type(FRAME_TYPE.ROOM_UPDATE)
         if owner_update.get("room_id") != room_id or client_update.get("room_id") != room_id:
             raise TestFailure(f"room_update.room_id mismatch: {owner_update!r} / {client_update!r}")
         if owner_update.get("seats") != client_update.get("seats"):
@@ -433,15 +437,15 @@ def test_room_not_found(port: int) -> None:
                    for s in owner_update.get("seats", [])):
             raise TestFailure(f"owner must see the newcomer in room_update: {owner_update!r}")
 
-        owner.send({"type": "ready"})
-        owner.expect_type("game_start")
-        client.expect_type("game_start")
+        owner.send({"type": FRAME_TYPE.READY})
+        owner.expect_type(FRAME_TYPE.GAME_START)
+        client.expect_type(FRAME_TYPE.GAME_START)
 
         login(late, "后来者")
-        late.send({"type": "join_room", "room_id": room_id})
-        late.expect_error("ROOM_NOT_FOUND")
-        late.send({"type": "ping"})
-        late.expect_type("pong")
+        late.send({"type": FRAME_TYPE.JOIN_ROOM, "room_id": room_id})
+        late.expect_error(ERROR_CODE.ROOM_NOT_FOUND)
+        late.send({"type": FRAME_TYPE.PING})
+        late.expect_type(FRAME_TYPE.PONG)
     finally:
         client.close()
         owner.close()
@@ -450,54 +454,54 @@ def test_room_not_found(port: int) -> None:
 
 def test_error_codes_are_from_the_frozen_table(port: int) -> None:
     frozen_codes = {
-        "INVALID_NAME",
-        "NOT_LOGGED_IN",
-        "ROOM_NOT_FOUND",
-        "NOT_YOUR_TURN",
-        "NO_PENDING_ACTION",
-        "ILLEGAL_ACTION",
-        "UNKNOWN_TILE",
-        "BAD_REQUEST",
-        "FRAME_TOO_LARGE",
-        "RATE_LIMITED",
-        "INTERNAL",
+        ERROR_CODE.INVALID_NAME,
+        ERROR_CODE.NOT_LOGGED_IN,
+        ERROR_CODE.ROOM_NOT_FOUND,
+        ERROR_CODE.NOT_YOUR_TURN,
+        ERROR_CODE.NO_PENDING_ACTION,
+        ERROR_CODE.ILLEGAL_ACTION,
+        ERROR_CODE.UNKNOWN_TILE,
+        ERROR_CODE.BAD_REQUEST,
+        ERROR_CODE.FRAME_TOO_LARGE,
+        ERROR_CODE.RATE_LIMITED,
+        ERROR_CODE.INTERNAL,
     }
     client = Client(port, "error-codes")
     seen = []
     try:
         login(client, "错误码")
         # Connection-level validation happens before any room lookup.
-        client.send({"type": "discard", "tile": "10z", "seq": 1})
-        seen.append(client.expect_error("UNKNOWN_TILE")["code"])
-        client.send({"type": "discard", "tile": "3m"})  # missing seq
-        seen.append(client.expect_error("BAD_REQUEST")["code"])
-        client.send({"type": "action", "action": "dance", "tiles": [], "seq": 1})
-        seen.append(client.expect_error("BAD_REQUEST")["code"])
+        client.send({"type": FRAME_TYPE.DISCARD, "tile": "10z", "seq": 1})
+        seen.append(client.expect_error(ERROR_CODE.UNKNOWN_TILE)["code"])
+        client.send({"type": FRAME_TYPE.DISCARD, "tile": "3m"})  # missing seq
+        seen.append(client.expect_error(ERROR_CODE.BAD_REQUEST)["code"])
+        client.send({"type": FRAME_TYPE.ACTION, "action": "dance", "tiles": [], "seq": 1})
+        seen.append(client.expect_error(ERROR_CODE.BAD_REQUEST)["code"])
         # "5x" is not a tile in either the 27-face or the 34-face encoding (a bare "1z"
         # would become legal once the honour tiles land).
-        client.send({"type": "action", "action": "pong", "tiles": ["5x"], "seq": 1})
-        seen.append(client.expect_error("UNKNOWN_TILE")["code"])
-        client.send({"type": "discard", "tile": "5x", "seq": 1})
-        seen.append(client.expect_error("UNKNOWN_TILE")["code"])
-        client.send({"type": "action", "action": "pong", "tiles": "9s", "seq": 1})  # tiles not an array
-        seen.append(client.expect_error("BAD_REQUEST")["code"])
+        client.send({"type": FRAME_TYPE.ACTION, "action": ACTION.PONG, "tiles": ["5x"], "seq": 1})
+        seen.append(client.expect_error(ERROR_CODE.UNKNOWN_TILE)["code"])
+        client.send({"type": FRAME_TYPE.DISCARD, "tile": "5x", "seq": 1})
+        seen.append(client.expect_error(ERROR_CODE.UNKNOWN_TILE)["code"])
+        client.send({"type": FRAME_TYPE.ACTION, "action": ACTION.PONG, "tiles": "9s", "seq": 1})  # tiles not an array
+        seen.append(client.expect_error(ERROR_CODE.BAD_REQUEST)["code"])
         # Room-scoped intents without a room are rejected with ROOM_NOT_FOUND.
-        client.send({"type": "ready"})
-        seen.append(client.expect_error("ROOM_NOT_FOUND")["code"])
-        client.send({"type": "sync"})
-        seen.append(client.expect_error("ROOM_NOT_FOUND")["code"])
-        client.send({"type": "discard", "tile": "3m", "seq": 1})
-        seen.append(client.expect_error("ROOM_NOT_FOUND")["code"])
+        client.send({"type": FRAME_TYPE.READY})
+        seen.append(client.expect_error(ERROR_CODE.ROOM_NOT_FOUND)["code"])
+        client.send({"type": FRAME_TYPE.SYNC})
+        seen.append(client.expect_error(ERROR_CODE.ROOM_NOT_FOUND)["code"])
+        client.send({"type": FRAME_TYPE.DISCARD, "tile": "3m", "seq": 1})
+        seen.append(client.expect_error(ERROR_CODE.ROOM_NOT_FOUND)["code"])
         for code in seen:
             if code not in frozen_codes:
                 raise TestFailure(f"server sent a code outside PROTOCOL.md §7.1: {code}")
 
         # Inside a room with no open window, a well-formed discard/action is silently
         # dropped (PROTOCOL.md §6.3: a mismatching seq is never answered with an error).
-        client.send({"type": "create_room"})
-        client.expect_type("room_joined")
-        client.send({"type": "discard", "tile": "3m", "seq": 1})
-        client.send({"type": "action", "action": "pass", "tiles": [], "seq": 1})
+        client.send({"type": FRAME_TYPE.CREATE_ROOM})
+        client.expect_type(FRAME_TYPE.ROOM_JOINED)
+        client.send({"type": FRAME_TYPE.DISCARD, "tile": "3m", "seq": 1})
+        client.send({"type": FRAME_TYPE.ACTION, "action": ACTION.PASS, "tiles": [], "seq": 1})
         client.expect_no_frame()
     finally:
         client.close()
@@ -507,7 +511,7 @@ def test_rate_limit_storm(port: int) -> None:
     client = Client(port, "rate-limit")
     try:
         login(client, "限速")
-        burst = b'{"type":"ping"}\n' * 1200
+        burst = (b'{"type":%d}\n' % FRAME_TYPE.PING) * 1200
         client.send_raw(burst)
         deadline = time.monotonic() + 10
         saw_rate_limited = False
@@ -527,7 +531,7 @@ def test_rate_limit_storm(port: int) -> None:
                 break
             buffered += chunk
         for frame in frames_of(buffered):
-            if frame.get("type") == "error" and frame.get("code") == "RATE_LIMITED":
+            if frame.get("type") == FRAME_TYPE.ERROR and frame.get("code") == ERROR_CODE.RATE_LIMITED:
                 saw_rate_limited = True
         if not saw_rate_limited:
             raise TestFailure("rate-limit storm: no RATE_LIMITED error was sent")
@@ -539,13 +543,13 @@ def test_rate_limit_storm(port: int) -> None:
 
 def _seat_disconnected(frame: dict, seat: int):
     """True/False for the seat's public `disconnected` flag in a state_sync, None otherwise."""
-    if frame.get("type") != "state_sync":
+    if frame.get("type") != FRAME_TYPE.STATE_SYNC:
         return None
     entry = next((item for item in frame.get("seats", []) if item.get("seat") == seat), None)
     return None if entry is None else bool(entry.get("disconnected"))
 
 
-def _drain_until(client: "Client", wanted: str, timeout: float, seen: list) -> dict:
+def _drain_until(client: "Client", wanted: int, timeout: float, seen: list) -> dict:
     """Reads frames until |wanted| arrives, collecting the ones seen on the way.
 
     A game keeps producing frames while a client is silent (its window times out, the bots
@@ -569,10 +573,10 @@ def test_idle_timeout(port: int) -> None:
     try:
         login(lobby, "大厅发呆")
         login(in_room, "房内发呆")
-        in_room.send({"type": "create_room"})
-        in_room.expect_type("room_joined")
-        in_room.send({"type": "ready"})
-        in_room.expect_type("game_start")
+        in_room.send({"type": FRAME_TYPE.CREATE_ROOM})
+        in_room.expect_type(FRAME_TYPE.ROOM_JOINED)
+        in_room.send({"type": FRAME_TYPE.READY})
+        in_room.expect_type(FRAME_TYPE.GAME_START)
         started = time.monotonic()
         # The lobby connection must be closed after ~20s of silence.
         deadline = started + 30
@@ -589,16 +593,16 @@ def test_idle_timeout(port: int) -> None:
             raise TestFailure(f"lobby connection closed after only {elapsed:.1f}s (expected ~20s)")
         # The in-room connection stays open and still answers (its seat becomes entrusted).
         time.sleep(max(0.0, 21 - elapsed))
-        in_room.send({"type": "ping"})
+        in_room.send({"type": FRAME_TYPE.PING})
         seen: list = []
-        _drain_until(in_room, "pong", 10.0, seen)
+        _drain_until(in_room, FRAME_TYPE.PONG, 10.0, seen)
         # ... and the silence really did entrust the seat: the game either kept broadcasting
         # snapshots while we were quiet, or answers a `sync` with the authoritative one.
         # This `disconnected` flag is exactly what the client turns into its 托管 badge.
         entrust_flags = [flag for flag in (_seat_disconnected(frame, 0) for frame in seen) if flag is not None]
         if not any(entrust_flags):
-            in_room.send({"type": "sync"})
-            _drain_until(in_room, "state_sync", 10.0, seen)
+            in_room.send({"type": FRAME_TYPE.SYNC})
+            _drain_until(in_room, FRAME_TYPE.STATE_SYNC, 10.0, seen)
             entrust_flags = [flag for flag in (_seat_disconnected(frame, 0) for frame in seen) if flag is not None]
         if not any(entrust_flags):
             raise TestFailure("20s of real silence must entrust the in-room seat "
@@ -643,12 +647,12 @@ def test_continuous_traffic_is_not_idle(port: int) -> None:
         started = time.monotonic()
         pings = 0
         while time.monotonic() - started < 2 * IDLE_THRESHOLD_S + 5:
-            client.send({"type": "ping"})
-            client.expect_type("pong")
+            client.send({"type": FRAME_TYPE.PING})
+            client.expect_type(FRAME_TYPE.PONG)
             pings += 1
             time.sleep(1.0)
-        client.send({"type": "ping"})
-        client.expect_type("pong")
+        client.send({"type": FRAME_TYPE.PING})
+        client.expect_type(FRAME_TYPE.PONG)
         print(f"[gateway-slow] continuous traffic survived {time.monotonic() - started:.1f}s "
               f"({pings} heartbeats) without being treated as idle")
     finally:
@@ -671,10 +675,10 @@ def _play_one_slow_game(port: int, attempt: int) -> dict:
     result = {"entrusted": [], "errors": [], "answered": 0, "elapsed": 0.0, "reason": None}
     try:
         login(client, f"慢速玩家{attempt}")
-        client.send({"type": "create_room"})
-        client.expect_type("room_joined")
-        client.send({"type": "ready"})
-        start = client.expect_type("game_start")
+        client.send({"type": FRAME_TYPE.CREATE_ROOM})
+        client.expect_type(FRAME_TYPE.ROOM_JOINED)
+        client.send({"type": FRAME_TYPE.READY})
+        start = client.expect_type(FRAME_TYPE.GAME_START)
         hand = list(start["hand"])
         drawn = None
         started = time.monotonic()
@@ -684,7 +688,7 @@ def _play_one_slow_game(port: int, attempt: int) -> dict:
             if now >= next_heartbeat:
                 # No pong expectation: the room may have other frames in flight, they are
                 # handled by the same loop. A dead connection raises from recv_frame instead.
-                client.send({"type": "ping"})
+                client.send({"type": FRAME_TYPE.PING})
                 next_heartbeat = time.monotonic() + HEARTBEAT_S
                 continue
             try:
@@ -694,41 +698,41 @@ def _play_one_slow_game(port: int, attempt: int) -> dict:
                     continue  # heartbeat is due; the next round sends it
                 raise
             kind = frame["type"]
-            if kind == "error":
+            if kind == FRAME_TYPE.ERROR:
                 result["errors"].append(frame)
                 continue
-            if kind == "game_end":
+            if kind == FRAME_TYPE.GAME_END:
                 result["reason"] = frame.get("reason")
                 break
-            if kind == "draw":
+            if kind == FRAME_TYPE.DRAW:
                 hand.append(frame["tile"])
                 drawn = frame["tile"]
                 continue
-            if kind == "pong":
+            if kind == FRAME_TYPE.PONG:
                 continue  # heartbeat answer
-            if kind == "discard_event":
+            if kind == FRAME_TYPE.DISCARD_EVENT:
                 if frame["seat"] == 0:
                     if frame["tile"] in hand:
                         hand.remove(frame["tile"])
                     drawn = None
                 continue
-            if kind == "state_sync":
+            if kind == FRAME_TYPE.STATE_SYNC:
                 seat0 = next((entry for entry in frame["seats"] if entry["seat"] == 0), None)
                 if seat0 is not None and seat0["disconnected"]:
                     result["entrusted"].append(frame["seq"])
                 continue
-            if kind == "action_request":
+            if kind == FRAME_TYPE.ACTION_REQUEST:
                 # Slow down until the game has outlived the idle threshold, then finish fast.
                 elapsed = time.monotonic() - started
                 time.sleep(9.0 if elapsed < IDLE_THRESHOLD_S + 2 else 0.2)
                 seq = frame["seq"]
                 actions = {option["action"] for option in frame.get("options", [])}
-                if "win" in actions:
-                    client.send({"type": "action", "action": "win", "tiles": [], "seq": seq})
-                elif frame["window"] == "discard":
-                    client.send({"type": "discard", "tile": _pick_tile(hand, drawn), "seq": seq})
+                if ACTION.WIN in actions:
+                    client.send({"type": FRAME_TYPE.ACTION, "action": ACTION.WIN, "tiles": [], "seq": seq})
+                elif frame["window"] == WINDOW.DISCARD:
+                    client.send({"type": FRAME_TYPE.DISCARD, "tile": _pick_tile(hand, drawn), "seq": seq})
                 else:
-                    client.send({"type": "action", "action": "pass", "tiles": [], "seq": seq})
+                    client.send({"type": FRAME_TYPE.ACTION, "action": ACTION.PASS, "tiles": [], "seq": seq})
                 result["answered"] += 1
                 continue
             # discard/draw for others, action_event, ... : nothing to do

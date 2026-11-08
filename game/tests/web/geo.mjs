@@ -1,5 +1,6 @@
 // 布局碰撞自检：副露带（最多 4 组，含被鸣横放）vs 牌河 18 张 vs 他家区域
 import { MELD, RIVER, SEAT_LAYOUT, HAND } from '../../web/js/config.js';
+import { MELD_TYPE } from '../../web/js/protocol_enums.js';
 
 // —— rivers.js 的 riverSlot 原样拷贝 ——
 function riverSlot(seat, n) {
@@ -26,7 +27,7 @@ function meldBoxes(seat, groups) {
   if (!L.far) return [];   // 本家另有 ownNear 逻辑，单独验
   const ax = Math.cos(L.angle), ay = Math.sin(L.angle);
   const melds = Array.from({ length: groups }, (_, gi) =>
-    ({ tiles: ['x', 'x', 'x'], type: 'pong', rotated: 0 }));   // 每组 3 张、第 1 张被鸣(横放)
+    ({ tiles: ['x', 'x', 'x'], type: MELD_TYPE.PONG, rotated: 0 }));   // 每组 3 张、第 1 张被鸣(横放)
   const items = [];
   melds.forEach((m, gi) => {
     m.tiles.forEach((_, i) => items.push({ claimed: i === 0, group: gi }));

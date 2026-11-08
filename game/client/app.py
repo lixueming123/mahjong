@@ -32,6 +32,17 @@ from .render import (actionbar, lobby as lobby_view, login as login_view, overla
 from .tiles import button_label, tile_face, tile_label
 from .view import UiView
 
+import sys
+from pathlib import Path
+
+_game_root = next(
+    p for p in Path(__file__).resolve().parents
+    if (p / "protocol" / "enums.json").is_file()
+)
+sys.path.insert(0, str(_game_root))
+from protocol.enums import (ACTION, ERROR_CODE, FRAME_TYPE, LENGTH, MODE, REASON,
+                            name_of)
+
 log = logging.getLogger("mahjong.client.app")
 
 FRAMES_PER_TICK = 256
@@ -60,20 +71,20 @@ REMATCH_RETRY_DELAY = 0.3
 BROADCAST_TRACE = os.environ.get("MAHJONG_BC_TRACE") == "1"
 
 ERROR_TEXT = {
-    "INVALID_NAME": "昵称非法：需 1..16 个字符，且不含换行或控制字符",
-    "NOT_LOGGED_IN": "会话未建立（客户端缺陷）",
-    "ROOM_NOT_FOUND": "房间不存在或已关闭",
-    "NOT_YOUR_TURN": "还没轮到你",
-    "NO_PENDING_ACTION": "当前没有需要你处理的动作",
-    "ILLEGAL_ACTION": "该动作当前不可用",
-    "UNKNOWN_TILE": "牌不在你的手牌中（操作可能已过期）",
-    "BAD_REQUEST": "请求格式错误（客户端缺陷）",
-    "FRAME_TOO_LARGE": "发送帧过大",
-    "RATE_LIMITED": "操作过于频繁，请稍候",
-    "INTERNAL": "服务端内部错误",
-    "AUTH_FAILED": "账号或密码错误",
-    "USERNAME_TAKEN": "账号名已被占用",
-    "ALREADY_ONLINE": "该账号已在别处登录",
+    ERROR_CODE.INVALID_NAME: "昵称非法：需 1..16 个字符，且不含换行或控制字符",
+    ERROR_CODE.NOT_LOGGED_IN: "会话未建立（客户端缺陷）",
+    ERROR_CODE.ROOM_NOT_FOUND: "房间不存在或已关闭",
+    ERROR_CODE.NOT_YOUR_TURN: "还没轮到你",
+    ERROR_CODE.NO_PENDING_ACTION: "当前没有需要你处理的动作",
+    ERROR_CODE.ILLEGAL_ACTION: "该动作当前不可用",
+    ERROR_CODE.UNKNOWN_TILE: "牌不在你的手牌中（操作可能已过期）",
+    ERROR_CODE.BAD_REQUEST: "请求格式错误（客户端缺陷）",
+    ERROR_CODE.FRAME_TOO_LARGE: "发送帧过大",
+    ERROR_CODE.RATE_LIMITED: "操作过于频繁，请稍候",
+    ERROR_CODE.INTERNAL: "服务端内部错误",
+    ERROR_CODE.AUTH_FAILED: "账号或密码错误",
+    ERROR_CODE.USERNAME_TAKEN: "账号名已被占用",
+    ERROR_CODE.ALREADY_ONLINE: "该账号已在别处登录",
 }
 # MySQL 不可用时服务端对账号帧统一回 INTERNAL（ACCOUNT_DESIGN §2.3），文案按该 message 区分。
 ACCOUNT_UNAVAILABLE_TEXT = "账号服务暂不可用"
@@ -143,8 +154,8 @@ class GameApp:
         self.password = ""
         self.login_focus = "name"
         self.login_password_error = False
-        # 提交时定下的登录意图（("login", {...}) / ("register", {...})），连接建立后发出。
-        self.pending_auth: tuple[str, dict] | None = None
+        # 提交时定下的登录意图（(FRAME_TYPE.LOGIN, {...}) / (FRAME_TYPE.REGISTER, {...})），连接建立后发出。
+        self.pending_auth: tuple[int, dict] | None = None
         # 战绩（ACCOUNT_DESIGN §3.4）：保存最近的 `stats` 载荷本身，渲染时才格式化。
         self.stats: dict | None = None
         self.stats_open = False
@@ -180,7 +191,7 @@ class GameApp:
         self.logged_in = False
         self.throttle_until = 0.0
         self.error_until = 0.0
-        self.error_code: str | None = None
+        self.error_code: int | None = None
         self.error_message: str | None = None
         self.toast_text = ""
         self.toast_until = 0.0
@@ -267,11 +278,11 @@ class GameApp:
         self.logged_in = False
         self.last_ping = None
 
-    def send_frame(self, ftype: str, **fields) -> bool:
+    def send_frame(self, ftype: int, **fields) -> bool:
         if self.net is None or not self.connected:
             log.debug("未连接，拒绝发送 %s", ftype)
             return False
-        if time.monotonic() < self.throttle_until and ftype not in ("ping",):
+        if time.monotonic() < self.throttle_until and ftype not in (FRAME_TYPE.PING,):
             log.warning("限速节流中，丢弃出站帧 %s", ftype)
             return False
         frame = {"type": ftype}
@@ -578,7 +589,7 @@ class GameApp:
                 self.login_input_error = True
                 return None
             self.nickname = name
-            return ("login", {"name": name})
+            return (FRAME_TYPE.LOGIN, {"name": name})
 
         account = self.account.strip()
         self.account = account
@@ -602,7 +613,7 @@ class GameApp:
             self.login_focus = "password"
             return None
         frame = {"username": account, "password": self.password}
-        return ("register" if register else "login", frame)
+        return (FRAME_TYPE.REGISTER if register else FRAME_TYPE.LOGIN, frame)
 
     def submit_login(self, register: bool = False) -> None:
         if self.login_stage not in ("IDLE",):
@@ -652,7 +663,7 @@ class GameApp:
         if state.screen == SCREEN_TABLE and state.game_started and not state.hand:
             if not self._empty_hand_synced:
                 self._empty_hand_synced = True
-                self.send_frame("sync")
+                self.send_frame(FRAME_TYPE.SYNC)
         else:
             self._empty_hand_synced = False
 
@@ -681,7 +692,7 @@ class GameApp:
             self.login_status_color = T.TEXT_DIM
             # 握手第一帧由提交时定下的意图决定（ACCOUNT_DESIGN §5）：游客是 login{name}，
             # 账号是 login{username,password} 或 register{...}。没有意图时退回游客登录。
-            ftype, fields = self.pending_auth or ("login", {"name": self.nickname})
+            ftype, fields = self.pending_auth or (FRAME_TYPE.LOGIN, {"name": self.nickname})
             self.send_frame(ftype, **fields)
         elif kind == "connect_failed":
             self.connected = False
@@ -709,11 +720,11 @@ class GameApp:
             return
         ftype = frame.get("type")
         log.debug("← %s", ftype)
-        if ftype in ("state_sync", "action_request"):
+        if ftype in (FRAME_TYPE.STATE_SYNC, FRAME_TYPE.ACTION_REQUEST):
             self.error_until = 0.0
         if self.banner_text and self.banner_action is None:
             self._clear_banner()
-        if ftype == "login_ok":
+        if ftype == FRAME_TYPE.LOGIN_OK:
             # 握手完成：从这里开始才允许发心跳（t28 / GD-C1 零 error 帧）
             self.logged_in = True
             self.last_ping = now          # 心跳时钟自登录起算 → 首个 ping 在 HEARTBEAT_INTERVAL 之后
@@ -739,21 +750,21 @@ class GameApp:
             self.login_status = "已登录，请点「开始对局」"
             self.login_status_color = T.TEXT_DIM
             if self.has_account:
-                self.send_frame("stats_request")  # 大厅要显示战绩，先拉一次
+                self.send_frame(FRAME_TYPE.STATS_REQUEST)  # 大厅要显示战绩，先拉一次
             self._request_room_list(now)
             return
-        if ftype == "room_joined":
+        if ftype == FRAME_TYPE.ROOM_JOINED:
             self._on_room_joined(frame, now)
             return
-        if ftype == "room_list":
+        if ftype == FRAME_TYPE.ROOM_LIST:
             self._apply_room_list(frame)
             return
-        if ftype == "pong":
+        if ftype == FRAME_TYPE.PONG:
             if self.ping_sent_at is not None:
                 self.rtt_ms = (now - self.ping_sent_at) * 1000.0
                 self.ping_sent_at = None
             return
-        if ftype == "stats":
+        if ftype == FRAME_TYPE.STATS:
             # ACCOUNT_DESIGN §3.4：载荷原样留存，交给 render/stats.py 格式化（渲染层不解析协议）。
             games, wins = frame.get("games"), frame.get("wins")
             draws, net = frame.get("draws"), frame.get("net_score")
@@ -761,10 +772,10 @@ class GameApp:
             if all(isinstance(value, int) for value in (games, wins, draws, net)) and isinstance(recent, list):
                 self.stats = frame
             return
-        if ftype == "error":
+        if ftype == FRAME_TYPE.ERROR:
             self._on_error(frame, now)
             return
-        if ftype == "state_sync":
+        if ftype == FRAME_TYPE.STATE_SYNC:
             # §7 R2 / F-AN-03：权威帧到达 ⇒ 动画立即 snap 到终态（不得继续播完再更新，
             # 否则会出现「牌已落在 A 格、动画还飞向 B 格」）。
             self.feel.snap_all()
@@ -781,7 +792,7 @@ class GameApp:
             self.stage_since = now
             self.login_status = "准备中…（等待 game_start）"
             self.login_status_color = T.TEXT_DIM
-            self.send_frame("ready")
+            self.send_frame(FRAME_TYPE.READY)
             return
         self.login_stage = "IDLE"
         self.stage_since = now
@@ -818,7 +829,7 @@ class GameApp:
 
     def _request_room_list(self, now: float) -> None:
         self.last_list_rooms_at = now
-        self.send_frame("list_rooms")
+        self.send_frame(FRAME_TYPE.LIST_ROOMS)
 
     def _poll_room_list(self, now: float) -> None:
         if self.state.screen != SCREEN_LOBBY or not self.logged_in or not self.connected:
@@ -850,7 +861,7 @@ class GameApp:
 
     def _side_effects(self, frame: dict, before_screen: str, now: float) -> None:
         ftype = frame.get("type")
-        if ftype == "game_start":
+        if ftype == FRAME_TYPE.GAME_START:
             self.login_stage = "IDLE"
             self.login_retry_visible = False
             self._clear_banner()
@@ -861,7 +872,7 @@ class GameApp:
             # 播报在此**直接终止**（RULINGS C8：不缓冲权威帧，`game_start` 到达即切屏）
             self.bc.abort("game_start")
             self.bc.clear()
-        elif ftype == "draw":
+        elif ftype == FRAME_TYPE.DRAW:
             tile = frame.get("tile")
             if frame.get("seat") == self.state.my_seat:
                 # §4.10（v1.4）：提示条牌名用 §5.3 文案公式（tile_label），不再显示线上牌码
@@ -870,7 +881,7 @@ class GameApp:
                 self._sfx("tile_draw")
                 if self.state.drawn_index is not None:
                     self.feel.start_draw(self.state.drawn_index, now)
-        elif ftype == "discard_event":
+        elif ftype == FRAME_TYPE.DISCARD_EVENT:
             seat = frame.get("seat")
             tile = frame.get("tile")
             # F-AU-03：任一 discard_event（含三家）都响；与出牌动画同时起，0 ms 延迟
@@ -881,12 +892,12 @@ class GameApp:
                 self.feel.note_operation(now)   # F-AN-04 加速态计时基准
             elif isinstance(seat, int):
                 self._toast(f"{self.state.rel_label(seat)} 打出 {tile_label(tile)}", now)
-        elif ftype == "action_event":
+        elif ftype == FRAME_TYPE.ACTION_EVENT:
             self._toast(self._action_toast(frame), now)
             self._action_event_feel(frame, now)
-        elif ftype == "tenpai":
+        elif ftype == FRAME_TYPE.TENPAI:
             self._tenpai_feel(now)
-        elif ftype == "game_end":
+        elif ftype == FRAME_TYPE.GAME_END:
             self._clear_banner()
             self.state.window = None
             self.feel.snap_all()
@@ -900,14 +911,14 @@ class GameApp:
             )
             # F-AU-11 荒庄 / F-AU-15 局终（互斥：`draw_exhausted` 走收束音，不走「一局结束」音）
             reason = frame.get("reason")
-            if reason == "draw_exhausted":
+            if reason == REASON.DRAW_EXHAUSTED:
                 self._sfx_later(60.0, "draw_hand")
             else:
                 self._sfx_later(100.0, "hand_end")
             if self.login_mode == "account":
                 # 结算页要显示累计战绩，且本局刚落库（ACCOUNT_DESIGN §4.1/§5.5）。
-                self.send_frame("stats_request")
-        elif ftype == "match_end":
+                self.send_frame(FRAME_TYPE.STATS_REQUEST)
+        elif ftype == FRAME_TYPE.MATCH_END:
             # v2.0（§9.6）：场终页恢复两出口；此后不再有对局帧。
             # F-AU-16（P0）+ F-AU-27：场终音**立即抢占** WIN 通道上未播完的和牌音。
             self._clear_banner()
@@ -917,7 +928,7 @@ class GameApp:
             self.bc.abort("match_end")
             self.bc.clear()
             self._sfx_later(120.0, "match_end")
-        elif ftype == "action_request":
+        elif ftype == FRAME_TYPE.ACTION_REQUEST:
             # F-AU-12：本家打牌窗口**首次**出现 ⇒ 操作栏显示后 80 ms 才落声
             if (
                 frame.get("window") == WINDOW_DISCARD
@@ -926,7 +937,7 @@ class GameApp:
             ):
                 self._turn_start_announced = True
                 self._sfx_later(80.0, "turn_start")
-        elif ftype == "state_sync":
+        elif ftype == FRAME_TYPE.STATE_SYNC:
             pass
         self._on_screen_changed(before_screen, self.state.screen)
         if before_screen != self.state.screen:
@@ -937,15 +948,16 @@ class GameApp:
     def _action_event_feel(self, frame: dict, now: float) -> None:
         """副露音（F-AU-04..08）与鸣牌动画（§6.4）；和牌音（F-AU-09/10）走 `from_seat` 判定。"""
         action = frame.get("action")
-        if action == "win":
+        if action == ACTION.WIN:
             # v1.7 判定：`win.tsumo` 只存在于 game_end，而和牌音必须在 action_event 时就响。
             # 协议已冻结：有 `from_seat` = 荣和；无（`None`）= 自摸（§11.2.1-B）。
             self._sfx("win_ron" if frame.get("from_seat") is not None else "win_tsumo")
             self.feel.snap_all()
             return
+        # 键是动作整数常量，值是音效资产 id（内部标识，保持字符串）
         sfx_id = {
-            "pong": "call_pong", "chow": "call_chow", "kong": "call_kong",
-            "ankan": "call_ankan", "kakan": "call_kakan",
+            ACTION.PONG: "call_pong", ACTION.CHOW: "call_chow", ACTION.KONG: "call_kong",
+            ACTION.ANKAN: "call_ankan", ACTION.KAKAN: "call_kakan",
         }.get(action)
         if sfx_id is None:
             return
@@ -953,7 +965,7 @@ class GameApp:
         seat = frame.get("seat")
         # §6.4：ankan/kakan 没有「被鸣的那张牌」（不从牌河拿）⇒ 跳过 ①阶段
         self.feel.start_meld(seat if isinstance(seat, int) else -1,
-                             has_claimed_tile=action in ("pong", "chow", "kong"), now=now)
+                             has_claimed_tile=action in (ACTION.PONG, ACTION.CHOW, ACTION.KONG), now=now)
 
     def _tenpai_feel(self, now: float) -> None:
         """F-TP-06/07/08 与 F-AU-14：听牌条出现/更新/消失时播动画与音。"""
@@ -1005,21 +1017,23 @@ class GameApp:
         who = "你" if seat == self.state.my_seat else (
             self.state.rel_label(seat) if isinstance(seat, int) else "？"
         )
-        if action == "win":
+        if action == ACTION.WIN:
             name = tile_label(tiles[0]) if tiles else ""
-            return f"{who} {button_label('win')} {name}".strip()
-        if action in ("pong", "kong", "chow"):
+            return f"{who} {button_label(ACTION.WIN)} {name}".strip()
+        if action in (ACTION.PONG, ACTION.KONG, ACTION.CHOW):
             return f"{who} {button_label(action, tiles)}".strip()
         detail = tile_label(tiles[0]) if tiles else ""
-        return f"{who} {action} {detail}".strip()
+        # 其余动作（暗杠/加杠/立直/过）沿用旧口径：显示动作名 + 牌名。动作名经
+        # name_of 反查得到，只用于这条提示文案，不参与任何协议判定。
+        return f"{who} {name_of('action', action)} {detail}".strip()
 
     # ------------------------------------------------------------ 错误
 
     def _on_error(self, frame: dict, now: float) -> None:
         code = frame.get("code")
         message = frame.get("message")
-        if not isinstance(code, str):
-            code = "INTERNAL"
+        if not isinstance(code, int):
+            code = ERROR_CODE.INTERNAL
         self.state.error_count += 1
         self.state.last_error = {"code": code, "message": message}
         self.error_until = now + ERROR_STRIP_DURATION
@@ -1028,8 +1042,10 @@ class GameApp:
             code, message, self.state.seq,
         )
         self.error_code = code
-        self.error_message = message if isinstance(message, str) and message else ERROR_TEXT.get(code, code)
-        if code == "ILLEGAL_ACTION" and isinstance(message, str) and "riichi" in message:
+        self.error_message = message if isinstance(message, str) and message else ERROR_TEXT.get(
+            code, name_of("error_code", code)
+        )
+        if code == ERROR_CODE.ILLEGAL_ACTION and isinstance(message, str) and "riichi" in message:
             # 立直被拒的最常见原因：选中的宣言牌打完不听牌（服务端用门前手牌重算过，
             # 不听/振听/点数不足/牌山不足都归到同一句英文 message）。中文说清「换一张」，
             # 否则玩家只会看到 cannot declare riichi now，不知道下一步该做什么。
@@ -1040,7 +1056,7 @@ class GameApp:
             self.login_stage = "IDLE"
             self.auto_ready_on_join = False
 
-        if code == "ALREADY_ONLINE" and self.rematch_retries_left > 0:
+        if code == ERROR_CODE.ALREADY_ONLINE and self.rematch_retries_left > 0:
             # §9.5 第 7 条：上一连接刚关，服务端可能还没释放该账号。短重试而不是报错，
             # 让「再来一局」这一下点击在账号模式下也可靠。
             self.rematch_retries_left -= 1
@@ -1053,7 +1069,7 @@ class GameApp:
             self.login_status_color = T.TEXT_DIM
             self.retry_at = now + REMATCH_RETRY_DELAY
             return
-        if code in ("AUTH_FAILED", "USERNAME_TAKEN", "ALREADY_ONLINE"):
+        if code in (ERROR_CODE.AUTH_FAILED, ERROR_CODE.USERNAME_TAKEN, ERROR_CODE.ALREADY_ONLINE):
             # 账号类错误（ACCOUNT_DESIGN §5.4）：服务端保持连接，但客户端按「重来一次」处理——
             # 断开并回到可编辑的登录界面，与 NOT_LOGGED_IN 的恢复路径一致。
             self.close_socket(ERROR_TEXT[code])
@@ -1063,9 +1079,9 @@ class GameApp:
             self.pending_auth = None
             self.login_status = ERROR_TEXT[code]
             self.login_status_color = T.NEG
-            self.login_password_error = code == "AUTH_FAILED"
+            self.login_password_error = code == ERROR_CODE.AUTH_FAILED
             self.state.screen = SCREEN_LOGIN
-        elif code == "INTERNAL" and message == "account service unavailable":
+        elif code == ERROR_CODE.INTERNAL and message == "account service unavailable":
             self.close_socket("账号服务不可用")
             self.state.reset_all()
             self.login_stage = "IDLE"
@@ -1074,7 +1090,7 @@ class GameApp:
             self.login_status = ACCOUNT_UNAVAILABLE_TEXT
             self.login_status_color = T.NEG
             self.state.screen = SCREEN_LOGIN
-        elif code == "INVALID_NAME":
+        elif code == ERROR_CODE.INVALID_NAME:
             self.invalid_name_count += 1
             self.login_input_error = True
             self.login_stage = "IDLE"
@@ -1085,29 +1101,32 @@ class GameApp:
             self.login_status = note
             self.login_status_color = T.NEG
             self.state.screen = SCREEN_LOGIN
-        elif code == "NOT_LOGGED_IN":
+        elif code == ERROR_CODE.NOT_LOGGED_IN:
             self.close_socket("会话未建立")
             self.state.reset_all()
             self.login_stage = "IDLE"
             self.login_status = ERROR_TEXT[code]
             self.login_status_color = T.NEG
-        elif code == "RATE_LIMITED":
+        elif code == ERROR_CODE.RATE_LIMITED:
             self.throttle_until = now + 1.0
             self._set_banner("操作过于频繁，请稍候", T.WARN)
-        elif code in ("NOT_YOUR_TURN", "NO_PENDING_ACTION", "ILLEGAL_ACTION", "UNKNOWN_TILE"):
+        elif code in (
+            ERROR_CODE.NOT_YOUR_TURN, ERROR_CODE.NO_PENDING_ACTION,
+            ERROR_CODE.ILLEGAL_ACTION, ERROR_CODE.UNKNOWN_TILE,
+        ):
             self.state.clear_pending()
-            if code in ("NOT_YOUR_TURN", "NO_PENDING_ACTION", "UNKNOWN_TILE"):
-                self.send_frame("sync")
-            if code == "ILLEGAL_ACTION":
+            if code in (ERROR_CODE.NOT_YOUR_TURN, ERROR_CODE.NO_PENDING_ACTION, ERROR_CODE.UNKNOWN_TILE):
+                self.send_frame(FRAME_TYPE.SYNC)
+            if code == ERROR_CODE.ILLEGAL_ACTION:
                 self.state.selected_index = None
-        elif code == "BAD_REQUEST":
+        elif code == ERROR_CODE.BAD_REQUEST:
             self.error_message = f"{self.error_message}（继续出现该错误将被断开）"
-            self.send_frame("sync")
-        elif code == "FRAME_TOO_LARGE":
+            self.send_frame(FRAME_TYPE.SYNC)
+        elif code == ERROR_CODE.FRAME_TOO_LARGE:
             self.close_socket("发送帧过大，主动断开")
-        elif code == "INTERNAL":
+        elif code == ERROR_CODE.INTERNAL:
             self._set_banner("服务端内部错误，牌局可能无法继续", T.NEG, action="返回登录")
-        elif code == "ROOM_NOT_FOUND":
+        elif code == ERROR_CODE.ROOM_NOT_FOUND:
             if self.login_stage == "WAIT_GAME_START":
                 self.login_stage = "IDLE"
             self.auto_ready_on_join = False
@@ -1150,12 +1169,12 @@ class GameApp:
         # PROTOCOL §4.1：未登录的连接收到除 login 外的任何帧 → error{NOT_LOGGED_IN}。
         # 因此**必须等 login_ok 到达后才允许发心跳**：TCP 一连上 `connected` 即为真，
         # 若此处只判断 connected，第一次 tick（last_ping is None）就会在
-        # `connect()` 与 `send_frame("login")` 之间那十几毫秒窗口内发出 ping，
+        # `connect()` 与 `send_frame(FRAME_TYPE.LOGIN)` 之间那十几毫秒窗口内发出 ping，
         # 服务端回 NOT_LOGGED_IN，破坏 GD-C1「全程零 error 帧」（t28 修复）。
         if self.logged_in and (self.last_ping is None or now - self.last_ping >= HEARTBEAT_INTERVAL):
             self.last_ping = now
             self.ping_sent_at = now
-            self.send_frame("ping")
+            self.send_frame(FRAME_TYPE.PING)
         last_inbound = self.net.last_inbound
         if (
             self.disconnect_reason is None
@@ -1504,11 +1523,19 @@ class GameApp:
         return stats
 
     def _send_create_room(self) -> None:
-        """建桌：classic 不带 mode（帧与之前逐字节一致），只有日麻才带上 mode / length。"""
+        """建桌：classic 不带 mode（帧与之前逐字节一致），只有日麻才带上 mode / length。
+
+        大厅的 lobby_mode / lobby_length 是 UI 状态字符串，仅在构造这条出站帧时翻译成
+        MODE / LENGTH 整数（PROTOCOL v2.0 硬切换，服务端只认数字）。
+        """
         if self.lobby_mode == "classic":
-            self.send_frame("create_room")
+            self.send_frame(FRAME_TYPE.CREATE_ROOM)
         else:
-            self.send_frame("create_room", mode=self.lobby_mode, length=self.lobby_length)
+            self.send_frame(
+                FRAME_TYPE.CREATE_ROOM,
+                mode=MODE.RIICHI,
+                length=LENGTH.TONPU if self.lobby_length == "tonpu" else LENGTH.HANCHAN,
+            )
 
     def begin_match(self) -> None:
         """大厅「开始对局」：人已经入座，只发 `ready`。"""
@@ -1518,7 +1545,7 @@ class GameApp:
         self.stage_since = self.now
         self.login_status = "准备中…（等待 game_start）"
         self.login_status_color = T.TEXT_DIM
-        self.send_frame("ready")
+        self.send_frame(FRAME_TYPE.READY)
 
     def _lobby_click(self, pos: tuple[float, float]) -> None:
         if self.disconnect_reason:
@@ -1577,7 +1604,7 @@ class GameApp:
         self.stage_since = self.now
         self.login_status = "正在加入房间…"
         self.login_status_color = T.TEXT_DIM
-        self.send_frame("join_room", room_id=room_id)
+        self.send_frame(FRAME_TYPE.JOIN_ROOM, room_id=room_id)
 
     def _lobby_key(self, event: pygame.event.Event) -> None:
         if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
@@ -1668,7 +1695,7 @@ class GameApp:
         """
         self.stats_open = not self.stats_open
         if self.stats_open:
-            self.send_frame("stats_request")
+            self.send_frame(FRAME_TYPE.STATS_REQUEST)
 
     def _table_key(self, event: pygame.event.Event) -> None:
         state = self.state
@@ -1686,7 +1713,7 @@ class GameApp:
             return
         if event.key == pygame.K_SPACE:
             for spec in actionbar.build_buttons(state, self._remaining_ms()):
-                if spec.kind == "pass" and spec.enabled:
+                if spec.kind == ACTION.PASS and spec.enabled:
                     self._dispatch_button(spec)
                     return
             return
@@ -1701,9 +1728,9 @@ class GameApp:
 
     def _dispatch_button(self, spec: actionbar.ButtonSpec) -> None:
         self._sfx("ui_click")       # F-AU-01：点击**按下**帧
-        if spec.kind == "discard":
+        if spec.kind == FRAME_TYPE.DISCARD:
             self._confirm_discard()
-        elif spec.kind == "riichi":
+        elif spec.kind == ACTION.RIICHI:
             self._on_riichi_click()
         else:
             self._do_action(spec.kind, spec.tiles)
@@ -1719,7 +1746,7 @@ class GameApp:
         """点「立直」：已选好合法宣言牌就直接宣言，否则进入宣言模式并在手牌上打标记。"""
         state = self.state
         window = state.window
-        if window is None or not window.has("riichi"):
+        if window is None or not window.has(ACTION.RIICHI):
             return
         index = state.selected_index
         candidates = self._riichi_candidates()
@@ -1767,7 +1794,7 @@ class GameApp:
         seq = state.window.seq if state.window else None
         if seq is None:
             return False
-        if not self.send_frame("discard", tile=tile, seq=seq):
+        if not self.send_frame(FRAME_TYPE.DISCARD, tile=tile, seq=seq):
             return False
         state.mark_pending("打牌", index)
         log.info("提交打牌：tile=%s seq=%s", tile, seq)
@@ -1791,13 +1818,13 @@ class GameApp:
         seq = state.window.seq if state.window else None
         if seq is None:
             return False
-        if not self._do_action("riichi", [tile]):
+        if not self._do_action(ACTION.RIICHI, [tile]):
             return False
         state.mark_pending("立直", index)
         log.info("提交立直：tile=%s seq=%s", tile, seq)
         return True
 
-    def _do_action(self, action: str, tiles: list[str]) -> bool:
+    def _do_action(self, action: int, tiles: list[str]) -> bool:
         """§5.5 守卫：无窗口不发帧、动作必须在 `options` 内、`seq` 取 `current_seq`。"""
         state = self.state
         window = state.window
@@ -1806,26 +1833,26 @@ class GameApp:
         remaining = self._remaining_ms()
         if remaining is not None and remaining <= 0:
             return False
-        if action == "riichi":
+        if action == ACTION.RIICHI:
             # 日麻：窗口必须提供 riichi，且恰好给出 1 张宣言牌
-            if not window.has("riichi") or len(tiles) != 1:
+            if not window.has(ACTION.RIICHI) or len(tiles) != 1:
                 log.warning("立直需要窗口提供 riichi 且恰好 1 张宣言牌，拒绝发送：%r", tiles)
                 return False
-        elif action in ("kong", "pong", "chow", "ankan", "kakan"):
+        elif action in (ACTION.KONG, ACTION.PONG, ACTION.CHOW, ACTION.ANKAN, ACTION.KAKAN):
             # v2.0：ankan/kakan 的 tiles 恰好 1 个牌面元素（PROTOCOL v1.6 §4.6）
-            if action in ("ankan", "kakan") and len(tiles) != 1:
+            if action in (ACTION.ANKAN, ACTION.KAKAN) and len(tiles) != 1:
                 log.warning("%s 的 tiles 必须恰好 1 个牌面元素，拒绝发送：%r", action, tiles)
                 return False
             if not window.has(action, tiles):
                 log.warning("动作 %s%s 不在 options 中，拒绝发送", action, tiles)
                 return False
-        elif action == "win":
-            if not window.has("win"):
+        elif action == ACTION.WIN:
+            if not window.has(ACTION.WIN):
                 return False
-        elif action == "pass":
-            if window.window not in (WINDOW_CLAIM, WINDOW_CHANKAN) or not window.has("pass", []):
+        elif action == ACTION.PASS:
+            if window.window not in (WINDOW_CLAIM, WINDOW_CHANKAN) or not window.has(ACTION.PASS, []):
                 return False
-        if not self.send_frame("action", action=action, tiles=list(tiles), seq=window.seq):
+        if not self.send_frame(FRAME_TYPE.ACTION, action=action, tiles=list(tiles), seq=window.seq):
             return False
         # 「已提交：<动作>」与操作栏按钮共用同一文案公式（UI_UX_SPEC v1.4 §5.3 → tiles.button_label）
         state.mark_pending(button_label(action, tiles))
@@ -1892,7 +1919,11 @@ class GameApp:
             banner_color=self.banner_color,
             banner_action=self.banner_action,
             disconnect_reason=self.disconnect_reason,
-            error_code=(state.last_error or {}).get("code") if self.error_until > now else None,
+            error_code=(
+                name_of("error_code", (state.last_error or {}).get("code"))
+                if self.error_until > now and state.last_error is not None
+                else None
+            ),
             error_message=self.error_message if self.error_until > now else None,
             error_visible=self.error_until > now and state.last_error is not None,
             pending_label=state.pending_label,

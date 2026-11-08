@@ -23,13 +23,19 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import json
 import os
 import socket
 import struct
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import urlparse
+
+# Share the frozen wire enum table with the game clients (game/protocol/enums.json).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from protocol.enums import ERROR_CODE, FRAME_TYPE
 
 WEB_ROOT = os.path.dirname(os.path.abspath(__file__))
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -142,7 +148,17 @@ class BridgeSession:
             self.tcp.settimeout(None)
         except OSError as exc:
             log(f"连接游戏服务端 {game_host}:{game_port} 失败：{exc}")
-            self.send(0x1, b'{"type":"error","code":"INTERNAL","message":"cannot reach mahjong server"}')
+            self.send(
+                0x1,
+                json.dumps(
+                    {
+                        "type": FRAME_TYPE.ERROR,
+                        "code": ERROR_CODE.INTERNAL,
+                        "message": "cannot reach mahjong server",
+                    },
+                    ensure_ascii=False,
+                ).encode(),
+            )
             self.send(0x8, b"")
             self.closed.set()
 

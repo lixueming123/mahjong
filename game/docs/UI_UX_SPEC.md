@@ -573,7 +573,7 @@ y 轴刻度 ┌─────────────────────�
 | 改选 | 单击另一张 → 选中转移 |
 | 取消 | 右键 / `Esc` → 清除选中 |
 | 确认打出 | 再单击**同一张**，或按 `Enter`，或点「打牌」按钮 → 构造 `discard{tile, seq}`（§5.5） |
-| 可点条件 | 仅当：①最近一帧 `action_request` 的 `window == "discard"`；②PENDING 状态为假；③倒计时 `remaining_ms > 0`；④未处于结算/断线状态。否则手牌区为只读（无高亮、不响应点击） |
+| 可点条件 | 仅当：①最近一帧 `action_request` 的 `window == 1`；②PENDING 状态为假；③倒计时 `remaining_ms > 0`；④未处于结算/断线状态。否则手牌区为只读（无高亮、不响应点击） |
 | 摸牌标记 | 收到本家 `draw{tile}` 后，在 `hand[]` 中标记**一张**与 `tile` 同牌面的牌为 `drawn`（并入列排序后就地标记，取同牌面中**最左**的一张；副本不可区分，见 GAME_DESIGN 5.6.2）。**不设置独立摸牌槽位**，理由：排序要求（3.1）与副本不可区分性（5.6.2） |
 | 张数交叉校验 | 若 `len(hand) + 3*len(melds) ∉ {13,14}`（GAME_DESIGN 3.2 口径），在 HUD 右侧显示 `WARN` 色「张数异常」并记日志；**不修改**本地数据。**v2.0 新增第二道**：物理持有 = `len(hand) + 3*len(melds) + kans`（`kans` = 杠组数，从 `melds[]` 中 `type ∈ {kong,ankan,kakan}` 计数），等待态应为 `13 + kans`、行动态 `14 + kans`；不符同样 WARN。校验不过都**不改**本地数据 |
 
@@ -735,21 +735,21 @@ y 轴刻度 ┌─────────────────────�
 
 | # | 交互 | 触发条件（服务端已判定，客户端只展示） | 按钮可见性 | 禁用态 | 点击后行为与即时反馈 |
 | --- | --- | --- | --- | --- | --- |
-| 1 | **打牌** `discard` | `window == "discard"`（含庄家第一打、副露后待打牌、杠补牌后待打牌）**且**本家选中了一张手牌 | 仅在 `window == "discard"` 时显示；未选中手牌时以 `BTN_DISABLED` 显示 | ①`window == "claim"` → **隐藏**；②未选中 → 禁用；③PENDING → 禁用；④`remaining_ms == 0` → 禁用；⑤结算/断线 → 隐藏 | 发 `discard{tile,seq}`；该牌本地标记「待确认」（灰显 + 下沉 6px，**不移除**）；整条按钮组进入 PENDING「已提交：打牌」；收到 `discard_event{seat==本家}` 或 `state_sync` 后真正从手牌区移除 |
-| 2 | **胡** `win` | `options` 含 `{"action":"win"}`（`claim` 窗口 = 可荣和；`discard` 窗口 = 可自摸或天和） | 仅在 `options` 含 `win` 时显示，底 `BTN_WIN`（金色、更醒目），文案「胡」 | ①PENDING → 禁用；②`remaining_ms == 0` → 禁用；③结算/断线 → 隐藏 | 发 `action{action:"win",tiles:[],seq}`（两个窗口的 `tiles` 均为 `[]`，GAME_DESIGN 5.2）；文案「已提交：胡」；等待 `action_event{win}` / `game_end` |
-| 3 | **杠** `kong` | `options` 含 `{"action":"kong","tiles":[T]}`（服务端已判 `count(T,hand)==3` 且 `remaining ≥ 1`） | 仅在含 `kong` 时显示，文案「杠 <T 的中文牌名>」（如 `杠 5p` → 「杠 5 筒」，见下方文案公式） | ①PENDING / 超时 / 结算 / 断线 → 禁用或隐藏 | 发 `action{action:"kong",tiles:[T],seq}`；「已提交：杠 5p」；等待 `action_event`（随后 `state_sync` 提供权威副露） |
-| 4 | **碰** `pong` | `options` 含 `{"action":"pong","tiles":[T]}`（服务端已判 `count(T,hand) ≥ 2`；手中 3 张时与 `kong` 并存） | 仅在含 `pong` 时显示，文案「碰 <T 的中文牌名>」（如 `碰 2s` → 「碰 2 条」，见下方文案公式） | 同上 | 发 `action{action:"pong",tiles:[T],seq}`；「已提交：碰 5p」 |
-| 5 | **吃** `chow` | `options` 含一条或多条 `{"action":"chow","tiles":[a,b]}`（仅当本家是打出者的下家，`s == (S+1)%4`，GAME_DESIGN 5.3） | **每条 chow 选项一个按钮**，文案「吃 <a 的中文牌名> <b 的中文牌名>」（如 `吃 3p 4p` → 「吃 3 筒 4 筒」，见下方文案公式），最多 3 个按钮（5.3 的 3 种组合）；超过 3 条时只渲染前 3 条并记 WARN（协议不该出现） | 同上 | 发 `action{action:"chow",tiles:[a,b],seq}`（`tiles` 是**手中的两张**；被鸣牌由窗口上下文确定）；「已提交：吃 3p 4p」 |
-| 6 | **过** `pass` | **仅 `window == "claim"`** 时存在（`GAME_DESIGN.md` 5.1：claim 窗口的 `options` 「至少含 `pass`」） | 仅 `window == "claim"` 时显示，文案「过」，位于最右 | PENDING / 超时 / 结算 / 断线 → 禁用或隐藏 | 发 `action{action:"pass",tiles:[],seq}`；「已提交：过」；等待窗口结算 |
-| 7 | **暗杠** `ankan`（**v2.0 新增**） | `window == "discard"` **且** `options` 含 `{"action":"ankan","tiles":[T,T,T,T]}`（服务端已判手中 4 张同面且 `remaining ≥ 1`） | 仅 `discard` 窗口含 `ankan` 时显示，文案「暗杠」 | ①PENDING → 禁用；②`remaining_ms == 0` → 禁用；③结算/断线 → 隐藏 | 发 `action{action:"ankan",tiles:[T,T,T,T],seq}`（**4 张照抄 option 的 `tiles`**）；「已提交：暗杠」；等待本家 `action_event{ankan}` + `draw`（杠补牌） + 新窗口 |
-| 7′ | **暗杠 · 多条并存（v2.0 补记）** | 同一 `discard` 窗口的 `options` 出现**多条** `{"action":"ankan","tiles":[…]}`（手中多个牌面各 4 张可杠）时，**每条 option 渲染一个按钮**，文案均为「暗杠」（**不带牌名**，与 7 的文案公式一致）；提交时**原样回传所点 option 自带的 `tiles`** 以区分牌面 | 同 7（PENDING / 超时 / 结算 / 断线 → 禁用或隐藏） | 同 7 | 发 `action{action:"ankan",tiles:<所点 option 的 tiles>,seq}`；「已提交：暗杠」 |
-| 8 | **加杠** `kakan`（**v2.0 新增**） | `window == "discard"` **且** `options` 含 `{"action":"kakan","tiles":[T]}`（服务端已判存在该面 `pong` 组 + 手中 1 张 + `remaining ≥ 1`） | 仅 `discard` 窗口含 `kakan` 时显示，文案「加杠 <T 的中文牌名>」 | 同上 | 发 `action{action:"kakan",tiles:[T],seq}`（**1 张照抄 option 的 `tiles`**）；「已提交：加杠 9 条」；等待本家 `action_event{kakan}` + `draw` + 新窗口；随后 `state_sync` 中原 `pong` 组就地变 `kakan`（§4.8） |
-| 9 | **立直** `riichi`（**v1.21 补记，仅日麻**） | `mode == "riichi"` 且 `window == "discard"` 且 `options` 含 `{"action":"riichi","tiles":[]}`（服务端已判门清、存在打出后仍听牌的牌、持点 ≥ 1000、牌山 ≥ 4 张、未振听） | 仅在含 `riichi` 时显示，文案「立直」，紧跟「打牌」之后（§5.3 顺序表的日麻扩展位）；**窗口可用时恒为可点**（不需要先选牌） | ①PENDING → 禁用；②`remaining_ms == 0` → 禁用；③结算/断线 → 隐藏 | 点它进入**宣言模式**：手牌上按 `action_request.riichi_tiles`（PROTOCOL §5.7）给可作宣言牌的牌加金色描边 + 角标、其余牌压暗，提示「立直：只能打高亮的牌」；点高亮的牌 = 发 `action{action:"riichi",tiles:[T],seq}`（**恰好 1 张**，既是宣言牌也是打出的牌），点压暗的牌只弹提示不发帧 |
+| 1 | **打牌** `discard` | `window == 1`（含庄家第一打、副露后待打牌、杠补牌后待打牌）**且**本家选中了一张手牌 | 仅在 `window == 1` 时显示；未选中手牌时以 `BTN_DISABLED` 显示 | ①`window == 2` → **隐藏**；②未选中 → 禁用；③PENDING → 禁用；④`remaining_ms == 0` → 禁用；⑤结算/断线 → 隐藏 | 发 `discard{tile,seq}`；该牌本地标记「待确认」（灰显 + 下沉 6px，**不移除**）；整条按钮组进入 PENDING「已提交：打牌」；收到 `discard_event{seat==本家}` 或 `state_sync` 后真正从手牌区移除 |
+| 2 | **胡** `win` | `options` 含 `{"action":7}`（`claim` 窗口 = 可荣和；`discard` 窗口 = 可自摸或天和） | 仅在 `options` 含 `win` 时显示，底 `BTN_WIN`（金色、更醒目），文案「胡」 | ①PENDING → 禁用；②`remaining_ms == 0` → 禁用；③结算/断线 → 隐藏 | 发 `action{action:7,tiles:[],seq}`（两个窗口的 `tiles` 均为 `[]`，GAME_DESIGN 5.2）；文案「已提交：胡」；等待 `action_event{win}` / `game_end` |
+| 3 | **杠** `kong` | `options` 含 `{"action":4,"tiles":[T]}`（服务端已判 `count(T,hand)==3` 且 `remaining ≥ 1`） | 仅在含 `kong` 时显示，文案「杠 <T 的中文牌名>」（如 `杠 5p` → 「杠 5 筒」，见下方文案公式） | ①PENDING / 超时 / 结算 / 断线 → 禁用或隐藏 | 发 `action{action:4,tiles:[T],seq}`；「已提交：杠 5p」；等待 `action_event`（随后 `state_sync` 提供权威副露） |
+| 4 | **碰** `pong` | `options` 含 `{"action":2,"tiles":[T]}`（服务端已判 `count(T,hand) ≥ 2`；手中 3 张时与 `kong` 并存） | 仅在含 `pong` 时显示，文案「碰 <T 的中文牌名>」（如 `碰 2s` → 「碰 2 条」，见下方文案公式） | 同上 | 发 `action{action:2,tiles:[T],seq}`；「已提交：碰 5p」 |
+| 5 | **吃** `chow` | `options` 含一条或多条 `{"action":3,"tiles":[a,b]}`（仅当本家是打出者的下家，`s == (S+1)%4`，GAME_DESIGN 5.3） | **每条 chow 选项一个按钮**，文案「吃 <a 的中文牌名> <b 的中文牌名>」（如 `吃 3p 4p` → 「吃 3 筒 4 筒」，见下方文案公式），最多 3 个按钮（5.3 的 3 种组合）；超过 3 条时只渲染前 3 条并记 WARN（协议不该出现） | 同上 | 发 `action{action:3,tiles:[a,b],seq}`（`tiles` 是**手中的两张**；被鸣牌由窗口上下文确定）；「已提交：吃 3p 4p」 |
+| 6 | **过** `pass` | **仅 `window == 2`** 时存在（`GAME_DESIGN.md` 5.1：claim 窗口的 `options` 「至少含 `pass`」） | 仅 `window == 2` 时显示，文案「过」，位于最右 | PENDING / 超时 / 结算 / 断线 → 禁用或隐藏 | 发 `action{action:1,tiles:[],seq}`；「已提交：过」；等待窗口结算 |
+| 7 | **暗杠** `ankan`（**v2.0 新增**） | `window == 1` **且** `options` 含 `{"action":5,"tiles":[T,T,T,T]}`（服务端已判手中 4 张同面且 `remaining ≥ 1`） | 仅 `discard` 窗口含 `ankan` 时显示，文案「暗杠」 | ①PENDING → 禁用；②`remaining_ms == 0` → 禁用；③结算/断线 → 隐藏 | 发 `action{action:5,tiles:[T,T,T,T],seq}`（**4 张照抄 option 的 `tiles`**）；「已提交：暗杠」；等待本家 `action_event{ankan}` + `draw`（杠补牌） + 新窗口 |
+| 7′ | **暗杠 · 多条并存（v2.0 补记）** | 同一 `discard` 窗口的 `options` 出现**多条** `{"action":5,"tiles":[…]}`（手中多个牌面各 4 张可杠）时，**每条 option 渲染一个按钮**，文案均为「暗杠」（**不带牌名**，与 7 的文案公式一致）；提交时**原样回传所点 option 自带的 `tiles`** 以区分牌面 | 同 7（PENDING / 超时 / 结算 / 断线 → 禁用或隐藏） | 同 7 | 发 `action{action:5,tiles:<所点 option 的 tiles>,seq}`；「已提交：暗杠」 |
+| 8 | **加杠** `kakan`（**v2.0 新增**） | `window == 1` **且** `options` 含 `{"action":6,"tiles":[T]}`（服务端已判存在该面 `pong` 组 + 手中 1 张 + `remaining ≥ 1`） | 仅 `discard` 窗口含 `kakan` 时显示，文案「加杠 <T 的中文牌名>」 | 同上 | 发 `action{action:6,tiles:[T],seq}`（**1 张照抄 option 的 `tiles`**）；「已提交：加杠 9 条」；等待本家 `action_event{kakan}` + `draw` + 新窗口；随后 `state_sync` 中原 `pong` 组就地变 `kakan`（§4.8） |
+| 9 | **立直** `riichi`（**v1.21 补记，仅日麻**） | `mode == "riichi"` 且 `window == 1` 且 `options` 含 `{"action":8,"tiles":[]}`（服务端已判门清、存在打出后仍听牌的牌、持点 ≥ 1000、牌山 ≥ 4 张、未振听） | 仅在含 `riichi` 时显示，文案「立直」，紧跟「打牌」之后（§5.3 顺序表的日麻扩展位）；**窗口可用时恒为可点**（不需要先选牌） | ①PENDING → 禁用；②`remaining_ms == 0` → 禁用；③结算/断线 → 隐藏 | 点它进入**宣言模式**：手牌上按 `action_request.riichi_tiles`（PROTOCOL §5.7）给可作宣言牌的牌加金色描边 + 角标、其余牌压暗，提示「立直：只能打高亮的牌」；点高亮的牌 = 发 `action{action:8,tiles:[T],seq}`（**恰好 1 张**，既是宣言牌也是打出的牌），点压暗的牌只弹提示不发帧 |
 
 #### 5.3.1 「过」在打牌窗口为什么不出现（重要，防 error 帧）
 
-- `GAME_DESIGN.md` 5.1/5.3 明确：`window == "discard"` 的 `options` 只承载**除打牌之外的附加动作**
-  （v1.9：`[{"action":"win"}]` 或 `[]`；**v2.0**：`win` + `ankan` + `kakan` 的任意组合，仍**不含** `pass`），
+- `GAME_DESIGN.md` 5.1/5.3 明确：`window == 1` 的 `options` 只承载**除打牌之外的附加动作**
+  （v1.9：`[{"action":7}]` 或 `[]`；**v2.0**：`win` + `ankan` + `kakan` 的任意组合，仍**不含** `pass`），
   打牌本身由 `discard{tile,seq}` 表达，`pass` **不在**打牌窗口的 `options` 中。
 - 因此客户端在打牌窗口**不提供**「过」按钮：若点了，将发出 `action{pass}` 而该动作不在 `options` 中，
   服务端按 5.6.1 第 3 行回 `error{ILLEGAL_ACTION}`（违反 GD-C1「全程零 error 帧」）。
@@ -761,7 +761,7 @@ y 轴刻度 ┌─────────────────────�
 
 #### 5.3.2 立直为什么是「点立直 → 点高亮的牌」两段（v1.21，**必读**）
 
-立直 = **宣言 + 打牌** 的同一个动作（`PROTOCOL.md` §12.5：`action{action:"riichi",tiles:[T]}`，`T` 既是宣言牌也是随后打出的那张），
+立直 = **宣言 + 打牌** 的同一个动作（`PROTOCOL.md` §12.5：`action{action:8,tiles:[T]}`，`T` 既是宣言牌也是随后打出的那张），
 但宣言牌**不是随便哪张都行**——打出之后必须仍在听牌，否则服务端回 `ILLEGAL_ACTION`。
 v1.21 之前要求玩家「先选牌再点立直」：既把这一步藏了起来，又只能靠试错才知道选错牌。
 玩家看到灰按钮的第一反应就是「这里不能立直吗」。现在改成：
@@ -803,7 +803,7 @@ v1.22 起，左上场况卡标题行右侧常驻一枚**玩法徽标**（列宽 
 ### 5.4 手牌点选 → 确认打出的完整交互流程（冻结）
 
 ```
-① 打牌窗口开启（window=="discard" 且 remaining_ms>0 且非 PENDING）
+① 打牌窗口开启（window==1 且 remaining_ms>0 且非 PENDING）
      → 手牌区进入可点选态：鼠标悬停在某张牌上时该牌 1px 亮边（BTN_HOVER 色，不算选中）
 ② 第一次左键单击某张牌
      → selected_index = 该张下标；渲染 SELECT 描边 + 上移 8px
@@ -832,7 +832,7 @@ v1.22 起，左上场况卡标题行右侧常驻一枚**玩法徽标**（列宽 
 | --- | --- |
 | `seq` 必须回带 | 取最近一次 `action_request.seq`（`current_seq`），**禁止**使用更早的 `seq`（GAME_DESIGN 10.6 第 2 条） |
 | 无窗口不发帧 | `current_seq is None` 时，发送函数直接返回 False（UI 层已经禁用入口） |
-| 动作必须在 `options` 内 | 发送前断言：`discard` 需要 `window=="discard"`；`action{act}` 需要 `act`（与 `tiles` 组合）出现在 `options` 中 |
+| 动作必须在 `options` 内 | 发送前断言：`discard` 需要 `window==1`；`action{act}` 需要 `act`（与 `tiles` 组合）出现在 `options` 中 |
 | `tiles` 语义 | `win: []`；`kong/pong: [T]`；`chow: [a,b]`（手中两张）；`pass: []`（GAME_DESIGN 5.2） |
 | 不在一次事件里连发 | 每帧最多发送 1 帧 `discard`/`action`（避免触发限速） |
 | 出站节流 | 发送队列上限 64；同一 `seq` 只允许一次动作提交（PENDING 即锁） |
@@ -970,12 +970,12 @@ v1.22 起，左上场况卡标题行右侧常驻一枚**玩法徽标**（列宽 
 | 阶段 | 可见提示 | 后续行为 |
 | --- | --- | --- |
 | 本地预校验失败（空 / >16 字符，含控制字符被忽略） | 输入框 `NEG` 2px 描边；状态行红字：`昵称不能为空` / `昵称最多 16 个字符（当前 18）` | 不发帧；「进入牌桌」禁用；用户修改输入后清除红框 |
-| 服务端回 `error{code:"INVALID_NAME"}` | 输入框 `NEG` 描边 + 状态行红字：`昵称非法：需 1..16 个字符，且不含换行或控制字符（第 n/3 次）` | **保留输入内容**；「进入牌桌」恢复可用；`invalid_name_count++`；`n == 3` 时额外提示 `再提交一次将被断开连接` |
+| 服务端回 `error{code:1}` | 输入框 `NEG` 描边 + 状态行红字：`昵称非法：需 1..16 个字符，且不含换行或控制字符（第 n/3 次）` | **保留输入内容**；「进入牌桌」恢复可用；`invalid_name_count++`；`n == 3` 时额外提示 `再提交一次将被断开连接` |
 | 第 4 次非法（服务端断开连接） | 转入 §8.4 断线蒙层，原因文案 `昵称连续非法，服务端已断开连接` | 只能「返回登录」（回到可编辑的登录界面） |
-| 服务端回 `error{code:"AUTH_FAILED"}`（v1.5） | 状态行红字 `账号或密码错误`；密码框 `NEG` 描边（账号名保留） | 断开并回到可编辑的登录界面（客户端不自动重试）；非空、非活动、非生产环境**不得**回显口令 |
-| 服务端回 `error{code:"USERNAME_TAKEN"}`（v1.5） | 状态行红字 `账号名已被占用`（账号名保留，可改名或改点「登录」） | 同上；不改动输入内容 |
-| 服务端回 `error{code:"ALREADY_ONLINE"}`（v1.5） | 状态行红字 `该账号已在别处登录` | 同上；**必须**与该账号的其它错误区分提示（用户需去关闭旧会话） |
-| 服务端回 `error{code:"INTERNAL"}` 且 `message == "account service unavailable"`（v1.5） | 状态行红字 `账号服务暂不可用` | 同上；游客模式与对局不受影响 |
+| 服务端回 `error{code:12}`（v1.5） | 状态行红字 `账号或密码错误`；密码框 `NEG` 描边（账号名保留） | 断开并回到可编辑的登录界面（客户端不自动重试）；非空、非活动、非生产环境**不得**回显口令 |
+| 服务端回 `error{code:13}`（v1.5） | 状态行红字 `账号名已被占用`（账号名保留，可改名或改点「登录」） | 同上；不改动输入内容 |
+| 服务端回 `error{code:14}`（v1.5） | 状态行红字 `该账号已在别处登录` | 同上；**必须**与该账号的其它错误区分提示（用户需去关闭旧会话） |
+| 服务端回 `error{code:11}` 且 `message == "account service unavailable"`（v1.5） | 状态行红字 `账号服务暂不可用` | 同上；游客模式与对局不受影响 |
 
 - 客户端发送前对昵称 `strip()` 首尾空白，但**不做**其它改写（不截断、不替换字符），保证用户看到的与服务端判定的一致。
 

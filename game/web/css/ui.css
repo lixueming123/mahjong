@@ -373,10 +373,15 @@ body { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-s
 .rshand-concealed { display: flex; gap: 2px; flex-wrap: wrap; }
 .rshand-agari { display: flex; padding-left: 12px; margin-left: 2px;
   border-left: 2px dashed rgba(230, 166, 60, .55); }
-.rstile { display: inline-block; width: 46px; height: 64px; border-radius: 6px;
+.rstile { position: relative; display: inline-block; width: 46px; height: 64px; border-radius: 6px;
   background-repeat: no-repeat; background-color: #f5f1e6;
   box-shadow: 0 2px 5px rgba(0, 0, 0, .45), inset 0 0 0 1px rgba(90, 60, 20, .25); }
+.rsface { position: absolute; inset: 0; border-radius: inherit; background-repeat: no-repeat; }
 .rstile.claim { width: 64px; height: 46px; align-self: flex-end; }
+/* 被鸣张：外层只负责横躺占位，内层保持 46x64 原比例贴图后顺时针转 90°，
+   朝向与 3D 桌面 makeFlatTile(rot+1) 一致；只改外层尺寸会把牌面压扁。 */
+.rstile.claim > .rsface { inset: auto; width: 46px; height: 64px;
+  left: 50%; top: 50%; transform: translate(-50%, -50%) rotate(90deg); }
 .rstile.agari { outline: 2px solid var(--gold); outline-offset: -2px;
   box-shadow: 0 0 12px rgba(230, 166, 60, .85); }
 .rshand-yaku { margin-top: 10px; text-align: center; font-size: 15px;

@@ -24,6 +24,10 @@ import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from protocol.enums import ACTION, FRAME_TYPE, MODE, WINDOW, value_of
 
 MY_SEAT = 0
 START_POINTS = 25000
@@ -123,18 +127,18 @@ def scan_tiles(frame: dict, observation: dict) -> None:
 
 def play_one_round(client: Client, length: str = "tonpu") -> dict:
     """打完一局（到第一份 game_end），返回收集到的观测值。"""
-    client.send({"type": "login", "name": "日麻玩家"})
-    if client.recv().get("type") != "login_ok":
+    client.send({"type": FRAME_TYPE.LOGIN, "name": "日麻玩家"})
+    if client.recv().get("type") != FRAME_TYPE.LOGIN_OK:
         raise TestFailure("login did not answer login_ok")
 
-    client.send({"type": "create_room", "mode": "riichi", "length": length})
+    client.send({"type": FRAME_TYPE.CREATE_ROOM, "mode": MODE.RIICHI, "length": value_of("length", length)})
     joined = client.recv()
-    if joined.get("type") != "room_joined":
+    if joined.get("type") != FRAME_TYPE.ROOM_JOINED:
         raise TestFailure(f"create_room failed: {joined!r}")
     if joined.get("seat") != MY_SEAT:
         raise TestFailure(f"expect seat 0, got {joined!r}")
 
-    client.send({"type": "ready"})
+    client.send({"type": FRAME_TYPE.READY})
 
     observation = {
         "game_start": None,
@@ -156,14 +160,14 @@ def play_one_round(client: Client, length: str = "tonpu") -> dict:
         kind = frame.get("type")
         scan_tiles(frame, observation)
 
-        if kind == "error":
+        if kind == FRAME_TYPE.ERROR:
             observation["errors"].append(frame)
             continue
-        if kind == "game_start":
+        if kind == FRAME_TYPE.GAME_START:
             observation["game_start"] = frame
             my_hand = list(frame.get("hand") or [])
             continue
-        if kind == "state_sync":
+        if kind == FRAME_TYPE.STATE_SYNC:
             observation["syncs"] += 1
             remaining = frame.get("remaining")
             if isinstance(remaining, int):
@@ -173,17 +177,17 @@ def play_one_round(client: Client, length: str = "tonpu") -> dict:
                     observation["max_remaining"] = remaining
             my_hand = list(frame.get("hand") or [])
             continue
-        if kind == "action_request":
+        if kind == FRAME_TYPE.ACTION_REQUEST:
             seq = frame.get("seq")
             window = frame.get("window")
-            if window == "discard":
+            if window == WINDOW.DISCARD:
                 if not my_hand:
                     raise TestFailure("discard window opened with an empty tracked hand")
-                client.send({"type": "discard", "tile": my_hand[0], "seq": seq})
+                client.send({"type": FRAME_TYPE.DISCARD, "tile": my_hand[0], "seq": seq})
             else:
-                client.send({"type": "action", "action": "pass", "tiles": [], "seq": seq})
+                client.send({"type": FRAME_TYPE.ACTION, "action": ACTION.PASS, "tiles": [], "seq": seq})
             continue
-        if kind == "tenpai":
+        if kind == FRAME_TYPE.TENPAI:
             # v1.13 §12.8：日麻听牌帧必须逐张带 yaku，帧级 no_yaku 只在「全部无役」时为真
             observation["tenpai_frames"] += 1
             waits = frame.get("waits") or []
@@ -203,7 +207,7 @@ def play_one_round(client: Client, length: str = "tonpu") -> dict:
             if no_yaku:
                 observation["tenpai_no_yaku"] += 1
             continue
-        if kind == "game_end":
+        if kind == FRAME_TYPE.GAME_END:
             observation["game_end"] = frame
             return observation
 

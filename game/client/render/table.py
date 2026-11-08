@@ -28,6 +28,16 @@ from .. import theme as T
 from ..game_state import SCREEN_TABLE, GameState
 from ..tiles import multiset_remove, tile_face, tile_label
 from ..view import UiView
+
+import sys
+from pathlib import Path
+
+_game_root = next(
+    p for p in Path(__file__).resolve().parents
+    if (p / "protocol" / "enums.json").is_file()
+)
+sys.path.insert(0, str(_game_root))
+from protocol.enums import ACTION, WINDOW
 from . import art
 from . import broadcast as broadcast_view
 from . import widgets as W
@@ -397,8 +407,10 @@ def render(surface: pygame.Surface, ui: UiView, feel=None) -> None:
 
 # ---------------------------------------------------------------- 可吃碰提示（FEEL_SPEC §3）
 
-#: 每个动作从手牌里消耗的**同面张数** / 构成张（F-CL-02）
-_CLAIM_HAND_COUNT = {"pong": 2, "kong": 3, "ankan": 4, "kakan": 1}
+#: 每个动作从手牌里消耗的**同面张数** / 构成张（F-CL-02）；键是动作整数常量
+_CLAIM_HAND_COUNT = {
+    ACTION.PONG: 2, ACTION.KONG: 3, ACTION.ANKAN: 4, ACTION.KAKAN: 1,
+}
 
 
 def claim_hand_faces(state, window) -> dict[str, int]:
@@ -411,7 +423,7 @@ def claim_hand_faces(state, window) -> dict[str, int]:
     for opt in window.options:
         action = opt.get("action")
         tiles = [t for t in (opt.get("tiles") or []) if isinstance(t, str)]
-        if action == "chow":
+        if action == ACTION.CHOW:
             for face in tiles[:2]:
                 out[face] = max(out.get(face, 0), 1)
             continue
@@ -472,9 +484,9 @@ def draw_flight_tile(
 def claim_highlight_active(state) -> bool:
     """F-CL-04/06：只在「claim 窗口且有非 pass 选项」时才画高亮。"""
     window = state.window
-    if window is None or window.window != "claim":
+    if window is None or window.window != WINDOW.CLAIM:
         return False
-    return any(opt.get("action") not in (None, "pass") for opt in window.options)
+    return any(opt.get("action") not in (None, ACTION.PASS) for opt in window.options)
 
 
 # ---------------------------------------------------------------- HUD

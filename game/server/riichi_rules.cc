@@ -22,9 +22,7 @@ namespace {
 constexpr int kSuitFaces = kRankCount;  // 每门 9 个牌面
 constexpr int kDragonBase = 31;         // 5z 白 / 6z 发 / 7z 中
 
-bool IsTerminalFace(Face face) {
-  return IsNumberFace(face) && (RankOf(face) == 1 || RankOf(face) == 9);
-}
+bool IsTerminalFace(Face face) { return IsNumberFace(face) && (RankOf(face) == 1 || RankOf(face) == 9); }
 
 bool IsHonor(Face face) { return face >= kNumericFaceCount; }
 
@@ -93,8 +91,7 @@ GroupInfo InfoOf(const Group& group, const std::vector<Meld>& melds) {
   info.from_meld = group.from_meld;
   info.face = group.face;
   info.open = group.is_run;
-  if (group.from_meld && group.meld_index >= 0 &&
-      static_cast<size_t>(group.meld_index) < melds.size()) {
+  if (group.from_meld && group.meld_index >= 0 && static_cast<size_t>(group.meld_index) < melds.size()) {
     const MeldType type = melds[static_cast<size_t>(group.meld_index)].type;
     info.kan = IsKanMeld(type);
     info.open = group.is_run || type != MeldType::kAnkan;
@@ -193,9 +190,8 @@ bool PairIsYakuhai(Face pair, const WinContext& ctx) {
 }
 
 // 单拆法的番种（不含宝牌、不含役满）。顺序 = 判定顺序 = 渲染顺序。
-std::vector<Yaku> YakuForDecomposition(const Decomposition& decomp, const std::vector<Meld>& melds,
-                                       Face winning, const WinContext& ctx, const HandFacts& facts,
-                                       WaitKind wait, bool* out_pinfu) {
+std::vector<Yaku> YakuForDecomposition(const Decomposition& decomp, const std::vector<Meld>& melds, Face winning,
+                                       const WinContext& ctx, const HandFacts& facts, WaitKind wait, bool* out_pinfu) {
   std::vector<Yaku> yaku;
   auto push = [&yaku](std::string_view id, int han) {
     if (han > 0) {
@@ -269,8 +265,7 @@ std::vector<Yaku> YakuForDecomposition(const Decomposition& decomp, const std::v
   push("tanyao", facts.has_terminal_or_honor ? 0 : 1);
 
   // ---- 平和：门前 + 四顺子 + 非役牌将 + 两面待ち ----
-  const bool pinfu =
-      closed && all_runs && !PairIsYakuhai(decomp.pair, ctx) && wait == WaitKind::kRyanmen;
+  const bool pinfu = closed && all_runs && !PairIsYakuhai(decomp.pair, ctx) && wait == WaitKind::kRyanmen;
   push("pinfu", pinfu ? 1 : 0);
   if (out_pinfu != nullptr) {
     *out_pinfu = pinfu;
@@ -297,8 +292,7 @@ std::vector<Yaku> YakuForDecomposition(const Decomposition& decomp, const std::v
   // ---- 三色同顺 / 一气通贯 ----
   bool sanshoku = false;
   for (int rank = 0; rank < kRankCount - 2; ++rank) {
-    if (run_starts[static_cast<size_t>(rank)] > 0 &&
-        run_starts[static_cast<size_t>(kSuitFaces + rank)] > 0 &&
+    if (run_starts[static_cast<size_t>(rank)] > 0 && run_starts[static_cast<size_t>(kSuitFaces + rank)] > 0 &&
         run_starts[static_cast<size_t>(2 * kSuitFaces + rank)] > 0) {
       sanshoku = true;
     }
@@ -403,14 +397,12 @@ bool IsJunseiChuuren(const std::vector<Tile>& concealed, Tile winning, uint8_t s
 // 役满（独立于番数；同一手可叠加多个役满）。双倍役满用 `YakumanMultiplier` 折算：
 // 每条款目的 han = 13 × 倍数（`kokushi_13` / `suuankou_tanki` / `chuuren_junsei` / `daisuushii` = 26），
 // 这样 `win.han_breakdown.base`（Σ yaku.han）与 `win.han` 仍然相等，客户端不必知道「倍数」这回事。
-std::vector<Yaku> DetectYakuman(const std::vector<Tile>& concealed, const std::vector<Meld>& melds,
-                                Tile winning, const WinContext& ctx) {
+std::vector<Yaku> DetectYakuman(const std::vector<Tile>& concealed, const std::vector<Meld>& melds, Tile winning,
+                                const WinContext& ctx) {
   std::vector<Yaku> result;
   const bool tsumo = ctx.Tsumo();
   const HandFacts facts = ComputeFacts(concealed, melds);
-  auto push = [&result](std::string_view id) {
-    result.push_back(Yaku {std::string(id), 13 * YakumanMultiplier(id)});
-  };
+  auto push = [&result](std::string_view id) { result.push_back(Yaku {std::string(id), 13 * YakumanMultiplier(id)}); };
 
   if (facts.all_honors) {
     push("tsuuiisou");
@@ -443,8 +435,7 @@ std::vector<Yaku> DetectYakuman(const std::vector<Tile>& concealed, const std::v
     bool all_present = true;
     bool has_pair = false;
     for (int face = 0; face < kFaceCount; ++face) {
-      const bool orphan =
-          std::find(std::begin(kOrphans), std::end(kOrphans), face) != std::end(kOrphans);
+      const bool orphan = std::find(std::begin(kOrphans), std::end(kOrphans), face) != std::end(kOrphans);
       if (!orphan && counts[static_cast<size_t>(face)] > 0) {
         only_orphans = false;
       }
@@ -481,8 +472,7 @@ std::vector<Yaku> DetectYakuman(const std::vector<Tile>& concealed, const std::v
         }
       }
       if (ok) {
-        push(IsJunseiChuuren(concealed, winning, static_cast<uint8_t>(facts.suit)) ? "chuuren_junsei"
-                                                                                  : "chuuren");
+        push(IsJunseiChuuren(concealed, winning, static_cast<uint8_t>(facts.suit)) ? "chuuren_junsei" : "chuuren");
       }
     }
   }
@@ -548,9 +538,8 @@ std::vector<Yaku> YakuOfSevenPairs(const WinContext& ctx, const HandFacts& facts
   return yaku;
 }
 
-int FuForDecomposition(const Decomposition& decomp, const std::vector<Meld>& melds,
-                       const HandFacts& facts, WaitKind wait, bool pinfu, bool tsumo,
-                       const WinContext& ctx) {
+int FuForDecomposition(const Decomposition& decomp, const std::vector<Meld>& melds, const HandFacts& facts,
+                       WaitKind wait, bool pinfu, bool tsumo, const WinContext& ctx) {
   int fu = 20;
   for (const Group& group : decomp.groups) {
     const GroupInfo info = InfoOf(group, melds);
@@ -592,8 +581,7 @@ int FuForDecomposition(const Decomposition& decomp, const std::vector<Meld>& mel
 }
 
 // 按 base 计算支付（役满与普通手共用）
-PointResult Pay(int base, bool dealer, bool tsumo, int winner_seat, int from_seat, int dealer_seat,
-                int honba) {
+PointResult Pay(int base, bool dealer, bool tsumo, int winner_seat, int from_seat, int dealer_seat, int honba) {
   PointResult out;
   out.base = base;
   if (tsumo) {
@@ -684,13 +672,13 @@ Face DoraFaceFromIndicator(Tile indicator) {
 }
 
 int YakuHan(std::string_view id, bool closed) {
-  if (id == "riichi" || id == "ippatsu" || id == "tsumo" || id == "pinfu" || id == "iipeikou" ||
-      id == "tanyao" || id == "yakuhai" || id == "rinshan" || id == "chankan" || id == "haitei" ||
-      id == "houtei" || id == "dora" || id == "ura_dora" || id == "aka_dora") {
+  if (id == "riichi" || id == "ippatsu" || id == "tsumo" || id == "pinfu" || id == "iipeikou" || id == "tanyao" ||
+      id == "yakuhai" || id == "rinshan" || id == "chankan" || id == "haitei" || id == "houtei" || id == "dora" ||
+      id == "ura_dora" || id == "aka_dora") {
     return 1;
   }
-  if (id == "chiitoitsu" || id == "toitoi" || id == "sanankou" || id == "sankantsu" ||
-      id == "shousangen" || id == "honroutou") {
+  if (id == "chiitoitsu" || id == "toitoi" || id == "sanankou" || id == "sankantsu" || id == "shousangen" ||
+      id == "honroutou") {
     return 2;
   }
   if (id == "sanshoku_doujun" || id == "ittsuu" || id == "chanta") {
@@ -712,10 +700,9 @@ int YakuHan(std::string_view id, bool closed) {
 }
 
 bool IsYakumanYaku(std::string_view id) {
-  return id == "tenhou" || id == "chiihou" || id == "kokushi" || id == "kokushi_13" ||
-         id == "suuankou" || id == "suuankou_tanki" || id == "daisangen" || id == "tsuuiisou" ||
-         id == "ryuuiisou" || id == "chinroutou" || id == "chuuren" || id == "chuuren_junsei" ||
-         id == "suukantsu" || id == "shousuushii" || id == "daisuushii";
+  return id == "tenhou" || id == "chiihou" || id == "kokushi" || id == "kokushi_13" || id == "suuankou" ||
+         id == "suuankou_tanki" || id == "daisangen" || id == "tsuuiisou" || id == "ryuuiisou" || id == "chinroutou" ||
+         id == "chuuren" || id == "chuuren_junsei" || id == "suukantsu" || id == "shousuushii" || id == "daisuushii";
 }
 
 int YakumanMultiplier(std::string_view id) {
@@ -744,8 +731,8 @@ std::string_view LimitName(Limit limit) {
   return "none";
 }
 
-bool CanDeclareRiichi(const std::vector<Tile>& concealed_with_winning_tile,
-                      const std::vector<Meld>& melds, int remaining) {
+bool CanDeclareRiichi(const std::vector<Tile>& concealed_with_winning_tile, const std::vector<Meld>& melds,
+                      int remaining) {
   if (!IsClosedHand(melds)) {
     return false;
   }
@@ -763,8 +750,8 @@ bool CanDeclareRiichi(const std::vector<Tile>& concealed_with_winning_tile,
     }
     tried[static_cast<size_t>(face)] = true;
     std::vector<Tile> rest = concealed_with_winning_tile;
-    const auto it = std::find_if(rest.begin(), rest.end(),
-                                 [face](const Tile& candidate) { return FaceOf(candidate) == face; });
+    const auto it =
+        std::find_if(rest.begin(), rest.end(), [face](const Tile& candidate) { return FaceOf(candidate) == face; });
     if (it != rest.end()) {
       rest.erase(it);
     }
@@ -786,8 +773,7 @@ bool IsKokushiFace(Face face) {
 
 }  // namespace
 
-bool IsKokushiHand(const std::vector<Tile>& concealed_with_winning_tile,
-                   const std::vector<Meld>& melds) {
+bool IsKokushiHand(const std::vector<Tile>& concealed_with_winning_tile, const std::vector<Meld>& melds) {
   if (!melds.empty() || concealed_with_winning_tile.size() != 14) {
     return false;  // 国士必须是门前清的 14 张
   }
@@ -814,16 +800,15 @@ bool IsKokushiHand(const std::vector<Tile>& concealed_with_winning_tile,
   return pairs == 1;
 }
 
-bool IsRiichiWinningHand(const std::vector<Tile>& concealed_with_winning_tile,
-                         const std::vector<Meld>& melds, Tile winning_tile, bool tsumo) {
+bool IsRiichiWinningHand(const std::vector<Tile>& concealed_with_winning_tile, const std::vector<Meld>& melds,
+                         Tile winning_tile, bool tsumo) {
   if (IsKokushiHand(concealed_with_winning_tile, melds)) {
     return true;
   }
   return IsWinningHand(concealed_with_winning_tile, melds, winning_tile, tsumo);
 }
 
-std::vector<Tile> RiichiWaitingTiles(const std::vector<Tile>& concealed,
-                                     const std::vector<Meld>& melds) {
+std::vector<Tile> RiichiWaitingTiles(const std::vector<Tile>& concealed, const std::vector<Meld>& melds) {
   std::vector<Tile> waits = WaitingTiles(concealed, melds);
   if (!melds.empty() || concealed.size() != 13) {
     return waits;
@@ -859,15 +844,13 @@ std::vector<Tile> RiichiWaitingTiles(const std::vector<Tile>& concealed,
     waits.push_back(MakeTileFromFace(missing));
   }
   std::sort(waits.begin(), waits.end(), [](Tile lhs, Tile rhs) { return FaceOf(lhs) < FaceOf(rhs); });
-  waits.erase(std::unique(waits.begin(), waits.end(),
-                          [](Tile lhs, Tile rhs) { return FaceOf(lhs) == FaceOf(rhs); }),
+  waits.erase(std::unique(waits.begin(), waits.end(), [](Tile lhs, Tile rhs) { return FaceOf(lhs) == FaceOf(rhs); }),
               waits.end());
   return waits;
 }
 
 bool RemoveOneFaceIn(std::vector<Tile>* tiles, Face face) {
-  const auto target = std::find_if(tiles->begin(), tiles->end(),
-                                   [face](Tile tile) { return FaceOf(tile) == face; });
+  const auto target = std::find_if(tiles->begin(), tiles->end(), [face](Tile tile) { return FaceOf(tile) == face; });
   if (target == tiles->end()) {
     return false;
   }
@@ -896,14 +879,14 @@ std::vector<Face> RiichiDiscardFaces(const std::vector<Tile>& concealed_with_win
   return faces;
 }
 
-bool CanAnkanAfterRiichi(const std::vector<Tile>& concealed_with_winning_tile,
-                         const std::vector<Meld>& melds, Tile drawn, Face face, int remaining) {
+bool CanAnkanAfterRiichi(const std::vector<Tile>& concealed_with_winning_tile, const std::vector<Meld>& melds,
+                         Tile drawn, Face face, int remaining) {
   if (remaining <= 0) {
     return false;  // 没有补牌可摸
   }
-  const int copies = static_cast<int>(std::count_if(
-      concealed_with_winning_tile.begin(), concealed_with_winning_tile.end(),
-      [face](Tile tile) { return FaceOf(tile) == face; }));
+  const int copies =
+      static_cast<int>(std::count_if(concealed_with_winning_tile.begin(), concealed_with_winning_tile.end(),
+                                     [face](Tile tile) { return FaceOf(tile) == face; }));
   if (copies < 4) {
     return false;
   }
@@ -931,22 +914,19 @@ bool CanAnkanAfterRiichi(const std::vector<Tile>& concealed_with_winning_tile,
   return WaitingTiles(after, melds_after) == waits_before;
 }
 
-std::vector<Option> DiscardOptions(const std::vector<Tile>& concealed_with_winning_tile,
-                                   const std::vector<Meld>& melds, int remaining,
-                                   bool riichi_declared, std::optional<Tile> drawn_tile) {
+std::vector<Option> DiscardOptions(const std::vector<Tile>& concealed_with_winning_tile, const std::vector<Meld>& melds,
+                                   int remaining, bool riichi_declared, std::optional<Tile> drawn_tile) {
   std::vector<Option> options;
-  const std::vector<Option> base =
-      mahjong::DiscardOptions(concealed_with_winning_tile, melds, remaining);
+  const std::vector<Option> base = mahjong::DiscardOptions(concealed_with_winning_tile, melds, remaining);
   for (const Option& option : base) {
-    if (riichi_declared && (option.action == "ankan" || option.action == "kakan")) {
+    if (riichi_declared && (option.action == protocol::Action::kAnkan || option.action == protocol::Action::kKakan)) {
       continue;  // 立直后 kakan 不可能（没有碰组），ankan 由下面的「不改变听牌」口径重算
     }
     options.push_back(option);
   }
   // 国士无双：共享的 `DiscardOptions` 按番数制的牌型判和，认不出国士，这里补一条 win。
-  if (FindOption(options, "win") == nullptr &&
-      IsKokushiHand(concealed_with_winning_tile, melds)) {
-    options.insert(options.begin(), Option {"win", {}});  // 顺序仍是 win 在最前
+  if (FindOption(options, protocol::Action::kWin) == nullptr && IsKokushiHand(concealed_with_winning_tile, melds)) {
+    options.insert(options.begin(), Option {protocol::Action::kWin, {}});  // 顺序仍是 win 在最前
   }
   if (riichi_declared && drawn_tile.has_value()) {
     for (int index = 0; index < kFaceCount; ++index) {
@@ -955,34 +935,33 @@ std::vector<Option> DiscardOptions(const std::vector<Tile>& concealed_with_winni
         continue;
       }
       Option ankan;
-      ankan.action = "ankan";
+      ankan.action = protocol::Action::kAnkan;
       ankan.tiles = {MakeTileFromFace(face)};  // 与 base 同形：恰 1 个牌面元素
       options.push_back(std::move(ankan));
     }
   }
   if (!riichi_declared && CanDeclareRiichi(concealed_with_winning_tile, melds, remaining)) {
     Option riichi_option;
-    riichi_option.action = "riichi";
+    riichi_option.action = protocol::Action::kRiichi;
     options.push_back(riichi_option);
   }
   return options;
 }
 
-std::vector<Option> ClaimOptions(const std::vector<Tile>& hand, const std::vector<Meld>& melds,
-                                 Tile discarded, int remaining, bool is_next_player, bool furiten) {
-  std::vector<Option> options =
-      mahjong::ClaimOptions(hand, melds, discarded, remaining, is_next_player);
-  if (FindOption(options, "win") == nullptr) {
+std::vector<Option> ClaimOptions(const std::vector<Tile>& hand, const std::vector<Meld>& melds, Tile discarded,
+                                 int remaining, bool is_next_player, bool furiten) {
+  std::vector<Option> options = mahjong::ClaimOptions(hand, melds, discarded, remaining, is_next_player);
+  if (FindOption(options, protocol::Action::kWin) == nullptr) {
     // 国士无双：补上共享实现认不出的荣和
     std::vector<Tile> full = hand;
     full.push_back(discarded);
     if (IsKokushiHand(full, melds)) {
-      options.insert(options.begin(), Option {"win", {}});
+      options.insert(options.begin(), Option {protocol::Action::kWin, {}});
     }
   }
   if (furiten) {
     options.erase(std::remove_if(options.begin(), options.end(),
-                                 [](const Option& option) { return option.action == "win"; }),
+                                 [](const Option& option) { return option.action == protocol::Action::kWin; }),
                   options.end());
   }
   return options;
@@ -1002,8 +981,7 @@ std::array<int, 4> DrawPenalty(const std::array<bool, 4>& tenpai) {
   const int per_noten = 3000 / (4 - tenpai_count);
   const int per_tenpai = 3000 / tenpai_count;
   for (int seat = 0; seat < 4; ++seat) {
-    delta[static_cast<size_t>(seat)] =
-        tenpai[static_cast<size_t>(seat)] ? per_tenpai : -per_noten;
+    delta[static_cast<size_t>(seat)] = tenpai[static_cast<size_t>(seat)] ? per_tenpai : -per_noten;
   }
   return delta;
 }
@@ -1047,8 +1025,8 @@ int SeatWindOf(int round_wind, int seat, int dealer) {
   return ((round_wind % 4 + 4) % 4 + offset) % 4;
 }
 
-std::vector<Option> ChankanOptions(const std::vector<Tile>& hand, const std::vector<Meld>& melds,
-                                   Tile tile, const WinContext& ctx, bool furiten) {
+std::vector<Option> ChankanOptions(const std::vector<Tile>& hand, const std::vector<Meld>& melds, Tile tile,
+                                   const WinContext& ctx, bool furiten) {
   std::vector<Option> options;
   if (!furiten && IsRiichiWinningHand(hand, melds, tile, /*is_tsumo=*/false)) {
     std::vector<Tile> full = hand;
@@ -1061,12 +1039,12 @@ std::vector<Option> ChankanOptions(const std::vector<Tile>& hand, const std::vec
     }
     if (!DetectYaku(full, melds, tile, chankan).empty()) {
       Option win;
-      win.action = "win";
+      win.action = protocol::Action::kWin;
       options.push_back(win);
     }
   }
   Option pass;
-  pass.action = "pass";
+  pass.action = protocol::Action::kPass;
   options.push_back(pass);
   return options;
 }
@@ -1115,11 +1093,9 @@ bool IsPermanentFuriten(const std::vector<Tile>& concealed, const std::vector<Me
   return false;
 }
 
-std::vector<Yaku> DetectYaku(const std::vector<Tile>& concealed_with_winning_tile,
-                             const std::vector<Meld>& melds, Tile winning_tile,
-                             const WinContext& ctx) {
-  if (const std::vector<Yaku> yakuman =
-          DetectYakuman(concealed_with_winning_tile, melds, winning_tile, ctx);
+std::vector<Yaku> DetectYaku(const std::vector<Tile>& concealed_with_winning_tile, const std::vector<Meld>& melds,
+                             Tile winning_tile, const WinContext& ctx) {
+  if (const std::vector<Yaku> yakuman = DetectYakuman(concealed_with_winning_tile, melds, winning_tile, ctx);
       !yakuman.empty()) {
     return yakuman;
   }
@@ -1132,8 +1108,7 @@ std::vector<Yaku> DetectYaku(const std::vector<Tile>& concealed_with_winning_til
   for (const Decomposition& decomp : EnumerateDecompositions(concealed_with_winning_tile, melds)) {
     bool pinfu = false;
     const WaitKind wait = WaitOf(decomp, FaceOf(winning_tile));
-    std::vector<Yaku> yaku =
-        YakuForDecomposition(decomp, melds, FaceOf(winning_tile), ctx, facts, wait, &pinfu);
+    std::vector<Yaku> yaku = YakuForDecomposition(decomp, melds, FaceOf(winning_tile), ctx, facts, wait, &pinfu);
     int han = 0;
     for (const Yaku& item : yaku) {
       han += item.han;
@@ -1146,8 +1121,8 @@ std::vector<Yaku> DetectYaku(const std::vector<Tile>& concealed_with_winning_til
   return best;
 }
 
-int FuOf(const std::vector<Tile>& concealed_with_winning_tile, const std::vector<Meld>& melds,
-         Tile winning_tile, const WinContext& ctx) {
+int FuOf(const std::vector<Tile>& concealed_with_winning_tile, const std::vector<Meld>& melds, Tile winning_tile,
+         const WinContext& ctx) {
   const HandFacts facts = ComputeFacts(concealed_with_winning_tile, melds);
   if (melds.empty() && IsSevenPairs(concealed_with_winning_tile)) {
     return 25;
@@ -1160,8 +1135,7 @@ int FuOf(const std::vector<Tile>& concealed_with_winning_tile, const std::vector
   for (const Decomposition& decomp : EnumerateDecompositions(concealed_with_winning_tile, melds)) {
     const WaitKind wait = WaitOf(decomp, FaceOf(winning_tile));
     bool pinfu = false;
-    const std::vector<Yaku> yaku =
-        YakuForDecomposition(decomp, melds, FaceOf(winning_tile), ctx, facts, wait, &pinfu);
+    const std::vector<Yaku> yaku = YakuForDecomposition(decomp, melds, FaceOf(winning_tile), ctx, facts, wait, &pinfu);
     int han = 0;
     for (const Yaku& item : yaku) {
       han += item.han;
@@ -1175,8 +1149,8 @@ int FuOf(const std::vector<Tile>& concealed_with_winning_tile, const std::vector
   return best_fu > 0 ? best_fu : 30;
 }
 
-ScoreResult ScoreHand(const std::vector<Tile>& concealed_with_winning_tile,
-                      const std::vector<Meld>& melds, Tile winning_tile, const WinContext& ctx) {
+ScoreResult ScoreHand(const std::vector<Tile>& concealed_with_winning_tile, const std::vector<Meld>& melds,
+                      Tile winning_tile, const WinContext& ctx) {
   ScoreResult result;
   if (ctx.winner_seat < 0 || ctx.winner_seat >= 4) {
     return result;
@@ -1185,8 +1159,7 @@ ScoreResult ScoreHand(const std::vector<Tile>& concealed_with_winning_tile,
   const HandFacts facts = ComputeFacts(concealed_with_winning_tile, melds);
 
   // ---- 1. 役满：命中即只算役满（可叠加）----
-  if (const std::vector<Yaku> yakuman =
-          DetectYakuman(concealed_with_winning_tile, melds, winning_tile, ctx);
+  if (const std::vector<Yaku> yakuman = DetectYakuman(concealed_with_winning_tile, melds, winning_tile, ctx);
       !yakuman.empty()) {
     result.yaku = yakuman;
     result.yakuman_count = 0;
@@ -1196,9 +1169,8 @@ ScoreResult ScoreHand(const std::vector<Tile>& concealed_with_winning_tile,
     result.han = 13 * result.yakuman_count;
     result.fu = 0;
     result.limit = Limit::kYakuman;
-    const PointResult pay =
-        Pay(8000 * result.yakuman_count, dealer, ctx.Tsumo(), ctx.winner_seat, ctx.from_seat,
-            ctx.dealer_seat, ctx.honba);
+    const PointResult pay = Pay(8000 * result.yakuman_count, dealer, ctx.Tsumo(), ctx.winner_seat, ctx.from_seat,
+                                ctx.dealer_seat, ctx.honba);
     result.base = pay.base;
     result.points = pay.points;
     result.per_payer = pay.per_payer;
@@ -1280,8 +1252,7 @@ ScoreResult ScoreHand(const std::vector<Tile>& concealed_with_winning_tile,
     candidate.aka = aka;
     Limit limit = Limit::kNone;
     const int base = BaseFor(han, fu, &limit);
-    const PointResult pay =
-        Pay(base, dealer, ctx.Tsumo(), ctx.winner_seat, ctx.from_seat, ctx.dealer_seat, ctx.honba);
+    const PointResult pay = Pay(base, dealer, ctx.Tsumo(), ctx.winner_seat, ctx.from_seat, ctx.dealer_seat, ctx.honba);
     candidate.base = base;
     candidate.limit = limit;
     candidate.points = pay.points;
@@ -1299,8 +1270,7 @@ ScoreResult ScoreHand(const std::vector<Tile>& concealed_with_winning_tile,
     for (const Decomposition& decomp : EnumerateDecompositions(concealed_with_winning_tile, melds)) {
       const WaitKind wait = WaitOf(decomp, winning_face);
       bool pinfu = false;
-      std::vector<Yaku> yaku =
-          YakuForDecomposition(decomp, melds, winning_face, ctx, facts, wait, &pinfu);
+      std::vector<Yaku> yaku = YakuForDecomposition(decomp, melds, winning_face, ctx, facts, wait, &pinfu);
       const int fu = FuForDecomposition(decomp, melds, facts, wait, pinfu, ctx.Tsumo(), ctx);
       consider(yaku, fu);
     }

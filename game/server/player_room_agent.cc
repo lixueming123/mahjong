@@ -5,8 +5,6 @@
 // window still open). That split is deliberate: the wire shape is the player's business, the
 // game state is the room's.
 
-#include "player_agent.h"
-
 #include <optional>
 #include <string>
 #include <utility>
@@ -14,6 +12,7 @@
 #include "actor_scope.h"
 #include "frame_parser.h"
 #include "player_actor.h"
+#include "player_agent.h"
 #include "protocol.h"
 #include "room.h"
 
@@ -26,13 +25,13 @@ bool HasRoom(const PlayerServices& services) {
   if (!services.room.IsEmpty()) {
     return true;
   }
-  services.player.SendError(protocol::kCodeRoomNotFound, "not in a room");
+  services.player.SendError(protocol::ErrorCode::kRoomNotFound, "not in a room");
   return false;
 }
 
 void ForwardToRoom(const PlayerServices& services, json::Value frame) {
-  ActorSendScope().spawn(services.room.Send<&RoomActor::Dispatch>(
-      RoomEnvelope::GameFrame(services.session.Info(), std::move(frame))));
+  ActorSendScope().spawn(
+      services.room.Send<&RoomActor::Dispatch>(RoomEnvelope::GameFrame(services.session.Info(), std::move(frame))));
 }
 
 }  // namespace

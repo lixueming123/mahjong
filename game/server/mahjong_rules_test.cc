@@ -1,17 +1,19 @@
 // 麻将规则库单元测试（规格：game/docs/RULESET.md v1.0 §10）
-#include <gtest/gtest.h>
+#include "server/mahjong_rules.h"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <iostream>
 #include <cstdint>
+#include <iostream>
 #include <random>
 #include <set>
 #include <string>
 #include <vector>
 
-#include "server/mahjong_rules.h"
+#include <gtest/gtest.h>
+
+#include "server/protocol.h"
 
 namespace mahjong {
 namespace {
@@ -19,24 +21,22 @@ namespace {
 std::vector<Tile> H(std::vector<std::string> texts) {
   auto tiles = ParseTiles(texts);
   EXPECT_TRUE(tiles.has_value());
-  return tiles.value_or(std::vector<Tile>{});
+  return tiles.value_or(std::vector<Tile> {});
 }
 
 Meld Pong(std::vector<std::string> texts) {
   std::vector<Tile> tiles = H(std::move(texts));
   SortTiles(tiles);
-  return Meld{.type = MeldType::kPong, .tiles = tiles};
+  return Meld {.type = MeldType::kPong, .tiles = tiles};
 }
 
 Meld Kong(std::vector<std::string> texts) {
   std::vector<Tile> tiles = H(std::move(texts));
   SortTiles(tiles);
-  return Meld{.type = MeldType::kKong, .tiles = tiles};
+  return Meld {.type = MeldType::kKong, .tiles = tiles};
 }
 
-int Sum(const std::array<int, 4>& delta) {
-  return delta[0] + delta[1] + delta[2] + delta[3];
-}
+int Sum(const std::array<int, 4>& delta) { return delta[0] + delta[1] + delta[2] + delta[3]; }
 
 // ---- B1 辅助：番种列表的常用断言形态 ----
 std::vector<std::string> Ids(const std::vector<Yaku>& yaku) {
@@ -85,20 +85,19 @@ ScoreContext Ctx(int winner_seat, int from_seat, bool dealer = false, bool rinsh
 Meld Ankan(std::vector<std::string> texts) {
   std::vector<Tile> tiles = H(std::move(texts));
   SortTiles(tiles);
-  return Meld{.type = MeldType::kAnkan, .tiles = tiles};
+  return Meld {.type = MeldType::kAnkan, .tiles = tiles};
 }
 
 Meld Kakan(std::vector<std::string> texts) {
   std::vector<Tile> tiles = H(std::move(texts));
   SortTiles(tiles);
-  return Meld{.type = MeldType::kKakan, .tiles = tiles};
+  return Meld {.type = MeldType::kKakan, .tiles = tiles};
 }
 
 // 断言「番数 ↔ 倍率 ↔ 支付」三者自洽（§2.1/§2.2 的主公式，B1.1 裁决版：
 // 自摸不是番种 ⇒ han 不含自摸；"自摸 ×2" 只在 2R/6R 支付公式里），返回最终番数供进一步断言
 int ExpectScoreConsistent(const ScoreResult& score, const ScoreContext& ctx) {
-  const int expected_han =
-      std::min(YakuHanTotal(score.yaku) + (ctx.winner_is_dealer ? 1 : 0), 6);
+  const int expected_han = std::min(YakuHanTotal(score.yaku) + (ctx.winner_is_dealer ? 1 : 0), 6);
   EXPECT_EQ(score.han, expected_han);
   EXPECT_EQ(score.multiplier, 1 << expected_han);
   EXPECT_EQ(score.per_payer, ctx.Tsumo() ? 2 * score.multiplier : score.multiplier);
@@ -129,8 +128,7 @@ bool BruteDecompose(std::array<uint8_t, kFaceCount> counts, int need_groups,
     }
     const int rank = f % kRankCount;  // 0-based
     // 顺子仅限同一门数牌；字牌面（≥27）编号连续但绝不成顺（与规则库同一约束，独立重写）
-    if (f < kNumericFaceCount && rank <= kRankCount - 3 && counts[f] > 0 && counts[f + 1] > 0 &&
-        counts[f + 2] > 0) {
+    if (f < kNumericFaceCount && rank <= kRankCount - 3 && counts[f] > 0 && counts[f + 1] > 0 && counts[f + 2] > 0) {
       counts[f] -= 1;
       counts[f + 1] -= 1;
       counts[f + 2] -= 1;
@@ -194,15 +192,14 @@ TEST(MahjongRules, ParseAndSortTiles) {  // 1
   EXPECT_FALSE(ParseTile("m1").has_value());
   EXPECT_FALSE(ParseTile("10p").has_value());
 
-  std::vector<Tile> tiles =
-      H({"9s", "3p", "1m", "2m", "1s", "3p", "1m", "5m", "9m", "3p", "4p", "2s", "2s", "7s"});
+  std::vector<Tile> tiles = H({"9s", "3p", "1m", "2m", "1s", "3p", "1m", "5m", "9m", "3p", "4p", "2s", "2s", "7s"});
   const std::vector<Tile> sorted = SortedTiles(tiles);
   std::vector<std::string> texts;
   for (Tile t : sorted) texts.push_back(FormatTile(t));
-  const std::vector<std::string> expected = {"1m", "1m", "2m", "5m", "9m", "3p", "3p", "3p",
-                                             "4p", "1s", "2s", "2s", "7s", "9s"};
+  const std::vector<std::string> expected = {"1m", "1m", "2m", "5m", "9m", "3p", "3p",
+                                             "3p", "4p", "1s", "2s", "2s", "7s", "9s"};
   EXPECT_EQ(texts, expected);
-  EXPECT_EQ(kTileCount, 136);   // t14 口径：34 面 × 4
+  EXPECT_EQ(kTileCount, 136);  // t14 口径：34 面 × 4
   EXPECT_EQ(FaceOf(*ParseTile("1m")), 0);
   EXPECT_EQ(FaceOf(*ParseTile("9s")), 26);
 }
@@ -251,53 +248,45 @@ TEST(MahjongRules, DealFromWall) {  // 3
 // ---------------------------------------------------------------------------
 TEST(MahjongRules, WinStandardHands) {  // 4
   // P1：4 顺子 + 将（荣和形态：门前 13 张 + 和牌张）
-  std::vector<Tile> p1 = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s",
-                            "3s", "5s"});
+  std::vector<Tile> p1 = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "5s"});
   EXPECT_TRUE(CanWinWith(p1, {}, *ParseTile("5s")));
   std::vector<Tile> p1_full = p1;
   p1_full.push_back(*ParseTile("5s"));
   // B1：`pinfu` 的语义由「没有番的普通和牌」改为「门清 + 全顺子 + 数牌将」1 番（GAME_DESIGN_V2 §5.1 #11），
   // 因此这手牌现在判出 menzen + pinfu 两条番种，不再是「无标签」。
-  EXPECT_EQ(WinTags(p1_full, {}), (std::vector<std::string>{"menzen", "pinfu"}));
+  EXPECT_EQ(WinTags(p1_full, {}), (std::vector<std::string> {"menzen", "pinfu"}));
 
   // P2：含刻子
-  std::vector<Tile> p2 = H({"1m", "1m", "1m", "2m", "3m", "4m", "5p", "5p", "5p", "7s", "8s",
-                            "9s", "9m"});
+  std::vector<Tile> p2 = H({"1m", "1m", "1m", "2m", "3m", "4m", "5p", "5p", "5p", "7s", "8s", "9s", "9m"});
   EXPECT_TRUE(CanWinWith(p2, {}, *ParseTile("9m")));
 
   // P8 边界：4 张同牌面同时充当刻子 + 顺子的一环
-  std::vector<Tile> p8 = H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "1m", "2m",
-                            "3m", "5m", "5m"});
+  std::vector<Tile> p8 = H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "1m", "2m", "3m", "5m", "5m"});
   EXPECT_TRUE(CanWinExact(p8, {}));
 }
 
 TEST(MahjongRules, WinSevenPairs) {  // 5
-  std::vector<Tile> p3 = H({"1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2p", "2p", "6p",
-                            "6p", "8p", "8p"});
+  std::vector<Tile> p3 = H({"1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2p", "2p", "6p", "6p", "8p", "8p"});
   EXPECT_TRUE(CanWinExact(p3, {}));
   EXPECT_TRUE(IsSevenPairs(p3));
-  EXPECT_EQ(WinTags(p3, {}), (std::vector<std::string>{"menzen", "seven_pairs"}));
+  EXPECT_EQ(WinTags(p3, {}), (std::vector<std::string> {"menzen", "seven_pairs"}));
 
   // 自摸形态统一入口
   EXPECT_TRUE(IsWinningHand(p3, {}, *ParseTile("8p"), /*is_tsumo=*/true));
 }
 
 TEST(MahjongRules, WinPureOneSuit) {  // 6
-  std::vector<Tile> p4 = H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4m", "5m",
-                            "6m", "7m", "7m"});
+  std::vector<Tile> p4 = H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4m", "5m", "6m", "7m", "7m"});
   EXPECT_TRUE(CanWinExact(p4, {}));
   EXPECT_FALSE(IsSevenPairs(p4));
   // 清一色 5 番 + 门清 1 番 + 三暗刻 2 番（111/222/333 三组暗刻）
-  EXPECT_EQ(WinTags(p4, {}),
-            (std::vector<std::string>{"menzen", "sanankou", "pure_one_suit"}));
+  EXPECT_EQ(WinTags(p4, {}), (std::vector<std::string> {"menzen", "sanankou", "pure_one_suit"}));
 
-  std::vector<Tile> p5 = H({"1m", "1m", "2m", "2m", "3m", "3m", "4m", "4m", "5m", "5m", "6m",
-                            "6m", "7m", "7m"});
+  std::vector<Tile> p5 = H({"1m", "1m", "2m", "2m", "3m", "3m", "4m", "4m", "5m", "5m", "6m", "6m", "7m", "7m"});
   EXPECT_TRUE(CanWinExact(p5, {}));
   // 七对子（1+2+5=8 番）与「四顺子 + 将」拆法（menzen1+pinfu1+iipeikou1+pure5=8 番）同分；
   // §1.3.4：同分取**枚举序第一个** ⇒ 标准型拆法（枚举先于七对子候选）胜出。
-  EXPECT_EQ(WinTags(p5, {}),
-            (std::vector<std::string>{"menzen", "pinfu", "iipeikou", "pure_one_suit"}));
+  EXPECT_EQ(WinTags(p5, {}), (std::vector<std::string> {"menzen", "pinfu", "iipeikou", "pure_one_suit"}));
 }
 
 TEST(MahjongRules, WinWithMelds) {  // 7
@@ -323,35 +312,29 @@ TEST(MahjongRules, WinWithMelds) {  // 7
 // 和牌判定的反例（RULESET §10.2）：不允许误判为和牌
 // ---------------------------------------------------------------------------
 TEST(MahjongRules, NotWinMissingPair) {  // 8
-  std::vector<Tile> n1 = H({"1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p",
-                            "3p", "5p", "7p"});
+  std::vector<Tile> n1 = H({"1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "5p", "7p"});
   EXPECT_FALSE(CanWinExact(n1, {}));
 }
 
 TEST(MahjongRules, NotWinIsolatedTiles) {  // 9
-  std::vector<Tile> n2 = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s",
-                            "3s", "5s", "6s"});
+  std::vector<Tile> n2 = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "5s", "6s"});
   EXPECT_FALSE(CanWinExact(n2, {}));
 
-  std::vector<Tile> n7 = H({"1m", "1m", "2m", "2m", "3m", "3m", "4m", "4m", "5m", "5m", "6m",
-                            "6m", "7m", "9m"});
+  std::vector<Tile> n7 = H({"1m", "1m", "2m", "2m", "3m", "3m", "4m", "4m", "5m", "5m", "6m", "6m", "7m", "9m"});
   EXPECT_FALSE(CanWinExact(n7, {}));  // 9m 无法归属任何面子
 }
 
 TEST(MahjongRules, NotWinFourOfAKindIsNotTwoPairs) {  // 10
-  std::vector<Tile> n3 = H({"1m", "1m", "1m", "1m", "2p", "2p", "3p", "3p", "4p", "4p", "5p",
-                            "5p", "6p", "6p"});
+  std::vector<Tile> n3 = H({"1m", "1m", "1m", "1m", "2p", "2p", "3p", "3p", "4p", "4p", "5p", "5p", "6p", "6p"});
   EXPECT_FALSE(IsSevenPairs(n3));
   EXPECT_FALSE(CanWinExact(n3, {}));
 }
 
 TEST(MahjongRules, NotWinWrongTileCount) {  // 11
-  std::vector<Tile> n4 = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s",
-                            "3s", "5s"});
+  std::vector<Tile> n4 = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "5s"});
   EXPECT_FALSE(CanWinExact(n4, {}));  // 13 张
 
-  std::vector<Tile> n5 = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s",
-                            "3s", "5s", "5s", "5s"});
+  std::vector<Tile> n5 = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "5s", "5s", "5s"});
   EXPECT_FALSE(CanWinExact(n5, {}));  // 15 张
 
   std::vector<Tile> n6 = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "7p"});
@@ -370,8 +353,7 @@ TEST(MahjongRules, NotWinSevenPairsRequiresConcealed) {  // 12
 // 算分（RULESET §6）
 // ---------------------------------------------------------------------------
 TEST(MahjongRules, ScoreRonAndTsumo) {  // 13
-  std::vector<Tile> hira = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s",
-                              "3s", "5s", "5s"});
+  std::vector<Tile> hira = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "5s", "5s"});
   // 番数制（B1）：这手牌 = menzen 1 + pinfu 1 = 2 番 ⇒ R = 4
   // S1 荣和：放炮者 −4、和牌者 +4
   const ScoreResult ron = ScoreWin(/*winner=*/1, /*from_seat=*/0, hira, {});
@@ -406,12 +388,9 @@ TEST(MahjongRules, ScoreRonAndTsumo) {  // 13
 }
 
 TEST(MahjongRules, ScoreMultipliers) {  // 14
-  std::vector<Tile> seven = H({"1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2p", "2p", "6p",
-                               "6p", "8p", "8p"});
-  std::vector<Tile> pure = H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4m", "5m",
-                              "6m", "7m", "7m"});
-  std::vector<Tile> both = H({"1m", "1m", "2m", "2m", "3m", "3m", "4m", "4m", "5m", "5m", "6m",
-                              "6m", "7m", "7m"});
+  std::vector<Tile> seven = H({"1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2p", "2p", "6p", "6p", "8p", "8p"});
+  std::vector<Tile> pure = H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4m", "5m", "6m", "7m", "7m"});
+  std::vector<Tile> both = H({"1m", "1m", "2m", "2m", "3m", "3m", "4m", "4m", "5m", "5m", "6m", "6m", "7m", "7m"});
 
   // 七对子 = menzen 1 + seven_pairs 2 = 3 番 ⇒ R = 8
   const ScoreResult r = ScoreWin(0, 3, seven, {});
@@ -444,54 +423,50 @@ TEST(MahjongRules, ScoreMultipliers) {  // 14
 // ---------------------------------------------------------------------------
 TEST(MahjongRules, ClaimOptions) {  // 15
   // 碰：手中有 2 张
-  const std::vector<Tile> two = H({"9s", "9s", "1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p",
-                                   "9p", "1p", "2p"});
+  const std::vector<Tile> two = H({"9s", "9s", "1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1p", "2p"});
   const auto pong_options = ClaimOptions(two, {}, *ParseTile("9s"), 55, /*is_next_player=*/false);
-  ASSERT_NE(FindOption(pong_options, "pong"), nullptr);
-  EXPECT_EQ(FindOption(pong_options, "kong"), nullptr);
-  EXPECT_EQ(pong_options.front().action, "pong");  // 顺序：win → kong → pong → chow → pass
-  EXPECT_EQ(pong_options.back().action, "pass");
+  ASSERT_NE(FindOption(pong_options, protocol::Action::kPong), nullptr);
+  EXPECT_EQ(FindOption(pong_options, protocol::Action::kKong), nullptr);
+  EXPECT_EQ(pong_options.front().action, protocol::Action::kPong);  // 顺序：win → kong → pong → chow → pass
+  EXPECT_EQ(pong_options.back().action, protocol::Action::kPass);
   EXPECT_TRUE(HasNonPassOption(pong_options));
-  EXPECT_TRUE(OptionTilesMatch(*FindOption(pong_options, "pong"), H({"9s"})));
+  EXPECT_TRUE(OptionTilesMatch(*FindOption(pong_options, protocol::Action::kPong), H({"9s"})));
 
   // 杠：手中 3 张且 remaining ≥ 1；remaining == 0 时不提供
-  const std::vector<Tile> three = H({"9s", "9s", "9s", "1m", "2m", "3m", "4m", "5m", "6m", "7p",
-                                     "8p", "9p", "1p"});
+  const std::vector<Tile> three = H({"9s", "9s", "9s", "1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1p"});
   const auto kong_ok = ClaimOptions(three, {}, *ParseTile("9s"), 55, false);
-  ASSERT_NE(FindOption(kong_ok, "kong"), nullptr);
-  ASSERT_NE(FindOption(kong_ok, "pong"), nullptr);
-  EXPECT_EQ(kong_ok[0].action, "kong");
-  EXPECT_EQ(kong_ok[1].action, "pong");
+  ASSERT_NE(FindOption(kong_ok, protocol::Action::kKong), nullptr);
+  ASSERT_NE(FindOption(kong_ok, protocol::Action::kPong), nullptr);
+  EXPECT_EQ(kong_ok[0].action, protocol::Action::kKong);
+  EXPECT_EQ(kong_ok[1].action, protocol::Action::kPong);
   const auto kong_blocked = ClaimOptions(three, {}, *ParseTile("9s"), 0, false);
-  EXPECT_EQ(FindOption(kong_blocked, "kong"), nullptr);
-  EXPECT_NE(FindOption(kong_blocked, "pong"), nullptr);
+  EXPECT_EQ(FindOption(kong_blocked, protocol::Action::kKong), nullptr);
+  EXPECT_NE(FindOption(kong_blocked, protocol::Action::kPong), nullptr);
 
   // 吃：仅下家；每个合法组合一条选项
-  const std::vector<Tile> chow_hand = H({"1p", "2p", "4p", "5p", "1m", "2m", "3m", "4m", "5m",
-                                         "6m", "7m", "8m", "9m"});
+  const std::vector<Tile> chow_hand = H({"1p", "2p", "4p", "5p", "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m"});
   const auto chow_next = ClaimOptions(chow_hand, {}, *ParseTile("3p"), 55, /*is_next_player=*/true);
   int chow_count = 0;
   for (const Option& option : chow_next) {
-    if (option.action == "chow") {
+    if (option.action == protocol::Action::kChow) {
       ++chow_count;
       EXPECT_EQ(option.tiles.size(), 2u);
     }
   }
   EXPECT_EQ(chow_count, 3);  // {1p,2p}、{2p,4p}、{4p,5p}（RULESET §4.2）
   const auto chow_not_next = ClaimOptions(chow_hand, {}, *ParseTile("3p"), 55, false);
-  EXPECT_EQ(FindOption(chow_not_next, "chow"), nullptr);
+  EXPECT_EQ(FindOption(chow_not_next, protocol::Action::kChow), nullptr);
   EXPECT_FALSE(HasNonPassOption(chow_not_next));  // 只剩 pass
 }
 
 TEST(MahjongRules, DiscardOptionsAndDefaultDiscard) {  // 16
-  std::vector<Tile> winning = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s",
-                                 "2s", "3s", "5s", "5s"});
+  std::vector<Tile> winning = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "5s", "5s"});
   const auto win_options = DiscardOptions(winning, {});
   ASSERT_EQ(win_options.size(), 1u);
-  EXPECT_EQ(win_options[0].action, "win");
+  EXPECT_EQ(win_options[0].action, protocol::Action::kWin);
 
-  std::vector<Tile> not_winning = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s",
-                                     "2s", "5s", "6s", "9s"});
+  std::vector<Tile> not_winning =
+      H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "5s", "6s", "9s"});
   EXPECT_TRUE(DiscardOptions(not_winning, {}).empty());
 
   // 超时默认打牌：有摸牌记录 → 打刚摸到的牌
@@ -608,16 +583,16 @@ TEST(MahjongRules, HonorConstantsAndEncoding) {  // 20
   for (size_t i = 0; i < honors.size(); ++i) {
     const auto tile = ParseTile(honors[i]);
     ASSERT_TRUE(tile.has_value()) << honors[i];
-    EXPECT_EQ(FormatTile(*tile), honors[i]);                       // 往返可逆
-    EXPECT_EQ(FaceOf(*tile), 27 + static_cast<int>(i));            // 面编号 27..33
-    EXPECT_EQ(SuitOf(FaceOf(*tile)), 3);                           // 字牌花色编号 3
-    EXPECT_EQ(RankOf(FaceOf(*tile)), i + 1);                       // 1..7
+    EXPECT_EQ(FormatTile(*tile), honors[i]);             // 往返可逆
+    EXPECT_EQ(FaceOf(*tile), 27 + static_cast<int>(i));  // 面编号 27..33
+    EXPECT_EQ(SuitOf(FaceOf(*tile)), 3);                 // 字牌花色编号 3
+    EXPECT_EQ(RankOf(FaceOf(*tile)), i + 1);             // 1..7
     EXPECT_TRUE(IsHonorFace(FaceOf(*tile)));
     EXPECT_FALSE(IsNumberFace(FaceOf(*tile)));
-    EXPECT_EQ(HonorName(FaceOf(*tile)), names[i]);                 // 与文档映射逐字一致
+    EXPECT_EQ(HonorName(FaceOf(*tile)), names[i]);  // 与文档映射逐字一致
     EXPECT_EQ(*tile, *ParseTile(honors[i]));
   }
-  EXPECT_TRUE(HonorName(FaceOf(*ParseTile("1m"))).empty());        // 非字牌无名
+  EXPECT_TRUE(HonorName(FaceOf(*ParseTile("1m"))).empty());  // 非字牌无名
 
   // 非法编码必须被拒（PROTOCOL §2.1 合取正则）
   for (const char* bad : {"8z", "9z", "0z", "10z", "5x", "z1", "", "1Z", "m1"}) {
@@ -638,41 +613,38 @@ TEST(MahjongRules, HonorConstantsAndEncoding) {  // 20
 // ---------------------------------------------------------------------------
 TEST(MahjongRules, HonorInWinningHands) {  // 21
   // 字牌做刻子：3 组字牌刻子（白发中）+ 1 组数牌刻子 + 将
-  std::vector<Tile> honor_triplet = H({"5z", "5z", "5z", "6z", "6z", "6z", "7z", "7z", "7z",
-                                       "1m", "1m", "1m", "9s", "9s"});
+  std::vector<Tile> honor_triplet =
+      H({"5z", "5z", "5z", "6z", "6z", "6z", "7z", "7z", "7z", "1m", "1m", "1m", "9s", "9s"});
   EXPECT_TRUE(CanWinExact(honor_triplet, {}));
   // menzen 1 + yakuhai 3（白/发/中各一组，合并为一条）+ toitoi 2 + sanankou 2 = 8 番
-  EXPECT_EQ(WinTags(honor_triplet, {}),
-            (std::vector<std::string>{"menzen", "yakuhai", "toitoi", "sanankou"}));
+  EXPECT_EQ(WinTags(honor_triplet, {}), (std::vector<std::string> {"menzen", "yakuhai", "toitoi", "sanankou"}));
   // 字牌不产生清一色 / 混一色（全字牌不满足「恰含一门数牌」）
   EXPECT_TRUE(IsPureOneSuit(honor_triplet, {}) == false);
   EXPECT_FALSE(HasTag(honor_triplet, {}, "honitsu"));
 
   // 字牌做将：4 组数牌面子 + 将 1z1z ⇒ 只有门清（将牌是字牌 ⇒ 平和不成立）
-  std::vector<Tile> honor_pair = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s",
-                                    "2s", "3s", "1z", "1z"});
+  std::vector<Tile> honor_pair =
+      H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "1z", "1z"});
   EXPECT_TRUE(CanWinExact(honor_pair, {}));
-  EXPECT_EQ(WinTags(honor_pair, {}), std::vector<std::string>{"menzen"});
+  EXPECT_EQ(WinTags(honor_pair, {}), std::vector<std::string> {"menzen"});
 
   // 字牌做将（荣和形态：13 张 + 和牌张）
-  std::vector<Tile> ron_hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s",
-                                  "2s", "3s", "1z"});
+  std::vector<Tile> ron_hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "1z"});
   EXPECT_TRUE(CanWinWith(ron_hand, {}, *ParseTile("1z")));
 
   // 字牌 + 数牌混合刻子（含中张顺子）
-  std::vector<Tile> mixed = H({"2z", "2z", "2z", "3p", "4p", "5p", "6s", "7s", "8s", "4z", "4z",
-                               "4z", "9m", "9m"});
+  std::vector<Tile> mixed = H({"2z", "2z", "2z", "3p", "4p", "5p", "6s", "7s", "8s", "4z", "4z", "4z", "9m", "9m"});
   EXPECT_TRUE(CanWinExact(mixed, {}));
 }
 
 TEST(MahjongRules, HonorSevenPairsAndScoring) {  // 22
   // 含字牌对子的七对子
-  std::vector<Tile> honor_seven = H({"1z", "1z", "2z", "2z", "3m", "3m", "4m", "4m", "5p", "5p",
-                                     "6p", "6p", "7s", "7s"});
+  std::vector<Tile> honor_seven =
+      H({"1z", "1z", "2z", "2z", "3m", "3m", "4m", "4m", "5p", "5p", "6p", "6p", "7s", "7s"});
   EXPECT_TRUE(IsSevenPairs(honor_seven));
   EXPECT_TRUE(CanWinExact(honor_seven, {}));
   // menzen 1 + seven_pairs 2 = 3 番（字牌不额外加成，也不构成混一色：三色数牌）
-  EXPECT_EQ(WinTags(honor_seven, {}), (std::vector<std::string>{"menzen", "seven_pairs"}));
+  EXPECT_EQ(WinTags(honor_seven, {}), (std::vector<std::string> {"menzen", "seven_pairs"}));
   const ScoreResult r = ScoreWin(0, 3, honor_seven, {});
   EXPECT_EQ(r.han, 3);
   EXPECT_EQ(r.multiplier, 8);
@@ -681,30 +653,27 @@ TEST(MahjongRules, HonorSevenPairsAndScoring) {  // 22
   EXPECT_EQ(Sum(r.delta), 0);
 
   // 全字牌七对子：仍只是七对子（无「字一色」→ 不是清一色，也不是混一色）
-  std::vector<Tile> all_honor_seven = H({"1z", "1z", "2z", "2z", "3z", "3z", "4z", "4z", "5z",
-                                         "5z", "6z", "6z", "7z", "7z"});
+  std::vector<Tile> all_honor_seven =
+      H({"1z", "1z", "2z", "2z", "3z", "3z", "4z", "4z", "5z", "5z", "6z", "6z", "7z", "7z"});
   EXPECT_TRUE(CanWinExact(all_honor_seven, {}));
-  EXPECT_EQ(WinTags(all_honor_seven, {}),
-            (std::vector<std::string>{"menzen", "seven_pairs"}));
+  EXPECT_EQ(WinTags(all_honor_seven, {}), (std::vector<std::string> {"menzen", "seven_pairs"}));
   EXPECT_EQ(ScoreWin(0, 3, all_honor_seven, {}).multiplier, 8);  // 不得拿到清一色/混一色的倍率
 }
 
 TEST(MahjongRules, HonorIsNotPureOneSuit) {  // 23
   // 全字牌（4 组字牌刻子 + 字牌将）：能和的，但**不是**清一色（RULESET §3.4 无「字一色」），
   // 也**不是**混一色（要求「恰含一门数牌」）
-  std::vector<Tile> all_honor = H({"1z", "1z", "1z", "2z", "2z", "2z", "3z", "3z", "3z", "4z",
-                                   "4z", "4z", "5z", "5z"});
+  std::vector<Tile> all_honor = H({"1z", "1z", "1z", "2z", "2z", "2z", "3z", "3z", "3z", "4z", "4z", "4z", "5z", "5z"});
   EXPECT_TRUE(CanWinExact(all_honor, {}));
   EXPECT_FALSE(IsPureOneSuit(all_honor, {}));
   EXPECT_FALSE(HasTag(all_honor, {}, "pure_one_suit"));
   EXPECT_FALSE(HasTag(all_honor, {}, "honitsu"));
   // menzen 1 + toitoi 2 + sanankou 2 = 5 番
-  EXPECT_EQ(WinTags(all_honor, {}),
-            (std::vector<std::string>{"menzen", "toitoi", "sanankou"}));
+  EXPECT_EQ(WinTags(all_honor, {}), (std::vector<std::string> {"menzen", "toitoi", "sanankou"}));
 
   // 含单个字牌对的数牌手牌 → 不是清一色，而是**混一色**（B1 新增番种，§1.4）
-  std::vector<Tile> one_honor_pair = H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m",
-                                        "4m", "5m", "6m", "1z", "1z"});
+  std::vector<Tile> one_honor_pair =
+      H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4m", "5m", "6m", "1z", "1z"});
   EXPECT_TRUE(CanWinExact(one_honor_pair, {}));
   EXPECT_FALSE(IsPureOneSuit(one_honor_pair, {}));
   EXPECT_FALSE(HasTag(one_honor_pair, {}, "pure_one_suit"));
@@ -712,8 +681,7 @@ TEST(MahjongRules, HonorIsNotPureOneSuit) {  // 23
 
   // 副露含字牌刻子时同样不是清一色（1 组副露 ⇒ 门前 11 张：3 组面子 + 将）
   const std::vector<Meld> honor_meld = {Pong({"5z", "5z", "5z"})};
-  std::vector<Tile> with_meld = H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "4m", "5m", "6m",
-                                   "6m"});
+  std::vector<Tile> with_meld = H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "4m", "5m", "6m", "6m"});
   ASSERT_EQ(with_meld.size(), 11u);
   EXPECT_TRUE(CanWinExact(with_meld, honor_meld));
   EXPECT_FALSE(IsPureOneSuit(with_meld, honor_meld));
@@ -722,60 +690,52 @@ TEST(MahjongRules, HonorIsNotPureOneSuit) {  // 23
 
 TEST(MahjongRules, HonorCannotChow) {  // 24
   // 字牌不可吃：即使手里有看似「连续」的字牌，也不得产生 chow 组合
-  std::vector<Tile> hand = H({"1z", "2z", "3z", "4z", "5z", "6z", "7z", "1m", "2m", "3m", "4m",
-                              "5m", "6m"});
+  std::vector<Tile> hand = H({"1z", "2z", "3z", "4z", "5z", "6z", "7z", "1m", "2m", "3m", "4m", "5m", "6m"});
   for (const char* honor : {"1z", "2z", "3z", "4z", "5z", "6z", "7z"}) {
     const auto tile = *ParseTile(honor);
     EXPECT_TRUE(ChowCombinations(hand, tile).empty()) << honor;
     EXPECT_FALSE(CanChow(hand, tile)) << honor;
     // 对应地，claim 选项里不得出现 chow（但 pass 恒在）
     const auto options = ClaimOptions(hand, {}, tile, 83, /*is_next_player=*/true);
-    EXPECT_EQ(FindOption(options, "chow"), nullptr) << honor;
-    EXPECT_NE(FindOption(options, "pass"), nullptr) << honor;
+    EXPECT_EQ(FindOption(options, protocol::Action::kChow), nullptr) << honor;
+    EXPECT_NE(FindOption(options, protocol::Action::kPass), nullptr) << honor;
   }
   // 对照：同样「连续」的数牌可以吃
-  std::vector<Tile> number_hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7m", "9s", "9s", "1p",
-                                     "2p", "4p", "5p"});
+  std::vector<Tile> number_hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7m", "9s", "9s", "1p", "2p", "4p", "5p"});
   EXPECT_FALSE(ChowCombinations(number_hand, *ParseTile("3p")).empty());
 }
 
 TEST(MahjongRules, HonorRunIsNotAWinningHand) {  // 25
   // 只有靠「字牌成顺」才能和的手牌 → 必须判不和（字牌不可成顺）
-  std::vector<Tile> honor_run = H({"1z", "2z", "3z", "1m", "2m", "3m", "4p", "5p", "6p", "7s",
-                                   "8s", "9s", "5z", "5z"});
+  std::vector<Tile> honor_run = H({"1z", "2z", "3z", "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "5z", "5z"});
   EXPECT_FALSE(CanWinExact(honor_run, {}));
 
   // 与上面同构、但把「伪顺子」换成真顺子 → 必须判和（证明拒绝的是字牌顺子而非整个牌型）
-  std::vector<Tile> real_run = H({"1m", "2m", "3m", "2m", "3m", "4m", "4p", "5p", "6p", "7s",
-                                  "8s", "9s", "5z", "5z"});
+  std::vector<Tile> real_run = H({"1m", "2m", "3m", "2m", "3m", "4m", "4p", "5p", "6p", "7s", "8s", "9s", "5z", "5z"});
   EXPECT_TRUE(CanWinExact(real_run, {}));
 
   // 边界：2z3z4z / 6z7z 这类组合都不得成顺
-  EXPECT_FALSE(CanWinExact(H({"2z", "3z", "4z", "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s",
-                              "9s", "5z", "5z"}),
-                           {}));
-  EXPECT_FALSE(CanWinExact(H({"6z", "7z", "1z", "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s",
-                              "9s", "5z", "5z"}),
-                           {}));
+  EXPECT_FALSE(
+      CanWinExact(H({"2z", "3z", "4z", "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "5z", "5z"}), {}));
+  EXPECT_FALSE(
+      CanWinExact(H({"6z", "7z", "1z", "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "5z", "5z"}), {}));
 }
 
 TEST(MahjongRules, HonorTileConservation) {  // 26
   // 任一字牌面 > 4 张 → 判非法
   EXPECT_FALSE(IsVerifiedHand(H({"1z", "1z", "1z", "1z", "1z"})));
-  EXPECT_FALSE(CanWinExact(H({"5z", "5z", "5z", "5z", "5z", "1m", "2m", "3m", "4m", "5m", "6m",
-                              "7p", "8p", "9p"}),
-                           {}));
+  EXPECT_FALSE(
+      CanWinExact(H({"5z", "5z", "5z", "5z", "5z", "1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p"}), {}));
   // 恰好 4 张合法
   EXPECT_TRUE(IsVerifiedHand(H({"1z", "1z", "1z", "1z"})));
   // 字牌明杠（4 张）+ 手牌再出现同面 → 合计 5 张，非法
   const std::vector<Meld> honor_kong = {Kong({"5z", "5z", "5z", "5z"})};
-  EXPECT_FALSE(CanWinExact(H({"5z", "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "2m"}),
-                           honor_kong));
+  EXPECT_FALSE(CanWinExact(H({"5z", "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "2m"}), honor_kong));
   // 字牌碰 + 合法和牌形则成立
   const std::vector<Meld> honor_pong = {Pong({"1z", "1z", "1z"})};
   std::vector<Tile> hand = H({"1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "2m", "2m"});
   EXPECT_TRUE(CanWinExact(hand, honor_pong));
-  EXPECT_TRUE(CanPong(H({"1z", "1z", "3m"}), *ParseTile("1z")));   // 碰对字牌可用
+  EXPECT_TRUE(CanPong(H({"1z", "1z", "3m"}), *ParseTile("1z")));  // 碰对字牌可用
   EXPECT_TRUE(CanKong(H({"1z", "1z", "1z", "3m"}), *ParseTile("1z"), 83));
   EXPECT_TRUE(CanKong(H({"1z", "1z", "1z", "3m"}), *ParseTile("1z"), 0) == false);  // 无牌可补则不可杠
 }
@@ -786,14 +746,13 @@ TEST(MahjongRules, HonorTileConservation) {  // 26
 TEST(MahjongRules, MeldLegality) {  // 18
   EXPECT_TRUE(IsValidMeld(Pong({"5p", "5p", "5p"})));
   EXPECT_TRUE(IsValidMeld(Kong({"9s", "9s", "9s", "9s"})));
-  EXPECT_TRUE(IsValidMeld(Meld{.type = MeldType::kChow, .tiles = H({"3p", "4p", "5p"})}));
-  EXPECT_FALSE(IsValidMeld(Meld{.type = MeldType::kChow, .tiles = H({"3p", "4p", "6p"})}));
-  EXPECT_FALSE(IsValidMeld(Meld{.type = MeldType::kChow, .tiles = H({"8p", "9p", "1s"})}));
+  EXPECT_TRUE(IsValidMeld(Meld {.type = MeldType::kChow, .tiles = H({"3p", "4p", "5p"})}));
+  EXPECT_FALSE(IsValidMeld(Meld {.type = MeldType::kChow, .tiles = H({"3p", "4p", "6p"})}));
+  EXPECT_FALSE(IsValidMeld(Meld {.type = MeldType::kChow, .tiles = H({"8p", "9p", "1s"})}));
   EXPECT_FALSE(IsValidMeld(Pong({"5p", "5p"})));
   EXPECT_FALSE(IsValidMeld(Kong({"9s", "9s", "9s"})));
 
-  std::vector<Tile> hand = H({"5p", "5p", "6p", "6p", "7p", "1m", "2m", "3m", "4m", "5m", "6m",
-                              "7m", "8m"});
+  std::vector<Tile> hand = H({"5p", "5p", "6p", "6p", "7p", "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m"});
   EXPECT_TRUE(CanPong(hand, *ParseTile("5p")));
   EXPECT_FALSE(CanKong(hand, *ParseTile("5p"), 55));
   EXPECT_TRUE(CanChow(hand, *ParseTile("8p")));   // 6p 7p
@@ -817,16 +776,13 @@ TEST(MahjongRules, HandSizeInvariants) {  // 19
 
   // 明杠：物理张数 = 14 + 杠数
   const std::vector<Meld> kong = {Kong({"9s", "9s", "9s", "9s"})};
-  std::vector<Tile> kong_active = H({"1m", "2m", "3m", "4p", "5p", "6p", "1s", "2s", "3s", "2m",
-                                     "2m"});
+  std::vector<Tile> kong_active = H({"1m", "2m", "3m", "4p", "5p", "6p", "1s", "2s", "3s", "2m", "2m"});
   EXPECT_EQ(kong_active.size() + 3u * MeldCountOf(kong) + KanCountOf(kong), 15u);
   EXPECT_TRUE(CanWinExact(kong_active, kong));
   // 牌张守恒：与杠重复的第 5 张同面牌必须判非法
-  EXPECT_FALSE(CanWinExact(H({"1m", "2m", "3m", "4p", "5p", "6p", "9s", "9s", "9s", "2m", "2m"}),
-                           kong));
+  EXPECT_FALSE(CanWinExact(H({"1m", "2m", "3m", "4p", "5p", "6p", "9s", "9s", "9s", "2m", "2m"}), kong));
   EXPECT_FALSE(IsVerifiedHand(H({"1m", "1m", "1m", "1m", "1m"})));  // 5 张同面非法
 }
-
 
 // ---------------------------------------------------------------------------
 // t20：向听数与牌效率弃牌策略
@@ -879,39 +835,39 @@ TEST(MahjongRules, ShantenKnownHands) {  // 27
     int expect;
   };
   std::vector<Case> cases = {
-      {H({"1m","2m","3m","4m","5m","6m","7p","8p","9p","1s","2s","3s","5s","5s"}), {}, -1},  // 和牌形
-      {H({"1m","2m","3m","4m","5m","6m","7p","8p","9p","1s","2s","3s","5s"}), {}, 0},        // 听牌
-      {H({"1m","2m","3m","4m","5m","6m","7p","8p","9p","3s","4s","1z","5z"}), {}, 1},        // 一向听
-      {H({"1m","2m","3m","4m","5m","6m","7p","8p","3s","4s","1z","5z","9m"}), {}, 2},        // 两向听
-      {H({"1m","2m","3m","4m","5m","6m","7p","3s","1z","5z","9m","2p","4p"}), {}, 3},        // 三向听
-      {H({"1m","1m","2m","2m","3m","3m","4p","4p","5p","5p","6p","6p","7s"}), {}, 0},         // 七对子听牌
-      {H({"1m","1m","2m","2m","3m","3m","4p","4p","5p","5p","1z","3z","5z"}), {}, 1},         // 七对子一向听
-      {H({"1m","2m","3m","4m","5m","6m","7p","8p","9s","9s"}), {Pong({"5z","5z","5z"})}, 0},  // 副露听牌
-      {H({"1m","2m","3m","4m","5m","6m","7p","8p","9s"}), {Pong({"5z","5z","5z"})}, 1},       // 副露一向听（面子计入）
-      {H({"1m","2m","3m","4m","5m","6m","7p","3s","1z","5z"}), {Pong({"9s","9s","9s"})}, 2},
+      {H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "5s", "5s"}), {}, -1},  // 和牌形
+      {H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "5s"}), {}, 0},         // 听牌
+      {H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "3s", "4s", "1z", "5z"}), {}, 1},         // 一向听
+      {H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "3s", "4s", "1z", "5z", "9m"}), {}, 2},         // 两向听
+      {H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "3s", "1z", "5z", "9m", "2p", "4p"}), {}, 3},         // 三向听
+      {H({"1m", "1m", "2m", "2m", "3m", "3m", "4p", "4p", "5p", "5p", "6p", "6p", "7s"}), {}, 0},         // 七对子听牌
+      {H({"1m", "1m", "2m", "2m", "3m", "3m", "4p", "4p", "5p", "5p", "1z", "3z", "5z"}), {}, 1},        // 七对子一向听
+      {H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9s", "9s"}), {Pong({"5z", "5z", "5z"})}, 0},  // 副露听牌
+      {H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9s"}),
+       {Pong({"5z", "5z", "5z"})},
+       1},  // 副露一向听（面子计入）
+      {H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "3s", "1z", "5z"}), {Pong({"9s", "9s", "9s"})}, 2},
   };
   for (const Case& c : cases) {
-    EXPECT_EQ(Shanten(c.hand, c.melds), c.expect)
-        << "hand size=" << c.hand.size() << " melds=" << c.melds.size();
+    EXPECT_EQ(Shanten(c.hand, c.melds), c.expect) << "hand size=" << c.hand.size() << " melds=" << c.melds.size();
   }
 }
 
 TEST(MahjongRules, ShantenHonorRules) {  // 28
   // 字牌不成顺：1z2z3z 不得被当作一组面子（若误当顺子会得到 0）
-  const std::vector<Tile> no_run = H({"1z","2z","3z","5z","5z","1m","2m","3m","4m","5m","6m","7m","8m"});
+  const std::vector<Tile> no_run = H({"1z", "2z", "3z", "5z", "5z", "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m"});
   EXPECT_EQ(Shanten(no_run, {}), 2) << "字牌被误判成顺子时会得到 0";
 
   // 字牌刻子计入面子、字牌对子可作将
-  EXPECT_EQ(Shanten(H({"1z","1z","1z","2z","2z","2z","3z","3z","3z","4z","4z","4z","5z"}), {}), 0);
-  EXPECT_EQ(Shanten(H({"1z","1z","1z","2z","2z","2z","3z","3z","3z","4z","4z","4z","5z","5z"}), {}), -1);
-  EXPECT_EQ(Shanten(H({"1m","2m","3m","4m","5m","6m","7m","8m","9m","5z","5z","1p","2p"}), {}), 0);
+  EXPECT_EQ(Shanten(H({"1z", "1z", "1z", "2z", "2z", "2z", "3z", "3z", "3z", "4z", "4z", "4z", "5z"}), {}), 0);
+  EXPECT_EQ(Shanten(H({"1z", "1z", "1z", "2z", "2z", "2z", "3z", "3z", "3z", "4z", "4z", "4z", "5z", "5z"}), {}), -1);
+  EXPECT_EQ(Shanten(H({"1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "5z", "5z", "1p", "2p"}), {}), 0);
 }
 
 TEST(MahjongRules, ChooseDiscardPrefersIsolatedHonor) {  // 29
   // 孤字牌（1z/5z）是纯浮牌，应优先于数牌搭子（3p4p）被切掉：
   // 切孤字牌 → 打牌后摸一张可达听牌（0）；切搭子中的 3p → 只能到一向听（1）。
-  std::vector<Tile> hand =
-      H({"1m","2m","3m","4m","5m","6m","7p","8p","3p","4p","9s","9s","1z","5z"});
+  std::vector<Tile> hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "3p", "4p", "9s", "9s", "1z", "5z"});
   Tile drawn = *ParseTile("5z");
   const Tile pick = *ChooseDiscard(hand, {}, drawn);
   EXPECT_TRUE(IsHonorFace(FaceOf(pick))) << FormatTile(pick);
@@ -927,23 +883,21 @@ TEST(MahjongRules, ChooseDiscardPrefersIsolatedHonor) {  // 29
 TEST(MahjongRules, ChooseDiscardKeepsHonorPairAndTriplet) {  // 30
   // 字牌对子是**唯一将**：拆掉它必须严格更差（0 向听差 vs 听牌 -1）
   {
-    std::vector<Tile> hand =
-        H({"1m","2m","3m","4m","5m","6m","7m","8m","9m","5z","5z","1p","2p","9p"});
+    std::vector<Tile> hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "5z", "5z", "1p", "2p", "9p"});
     Tile drawn = *ParseTile("9p");
     const Tile pick = *ChooseDiscard(hand, {}, drawn);
     EXPECT_FALSE(IsHonorFace(FaceOf(pick))) << "字牌对子被拆掉：" << FormatTile(pick);
-    EXPECT_EQ(FormatTile(pick), "9p");                     // 唯一最优：切 9p 后听牌
+    EXPECT_EQ(FormatTile(pick), "9p");  // 唯一最优：切 9p 后听牌
     EXPECT_EQ(ScoreOf(hand, {}, FaceOf(pick)), -1);
     EXPECT_GT(ScoreOf(hand, {}, FaceOf(*ParseTile("5z"))), -1);  // 拆对子明显更差
   }
   // 字牌刻子可作面子：拆掉它同样严格更差
   {
-    std::vector<Tile> hand =
-        H({"5z","5z","5z","1m","2m","3m","4m","5m","6m","7p","8p","1s","9s","9s"});
+    std::vector<Tile> hand = H({"5z", "5z", "5z", "1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "1s", "9s", "9s"});
     Tile drawn = *ParseTile("9s");
     const Tile pick = *ChooseDiscard(hand, {}, drawn);
     EXPECT_FALSE(IsHonorFace(FaceOf(pick))) << "字牌刻子被拆掉：" << FormatTile(pick);
-    EXPECT_EQ(FormatTile(pick), "1s");                       // 唯一最优：切 1s 后听牌
+    EXPECT_EQ(FormatTile(pick), "1s");  // 唯一最优：切 1s 后听牌
     EXPECT_EQ(ScoreOf(hand, {}, FaceOf(pick)), -1);
     EXPECT_GT(ScoreOf(hand, {}, FaceOf(*ParseTile("5z"))), -1);  // 拆刻子更差
   }
@@ -951,8 +905,7 @@ TEST(MahjongRules, ChooseDiscardKeepsHonorPairAndTriplet) {  // 30
 
 TEST(MahjongRules, ChooseDiscardUsesBestAfterDrawMetric) {  // 31
   // 口径证明：评分 = 「打牌后从 34 面摸一张的最优向听」，而不是只看当前向听数。
-  std::vector<Tile> hand =
-      H({"3m","9m","5p","5p","8p","9p","9p","2s","7s","8s","1z","3z","3z","6z"});
+  std::vector<Tile> hand = H({"3m", "9m", "5p", "5p", "8p", "9p", "9p", "2s", "7s", "8s", "1z", "3z", "3z", "6z"});
 
   // (1) 不退化回「恒打刚摸到的牌」（DefaultDiscard 的旧行为）：打摸到的 9p 严格更差
   {
@@ -960,7 +913,7 @@ TEST(MahjongRules, ChooseDiscardUsesBestAfterDrawMetric) {  // 31
     const Tile pick = *ChooseDiscard(hand, {}, drawn);
     EXPECT_EQ(FormatTile(pick), "3m");
     EXPECT_EQ(ScoreOf(hand, {}, FaceOf(pick)), 2);
-    EXPECT_EQ(ScoreOf(hand, {}, FaceOf(drawn)), 3);           // 打摸到的牌严格更差
+    EXPECT_EQ(ScoreOf(hand, {}, FaceOf(drawn)), 3);  // 打摸到的牌严格更差
     EXPECT_LT(ScoreOf(hand, {}, FaceOf(pick)), ScoreOf(hand, {}, FaceOf(drawn)));
   }
   // (2) 与「只看向听数」的朴素口径给出**不同答案**：朴素口径并列时偏好刚摸到的 9m，
@@ -983,7 +936,10 @@ TEST(MahjongRules, ChooseDiscardUsesBestAfterDrawMetric) {  // 31
     std::sort(cands.begin(), cands.end());
     for (Face f : cands) min_score = std::min(min_score, ScoreOf(hand, {}, f));
     for (Face f : cands) {
-      if (ScoreOf(hand, {}, f) == min_score) { min_score_min_face = f; break; }
+      if (ScoreOf(hand, {}, f) == min_score) {
+        min_score_min_face = f;
+        break;
+      }
     }
     EXPECT_EQ(ours_score, min_score);
     EXPECT_EQ(static_cast<int>(FaceOf(ours)), min_score_min_face);
@@ -998,8 +954,7 @@ TEST(MahjongRules, ChooseDiscardUsesBestAfterDrawMetric) {  // 31
 
 TEST(MahjongRules, ChooseDiscardWithoutDrawRecord) {  // 32
   // 无摸牌记录（庄家第一打 / 碰吃后的待打牌）：可传 std::nullopt，且不改变选牌结果
-  std::vector<Tile> opening =
-      H({"1m","2m","3m","4m","5m","6m","7p","8p","3p","4p","9s","9s","1z","5z"});
+  std::vector<Tile> opening = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "3p", "4p", "9s", "9s", "1z", "5z"});
   const auto no_draw = ChooseDiscard(opening, {}, std::nullopt);
   ASSERT_TRUE(no_draw.has_value());
   EXPECT_EQ(ScoreOf(opening, {}, FaceOf(*no_draw)),
@@ -1008,7 +963,7 @@ TEST(MahjongRules, ChooseDiscardWithoutDrawRecord) {  // 32
 
   // 碰后待打牌（1 组副露 ⇒ 门前 11 张，行动态）：返回合法的、评分最优的牌
   const std::vector<Meld> melds = {Pong({"5z", "5z", "5z"})};
-  std::vector<Tile> after_pong = H({"1m","2m","3m","4m","5m","6m","7p","8p","3p","4p","9s"});
+  std::vector<Tile> after_pong = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "3p", "4p", "9s"});
   ASSERT_EQ(after_pong.size(), 11u);
   const auto pick = ChooseDiscard(after_pong, melds, std::nullopt);
   ASSERT_TRUE(pick.has_value());
@@ -1026,34 +981,30 @@ TEST(MahjongRules, ChooseDiscardWithoutDrawRecord) {  // 32
 }
 
 TEST(MahjongRules, ChooseDiscardDeterminism) {  // 33
-  std::vector<Tile> hand =
-      H({"3m","9m","5p","5p","8p","9p","9p","2s","7s","8s","1z","3z","3z","6z"});
+  std::vector<Tile> hand = H({"3m", "9m", "5p", "5p", "8p", "9p", "9p", "2s", "7s", "8s", "1z", "3z", "3z", "6z"});
   Tile drawn = *ParseTile("9m");
   const Tile a = *ChooseDiscard(hand, {}, drawn);
   const Tile b = *ChooseDiscard(hand, {}, drawn);
   EXPECT_EQ(FormatTile(a), FormatTile(b));  // 同一输入两次一致
 
   // 完全并列时取冻结牌序最小牌面：手中 5 个孤字牌评分相同（且都优于任何数牌候选）⇒ 取 1z
-  std::vector<Tile> tie_hand =
-      H({"1m","2m","3m","4m","5m","6m","7p","8p","9p","1z","3z","5z","6z","7z"});
+  std::vector<Tile> tie_hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1z", "3z", "5z", "6z", "7z"});
   const Tile tie_pick = *ChooseDiscard(tie_hand, {}, *ParseTile("7z"));
   EXPECT_TRUE(IsHonorFace(FaceOf(tie_pick)));
   EXPECT_EQ(FormatTile(tie_pick), "1z");  // 最小字牌面（冻结牌序中数牌在前，但数牌候选更差）
   for (const char* n : {"1m", "9p"}) {
-    EXPECT_GT(ScoreOf(tie_hand, {}, FaceOf(*ParseTile(n))), ScoreOf(tie_hand, {}, FaceOf(tie_pick)))
-        << n;
+    EXPECT_GT(ScoreOf(tie_hand, {}, FaceOf(*ParseTile(n))), ScoreOf(tie_hand, {}, FaceOf(tie_pick))) << n;
   }
 
   // DefaultDiscard 语义未被改动（超时代打 / 人类托管的冻结回退）
   EXPECT_EQ(FormatTile(*DefaultDiscard(hand, drawn)), FormatTile(drawn));
-  EXPECT_EQ(FormatTile(*DefaultDiscard(hand, std::nullopt)),
-            FormatTile(SortedTiles(hand).back()));
+  EXPECT_EQ(FormatTile(*DefaultDiscard(hand, std::nullopt)), FormatTile(SortedTiles(hand).back()));
 }
 
 TEST(MahjongRules, ChooseDiscardHonorTripletBeatsRunTemptation) {  // 34
   // 字牌永不参与顺子：把 1z2z3z 当顺子的实现会认为「切 5z」最优；正确实现应保留 5z 对子/刻子语义
   const std::vector<Tile> hand =
-      H({"1z","2z","3z","5z","5z","1m","2m","3m","4m","5m","6m","7m","8m","9m"});
+      H({"1z", "2z", "3z", "5z", "5z", "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m"});
   const Tile pick = *ChooseDiscard(hand, {}, *ParseTile("9m"));
   EXPECT_TRUE(IsHonorFace(FaceOf(pick))) << FormatTile(pick);
   // 1z/2z/3z 三个孤字牌并列（评分相同）⇒ 冻结牌序取 1z
@@ -1063,25 +1014,23 @@ TEST(MahjongRules, ChooseDiscardHonorTripletBeatsRunTemptation) {  // 34
 
 TEST(MahjongRules, ShantenAfterMeldHelper) {  // 35
   // hand 为鸣牌前门前手牌（等待态 13 张口径）
-  const std::vector<Tile> hand =
-      H({"1m","2m","3m","4m","5m","6m","7p","8p","9s","5z","5z","1p","2p"});
+  const std::vector<Tile> hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9s", "5z", "5z", "1p", "2p"});
   // 碰 5z（消耗手中的两张 5z）
-  const auto pong = ShantenAfterMeld(hand, {}, *ParseTile("5z"), H({"5z","5z"}), MeldType::kPong);
+  const auto pong = ShantenAfterMeld(hand, {}, *ParseTile("5z"), H({"5z", "5z"}), MeldType::kPong);
   ASSERT_TRUE(pong.has_value());
   EXPECT_GE(*pong, -1);
   // 吃：{1p,2p} 配 3p 成顺子
-  const auto chow = ShantenAfterMeld(hand, {}, *ParseTile("3p"), H({"1p","2p"}), MeldType::kChow);
+  const auto chow = ShantenAfterMeld(hand, {}, *ParseTile("3p"), H({"1p", "2p"}), MeldType::kChow);
   ASSERT_TRUE(chow.has_value());
   // 非法组合一律 nullopt：consume 与 claimed 不同面 / 张数不符 / 无牌可吃 / 字牌吃
-  EXPECT_FALSE(ShantenAfterMeld(hand, {}, *ParseTile("3p"), H({"9s","9s"}), MeldType::kPong).has_value());
-  EXPECT_FALSE(ShantenAfterMeld(hand, {}, *ParseTile("5z"), H({"5z","5z","5z"}), MeldType::kPong).has_value());
-  EXPECT_FALSE(ShantenAfterMeld(hand, {}, *ParseTile("3p"), H({"1p","2p","2p"}), MeldType::kChow).has_value());
-  EXPECT_FALSE(ShantenAfterMeld(hand, {}, *ParseTile("5z"), H({"1z","2z"}), MeldType::kChow).has_value());
-  EXPECT_FALSE(ShantenAfterMeld(hand, {}, *ParseTile("4p"), H({"1p","2p"}), MeldType::kChow).has_value());
+  EXPECT_FALSE(ShantenAfterMeld(hand, {}, *ParseTile("3p"), H({"9s", "9s"}), MeldType::kPong).has_value());
+  EXPECT_FALSE(ShantenAfterMeld(hand, {}, *ParseTile("5z"), H({"5z", "5z", "5z"}), MeldType::kPong).has_value());
+  EXPECT_FALSE(ShantenAfterMeld(hand, {}, *ParseTile("3p"), H({"1p", "2p", "2p"}), MeldType::kChow).has_value());
+  EXPECT_FALSE(ShantenAfterMeld(hand, {}, *ParseTile("5z"), H({"1z", "2z"}), MeldType::kChow).has_value());
+  EXPECT_FALSE(ShantenAfterMeld(hand, {}, *ParseTile("4p"), H({"1p", "2p"}), MeldType::kChow).has_value());
   // 明杠：补摸按最优补牌（乐观口径）；此处手中正好 3 张 5z
-  const std::vector<Tile> kong_hand =
-      H({"1m","2m","3m","4m","5m","6m","7p","8p","9s","5z","5z","5z","1p"});
-  const auto kong = ShantenAfterMeld(kong_hand, {}, *ParseTile("5z"), H({"5z","5z","5z"}), MeldType::kKong);
+  const std::vector<Tile> kong_hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9s", "5z", "5z", "5z", "1p"});
+  const auto kong = ShantenAfterMeld(kong_hand, {}, *ParseTile("5z"), H({"5z", "5z", "5z"}), MeldType::kKong);
   ASSERT_TRUE(kong.has_value());
   EXPECT_GE(*kong, -1);
 }
@@ -1154,31 +1103,28 @@ TEST(MahjongRules, ShantenMatchesTenpaiProperty) {  // 36
     std::vector<Tile> mutated_hand = h14;
     mutated_hand[rng() % mutated_hand.size()] = MakeTileFromFace(static_cast<Face>(face_dist(rng)));
     if (!counts_ok(mutated_hand, kCopiesPerFace)) continue;
-    EXPECT_EQ(Shanten(mutated_hand, {}) == -1, CanWinExact(mutated_hand, {}))
-        << "和牌 ⟺ -1 性质不符";
+    EXPECT_EQ(Shanten(mutated_hand, {}) == -1, CanWinExact(mutated_hand, {})) << "和牌 ⟺ -1 性质不符";
     ++mutated;
   }
 
-  std::cout << "[property] 和牌形样本=" << hands << "，听牌样本=" << tenpai_samples
-            << "，变异样本=" << mutated << std::endl;
+  std::cout << "[property] 和牌形样本=" << hands << "，听牌样本=" << tenpai_samples << "，变异样本=" << mutated
+            << std::endl;
   EXPECT_GT(hands, 300);
   EXPECT_GT(tenpai_samples, 900);
   EXPECT_GT(mutated, 300);
 }
 
 TEST(MahjongRules, ChooseDiscardPerformanceAndDefaultUnchanged) {  // 36
-  std::vector<Tile> hand =
-      H({"1m","2m","3m","4m","5m","6m","7p","8p","3p","4p","9s","9s","1z","5z"});
+  std::vector<Tile> hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "3p", "4p", "9s", "9s", "1z", "5z"});
   // 预热
   for (int i = 0; i < 10; ++i) (void)ChooseDiscard(hand, {}, *ParseTile("5z"));
   const int kIters = 200;
   const auto start = std::chrono::steady_clock::now();
   for (int i = 0; i < kIters; ++i) (void)ChooseDiscard(hand, {}, *ParseTile("5z"));
   const auto end = std::chrono::steady_clock::now();
-  const double per_call_us =
-      std::chrono::duration<double, std::micro>(end - start).count() / kIters;
-  std::cout << "[perf] ChooseDiscard: " << per_call_us << " us/次 ("
-            << per_call_us / 1000.0 << " ms/次), 阈值 2000 us" << std::endl;
+  const double per_call_us = std::chrono::duration<double, std::micro>(end - start).count() / kIters;
+  std::cout << "[perf] ChooseDiscard: " << per_call_us << " us/次 (" << per_call_us / 1000.0 << " ms/次), 阈值 2000 us"
+            << std::endl;
   EXPECT_LT(per_call_us, 2000.0) << "单次弃牌决策必须 < 2ms";
 }
 
@@ -1190,9 +1136,8 @@ namespace {
 
 // 番种表序（GAME_DESIGN_V2 §1.2）：**序 = 判定顺序 = 数组顺序**，冻结
 const std::vector<std::string> kYakuOrder = {
-    "menzen",  "tanyao", "pinfu",  "iipeikou", "yakuhai",
-    "rinshan", "sanshoku_doujun", "ittsuu", "toitoi", "sanankou",
-    "honitsu", "shousangen", "seven_pairs", "pure_one_suit",
+    "menzen", "tanyao", "pinfu",    "iipeikou", "yakuhai",    "rinshan",     "sanshoku_doujun",
+    "ittsuu", "toitoi", "sanankou", "honitsu",  "shousangen", "seven_pairs", "pure_one_suit",
 };
 
 // 断言：id 均已知、严格按冻结表序出现、同一 id 至多一条、han 与冻结番数表一致
@@ -1218,7 +1163,7 @@ void ExpectFrozenYakuOrder(const std::vector<Yaku>& yaku) {
 // 「14 张手牌 / 副露 / 和牌张」的判定入口（默认自摸口径的统一封装）
 std::vector<Yaku> YakuOf(const std::vector<Tile>& concealed, const std::vector<Meld>& melds,
                          std::string_view winning = "") {
-  Tile tile = concealed.empty() ? Tile{} : concealed.front();
+  Tile tile = concealed.empty() ? Tile {} : concealed.front();
   if (!winning.empty()) tile = *ParseTile(winning);
   return DetectYaku(concealed, melds, tile, Ctx(0, -1));
 }
@@ -1232,8 +1177,7 @@ TEST(MahjongRules, EnumerateDecompositionsReturnsAllSplits) {
   // 111m 222m 333m 555p 99s：同一手牌有**两种**拆法
   //   ① 111+222+333+555p（刻子分支先）
   //   ② 123+123+123+555p（顺子分支后）
-  std::vector<Tile> hand =
-      H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "5p", "5p", "5p", "9s", "9s"});
+  std::vector<Tile> hand = H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "5p", "5p", "5p", "9s", "9s"});
   ASSERT_TRUE(CanWinExact(hand, {}));
   const std::vector<Decomposition> decomps = EnumerateDecompositions(hand, {});
   ASSERT_EQ(decomps.size(), 2u);
@@ -1264,8 +1208,7 @@ TEST(MahjongRules, EnumerateDecompositionsReturnsAllSplits) {
   // 张数不符 / 非和牌形 ⇒ 空（不制造异常）
   EXPECT_TRUE(EnumerateDecompositions(H({"1m", "2m", "3m"}), {}).empty());
   EXPECT_TRUE(EnumerateDecompositions(
-                  H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "5s", "7p"}),
-                  {})
+                  H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "5s", "7p"}), {})
                   .empty());
 }
 
@@ -1307,23 +1250,20 @@ TEST(MahjongRules, EnumerateDecompositionsAgreesWithWinningJudge) {
     // 判定契约（与 CanWinExact 的实现一致）：和牌 ⇔ 有标准型拆法 **或**（七对子）。
     // 七对子没有「4 面子 + 1 将」拆法 ⇒ 枚举为空但判和为真 —— 判番走独立分支，两条路径依然同源。
     ASSERT_TRUE(CanWinExact(hand, {})) << "构造出的手牌必须能和：" << FormatHand(hand);
-    EXPECT_EQ(CanWinExact(hand, {}),
-              !EnumerateDecompositions(hand, {}).empty() || IsSevenPairs(hand))
+    EXPECT_EQ(CanWinExact(hand, {}), !EnumerateDecompositions(hand, {}).empty() || IsSevenPairs(hand))
         << "全拆法枚举与和牌判定必须同源：" << FormatHand(hand);
     ++agree;
     // 变异一手牌：枚举结果与判定必须一致（标准型和 ⇔ 至少一个拆法）
     std::vector<Tile> mutated = hand;
     mutated[rng() % mutated.size()] = MakeTileFromFace(static_cast<Face>(face_dist(rng)));
     if (!IsVerifiedHand(mutated)) continue;
-    EXPECT_EQ(CanWinExact(mutated, {}),
-              !EnumerateDecompositions(mutated, {}).empty() || IsSevenPairs(mutated))
+    EXPECT_EQ(CanWinExact(mutated, {}), !EnumerateDecompositions(mutated, {}).empty() || IsSevenPairs(mutated))
         << FormatHand(mutated);
   }
   EXPECT_GT(constructed, 1000);
   EXPECT_EQ(constructed, agree);
   // 七对子没有标准型拆法 ⇒ 枚举为空，但判定为和（判番走独立分支）
-  std::vector<Tile> seven =
-      H({"1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2p", "2p", "6p", "6p", "8p", "8p"});
+  std::vector<Tile> seven = H({"1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2p", "2p", "6p", "6p", "8p", "8p"});
   EXPECT_TRUE(EnumerateDecompositions(seven, {}).empty());
   EXPECT_TRUE(CanWinExact(seven, {}));
 }
@@ -1355,7 +1295,11 @@ TEST(MahjongRules, ScoreHandCoversEveryHanRow) {
   const std::vector<Row> rows = {
       // 0 番：副露垃圾手（有碰、含幺九、跨三门 ⇒ 无任何番种）
       {H({"1m", "2m", "3m", "4p", "5p", "6p", "7p", "8p", "9p", "2m", "2m"}),
-       {Pong({"9s", "9s", "9s"})}, "2m", 0, 1, "0 番 副露垃圾手"},
+       {Pong({"9s", "9s", "9s"})},
+       "2m",
+       0,
+       1,
+       "0 番 副露垃圾手"},
       // 1 番：只有门清（将牌是字牌 ⇒ 平和不成立）
       {H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "1z", "1z"}),
        {},
@@ -1402,8 +1346,7 @@ TEST(MahjongRules, ScoreHandCoversEveryHanRow) {
   for (const Row& row : rows) {
     ASSERT_TRUE(CanWinExact(row.hand, row.melds)) << row.label;
     const ScoreContext ctx = Ctx(1, 3);
-    const ScoreResult score =
-        ScoreHand(row.hand, row.melds, *ParseTile(row.winning), ctx);
+    const ScoreResult score = ScoreHand(row.hand, row.melds, *ParseTile(row.winning), ctx);
     ExpectFrozenYakuOrder(score.yaku);
     EXPECT_EQ(ExpectScoreConsistent(score, ctx), row.han) << row.label;
     EXPECT_EQ(score.multiplier, row.multiplier) << row.label;
@@ -1418,14 +1361,12 @@ TEST(MahjongRules, ScoreHandCoversEveryHanRow) {
 // R2：14 个番种（每个：正例 + 最容易误判的反例）
 // ---------------------------------------------------------------------------
 TEST(MahjongRules, YakuMenzen) {  // #1 门前清：ankan 不破门清，pong/chow/kong/kakan 破
-  std::vector<Tile> closed =
-      H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "1z", "1z"});
+  std::vector<Tile> closed = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "1z", "1z"});
   EXPECT_TRUE(HasYakuId(YakuOf(closed, {}), "menzen"));
 
   // ankan 不破门清（§1.2 #1 / §4.2）
   const std::vector<Meld> ankan = {Ankan({"9s", "9s", "9s", "9s"})};
-  std::vector<Tile> with_ankan =
-      H({"1m", "2m", "3m", "4p", "5p", "6p", "1s", "2s", "3s", "2m", "2m"});
+  std::vector<Tile> with_ankan = H({"1m", "2m", "3m", "4p", "5p", "6p", "1s", "2s", "3s", "2m", "2m"});
   ASSERT_TRUE(CanWinExact(with_ankan, ankan));
   EXPECT_TRUE(HasYakuId(YakuOf(with_ankan, ankan), "menzen")) << "暗杠不得破门清";
 
@@ -1433,7 +1374,7 @@ TEST(MahjongRules, YakuMenzen) {  // #1 门前清：ankan 不破门清，pong/ch
   std::vector<Tile> tail = H({"1m", "2m", "3m", "4p", "5p", "6p", "1s", "2s", "3s", "2m", "2m"});
   const std::vector<Meld> pong = {Pong({"5z", "5z", "5z"})};
   EXPECT_FALSE(HasYakuId(YakuOf(tail, pong), "menzen"));
-  const std::vector<Meld> chow = {Meld{.type = MeldType::kChow, .tiles = H({"7m", "8m", "9m"})}};
+  const std::vector<Meld> chow = {Meld {.type = MeldType::kChow, .tiles = H({"7m", "8m", "9m"})}};
   EXPECT_FALSE(HasYakuId(YakuOf(tail, chow), "menzen"));
   const std::vector<Meld> kong = {Kong({"5z", "5z", "5z", "5z"})};
   EXPECT_FALSE(HasYakuId(YakuOf(tail, kong), "menzen"));
@@ -1457,15 +1398,13 @@ TEST(MahjongRules, YakuTanyao) {  // #2 断幺九
   EXPECT_FALSE(HasYakuId(YakuOf(with_honor, {}), "tanyao"));
   // 反例 3：副露里含幺九（`all` 是全集，不只是门前手牌）
   const std::vector<Meld> pong = {Pong({"1s", "1s", "1s"})};
-  std::vector<Tile> concealed =
-      H({"2m", "2m", "2m", "3p", "4p", "5p", "5m", "6m", "7m", "5s", "5s"});
+  std::vector<Tile> concealed = H({"2m", "2m", "2m", "3p", "4p", "5p", "5m", "6m", "7m", "5s", "5s"});
   ASSERT_TRUE(CanWinExact(concealed, pong));
   EXPECT_FALSE(HasYakuId(YakuOf(concealed, pong), "tanyao"));
 }
 
 TEST(MahjongRules, YakuPinfu) {  // #3 平和：门清 + 4 顺子 + 数牌将
-  std::vector<Tile> pinfu =
-      H({"2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "6p", "7p", "8p", "5s", "5s"});
+  std::vector<Tile> pinfu = H({"2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "6p", "7p", "8p", "5s", "5s"});
   EXPECT_EQ(HanOfYaku(YakuOf(pinfu, {}), "pinfu"), 1);
 
   // 反例 1：将牌是字牌
@@ -1473,8 +1412,7 @@ TEST(MahjongRules, YakuPinfu) {  // #3 平和：门清 + 4 顺子 + 数牌将
       H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "1z", "1z"});
   EXPECT_FALSE(HasYakuId(YakuOf(honor_pair, {}), "pinfu"));
   // 反例 2：含刻子
-  std::vector<Tile> triplet =
-      H({"2m", "2m", "2m", "3p", "4p", "5p", "6s", "7s", "8s", "5m", "6m", "7m", "5s", "5s"});
+  std::vector<Tile> triplet = H({"2m", "2m", "2m", "3p", "4p", "5p", "6s", "7s", "8s", "5m", "6m", "7m", "5s", "5s"});
   EXPECT_FALSE(HasYakuId(YakuOf(triplet, {}), "pinfu"));
   // 反例 3：有副露（平和是门清限定）
   const std::vector<Meld> pong = {Pong({"9s", "9s", "9s"})};
@@ -1484,13 +1422,11 @@ TEST(MahjongRules, YakuPinfu) {  // #3 平和：门清 + 4 顺子 + 数牌将
 }
 
 TEST(MahjongRules, YakuIipeikou) {  // #4 一杯口：门清 + 两组同花色同起点顺子
-  std::vector<Tile> iipeikou =
-      H({"2m", "3m", "4m", "2m", "3m", "4m", "6p", "7p", "8p", "3s", "4s", "5s", "9s", "9s"});
+  std::vector<Tile> iipeikou = H({"2m", "3m", "4m", "2m", "3m", "4m", "6p", "7p", "8p", "3s", "4s", "5s", "9s", "9s"});
   EXPECT_EQ(HanOfYaku(YakuOf(iipeikou, {}), "iipeikou"), 1);
 
   // 反例 1：两组顺子起点不同（2m3m4m vs 3m4m5m）
-  std::vector<Tile> near_miss =
-      H({"2m", "3m", "4m", "3m", "4m", "5m", "6p", "7p", "8p", "3s", "4s", "5s", "9s", "9s"});
+  std::vector<Tile> near_miss = H({"2m", "3m", "4m", "3m", "4m", "5m", "6p", "7p", "8p", "3s", "4s", "5s", "9s", "9s"});
   EXPECT_FALSE(HasYakuId(YakuOf(near_miss, {}), "iipeikou"));
   // 反例 2：同起点但花色不同（2m3m4m vs 2p3p4p —— 那是三色的形状，不是一杯口）
   std::vector<Tile> cross_suit =
@@ -1498,8 +1434,7 @@ TEST(MahjongRules, YakuIipeikou) {  // #4 一杯口：门清 + 两组同花色�
   EXPECT_FALSE(HasYakuId(YakuOf(cross_suit, {}), "iipeikou"));
   // 反例 3：有副露（一杯口是门清限定）
   const std::vector<Meld> pong = {Pong({"9p", "9p", "9p"})};
-  std::vector<Tile> open =
-      H({"2m", "3m", "4m", "2m", "3m", "4m", "6p", "7p", "8p", "3s", "3s"});
+  std::vector<Tile> open = H({"2m", "3m", "4m", "2m", "3m", "4m", "6p", "7p", "8p", "3s", "3s"});
   ASSERT_TRUE(CanWinExact(open, pong));
   EXPECT_FALSE(HasYakuId(YakuOf(open, pong), "iipeikou"));
 }
@@ -1509,25 +1444,21 @@ TEST(MahjongRules, YakuYakuhai) {  // #5 箭刻：多条合并为一条，han = 
       H({"5z", "5z", "5z", "2m", "2m", "2m", "3p", "4p", "5p", "6s", "7s", "8s", "9m", "9m"});
   const std::vector<Yaku> single = YakuOf(one_dragon, {});
   EXPECT_EQ(HanOfYaku(single, "yakuhai"), 1);
-  EXPECT_EQ(std::count_if(single.begin(), single.end(),
-                          [](const Yaku& y) { return y.id == "yakuhai"; }),
-            1) << "yakuhai 只能出现一条";
+  EXPECT_EQ(std::count_if(single.begin(), single.end(), [](const Yaku& y) { return y.id == "yakuhai"; }), 1)
+      << "yakuhai 只能出现一条";
 
   // 两组白/发 ⇒ 仍是一条，han = 2；三组 ⇒ han = 3
   std::vector<Tile> two_dragons =
       H({"5z", "5z", "5z", "6z", "6z", "6z", "2m", "3m", "4m", "5p", "6p", "7p", "9s", "9s"});
   const std::vector<Yaku> two = YakuOf(two_dragons, {});
   EXPECT_EQ(HanOfYaku(two, "yakuhai"), 2);
-  EXPECT_EQ(std::count_if(two.begin(), two.end(),
-                          [](const Yaku& y) { return y.id == "yakuhai"; }),
-            1);
+  EXPECT_EQ(std::count_if(two.begin(), two.end(), [](const Yaku& y) { return y.id == "yakuhai"; }), 1);
   std::vector<Tile> three_dragons =
       H({"5z", "5z", "5z", "6z", "6z", "6z", "7z", "7z", "7z", "1m", "2m", "3m", "9s", "9s"});
   EXPECT_EQ(HanOfYaku(YakuOf(three_dragons, {}), "yakuhai"), 3);
 
   // 反例 1：风牌（1z 东）不是箭刻
-  std::vector<Tile> wind =
-      H({"1z", "1z", "1z", "2m", "2m", "2m", "3p", "4p", "5p", "6s", "7s", "8s", "9m", "9m"});
+  std::vector<Tile> wind = H({"1z", "1z", "1z", "2m", "2m", "2m", "3p", "4p", "5p", "6s", "7s", "8s", "9m", "9m"});
   EXPECT_FALSE(HasYakuId(YakuOf(wind, {}), "yakuhai"));
   // 反例 2：箭牌的**对子**（不是刻子/杠）不算
   std::vector<Tile> dragon_pair =
@@ -1535,15 +1466,13 @@ TEST(MahjongRules, YakuYakuhai) {  // #5 箭刻：多条合并为一条，han = 
   EXPECT_FALSE(HasYakuId(YakuOf(dragon_pair, {}), "yakuhai"));
   // 箭牌暗杠同样计入箭刻（刻子或杠）
   const std::vector<Meld> dragon_kan = {Ankan({"7z", "7z", "7z", "7z"})};
-  std::vector<Tile> with_kan =
-      H({"1m", "2m", "3m", "4p", "5p", "6p", "1s", "2s", "3s", "2m", "2m"});
+  std::vector<Tile> with_kan = H({"1m", "2m", "3m", "4p", "5p", "6p", "1s", "2s", "3s", "2m", "2m"});
   ASSERT_TRUE(CanWinExact(with_kan, dragon_kan));
   EXPECT_EQ(HanOfYaku(YakuOf(with_kan, dragon_kan), "yakuhai"), 1);
 }
 
 TEST(MahjongRules, YakuRinshan) {  // #6 杠上开花：自摸 且 和牌张是本次杠的补牌
-  std::vector<Tile> hand =
-      H({"2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "6p", "7p", "8p", "5s", "5s"});
+  std::vector<Tile> hand = H({"2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "6p", "7p", "8p", "5s", "5s"});
   const ScoreContext rinshan_tsumo = Ctx(0, -1, /*dealer=*/false, /*rinshan=*/true);
   const std::vector<Yaku> yaku = DetectYaku(hand, {}, *ParseTile("5s"), rinshan_tsumo);
   EXPECT_EQ(HanOfYaku(yaku, "rinshan"), 1);
@@ -1561,8 +1490,7 @@ TEST(MahjongRules, YakuRinshan) {  // #6 杠上开花：自摸 且 和牌张是�
 }
 
 TEST(MahjongRules, YakuSanshokuDoujun) {  // #7 三色同顺
-  std::vector<Tile> sanshoku =
-      H({"2m", "3m", "4m", "2p", "3p", "4p", "2s", "3s", "4s", "7z", "7z", "7z", "9m", "9m"});
+  std::vector<Tile> sanshoku = H({"2m", "3m", "4m", "2p", "3p", "4p", "2s", "3s", "4s", "7z", "7z", "7z", "9m", "9m"});
   EXPECT_EQ(HanOfYaku(YakuOf(sanshoku, {}), "sanshoku_doujun"), 2);
 
   // 反例 1：三门起点不同（2m vs 3p vs 2s）
@@ -1570,45 +1498,38 @@ TEST(MahjongRules, YakuSanshokuDoujun) {  // #7 三色同顺
       H({"2m", "3m", "4m", "3p", "4p", "5p", "2s", "3s", "4s", "7z", "7z", "7z", "9m", "9m"});
   EXPECT_FALSE(HasYakuId(YakuOf(diff_start, {}), "sanshoku_doujun"));
   // 反例 2：只有两门（m + p）
-  std::vector<Tile> two_suits =
-      H({"2m", "3m", "4m", "2p", "3p", "4p", "6s", "7s", "8s", "9m", "9m", "2m", "3m", "4m"});
+  std::vector<Tile> two_suits = H({"2m", "3m", "4m", "2p", "3p", "4p", "6s", "7s", "8s", "9m", "9m", "2m", "3m", "4m"});
   EXPECT_FALSE(HasYakuId(YakuOf(two_suits, {}), "sanshoku_doujun"));
   // 副露的**吃**也算一组顺子（三色不要求门清）
-  const std::vector<Meld> chow = {Meld{.type = MeldType::kChow, .tiles = H({"2p", "3p", "4p"})}};
-  std::vector<Tile> with_chow =
-      H({"2m", "3m", "4m", "2s", "3s", "4s", "9m", "9m", "1z", "1z", "1z"});
+  const std::vector<Meld> chow = {Meld {.type = MeldType::kChow, .tiles = H({"2p", "3p", "4p"})}};
+  std::vector<Tile> with_chow = H({"2m", "3m", "4m", "2s", "3s", "4s", "9m", "9m", "1z", "1z", "1z"});
   ASSERT_TRUE(CanWinExact(with_chow, chow));
   EXPECT_EQ(HanOfYaku(YakuOf(with_chow, chow), "sanshoku_doujun"), 2);
 }
 
 TEST(MahjongRules, YakuIttsuu) {  // #8 一气通贯
-  std::vector<Tile> ittsuu =
-      H({"1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "2p", "2p", "2p", "1z", "1z"});
+  std::vector<Tile> ittsuu = H({"1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "2p", "2p", "2p", "1z", "1z"});
   EXPECT_EQ(HanOfYaku(YakuOf(ittsuu, {}), "ittsuu"), 2);
 
   // 反例 1：缺一段（m 门只有 123 + 456，第三段在 p 门）
-  std::vector<Tile> broken =
-      H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "2p", "3p", "4p", "1z", "1z"});
+  std::vector<Tile> broken = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "2p", "3p", "4p", "1z", "1z"});
   ASSERT_TRUE(CanWinExact(broken, {}));
   EXPECT_FALSE(HasYakuId(YakuOf(broken, {}), "ittsuu"));
   // 反例 2：三段都在但跨花色（123m + 456m + 789p）
-  std::vector<Tile> cross =
-      H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "2s", "3s", "4s", "9m", "9m"});
+  std::vector<Tile> cross = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "2s", "3s", "4s", "9m", "9m"});
   ASSERT_TRUE(CanWinExact(cross, {}));
   EXPECT_FALSE(HasYakuId(YakuOf(cross, {}), "ittsuu")) << "一气通贯要求同一门";
 }
 
 TEST(MahjongRules, YakuToitoi) {  // #9 对对和：4 组全为刻子或杠
-  std::vector<Tile> toitoi =
-      H({"1m", "1m", "1m", "5p", "5p", "5p", "9s", "9s", "9s", "2z", "2z", "2z", "4z", "4z"});
+  std::vector<Tile> toitoi = H({"1m", "1m", "1m", "5p", "5p", "5p", "9s", "9s", "9s", "2z", "2z", "2z", "4z", "4z"});
   const std::vector<Yaku> yaku = YakuOf(toitoi, {});
   EXPECT_EQ(HanOfYaku(yaku, "toitoi"), 2);
   // 表序：menzen(1) 在 toitoi(9) 之前、sanankou(10) 在 toitoi 之后
-  EXPECT_EQ(Ids(yaku), (std::vector<std::string>{"menzen", "toitoi", "sanankou"}));
+  EXPECT_EQ(Ids(yaku), (std::vector<std::string> {"menzen", "toitoi", "sanankou"}));
 
   // 反例 1：含一组顺子
-  std::vector<Tile> with_run =
-      H({"2m", "3m", "4m", "5p", "5p", "5p", "9s", "9s", "9s", "2z", "2z", "2z", "4z", "4z"});
+  std::vector<Tile> with_run = H({"2m", "3m", "4m", "5p", "5p", "5p", "9s", "9s", "9s", "2z", "2z", "2z", "4z", "4z"});
   EXPECT_FALSE(HasYakuId(YakuOf(with_run, {}), "toitoi"));
   // 副露的碰/杠同样计入（对对和不要求门清）
   const std::vector<Meld> melds = {Pong({"5p", "5p", "5p"}), Kong({"9s", "9s", "9s", "9s"})};
@@ -1619,8 +1540,7 @@ TEST(MahjongRules, YakuToitoi) {  // #9 对对和：4 组全为刻子或杠
 
 TEST(MahjongRules, YakuSanankou) {  // #10 三暗刻（含荣和排除和牌张补成的刻子）
   // 三组暗刻（111m / 555p / 999s）+ 一组顺子 + 将
-  std::vector<Tile> base =
-      H({"1m", "1m", "1m", "5p", "5p", "5p", "9s", "9s", "9s", "2m", "3m", "4m", "4z", "4z"});
+  std::vector<Tile> base = H({"1m", "1m", "1m", "5p", "5p", "5p", "9s", "9s", "9s", "2m", "3m", "4m", "4z", "4z"});
   ASSERT_TRUE(CanWinExact(base, {}));
   // 自摸：和牌张（9s）补成的刻子仍是暗刻 ⇒ 三暗刻成立
   const std::vector<Yaku> tsumo = DetectYaku(base, {}, *ParseTile("9s"), Ctx(0, -1));
@@ -1633,41 +1553,34 @@ TEST(MahjongRules, YakuSanankou) {  // #10 三暗刻（含荣和排除和牌张�
   EXPECT_EQ(HanOfYaku(ron_run, "sanankou"), 2);
 
   // 反例 1：只有两组暗刻（第三组是顺子）且荣和
-  std::vector<Tile> two_ankou =
-      H({"1m", "1m", "1m", "5p", "5p", "5p", "2m", "3m", "4m", "6s", "7s", "8s", "4z", "4z"});
+  std::vector<Tile> two_ankou = H({"1m", "1m", "1m", "5p", "5p", "5p", "2m", "3m", "4m", "6s", "7s", "8s", "4z", "4z"});
   EXPECT_FALSE(HasYakuId(DetectYaku(two_ankou, {}, *ParseTile("4z"), Ctx(0, 2)), "sanankou"));
   // 反例 2：暗杠计入暗刻、明碰不计
   const std::vector<Meld> ankan = {Ankan({"9s", "9s", "9s", "9s"})};
-  std::vector<Tile> with_ankan =
-      H({"1m", "1m", "1m", "5p", "5p", "5p", "2m", "3m", "4m", "4z", "4z"});
+  std::vector<Tile> with_ankan = H({"1m", "1m", "1m", "5p", "5p", "5p", "2m", "3m", "4m", "4z", "4z"});
   ASSERT_TRUE(CanWinExact(with_ankan, ankan));
   EXPECT_EQ(HanOfYaku(YakuOf(with_ankan, ankan), "sanankou"), 2);  // 111m + 555p + 暗杠 9s
   const std::vector<Meld> pongs = {Pong({"9s", "9s", "9s"}), Pong({"5p", "5p", "5p"})};
-  std::vector<Tile> with_pongs =
-      H({"1m", "1m", "1m", "2m", "3m", "4m", "4z", "4z"});
+  std::vector<Tile> with_pongs = H({"1m", "1m", "1m", "2m", "3m", "4m", "4z", "4z"});
   ASSERT_TRUE(CanWinExact(with_pongs, pongs));
   EXPECT_FALSE(HasYakuId(YakuOf(with_pongs, pongs), "sanankou")) << "明碰不是暗刻";
 }
 
 TEST(MahjongRules, YakuHonitsu) {  // #11 混一色：恰含一门数牌 + 至少 1 张字牌
-  std::vector<Tile> honitsu =
-      H({"1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "2m", "2m", "2m", "1z", "1z"});
+  std::vector<Tile> honitsu = H({"1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "2m", "2m", "2m", "1z", "1z"});
   const std::vector<Yaku> yaku = YakuOf(honitsu, {});
   EXPECT_EQ(HanOfYaku(yaku, "honitsu"), 2);
   EXPECT_FALSE(HasYakuId(yaku, "pure_one_suit")) << "有字牌 ⇒ 不是清一色";
   ExpectFrozenYakuOrder(yaku);
 
   // 反例 1：全字牌（不是「恰含一门数牌」⇒ 也不成立）
-  std::vector<Tile> all_honor =
-      H({"1z", "1z", "1z", "2z", "2z", "2z", "3z", "3z", "3z", "4z", "4z", "4z", "5z", "5z"});
+  std::vector<Tile> all_honor = H({"1z", "1z", "1z", "2z", "2z", "2z", "3z", "3z", "3z", "4z", "4z", "4z", "5z", "5z"});
   EXPECT_FALSE(HasYakuId(YakuOf(all_honor, {}), "honitsu")) << "全字牌不得判混一色";
   // 反例 2：两门数牌 + 字牌
-  std::vector<Tile> two_suits =
-      H({"1m", "2m", "3m", "4p", "5p", "6p", "7m", "8m", "9m", "2m", "2m", "2m", "1z", "1z"});
+  std::vector<Tile> two_suits = H({"1m", "2m", "3m", "4p", "5p", "6p", "7m", "8m", "9m", "2m", "2m", "2m", "1z", "1z"});
   EXPECT_FALSE(HasYakuId(YakuOf(two_suits, {}), "honitsu"));
   // 反例 3：单门数牌但零字牌 ⇒ 是清一色而不是混一色（结构互斥，无需互斥分支）
-  std::vector<Tile> pure_only =
-      H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4m", "5m", "6m", "7m", "7m"});
+  std::vector<Tile> pure_only = H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4m", "5m", "6m", "7m", "7m"});
   EXPECT_FALSE(HasYakuId(YakuOf(pure_only, {}), "honitsu"));
 }
 
@@ -1689,29 +1602,25 @@ TEST(MahjongRules, YakuShousangen) {  // #12 小三元：两组箭刻 + 第三�
 }
 
 TEST(MahjongRules, YakuSevenPairs) {  // #13 七对子：门清 + 14 张为 7 个不同牌面各 2 张
-  std::vector<Tile> seven =
-      H({"1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2p", "2p", "6p", "6p", "8p", "8p"});
+  std::vector<Tile> seven = H({"1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2p", "2p", "6p", "6p", "8p", "8p"});
   const std::vector<Yaku> yaku = YakuOf(seven, {});
   EXPECT_EQ(HanOfYaku(yaku, "seven_pairs"), 2);
   EXPECT_EQ(HanOfYaku(yaku, "menzen"), 1);
   ExpectFrozenYakuOrder(yaku);
 
   // 反例 1：4 张同面不算两对
-  std::vector<Tile> quad =
-      H({"1m", "1m", "1m", "1m", "2p", "2p", "3p", "3p", "4p", "4p", "5p", "5p", "6p", "6p"});
+  std::vector<Tile> quad = H({"1m", "1m", "1m", "1m", "2p", "2p", "3p", "3p", "4p", "4p", "5p", "5p", "6p", "6p"});
   EXPECT_FALSE(IsSevenPairs(quad));
   EXPECT_FALSE(HasYakuId(YakuOf(quad, {}), "seven_pairs"));
   // 反例 2：有副露（七对子是门清限定，结构必然）
   const std::vector<Meld> pong = {Pong({"9s", "9s", "9s"})};
-  std::vector<Tile> open =
-      H({"1m", "1m", "3m", "3m", "5m", "5m", "2p", "2p", "6p", "6p", "8p"});
+  std::vector<Tile> open = H({"1m", "1m", "3m", "3m", "5m", "5m", "2p", "2p", "6p", "6p", "8p"});
   ASSERT_EQ(open.size(), 11u);
   EXPECT_FALSE(HasYakuId(YakuOf(open, pong), "seven_pairs"));
 }
 
 TEST(MahjongRules, YakuPureOneSuit) {  // #14 清一色：全同一门数牌、零字牌
-  std::vector<Tile> pure =
-      H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4m", "5m", "6m", "7m", "7m"});
+  std::vector<Tile> pure = H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4m", "5m", "6m", "7m", "7m"});
   EXPECT_EQ(HanOfYaku(YakuOf(pure, {}), "pure_one_suit"), 5);
 
   // 反例 1：混入 1 张字牌 ⇒ 跌成混一色
@@ -1721,14 +1630,12 @@ TEST(MahjongRules, YakuPureOneSuit) {  // #14 清一色：全同一门数牌、�
   EXPECT_FALSE(HasYakuId(mixed, "pure_one_suit"));
   EXPECT_TRUE(HasYakuId(mixed, "honitsu"));
   // 反例 2：两门数牌 + 字牌
-  std::vector<Tile> two_suits =
-      H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4p", "5p", "6p", "1z", "1z"});
+  std::vector<Tile> two_suits = H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4p", "5p", "6p", "1z", "1z"});
   EXPECT_FALSE(HasYakuId(YakuOf(two_suits, {}), "pure_one_suit"));
 }
 
 TEST(MahjongRules, BonusTsumoAndDealerBonus) {  // 2 个加成：自摸 +1、庄家 +1（都不是番种）
-  std::vector<Tile> hand =
-      H({"2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "6p", "7p", "8p", "5s", "5s"});
+  std::vector<Tile> hand = H({"2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "6p", "7p", "8p", "5s", "5s"});
   const int base_han = YakuHanTotal(YakuOf(hand, {}));
   ASSERT_EQ(base_han, 3);  // menzen + pinfu + tanyao
 
@@ -1754,8 +1661,7 @@ TEST(MahjongRules, BonusTsumoAndDealerBonus) {  // 2 个加成：自摸 +1、庄
   EXPECT_EQ(both.per_payer, 32);
   EXPECT_EQ(both.total, 96);
   // 封顶对庄家加成同样生效：6 番手牌 + 庄家 ⇒ 仍 6 番
-  std::vector<Tile> capped =
-      H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4m", "5m", "6m", "7m", "7m"});
+  std::vector<Tile> capped = H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4m", "5m", "6m", "7m", "7m"});
   const ScoreResult capped_dealer = ScoreHand(capped, {}, *ParseTile("7m"), Ctx(0, 1, true));
   EXPECT_EQ(capped_dealer.han, 6) << "庄家加成必须受同一封顶";
   EXPECT_EQ(capped_dealer.multiplier, 64);
@@ -1775,12 +1681,12 @@ TEST(MahjongRules, ZeroHanDealerTsumoCrossesToHanOneMultiplierTwo) {
   ASSERT_TRUE(CanWinExact(zero_han, pong));
   const ScoreResult score = ScoreHand(zero_han, pong, *ParseTile("2m"), Ctx(2, -1, /*dealer=*/true));
   EXPECT_TRUE(score.yaku.empty()) << "0 番手牌不得凭空生成番种";
-  EXPECT_EQ(score.han, 1);           // base 0 + dealer 1（自摸 +0）
+  EXPECT_EQ(score.han, 1);  // base 0 + dealer 1（自摸 +0）
   EXPECT_EQ(score.dealer_bonus, 1);
-  EXPECT_EQ(score.multiplier, 2);    // R = 2^1
-  EXPECT_EQ(score.per_payer, 4);     // 自摸 = 2R
-  EXPECT_EQ(score.total, 12);        // 3 × 2R
-  EXPECT_EQ(score.delta, (std::array<int, 4>{-4, -4, 12, -4}));  // seat 2 自摸且为庄家
+  EXPECT_EQ(score.multiplier, 2);                                 // R = 2^1
+  EXPECT_EQ(score.per_payer, 4);                                  // 自摸 = 2R
+  EXPECT_EQ(score.total, 12);                                     // 3 × 2R
+  EXPECT_EQ(score.delta, (std::array<int, 4> {-4, -4, 12, -4}));  // seat 2 自摸且为庄家
   EXPECT_EQ(Sum(score.delta), 0);
 }
 
@@ -1796,7 +1702,7 @@ TEST(MahjongRules, ZeroHanTsumoIsExactlyMinusTwoPlusSix) {
   EXPECT_EQ(tsumo.multiplier, 1);  // R = 2^0 = 1（绝对值锚的根）
   EXPECT_EQ(tsumo.per_payer, 2);
   EXPECT_EQ(tsumo.total, 6);
-  EXPECT_EQ(tsumo.delta, (std::array<int, 4>{-2, -2, 6, -2}));
+  EXPECT_EQ(tsumo.delta, (std::array<int, 4> {-2, -2, 6, -2}));
   EXPECT_EQ(Sum(tsumo.delta), 0);
 }
 
@@ -1813,14 +1719,15 @@ TEST(MahjongRules, YakuDetectionIsDeterministicUnderShuffles) {
       {"七对子清一色", {"1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2m", "2m", "4m", "4m", "6m", "6m"}, {}},
       {"对对和三暗刻箭刻", {"1m", "1m", "1m", "5p", "5p", "5p", "9s", "9s", "9s", "2z", "2z", "2z", "4z", "4z"}, {}},
       {"副露三色", {"2m", "3m", "4m", "2p", "3p", "4p", "2s", "3s", "4s", "7z", "7z", "7z", "9m", "9m"}, {}},
-      {"暗杠混一色", {"1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "2m", "2m"}, {Ankan({"1z", "1z", "1z", "1z"})}},
+      {"暗杠混一色",
+       {"1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "2m", "2m"},
+       {Ankan({"1z", "1z", "1z", "1z"})}},
   };
   std::mt19937 rng(20261118);
   for (const Case& item : cases) {
     std::vector<Tile> hand = H({item.tiles.begin(), item.tiles.end()});
     ASSERT_TRUE(CanWinExact(hand, item.melds)) << item.label;
-    const std::vector<Yaku> reference =
-        DetectYaku(hand, item.melds, hand.front(), Ctx(0, -1));
+    const std::vector<Yaku> reference = DetectYaku(hand, item.melds, hand.front(), Ctx(0, -1));
     const int reference_han = YakuHanTotal(reference);
     for (int iter = 0; iter < 1000; ++iter) {
       std::shuffle(hand.begin(), hand.end(), rng);
@@ -1859,39 +1766,44 @@ TEST(MahjongRules, WaitingTilesUnitShapes) {
   const std::vector<Meld> none;
   const Case cases[] = {
       {"两面 23m → 1m/4m",
-       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "2m", "3m"}), none,
+       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "2m", "3m"}),
+       none,
        {"1m", "4m"}},
       {"嵌张 13m → 2m",
-       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "1m", "3m"}), none,
+       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "1m", "3m"}),
+       none,
        {"2m"}},
       {"边张 12m → 仅 3m（不可 0m）",
-       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "1m", "2m"}), none,
+       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "1m", "2m"}),
+       none,
        {"3m"}},
       {"单骑字牌 5z → 5z",
-       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "9s", "9s", "9s", "5z"}), none,
+       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "9s", "9s", "9s", "5z"}),
+       none,
        {"5z"}},
       {"多面 34567m → 2m/5m/8m",
-       H({"3m", "4m", "5m", "6m", "7m", "1p", "1p", "1p", "9p", "9p", "9p", "5z", "5z"}), none,
+       H({"3m", "4m", "5m", "6m", "7m", "1p", "1p", "1p", "9p", "9p", "9p", "5z", "5z"}),
+       none,
        {"2m", "5m", "8m"}},
       {"七对子 13 张 → 6p",
-       H({"1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2p", "2p", "4p", "4p", "6p"}), none,
+       H({"1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2p", "2p", "4p", "4p", "6p"}),
+       none,
        {"6p"}},
-      {"未听牌 → 空",
-       H({"1m", "3m", "5m", "7m", "9m", "1p", "3p", "5p", "1s", "3s", "5s", "2z", "4z"}), none,
-       {}},
+      {"未听牌 → 空", H({"1m", "3m", "5m", "7m", "9m", "1p", "3p", "5p", "1s", "3s", "5s", "2z", "4z"}), none, {}},
       {"带副露（碰 111p + 10 张）→ 1m/4m",
-       H({"2m", "3m", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z"}), {pong_1p},
+       H({"2m", "3m", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z"}),
+       {pong_1p},
        {"1m", "4m"}},
       {"行动态 14 张 → 空（未听牌口径）",
-       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "2m", "3m", "6z"}), none,
+       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "2m", "3m", "6z"}),
+       none,
        {}},
   };
   for (const Case& item : cases) {
     EXPECT_EQ(FaceSet(WaitingTiles(item.concealed, item.melds)), item.expected) << item.label;
   }
   // 顺序 = §2.2 冻结牌序（WaitingTiles 直接按面升序返回，同一牌面至多一条）。
-  const std::vector<Tile> multi =
-      H({"3m", "4m", "5m", "6m", "7m", "1p", "1p", "1p", "9p", "9p", "9p", "5z", "5z"});
+  const std::vector<Tile> multi = H({"3m", "4m", "5m", "6m", "7m", "1p", "1p", "1p", "9p", "9p", "9p", "5z", "5z"});
   std::vector<Tile> waits = WaitingTiles(multi, none);
   EXPECT_EQ(waits, SortedTiles(waits)) << "waits 必须按 §2.2 牌序";
   for (size_t i = 1; i < waits.size(); ++i) {
@@ -1921,8 +1833,7 @@ TEST(MahjongRules, WaitingTilesMatchesCanWinExact) {
 // PB-1（门禁卡点）：WaitingTiles 单次耗时 ≤ 200µs（均值）、p99 ≤ 400µs。
 // 最坏输入用九面听（1112345678999m，13 张，判 9 次 CanWinExact）；写法照 ChooseDiscard 性能用例。
 TEST(MahjongRules, WaitingTilesPerfBudget) {
-  const std::vector<Tile> worst =
-      H({"1m", "1m", "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "9m", "9m"});
+  const std::vector<Tile> worst = H({"1m", "1m", "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "9m", "9m"});
   const std::vector<Meld> none;
   ASSERT_GE(WaitingTiles(worst, none).size(), 5u) << "九面听的手牌必须真的多面听";
   for (int warmup = 0; warmup < 10; ++warmup) {
@@ -1933,8 +1844,7 @@ TEST(MahjongRules, WaitingTilesPerfBudget) {
   for (int iter = 0; iter < 200; ++iter) {
     const auto started = std::chrono::steady_clock::now();
     (void)WaitingTiles(worst, none);
-    const double us =
-        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - started).count();
+    const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - started).count();
     samples.push_back(us);
   }
   double sum = 0.0;
@@ -1974,8 +1884,8 @@ TEST(MahjongRules, SortPreservesTileIdentity) {
   }
 }
 
-TEST(MahjongRules, ZeroSumForEverySettlementKind) {  std::vector<Tile> hand =
-      H({"1m", "2m", "3m", "4p", "5p", "6p", "7p", "8p", "9p", "2m", "2m"});
+TEST(MahjongRules, ZeroSumForEverySettlementKind) {
+  std::vector<Tile> hand = H({"1m", "2m", "3m", "4p", "5p", "6p", "7p", "8p", "9p", "2m", "2m"});
   const std::vector<Meld> pong = {Pong({"9s", "9s", "9s"})};
   ASSERT_TRUE(CanWinExact(hand, pong));
 
@@ -2030,23 +1940,22 @@ TEST(MahjongRules, RegressionAnchorLegacyTags) {
   EXPECT_TRUE(ron.yaku.empty());
   EXPECT_EQ(ron.han, 0);
   EXPECT_EQ(ron.multiplier, 1);
-  EXPECT_EQ(ron.delta, (std::array<int, 4>{0, 1, 0, -1}));
+  EXPECT_EQ(ron.delta, (std::array<int, 4> {0, 1, 0, -1}));
 
   // ② 0 番自摸（自摸不是番种 ⇒ han 与荣和一致，仅支付路径不同）
   const ScoreResult tsumo = ScoreHand(zero_han, pong, *ParseTile("2m"), Ctx(1, -1));
   EXPECT_TRUE(tsumo.yaku.empty());
   EXPECT_EQ(tsumo.han, 0);
   EXPECT_EQ(tsumo.multiplier, 1);
-  EXPECT_EQ(tsumo.delta, (std::array<int, 4>{-2, 6, -2, -2}));
+  EXPECT_EQ(tsumo.delta, (std::array<int, 4> {-2, 6, -2, -2}));
 
   // ③ 荒庄
   const ScoreResult draw = ScoreDraw();
-  EXPECT_EQ(draw.delta, (std::array<int, 4>{0, 0, 0, 0}));
+  EXPECT_EQ(draw.delta, (std::array<int, 4> {0, 0, 0, 0}));
 
   // 新旧行为对照（设计升级，故意为之）：差额全部来自新增番种与封顶倍率，而非自摸
   // ④ 七对子荣和：旧 M=4 ⇒ ±4；新 menzen(1)+seven_pairs(2)=3 番 ⇒ R=8 ⇒ ±8
-  std::vector<Tile> seven =
-      H({"1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2p", "2p", "6p", "6p", "8p", "8p"});
+  std::vector<Tile> seven = H({"1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2p", "2p", "6p", "6p", "8p", "8p"});
   const ScoreResult seven_ron = ScoreHand(seven, {}, *ParseTile("8p"), Ctx(0, 3));
   EXPECT_EQ(seven_ron.delta[0], 8);
   EXPECT_EQ(seven_ron.delta[3], -8);
@@ -2055,8 +1964,7 @@ TEST(MahjongRules, RegressionAnchorLegacyTags) {
   EXPECT_EQ(MultiplierForHan(YakuHanTotal(seven_ron.yaku) - 1), 4);
 
   // ⑤ 清一色荣和：旧 M=4；新 menzen(1)+sanankou(2)+pure_one_suit(5)=8 番 ⇒ 封顶 6 ⇒ R=64
-  std::vector<Tile> pure =
-      H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4m", "5m", "6m", "7m", "7m"});
+  std::vector<Tile> pure = H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4m", "5m", "6m", "7m", "7m"});
   const ScoreResult pure_ron = ScoreHand(pure, {}, *ParseTile("7m"), Ctx(0, 3));
   EXPECT_EQ(pure_ron.multiplier, 64);
   EXPECT_EQ(pure_ron.delta[0], 64);
@@ -2066,11 +1974,12 @@ TEST(MahjongRules, RegressionAnchorLegacyTags) {
 // R4：杠（5 值 MeldType / 张数推导 / 就地升级 / 张数公式不变）
 // ---------------------------------------------------------------------------
 TEST(MahjongRules, MeldTypesAndKanCounting) {
-  EXPECT_EQ(MeldTypeName(MeldType::kPong), "pong");
-  EXPECT_EQ(MeldTypeName(MeldType::kChow), "chow");
-  EXPECT_EQ(MeldTypeName(MeldType::kKong), "kong");
-  EXPECT_EQ(MeldTypeName(MeldType::kAnkan), "ankan");
-  EXPECT_EQ(MeldTypeName(MeldType::kKakan), "kakan");
+  // v2.0：线上 melds[].type 走整数（§1.3.1），内部 MeldType → WireMeldType 的映射在此守护。
+  EXPECT_EQ(protocol::ToWire(MeldType::kPong), protocol::WireMeldType::kPong);
+  EXPECT_EQ(protocol::ToWire(MeldType::kChow), protocol::WireMeldType::kChow);
+  EXPECT_EQ(protocol::ToWire(MeldType::kKong), protocol::WireMeldType::kKong);
+  EXPECT_EQ(protocol::ToWire(MeldType::kAnkan), protocol::WireMeldType::kAnkan);
+  EXPECT_EQ(protocol::ToWire(MeldType::kKakan), protocol::WireMeldType::kKakan);
 
   EXPECT_TRUE(IsKanType(MeldType::kKong));
   EXPECT_TRUE(IsKanType(MeldType::kAnkan));
@@ -2093,8 +2002,7 @@ TEST(MahjongRules, MeldTypesAndKanCounting) {
 
   // kans = 三种杠的组数之和（旧「仅明杠」作废）；melds 仍是组数
   const std::vector<Meld> melds = {Pong({"1m", "1m", "1m"}), Kong({"2m", "2m", "2m", "2m"}),
-                                   Ankan({"3m", "3m", "3m", "3m"}),
-                                   Kakan({"4m", "4m", "4m", "4m"})};
+                                   Ankan({"3m", "3m", "3m", "3m"}), Kakan({"4m", "4m", "4m", "4m"})};
   EXPECT_EQ(MeldCountOf(melds), 4);
   EXPECT_EQ(KanCountOf(melds), 3);
 }
@@ -2103,7 +2011,7 @@ TEST(MahjongRules, AnkanAndKakanDetection) {
   // 手中 1m 恰 4 张 ⇒ 可暗杠；5p 仅 1 张（是副露 pong 5p 的第 4 张）⇒ 该组可加杠；
   // 9m 不在手 ⇒ 9m 的 pong 组不可加杠
   std::vector<Tile> hand = H({"1m", "1m", "1m", "1m", "5p", "2s", "3s", "4s"});
-  EXPECT_EQ(AnkanFaces(hand), std::vector<Face>{FaceOf(*ParseTile("1m"))});
+  EXPECT_EQ(AnkanFaces(hand), std::vector<Face> {FaceOf(*ParseTile("1m"))});
   EXPECT_TRUE(CanAnkan(hand));
   // 恰好 3 张不是暗杠（明杠走 CanKong 的鸣牌路径）
   EXPECT_FALSE(CanAnkan(H({"1m", "1m", "1m", "5p"})));
@@ -2111,7 +2019,7 @@ TEST(MahjongRules, AnkanAndKakanDetection) {
 
   // 加杠：只有**手中还有同面第 4 张**的那组 pong 可加杠
   const std::vector<Meld> melds = {Pong({"5p", "5p", "5p"}), Pong({"9m", "9m", "9m"})};
-  EXPECT_EQ(KakanMeldIndices(hand, melds), std::vector<int>{0});
+  EXPECT_EQ(KakanMeldIndices(hand, melds), std::vector<int> {0});
   EXPECT_TRUE(CanKakan(hand, melds));
   // 手里没有第 4 张 ⇒ 不可加杠
   EXPECT_FALSE(CanKakan(hand, {Pong({"9m", "9m", "9m"})}));
@@ -2122,8 +2030,7 @@ TEST(MahjongRules, AnkanAndKakanDetection) {
 TEST(MahjongRules, KongTileAccountingStaysInsideBothFormulas) {
   // 逻辑张数 = concealed + 3×melds ∈ {13,14}；物理 = 逻辑 + kans。**两条公式逐字不变**，
   // 三个杠的差别只在「第 4 张从哪来」，对台账零影响（GAME_DESIGN_V2 §4.1）。
-  std::vector<Tile> hand14 = H({"1m", "1m", "1m", "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m",
-                                "9m", "5p", "5p"});
+  std::vector<Tile> hand14 = H({"1m", "1m", "1m", "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "5p", "5p"});
   ASSERT_EQ(hand14.size(), 14u);
 
   // ---- 暗杠：14 → 扣 4 张、melds+1 ⇒ 10 + 3 = 13 → 补 1 张 ⇒ 14 ----
@@ -2198,34 +2105,32 @@ TEST(MahjongRules, AkaFiveStaysOutOfMeld) {
 TEST(MahjongRules, DiscardOptionsKongWindows) {
   // 顺序固定 win → ankan → kakan（R6）
   const std::vector<Meld> melds = {Pong({"5p", "5p", "5p"})};
-  std::vector<Tile> hand =
-      H({"1m", "1m", "1m", "1m", "5p", "2m", "3m", "4m", "6m", "7m", "8m"});
+  std::vector<Tile> hand = H({"1m", "1m", "1m", "1m", "5p", "2m", "3m", "4m", "6m", "7m", "8m"});
   ASSERT_EQ(hand.size() + 3u * MeldCountOf(melds), 14u);
   ASSERT_FALSE(CanWinExact(hand, melds));  // 该手牌不是和牌 ⇒ 首项应是 ankan
   const std::vector<Option> options = DiscardOptions(hand, melds, /*remaining=*/10);
   ASSERT_GE(options.size(), 2u);
-  EXPECT_EQ(options[0].action, "ankan");
+  EXPECT_EQ(options[0].action, protocol::Action::kAnkan);
   // B1.1 裁决 G：选项 tiles = 恰好 1 个牌面元素（与 kong 同形，PROTOCOL v1.6 §4.6；
   // UI 显示 4 张是客户端的事）
   ASSERT_EQ(options[0].tiles.size(), 1u);
   EXPECT_EQ(FaceOf(options[0].tiles[0]), FaceOf(*ParseTile("1m")));
-  EXPECT_EQ(options[1].action, "kakan");
+  EXPECT_EQ(options[1].action, protocol::Action::kKakan);
   EXPECT_EQ(options[1].tiles.size(), 1u);
   EXPECT_TRUE(OptionTilesMatch(options[1], H({"5p"})));
-  EXPECT_EQ(FindOption(options, "win"), nullptr);
+  EXPECT_EQ(FindOption(options, protocol::Action::kWin), nullptr);
 
   // win 在 ankan 之前
-  std::vector<Tile> winning =
-      H({"1m", "1m", "1m", "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "5z", "5z"});
+  std::vector<Tile> winning = H({"1m", "1m", "1m", "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "5z", "5z"});
   ASSERT_TRUE(CanWinExact(winning, {}));
   const std::vector<Option> win_options = DiscardOptions(winning, {}, /*remaining=*/5);
   ASSERT_GE(win_options.size(), 2u);
-  EXPECT_EQ(win_options[0].action, "win");
-  EXPECT_EQ(win_options[1].action, "ankan");
+  EXPECT_EQ(win_options[0].action, protocol::Action::kWin);
+  EXPECT_EQ(win_options[1].action, protocol::Action::kAnkan);
 
   // remaining == 0 ⇒ 无牌可补 ⇒ 不提供任何杠选项（与 CanKong 同源守卫）
-  EXPECT_EQ(FindOption(DiscardOptions(hand, melds, /*remaining=*/0), "ankan"), nullptr);
-  EXPECT_EQ(FindOption(DiscardOptions(hand, melds, /*remaining=*/0), "kakan"), nullptr);
+  EXPECT_EQ(FindOption(DiscardOptions(hand, melds, /*remaining=*/0), protocol::Action::kAnkan), nullptr);
+  EXPECT_EQ(FindOption(DiscardOptions(hand, melds, /*remaining=*/0), protocol::Action::kKakan), nullptr);
   // 未传 remaining（B2 未接线）⇒ 不提供（安全默认，房间行为不变）
   EXPECT_TRUE(DiscardOptions(hand, melds).empty());
   // 非本家行动态（13 张）⇒ 不提供
@@ -2244,8 +2149,7 @@ TEST(MahjongRules, DealTilesRespectsDealerSeat) {
     const Deal deal = DealTiles(wall, dealer);
     for (int seat = 0; seat < 4; ++seat) {
       const size_t expected = (seat == dealer) ? 14u : 13u;
-      EXPECT_EQ(deal.hands[static_cast<size_t>(seat)].size(), expected)
-          << "dealer=" << dealer << " seat=" << seat;
+      EXPECT_EQ(deal.hands[static_cast<size_t>(seat)].size(), expected) << "dealer=" << dealer << " seat=" << seat;
     }
     EXPECT_EQ(deal.remaining, 83);
     EXPECT_EQ(deal.next_index, 53);
@@ -2255,8 +2159,8 @@ TEST(MahjongRules, DealTilesRespectsDealerSeat) {
       for (Tile t : hand) ids.insert(t.id);
     }
     EXPECT_EQ(ids.size(), 53u) << "dealer=" << dealer;
-    EXPECT_NE(std::find(deal.hands[static_cast<size_t>(dealer)].begin(),
-                        deal.hands[static_cast<size_t>(dealer)].end(), wall[52]),
+    EXPECT_NE(std::find(deal.hands[static_cast<size_t>(dealer)].begin(), deal.hands[static_cast<size_t>(dealer)].end(),
+                        wall[52]),
               deal.hands[static_cast<size_t>(dealer)].end())
         << "第 53 张必须发给庄家（dealer=" << dealer << "）";
     // 牌山剩余段与发出去 53 张不重叠
@@ -2287,11 +2191,11 @@ TEST(MahjongRules, NextDealerAndClassifyRound) {
   EXPECT_EQ(NextDealer(3, RoundResult::kNonDealerWin), 0) << "轮庄必须回绕到 0";
 
   // reason → RoundResult：荒庄不看和牌者
-  EXPECT_EQ(ClassifyRound("draw_exhausted", 2, 0), RoundResult::kDrawExhausted);
-  EXPECT_EQ(ClassifyRound("win_ron", 0, 0), RoundResult::kDealerWin);
-  EXPECT_EQ(ClassifyRound("win_tsumo", 0, 0), RoundResult::kDealerWin);
-  EXPECT_EQ(ClassifyRound("win_ron", 2, 0), RoundResult::kNonDealerWin);
-  EXPECT_EQ(ClassifyRound("win_tsumo", 3, 2), RoundResult::kNonDealerWin);
+  EXPECT_EQ(ClassifyRound(protocol::RoundEndReason::kDrawExhausted, 2, 0), RoundResult::kDrawExhausted);
+  EXPECT_EQ(ClassifyRound(protocol::RoundEndReason::kWinRon, 0, 0), RoundResult::kDealerWin);
+  EXPECT_EQ(ClassifyRound(protocol::RoundEndReason::kWinTsumo, 0, 0), RoundResult::kDealerWin);
+  EXPECT_EQ(ClassifyRound(protocol::RoundEndReason::kWinRon, 2, 0), RoundResult::kNonDealerWin);
+  EXPECT_EQ(ClassifyRound(protocol::RoundEndReason::kWinTsumo, 3, 2), RoundResult::kNonDealerWin);
 }
 
 }  // namespace mahjong

@@ -20,9 +20,8 @@ namespace ex = stdexec;
 
 namespace mahjong {
 
-PlayerActor::PlayerActor(std::shared_ptr<Connection> conn, std::shared_ptr<PlayerIdAllocator> player_ids,
-                                 DbService db, std::shared_ptr<SessionRegistry> sessions,
-                                 ex_actor::ActorRef<LobbyActor> lobby)
+PlayerActor::PlayerActor(std::shared_ptr<Connection> conn, std::shared_ptr<PlayerIdAllocator> player_ids, DbService db,
+                         std::shared_ptr<SessionRegistry> sessions, ex_actor::ActorRef<LobbyActor> lobby)
     : conn_(std::move(conn)),
       player_ids_(std::move(player_ids)),
       db_(std::move(db)),
@@ -81,16 +80,16 @@ void PlayerActor::SeatError(std::string frame, QuotaKind quota) {
 
 void PlayerActor::Close(std::string reason) { conn_->RequestClose(std::move(reason)); }
 
-void PlayerActor::SendError(std::string_view code, std::string_view message) {
+void PlayerActor::SendError(protocol::ErrorCode code, std::string_view message) {
   conn_->SendFrame(protocol::ErrorFrame(code, message));
 }
 
 void PlayerActor::BadRequest(std::string_view message) {
-  SendError(protocol::kCodeBadRequest, message);
+  SendError(protocol::ErrorCode::kBadRequest, message);
   conn_->RecordBadFrame();
 }
 
-void PlayerActor::IllegalOperation(std::string_view code, std::string_view message) {
+void PlayerActor::IllegalOperation(protocol::ErrorCode code, std::string_view message) {
   SendError(code, message);
   conn_->RecordIllegalOp();
 }
@@ -119,7 +118,7 @@ void PlayerActor::ReplyParseError(const frame_parser::Error& error) {
 void PlayerActor::AccountServiceUnavailable() {
   // ACCOUNT_DESIGN.md §2.3: a server-side fault, so no quota is charged (only RecordBadFrame
   // and RecordIllegalOp would, and neither is used here).
-  SendError(protocol::kCodeInternal, "account service unavailable");
+  SendError(protocol::ErrorCode::kInternal, "account service unavailable");
 }
 
 namespace {
@@ -144,7 +143,7 @@ constexpr size_t CountBindings() {
 static_assert(CountBindings() == std::size(protocol::kClientFrameTypes),
               "every client frame type needs a binding in player_agent.h");
 
-const FrameBinding* FindBinding(std::string_view type) {
+const FrameBinding* FindBinding(protocol::FrameType type) {
   for (const std::span<const FrameBinding>& table : kFrameTables) {
     for (const FrameBinding& binding : table) {
       if (binding.type == type) {
@@ -168,19 +167,21 @@ void PlayerActor::OnFrame(std::string line) {
 
     const FrameBinding* binding = FindBinding(envelope->type);
     if (binding == nullptr) {
-      BadRequest("unknown frame type: " + envelope->type);
+      // The parse layer validated the integer range (§1.3), so reaching here means the value
+      // is either a server→client type or a client type nobody routes — both BAD_REQUEST.
+      BadRequest("unknown frame type: " + std::string(protocol::NameOf(envelope->type)));
       return;
     }
     // PROTOCOL.md §4.1: besides login and register, nothing is accepted before an identity.
     if (binding->requires_login && !session_.logged_in()) {
-      SendError(protocol::kCodeNotLoggedIn, "send login first");
+      SendError(protocol::ErrorCode::kNotLoggedIn, "send login first");
       return;
     }
     binding->handle(Services(), std::move(envelope->frame));
   } catch (const std::exception& e) {
     // A thrown handler would terminate the detached operation, so nothing escapes here.
     spdlog::error("{}: frame handling failed: {}", conn_->Describe(), e.what());
-    SendError(protocol::kCodeInternal, "internal error");
+    SendError(protocol::ErrorCode::kInternal, "internal error");
   }
 }
 
@@ -241,7 +242,7 @@ void PlayerActor::OnLoginResult(AuthOutcome outcome) {
       // §3.1: an unknown account and a wrong password answer the same thing, and the failure
       // counts toward the frozen illegal-operation quota (§7.2).
       session_.FailAuth();
-      IllegalOperation(protocol::kCodeAuthFailed, "wrong username or password");
+      IllegalOperation(protocol::ErrorCode::kAuthFailed, "wrong username or password");
       return;
     case AuthStatus::kUsernameTaken:  // not produced by a login
     case AuthStatus::kUnavailable:
@@ -258,7 +259,7 @@ void PlayerActor::OnRegisterResult(AuthOutcome outcome) {
       return;
     case AuthStatus::kUsernameTaken:
       session_.FailAuth();  // retryable, no quota: the client picks another name
-      SendError(protocol::kCodeUsernameTaken, "username already taken");
+      SendError(protocol::ErrorCode::kUsernameTaken, "username already taken");
       return;
     case AuthStatus::kAuthFailed:  // not produced by a register
     case AuthStatus::kUnavailable:
@@ -286,7 +287,7 @@ bool PlayerActor::AcceptAccount(const AuthOutcome& outcome) {
   }
   if (!sessions_->TryAcquire(outcome.account.id)) {
     session_.FailAuth();  // back to kAnonymous so the client may log in as someone else
-    SendError(protocol::kCodeAlreadyOnline, "this account is already online");
+    SendError(protocol::ErrorCode::kAlreadyOnline, "this account is already online");
     return false;
   }
   const std::string player_id = AccountPlayerId(outcome.account.id);

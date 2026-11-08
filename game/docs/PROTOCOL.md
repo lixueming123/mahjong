@@ -1,7 +1,8 @@
 # 麻将里程碑协议（PROTOCOL）
 
 - 文档 ID：PROTOCOL
-- 版本：**v1.23（冻结）**
+- 版本：**v2.0（冻结）**
+  v2.0 **控制字段整数化（破坏性变更，硬切换，不兼容 v1.x）**：`type`、`action`、`window`、`mode`、`length`、`melds[].type`、`reason`、`code` 八类控制字段在线上一律改传**整数**；字段名不变，其余字段（牌码、`yaku[].id`、`tags`、`win_type`、`limit`、昵称、id、自由文本）保持字符串。取值表见新增 §1.3.1，机器可读真值 `game/protocol/enums.json`，由 `protocol_enums_consistency_test.py` 守护 C++ / Python / JS / 文档四方一致。**无双读兼容层、无版本协商**：服务端只接受整数，服务端、Python 客户端、Web 客户端、全部测试与录制帧日志必须同批改完；v1.x 客户端无法连接 v2.0 服务端。
   v1.23 **等待页座位同步**：新增服务端帧 **`room_update`**（S→C 15 → **16 条**，§5.17）——`join_room` 成功、以及未开局时非房主真人断开，都向房间内**全部真人**广播当前四席位快照；`room_joined` 仍只回本人。修复「好友已入座、房主等待页仍显示 3 个 AI」的缺陷，客户端 **MUST** 用本帧刷新等待页。**零新增错误码、零既有帧字段变化**；不读新帧的旧客户端行为不变（未知帧忽略，§1.3）。见 §3.2、§4.3、§5.17
   v1.22 **玩法徽标（纯客户端，零帧变化）**：`game_start` **不新增** `mode` 字段（classic 帧逐字节冻结、仍是 6 键），客户端按「帧里有没有 `points[4]`」判定玩法——日麻恒带、classic 恒不带——并在场况卡右上角画徽标（`日麻` 金色 / `经典` 灰色）。这条只为回答一个反复出现的问题：**「这里怎么不能立直」多数时候答案是「这是经典房」**。服务端一字节未改。见 §5.4
   v1.21 **立直宣言牌候选**（`mode=riichi`）：`action_request` 新增**可选字段** `riichi_tiles`（牌面数组），只在 `window=="discard"` 且 `options` 含 `riichi` 时出现，值 = 手中「打出去之后仍在听牌且不落振听」的牌面（升序去重、恒用普通牌面码，赤 5 写 `5m`）。**候选为空时服务端不下发 `riichi` 选项**（不再出现"点了注定被拒"的按钮）。客户端据此在手牌上标记可宣言的牌，消除「选错宣言牌 → ILLEGAL_ACTION」的试错。**零新增帧、零新增错误码**；classic 与 v1.20 逐字节一致。见 §5.7、§12.5
@@ -18,7 +19,8 @@
   v1.6 **A 批增补**（番型表 + 番数结算 + 一场四局/连庄/场次总分 + 暗杠/加杠）：① `action` 动作词表 5 → **7**（+`ankan`、+`kakan`），**不新增窗口类型**（两者是 `discard` 窗口的附加 `options`）；② `melds[].type` 3 → **5**（+`ankan`、+`kakan`），暗杠对他家的 `tiles` 为**空数组**并在局终揭示（§5.9、§8.1）；③ `game_end` **只增字段**（`win.yaku[]` / `win.han_breakdown{base,tsumo,dealer,total}` / `win.han` / `win.dealer_bonus` / `win.rinshan` / `results[].match_total` / 顶层 `round_index` / `dealer` / `renchan_count` / `match_will_continue`），既有字段形状一律不动（**`win.tags` 保持旧语义**，仍是 `yaku[].id` 的子集）；④ 新增服务端帧 **`match_end`**（场终，§5.15）；⑤ **零新增错误码**（仍 14 条，§7.1）；⑥ 明确 `seq` **跨局单调不重置**（§6.2）。见附录 C v1.6 行。
   v1.5 大厅选房：新增 `list_rooms` / `room_list`；`join_room` 在开局前替换一个 AI 座位并回 `room_joined`；`create_room` 不自动开局；`ready` 仍是开局信号。错误码不新增。见 §3、§4.2–§4.4、§4.11、§5.14。
 - 状态：**已冻结**（t3 网关、t4 房间状态机、t5 客户端、t6 端到端脚本必须严格按本文实现；变更须走新的需求评审）
-- 修订：v1.22 增补 §5.4 的「玩法判定口径」（`game_start` 无 `mode` 键，客户端按 `points` 反推）
+- 修订：v2.0 **控制字段整数化（破坏性、硬切换）**：`type` / `action` / `window` / `mode` / `length` / `melds[].type` / `reason` / `code` 八域一律改传整数（取值见新增 §1.3.1），全文示例帧与字段值表同步改整数并加名称注释，派生文档只改示例代码块；与服务端 / 三端 / 测试 / golden 日志同批切换
+  v1.22 增补 §5.4 的「玩法判定口径」（`game_start` 无 `mode` 键，客户端按 `points` 反推）
   v1.21 增补 §5.7 的 `action_request.riichi_tiles`（立直宣言牌候选）与 §12.5 的客户端标记口径
   v1.20 增补 §12.13（场终剩棒归一位）与 §5.10 的 `game_end.kyoutaku_award`
   v1.18 增补 §2.1 的赤 5 牌码、§12.5 的 `win.aka_dora` 与 §12.11（双倍役满 id）
@@ -115,22 +117,167 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 ### 1.2 编码与分帧（NDJSON）
 
 1. 编码 **UTF-8**；每帧是一个 JSON 对象，以单个 `\n`（`0x0A`）结尾。
-2. **单帧上限 64 KB（65536 字节，不含结尾 `\n`）**：超限 → 尽力回一次 `error{code:"FRAME_TOO_LARGE"}` 后**立即断开该连接**。
+2. **单帧上限 64 KB（65536 字节，不含结尾 `\n`）**：超限 → 尽力回一次 `error{code:9}` 后**立即断开该连接**。
 3. 缓冲区累积超过 64 KB 仍未见 `\n` → **立即断开该连接**（不做无界缓冲）。
-4. 非法 UTF-8 或非法 JSON → 计一次坏帧，回 `error{code:"BAD_REQUEST"}`，连接保持（累计 10 次断开，见 §7.2）。
+4. 非法 UTF-8 或非法 JSON → 计一次坏帧，回 `error{code:8}`，连接保持（累计 10 次断开，见 §7.2）。
 5. 帧内**不得**出现裸换行（JSON 字符串中的换行必须转义为 `\n`）。
 
 ### 1.3 帧格式与兼容策略
 
 | 规则 | 冻结语义 |
 | --- | --- |
-| 帧结构 | 单行 JSON 对象；**MUST** 含 `"type"`（string） |
-| 缺失/非字符串 `type` | `error{code:"BAD_REQUEST"}`，连接保持 |
-| 未知 `type` | `error{code:"BAD_REQUEST"}`，连接保持 |
+| 帧结构 | 单行 JSON 对象；**MUST** 含 `"type"`（**integer**，取值见 §1.3.1，合法 `1..27`） |
+| 缺失 / 非整数 / `<1` / `>27` 的 `type` | `error{code:8}`，连接保持 |
+| 未知 `type`（数值在表内但无 C→S 路由，或方向为 S→C） | `error{code:8}`，连接保持 |
 | 未知字段 | 服务端 **MUST** 忽略（不得报错） |
 | 未知的服务端帧类型 | 客户端 **SHOULD** 忽略并记日志（前向兼容），不得崩溃 |
-| 字段类型错误（如 `seq` 非整数） | `error{code:"BAD_REQUEST"}`，状态零变更 |
+| 字段类型错误（如 `seq` 非整数、`{"type":3.0}`） | `error{code:8}`，状态零变更 |
 | 数值范围 | `seq`/`deadline_ms`/`remaining` 为非负整数（`seq ≥ 1`） |
+
+### 1.3.1 控制字段枚举表（v2.0，冻结线值）
+
+> 本节八张表是线值的**唯一冻结清单**，机器可读真值为 `game/protocol/enums.json`；
+> C++（`game/server/protocol_enums.h`）、Python（`game/protocol/enums.py`）、
+> Web（`game/web/js/protocol_enums.js`）各持一份类型化常量，由
+> `game/tests/protocol_enums_consistency_test.py` 逐域比对名称与数值。
+>
+> 规则：每个域 **`0 = INVALID` 保留、永不下发**；真实值连续 `1..N`；**永不重编号**，
+> 新增值只能追加到该域末尾并升协议版本。整数校验一律用 `IsInteger()`，
+> 因此 `{"type":3.0}` 属字段类型错误。
+>
+> 注意同名不同域：`pong` 分别是帧 `22`、动作 `2`、副露 `1`；
+> `discard` 分别是帧 `10`、窗口 `1`。三张表各自独立，勿统一编号。
+>
+> `0` 与越界值都不代表「未知帧」：入站一律按 §1.3 回 `error{code:8}`，
+> 客户端收到未知 S→C 帧仍按 §1.3 忽略。
+
+#### `type`（帧类型，27 值；1..11 为 C→S，12..27 为 S→C）
+
+<!-- wire-enum: frame_type -->
+| 值 | 名称 | 说明 |
+| --- | --- | --- |
+| 0 | `INVALID` | 保留，永不下发 |
+| 1 | `login` | C→S |
+| 2 | `register` | C→S |
+| 3 | `ping` | C→S |
+| 4 | `stats_request` | C→S |
+| 5 | `list_rooms` | C→S |
+| 6 | `create_room` | C→S |
+| 7 | `join_room` | C→S |
+| 8 | `ready` | C→S |
+| 9 | `sync` | C→S |
+| 10 | `discard` | C→S |
+| 11 | `action` | C→S |
+| 12 | `login_ok` | S→C |
+| 13 | `error` | S→C |
+| 14 | `room_joined` | S→C |
+| 15 | `game_start` | S→C |
+| 16 | `draw` | S→C |
+| 17 | `discard_event` | S→C |
+| 18 | `action_request` | S→C |
+| 19 | `action_event` | S→C |
+| 20 | `state_sync` | S→C |
+| 21 | `game_end` | S→C |
+| 22 | `pong` | S→C |
+| 23 | `stats` | S→C |
+| 24 | `room_list` | S→C |
+| 25 | `match_end` | S→C |
+| 26 | `tenpai` | S→C |
+| 27 | `room_update` | S→C |
+<!-- /wire-enum -->
+
+#### `action` / `options[].action` / `action_event.action`（8 值，§4.6 / §12.4）
+
+<!-- wire-enum: action -->
+| 值 | 名称 | 说明 |
+| --- | --- | --- |
+| 0 | `INVALID` | 保留，永不下发 |
+| 1 | `pass` | 见对应章节 |
+| 2 | `pong` | 见对应章节 |
+| 3 | `chow` | 见对应章节 |
+| 4 | `kong` | 见对应章节 |
+| 5 | `ankan` | 见对应章节 |
+| 6 | `kakan` | 见对应章节 |
+| 7 | `win` | 见对应章节 |
+| 8 | `riichi` | 见对应章节 |
+<!-- /wire-enum -->
+
+#### `window`（3 值，§5.7 / §12.10）
+
+<!-- wire-enum: window -->
+| 值 | 名称 | 说明 |
+| --- | --- | --- |
+| 0 | `INVALID` | 保留，永不下发 |
+| 1 | `discard` | 见对应章节 |
+| 2 | `claim` | 见对应章节 |
+| 3 | `chankan` | 见对应章节 |
+<!-- /wire-enum -->
+
+#### `mode`（2 值，§12.1）
+
+<!-- wire-enum: mode -->
+| 值 | 名称 | 说明 |
+| --- | --- | --- |
+| 0 | `INVALID` | 保留，永不下发 |
+| 1 | `classic` | 见对应章节 |
+| 2 | `riichi` | 见对应章节 |
+<!-- /wire-enum -->
+
+#### `length`（2 值，§12.1）
+
+<!-- wire-enum: length -->
+| 值 | 名称 | 说明 |
+| --- | --- | --- |
+| 0 | `INVALID` | 保留，永不下发 |
+| 1 | `tonpu` | 见对应章节 |
+| 2 | `hanchan` | 见对应章节 |
+<!-- /wire-enum -->
+
+#### `melds[].type`（5 值，§5.9）
+
+<!-- wire-enum: meld_type -->
+| 值 | 名称 | 说明 |
+| --- | --- | --- |
+| 0 | `INVALID` | 保留，永不下发 |
+| 1 | `pong` | 见对应章节 |
+| 2 | `chow` | 见对应章节 |
+| 3 | `kong` | 见对应章节 |
+| 4 | `ankan` | 见对应章节 |
+| 5 | `kakan` | 见对应章节 |
+<!-- /wire-enum -->
+
+#### `game_end.reason` / `stats.recent[].reason`（3 值，§5.10）
+
+<!-- wire-enum: reason -->
+| 值 | 名称 | 说明 |
+| --- | --- | --- |
+| 0 | `INVALID` | 保留，永不下发 |
+| 1 | `win_ron` | 见对应章节 |
+| 2 | `win_tsumo` | 见对应章节 |
+| 3 | `draw_exhausted` | 见对应章节 |
+<!-- /wire-enum -->
+
+#### `error.code`（14 值，§7.1）
+
+<!-- wire-enum: error_code -->
+| 值 | 名称 | 说明 |
+| --- | --- | --- |
+| 0 | `INVALID` | 保留，永不下发 |
+| 1 | `INVALID_NAME` | 见 §7.1 |
+| 2 | `NOT_LOGGED_IN` | 见 §7.1 |
+| 3 | `ROOM_NOT_FOUND` | 见 §7.1 |
+| 4 | `NOT_YOUR_TURN` | 见 §7.1 |
+| 5 | `NO_PENDING_ACTION` | 见 §7.1 |
+| 6 | `ILLEGAL_ACTION` | 见 §7.1 |
+| 7 | `UNKNOWN_TILE` | 见 §7.1 |
+| 8 | `BAD_REQUEST` | 见 §7.1 |
+| 9 | `FRAME_TOO_LARGE` | 见 §7.1 |
+| 10 | `RATE_LIMITED` | 见 §7.1 |
+| 11 | `INTERNAL` | 见 §7.1 |
+| 12 | `AUTH_FAILED` | 见 §7.1 |
+| 13 | `USERNAME_TAKEN` | 见 §7.1 |
+| 14 | `ALREADY_ONLINE` | 见 §7.1 |
+<!-- /wire-enum -->
 
 ### 1.4 连接生命周期
 
@@ -140,7 +287,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 4. 对局中真人断开 → 该座位标记 `disconnected = true` 并进入**托管**（立即按默认口径代打，不等 15 s），牌局继续（§8.5）。
 5. **场终**（收到 `match_end`）之后 30 秒仍未被客户端断开 → 服务端回收房间与连接资源。**局终（`game_end`）不触发回收**：v1.6 起房间跨局存活（v1.6 修订；原文为「`game_end` 之后 30 秒」）。
 6. **局间**（两局之间，`game_end` 与下一局 `game_start` 之间）：连接保持、**不回收**、**不接受 `join_room`**（§4.3）、也不需要客户端任何输入。局间时长由服务端决定，客户端不得依赖其具体数值（协议不承诺秒数；服务端在下一局开始时直接下发 `game_start`）。
-7. **账号会话（v1.3 增补）**：一个账号同时只能有一个在线连接。第二个连接用同一账号登录 → `error{code:"ALREADY_ONLINE"}`，连接保持（仍可改用游客身份登录）。占用在**连接关闭**时释放；游客（`login{name}`）不受此约束（无账号身份）。
+7. **账号会话（v1.3 增补）**：一个账号同时只能有一个在线连接。第二个连接用同一账号登录 → `error{code:14}`，连接保持（仍可改用游客身份登录）。占用在**连接关闭**时释放；游客（`login{name}`）不受此约束（无账号身份）。
 
 ### 1.5 时间
 
@@ -161,7 +308,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 
 | 情形 | 阈值 | 行为 |
 | --- | --- | --- |
-| 入站帧速率 | 滑动 1 秒窗口内 > **100** 帧 | 丢弃超出帧；同一次限速事件最多回 1 帧 `error{code:"RATE_LIMITED"}` |
+| 入站帧速率 | 滑动 1 秒窗口内 > **100** 帧 | 丢弃超出帧；同一次限速事件最多回 1 帧 `error{code:10}` |
 | 持续风暴 | 1 秒内 > **500** 帧，或连续 **3 秒**每秒都触发限速 | 立即断开连接 |
 | 坏帧累计 | **10** 次 | 第 10 次后断开连接 |
 | 非法操作累计 | **10** 次（§7.3） | 第 10 次后断开连接 |
@@ -202,7 +349,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | 牌面 | 东 | 南 | 西 | 北 | 白 | 发 | 中 |
 
 - 牌面种类 **34**（3 门 × 9 级 = 27 种数牌 + 7 种字牌）；每种 4 张 ⇒ **总张数 136**。牌山初值见 §0.6 与 `RULESET.md` §1。
-- 其他编码（含花牌、`0z`、`8z`、`z` 以外的花色字母）→ `error{code:"UNKNOWN_TILE"}`。
+- 其他编码（含花牌、`0z`、`8z`、`z` 以外的花色字母）→ `error{code:7}`。
 - **字牌只能构成刻子/杠，不可用于顺子（不可吃）**；和牌判定对字牌与数牌一视同仁（见 `RULESET.md` §3）。
 
 ### 2.2 排序（服务端下发顺序与客户端渲染顺序一致）
@@ -216,42 +363,42 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 
 ## 3. 消息总览
 
-### 3.1 客户端 → 服务端（10 条，MUST 支持）
+### 3.1 客户端 → 服务端（11 条，MUST 支持）
 
-| # | `type` | 字段 | 何时发送 |
-| --- | --- | --- | --- |
-| C1 | `login` | `name` | 建连后第一步 |
-| C2 | `create_room` | — | 大厅点「新建房间」 |
-| C3 | `join_room` | `room_id` | 大厅点一间还没开局的房间 |
-| C4 | `ready` | — | 已入座后点「开始对局」 |
-| C11 | `list_rooms` | — | 停在大厅时约每 1 秒一次 |
-| C5 | `discard` | `tile`, `seq` | 收到 `window=="discard"` 的 `action_request` 后 |
-| C6 | `action` | `action`, `tiles[]`, `seq` | 收到 `action_request` 后（动作须在其 `options` 内；v1.6 动作词表见 §4.6） |
-| C7 | `sync` | — | 任意时刻（错误恢复/对齐） |
-| C8 | `ping` | — | 每 5000 ms |
-| C9 | `register` | `username`, `password`, `name?` | 账号注册（v1.3，`ACCOUNT_DESIGN.md` §3.2）；注册成功即登录 |
-| C10 | `stats_request` | — | 登录后任意时刻（v1.3，查询本人累计战绩） |
+| # | 值 | `type`（名称） | 字段 | 何时发送 |
+| --- | --- | --- | --- | --- |
+| C1 | 1 | `login` | `name` | 建连后第一步 |
+| C2 | 6 | `create_room` | — | 大厅点「新建房间」 |
+| C3 | 7 | `join_room` | `room_id` | 大厅点一间还没开局的房间 |
+| C4 | 8 | `ready` | — | 已入座后点「开始对局」 |
+| C11 | 5 | `list_rooms` | — | 停在大厅时约每 1 秒一次 |
+| C5 | 10 | `discard` | `tile`, `seq` | 收到 `window==1` 的 `action_request` 后 |
+| C6 | 11 | `action` | `action`, `tiles[]`, `seq` | 收到 `action_request` 后（动作须在其 `options` 内；v1.6 动作词表见 §4.6） |
+| C7 | 9 | `sync` | — | 任意时刻（错误恢复/对齐） |
+| C8 | 3 | `ping` | — | 每 5000 ms |
+| C9 | 2 | `register` | `username`, `password`, `name?` | 账号注册（v1.3，`ACCOUNT_DESIGN.md` §3.2）；注册成功即登录 |
+| C10 | 4 | `stats_request` | — | 登录后任意时刻（v1.3，查询本人累计战绩） |
 
 ### 3.2 服务端 → 客户端（16 条）
 
-| # | `type` | 字段 | 收件人 |
-| --- | --- | --- | --- |
-| S1 | `login_ok` | `player_id`, `name` | 本人 |
-| S2 | `error` | `code`, `message`, `detail?` | 相关连接 |
-| S3 | `room_joined` | `room_id`, `seat`, `seats[]` | 本人 |
-| S4 | `game_start` | `hand[]`, `seat`, `dealer`, `round_index`, `round_count`（v1.6 增两个） | 每人一份（含本家手牌） |
-| S5 | `draw` | `tile`, `seat`, `seq` | **仅摸牌者本人** |
-| S6 | `discard_event` | `seat`, `tile`, `seq` | 广播 4 家 |
-| S7 | `action_request` | `seq`, `deadline_ms`, `window`, `options[]` | 仅窗内相关座位 |
-| S8 | `action_event` | `seat`, `action`, `tiles[]`, `from_seat?`, `seq` | 广播 4 家 |
-| S9 | `state_sync` | `hand[]`, `melds[]`, `seats[]`, `remaining`, `current_seat`, `seq` | 每人一份（他家不含 `hand`；暗杠牌面对他家为空） |
-| S10 | `game_end` | `reason`, `results[4]`, `win`（**局终**；v1.6 只增字段，见 §5.10） | 广播 4 家（**无 `seq`**） |
-| S11 | `pong` | — | 对应 `ping` |
-| S13 | `stats` | `games`, `wins`, `draws`, `net_score`, `recent[]` | 请求者本人（v1.3） |
-| S14 | `room_list` | `rooms[]` | 请求 `list_rooms` 的连接（v1.5） |
-| S15 | `match_end` | `hands_played`, `renchan_count`, `rankings[]` | 广播 4 家（**场终**，v1.6；**无 `seq`**） |
-| S16 | `tenpai` | `tenpai_seq`, `is_tenpai`, `waits[]{tile,remaining}` | **仅本家**（v1.7；**走 `tenpai_seq`，不参与 `room.seq` 比较**） |
-| S17 | `room_update` | `room_id`, `seats[]` | **广播房间内全部真人**（v1.23；未开局的座位变动，见 §5.17） |
+| # | 值 | `type`（名称） | 字段 | 收件人 |
+| --- | --- | --- | --- | --- |
+| S1 | 12 | `login_ok` | `player_id`, `name` | 本人 |
+| S2 | 13 | `error` | `code`, `message`, `detail?` | 相关连接 |
+| S3 | 14 | `room_joined` | `room_id`, `seat`, `seats[]` | 本人 |
+| S4 | 15 | `game_start` | `hand[]`, `seat`, `dealer`, `round_index`, `round_count`（v1.6 增两个） | 每人一份（含本家手牌） |
+| S5 | 16 | `draw` | `tile`, `seat`, `seq` | **仅摸牌者本人** |
+| S6 | 17 | `discard_event` | `seat`, `tile`, `seq` | 广播 4 家 |
+| S7 | 18 | `action_request` | `seq`, `deadline_ms`, `window`, `options[]` | 仅窗内相关座位 |
+| S8 | 19 | `action_event` | `seat`, `action`, `tiles[]`, `from_seat?`, `seq` | 广播 4 家 |
+| S9 | 20 | `state_sync` | `hand[]`, `melds[]`, `seats[]`, `remaining`, `current_seat`, `seq` | 每人一份（他家不含 `hand`；暗杠牌面对他家为空） |
+| S10 | 21 | `game_end` | `reason`, `results[4]`, `win`（**局终**；v1.6 只增字段，见 §5.10） | 广播 4 家（**无 `seq`**） |
+| S11 | 22 | `pong` | — | 对应 `ping` |
+| S13 | 23 | `stats` | `games`, `wins`, `draws`, `net_score`, `recent[]` | 请求者本人（v1.3） |
+| S14 | 24 | `room_list` | `rooms[]` | 请求 `list_rooms` 的连接（v1.5） |
+| S15 | 25 | `match_end` | `hands_played`, `renchan_count`, `rankings[]` | 广播 4 家（**场终**，v1.6；**无 `seq`**） |
+| S16 | 26 | `tenpai` | `tenpai_seq`, `is_tenpai`, `waits[]{tile,remaining}` | **仅本家**（v1.7；**走 `tenpai_seq`，不参与 `room.seq` 比较**） |
+| S17 | 27 | `room_update` | `room_id`, `seats[]` | **广播房间内全部真人**（v1.23；未开局的座位变动，见 §5.17） |
 
 > 表中 `S12` 不存在：本版本共 15 类服务端帧 + `pong` 计 **16 条**（v1.6 增补 `match_end`、v1.7 增补 `tenpai`、v1.23 增补 `room_update`），与 GAME_DESIGN §11.2 的对应关系见该节。
 > （编号沿用 v1.0 的历史序：`S12` 从未存在，v1.3 新增的 `stats` 取 `S13`，v1.6 的 `match_end` 取 `S15`，v1.7 的 `tenpai` 取 `S16`，v1.23 的 `room_update` 取 `S17`。）
@@ -263,8 +410,9 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 ### 4.1 `login`
 
 ```json
-{"type":"login","name":"玩家_"}
+{"type":1,"name":"玩家_"}
 ```
+> 数值对照：`1`=login（帧）；完整表见 §1.3.1。
 
 | 字段 | 类型 | 必填 | 校验 |
 | --- | --- | --- | --- |
@@ -273,8 +421,9 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 **账号形态（v1.3 增补，`ACCOUNT_DESIGN.md` §3.1）**
 
 ```json
-{"type":"login","username":"alice","password":"s3cret"}
+{"type":1,"username":"alice","password":"s3cret"}
 ```
+> 数值对照：`1`=login（帧）；完整表见 §1.3.1。
 
 | 字段 | 类型 | 必填 | 校验 |
 | --- | --- | --- | --- |
@@ -283,42 +432,45 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 
 - 判定：帧中出现 `username` 即走账号形态（此时忽略 `name`）；否则走上面的游客形态（行为与 v1.2 逐字相同）。
 - 账号形态成功 → `login_ok{player_id:"u-<id>",name:<昵称>}`（字段形状与游客形态相同，仅取值不同）。
-- 账号不存在与口令错误 → **同一个** `error{code:"AUTH_FAILED"}`（不泄露账号是否存在），连接保持；该错误计入 §7.2 的非法操作计数。
-- 该账号已在别处登录 → `error{code:"ALREADY_ONLINE"}`，连接保持。
+- 账号不存在与口令错误 → **同一个** `error{code:12}`（不泄露账号是否存在），连接保持；该错误计入 §7.2 的非法操作计数。
+- 该账号已在别处登录 → `error{code:14}`，连接保持。
 - 账号形态是异步的：发出后到 `login_ok` 之前，该连接上除 `login`/`register` 外的帧仍一律 `NOT_LOGGED_IN`；期间再发 `login`/`register` → `BAD_REQUEST`（`message:"already logged in"`）。
-- MySQL 不可用 → `error{code:"INTERNAL"}`（`message:"account service unavailable"`），**不计配额**（`ACCOUNT_DESIGN.md` §2.3）。
+- MySQL 不可用 → `error{code:11}`（`message:"account service unavailable"`），**不计配额**（`ACCOUNT_DESIGN.md` §2.3）。
 
-- 成功 → `login_ok`；失败 → `error{code:"INVALID_NAME"}`，连接保持；第 4 次非法昵称 → 断开（§1.7）。
-- 同一连接重复 `login` → `error{code:"BAD_REQUEST"}`（`message:"already logged in"`），连接保持。
-- 未登录发送除 `login` 外的任何帧 → `error{code:"NOT_LOGGED_IN"}`。
+- 成功 → `login_ok`；失败 → `error{code:1}`，连接保持；第 4 次非法昵称 → 断开（§1.7）。
+- 同一连接重复 `login` → `error{code:8}`（`message:"already logged in"`），连接保持。
+- 未登录发送除 `login` 外的任何帧 → `error{code:2}`。
 
 ### 4.2 `create_room`
 
 ```json
-{"type":"create_room"}
+{"type":6}
 ```
+> 数值对照：`6`=create_room（帧）；完整表见 §1.3.1。
 
 - 行为：创建房间，调用者占据 `seat = 0`；`seat = 1,2,3` 先是 AI（`is_bot = true`，昵称 `AI-1`/`AI-2`/`AI-3`）。**不**发牌、**不**把房间标成已开局。
-- 成功 → `room_joined`；已经在任意房间里 → `error{code:"BAD_REQUEST"}`（`message:"already in a room"`）；未登录 → `NOT_LOGGED_IN`。
+- 成功 → `room_joined`；已经在任意房间里 → `error{code:8}`（`message:"already in a room"`）；未登录 → `NOT_LOGGED_IN`。
 - `room_id` 格式：`r-` + **13 位小写 36 进制**（由进程级 36 比特随机标记与进程内 28 比特递增序号拼成，如 `r-0f3k9m2p7q1sx`）。**全局唯一**：同一进程内由序号保证；重启服务器或同库多进程由随机标记区分，**绝不复用**旧 `room_id`（账号库 `match_results` 以 `(room_id, account_id)` 为唯一键，复用会让新场次被误判成重复写入而丢弃，见 `ACCOUNT_DESIGN.md` §4）。
 
 ### 4.3 `join_room`
 
 ```json
-{"type":"join_room","room_id":"r-0f3k9m2p7q1sx"}
+{"type":7,"room_id":"r-0f3k9m2p7q1sx"}
 ```
+> 数值对照：`7`=join_room（帧）；完整表见 §1.3.1。
 
 - 只在目标房间**还没**收到 `ready` 时成功：把编号最小的 AI 座位换成该玩家，`seat` 为该编号。已经坐在这间房里再发一次 → 再回一帧当前的 `room_joined`，状态不变。
-- 已经在别的房间 → `error{code:"BAD_REQUEST"}`（`message:"already in a room"`）。
-- 房间不存在、已经开局、或没有剩余 AI 座位 → `error{code:"ROOM_NOT_FOUND"}`，连接保持。
+- 已经在别的房间 → `error{code:8}`（`message:"already in a room"`）。
+- 房间不存在、已经开局、或没有剩余 AI 座位 → `error{code:3}`，连接保持。
 - 成功入座后，服务端 **MUST** 向房间内**所有真人连接**广播一帧 `room_update`（§5.17）。`room_joined` 只回给加入者本人；房主与先到的玩家靠 `room_update` 才知道座位变化，否则等待页永远显示旧名单。
 - 未开局时其他真人断开：该座位恢复为原来的 AI，服务端 **MUST** 同样广播一帧 `room_update`。房主断开则房间删除，不发该帧（房间已不存在）。
 
 ### 4.4 `ready`
 
 ```json
-{"type":"ready"}
+{"type":8}
 ```
+> 数值对照：`8`=ready（帧）；完整表见 §1.3.1。
 
 - 调用者已在一间还没开局的房间里 → 立即开始本局：洗牌、发牌，向每个座位单独下发 `game_start`。空着的座位仍是 AI，和真人一起开局。
 - 未登录 → `NOT_LOGGED_IN`；不在房间 → `ROOM_NOT_FOUND`。
@@ -326,82 +478,87 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 ### 4.5 `discard`（H2）
 
 ```json
-{"type":"discard","tile":"4p","seq":7}
+{"type":10,"tile":"4p","seq":7}
 ```
+> 数值对照：`10`=discard（帧）；完整表见 §1.3.1。
 
 | 字段 | 类型 | 必填 | 校验（全部通过才改变状态） |
 | --- | --- | --- | --- |
 | `tile` | string | 是 | 匹配 **§2.1 的合取正则 `^([1-9][mps]\|[1-7]z)$`**（数牌或字牌均可）且**在本家手牌中**；否则 `UNKNOWN_TILE` |
 | `seq` | integer | 是 | **必须等于**当前窗口 `seq`；不等 → **静默丢弃**（§6.3，不回 `error`） |
 
-- 仅当**当前存在针对本家的 `window == "discard"` 窗口**且本家为 `current_seat` 时可接受；否则 `error{code:"NOT_YOUR_TURN"}`。
+- 仅当**当前存在针对本家的 `window == 1` 窗口**且本家为 `current_seat` 时可接受；否则 `error{code:4}`。
 - 副作用：本家手牌移除 1 张该牌面 → 加入本家牌河 → 关闭窗口 → `seq++` → 广播 `discard_event{seat,tile,seq}`。
 - 打牌即「放弃自摸」的唯一正确表达（打牌窗口不接受 `pass`，见 §4.6）。
 
 ### 4.6 `action`（H1、H2）
 
 ```json
-{"type":"action","action":"pong","tiles":["9s"],"seq":2}
+{"type":11,"action":2,"tiles":["9s"],"seq":2}
 ```
+> 数值对照：`11`=action（帧）、`2`=pong（动作）；完整表见 §1.3.1。
 
 | 字段 | 类型 | 必填 | 校验 |
 | --- | --- | --- | --- |
-| `action` | string | 是 | `∈ {pass, pong, chow, kong, ankan, kakan, win}`（v1.6 由 5 值增至 7 值） |
+| `action` | **integer** | 是 | `∈ {1..8}`（`1`=pass、`2`=pong、`3`=chow、`4`=kong、`5`=ankan、`6`=kakan、`7`=win、`8`=riichi；见 §1.3.1。v1.6 由 5 值增至 7 值、v1.12 增至 8 值） |
 | `tiles` | array\<string\> | 是 | 见下表「`tiles` 语义」 |
 | `seq` | integer | 是 | 必须等于当前窗口 `seq`；不等 → 静默丢弃 |
 
 **窗口 × `action` 合法性矩阵（H1，冻结；v1.6 扩列）**
 
-| 窗口 | `win` | `kong` | `ankan` | `kakan` | `pong` | `chow` | `pass` |
+| 窗口 | `7`=win | `4`=kong | `5`=ankan | `6`=kakan | `2`=pong | `3`=chow | `1`=pass |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `window == "discard"`（自家打牌窗口） | ✅（仅当 `options` 含 `win`） | ❌ | ✅（仅当含 `ankan`） | ✅（仅当含 `kakan`） | ❌ | ❌ | **❌ `ILLEGAL_ACTION`** |
-| `window == "claim"`（鸣牌窗口） | ✅（仅当 `options` 含 `win`） | ✅（仅当含 `kong`） | ❌ | ❌ | ✅（仅当含 `pong`） | ✅（仅当含 `chow`） | ✅（恒在 `options` 内） |
+| `window == 1`（自家打牌窗口） | ✅（仅当 `options` 含 `win`） | ❌ | ✅（仅当含 `ankan`） | ✅（仅当含 `kakan`） | ❌ | ❌ | **❌ `ILLEGAL_ACTION`** |
+| `window == 2`（鸣牌窗口） | ✅（仅当 `options` 含 `win`） | ✅（仅当含 `kong`） | ❌ | ❌ | ✅（仅当含 `pong`） | ✅（仅当含 `chow`） | ✅（恒在 `options` 内） |
 
 - 打牌窗口的**合法回复**：`discard{tile,seq}`，或 `options` 中**实际出现**的自理动作之一——`win`（自摸/天和）、`ankan`、`kakan`（v1.6 新增后两者）。
-  回 `action{action:"pass",seq}` → `error{code:"ILLEGAL_ACTION"}`（`pass` 不在该窗口 `options` 中）。
+  回 `action{action:1,seq}` → `error{code:6}`（`pass` 不在该窗口 `options` 中）。
 - **判定口径不变（H8）**：合法性一律**按窗口下发的 `options` 判定**，不按服务端重算的"还能做什么"判定；`options` 未提供的动作即便规则上可行也是 `ILLEGAL_ACTION`。
 - **暗杠/加杠只出现在 `discard` 窗口**（即本家自己的回合）；`claim` 窗口永不提供 `ankan`/`kakan`。
-- `action` 不在该窗口 `options` 中（或 `tiles` 不满足条件）→ `error{code:"ILLEGAL_ACTION"}`，状态零变更。
-- 座位不是当前窗口收件人 → `error{code:"NO_PENDING_ACTION"}`。
+- `action` 不在该窗口 `options` 中（或 `tiles` 不满足条件）→ `error{code:6}`，状态零变更。
+- 座位不是当前窗口收件人 → `error{code:5}`。
 
 **`tiles` 语义（冻结；v1.6 增两行）**
 
-| `action` | `tiles` | 服务端校验 |
-| --- | --- | --- |
-| `win` | `[]` | 和牌张由上下文确定（荣和 = 被和的那张；自摸 = 刚摸到的牌）；**服务端必须重算**（§8.3） |
-| `kong` | `[T]`（被鸣的那张牌） | `count(T, 手牌) == 3` 且 `remaining ≥ 1` |
-| `ankan` | `[T]`（**本家手牌中凑满 4 张的牌面**） | `count(T, 手牌) == 4` 且 `remaining ≥ 1`；本家此刻必须是行动态（`concealed + 3×melds = 14`）。`T` 可以是数牌或字牌 |
-| `kakan` | `[T]`（**已有碰组的牌面**） | 本家存在一组 `pong{T,T,T}` 且 `count(T, 手牌) ≥ 1` 且 `remaining ≥ 1`；**不设抢杠窗口**（§0.4） |
-| `pong` | `[T]`（被鸣的那张牌） | `count(T, 手牌) ≥ 2` |
-| `chow` | `[a,b]`（**手中的两张**，均为数牌） | 本家为打出者的下家（`(S+1)%4`）、**`T` 为数牌**、且 `{a,b,T}` 构成**同一数牌花色**的顺子（**字牌不可吃**，§2.1） |
-| `pass` | `[]` | 无需校验（仅 `claim` 窗口） |
+| 值 | `action`（名称） | `tiles` | 服务端校验 |
+| --- | --- | --- | --- |
+| 7 | `win` | `[]` | 和牌张由上下文确定（荣和 = 被和的那张；自摸 = 刚摸到的牌）；**服务端必须重算**（§8.3） |
+| 4 | `kong` | `[T]`（被鸣的那张牌） | `count(T, 手牌) == 3` 且 `remaining ≥ 1` |
+| 5 | `ankan` | `[T]`（**本家手牌中凑满 4 张的牌面**） | `count(T, 手牌) == 4` 且 `remaining ≥ 1`；本家此刻必须是行动态（`concealed + 3×melds = 14`）。`T` 可以是数牌或字牌 |
+| 6 | `kakan` | `[T]`（**已有碰组的牌面**） | 本家存在一组 `pong{T,T,T}` 且 `count(T, 手牌) ≥ 1` 且 `remaining ≥ 1`；**不设抢杠窗口**（§0.4） |
+| 2 | `pong` | `[T]`（被鸣的那张牌） | `count(T, 手牌) ≥ 2` |
+| 3 | `chow` | `[a,b]`（**手中的两张**，均为数牌） | 本家为打出者的下家（`(S+1)%4`）、**`T` 为数牌**、且 `{a,b,T}` 构成**同一数牌花色**的顺子（**字牌不可吃**，§2.1） |
+| 1 | `pass` | `[]` | 无需校验（仅 `claim` 窗口） |
 
-- `tiles` 中的每个元素都必须匹配 §2.1 的合取正则 `^([1-9][mps]|[1-7]z)$`；否则 `error{code:"UNKNOWN_TILE"}`（`chow` 的 `tiles` 元素必须为**数牌**，否则 `ILLEGAL_ACTION`）。
+- `tiles` 中的每个元素都必须匹配 §2.1 的合取正则 `^([1-9][mps]|[1-7]z)$`；否则 `error{code:7}`（`chow` 的 `tiles` 元素必须为**数牌**，否则 `ILLEGAL_ACTION`）。
 - `ankan`/`kakan` 的 `tiles` **恰好 1 个元素**（与 `kong` 同形）；元素多于 1 个 → `ILLEGAL_ACTION`。`ankan` 只报**牌面**（如 `"5m"`），不报具体副本（§2.2 副本不可区分）。
-- **副露后的动作语义（v1.6）**：`ankan` 成功后本家 `melds[]` 追加一组 `{type:"ankan", tiles:[T×4]}`（对他家为空数组，见 §5.9）；`kakan` 成功后**替换**原来那组 `pong` 为 `{type:"kakan", tiles:[T×4]}`（组数不变、顺序位置不变）。两者之后都**立即补摸 1 张**（`remaining--`）再开打牌窗口（`RULESET.md` §1.5、§4.3）。
+- **副露后的动作语义（v1.6）**：`ankan` 成功后本家 `melds[]` 追加一组 `{type:4, tiles:[T×4]}`（对他家为空数组，见 §5.9）；`kakan` 成功后**替换**原来那组 `pong` 为 `{type:5, tiles:[T×4]}`（组数不变、顺序位置不变）。两者之后都**立即补摸 1 张**（`remaining--`）再开打牌窗口（`RULESET.md` §1.5、§4.3）。
 - `action` 的 `tiles` 与随后广播的 `action_event.tiles` **语义相同**（§5.8）。
 
 ### 4.7 `sync`
 
 ```json
-{"type":"sync"}
+{"type":9}
 ```
+> 数值对照：`9`=sync（帧）；完整表见 §1.3.1。
 
 - 行为：仅向**请求者**回一帧该座位的 `state_sync`（本家手牌 + 公开信息 + `seq`），不广播。
 
 ### 4.8 `ping`
 
 ```json
-{"type":"ping"}
+{"type":3}
 ```
+> 数值对照：`3`=ping（帧）；完整表见 §1.3.1。
 
 - 行为：回 `pong`；用于 RTT 计算与心跳保活。计入入站限速（§1.7）。
 
 ### 4.9 `register`（v1.3 新增，`ACCOUNT_DESIGN.md` §3.2）
 
 ```json
-{"type":"register","username":"alice","password":"s3cret","name":"爱丽丝"}
+{"type":2,"username":"alice","password":"s3cret","name":"爱丽丝"}
 ```
+> 数值对照：`2`=register（帧）；完整表见 §1.3.1。
 
 | 字段 | 类型 | 必填 | 校验 |
 | --- | --- | --- | --- |
@@ -411,30 +568,32 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 
 - **注册成功即登录**：成功时直接下发 `login_ok{player_id:"u-<id>",name:<昵称>}`（**不新增 `register_ok`**），
   客户端后续流程与游客完全一致（`create_room` → `ready`）。
-- 账号名已存在 → `error{code:"USERNAME_TAKEN"}`，连接保持，可换名重试（不计配额）。
-- 字段缺失/类型错/校验不过 → `error{code:"BAD_REQUEST"}`。
-- 已登录、或账号登录/注册正在途中 → `error{code:"BAD_REQUEST"}`（`message:"already logged in"`）。
-- MySQL 不可用 → `error{code:"INTERNAL"}`（不计配额）。
+- 账号名已存在 → `error{code:13}`，连接保持，可换名重试（不计配额）。
+- 字段缺失/类型错/校验不过 → `error{code:8}`。
+- 已登录、或账号登录/注册正在途中 → `error{code:8}`（`message:"already logged in"`）。
+- MySQL 不可用 → `error{code:11}`（不计配额）。
 
 ### 4.10 `stats_request`（v1.3 新增）
 
 ```json
-{"type":"stats_request"}
+{"type":4}
 ```
+> 数值对照：`4`=stats_request（帧）；完整表见 §1.3.1。
 
 - 无字段。成功 → 下发一帧 `stats`（§5.13）。
 - **游客也可发**：游客没有账号，回**零值**载荷（`games`/`wins`/`draws`/`net_score` 全 0、`recent` 为空数组），
   不是错误——客户端因此不必区分会话类型。
-- 未登录 → `error{code:"NOT_LOGGED_IN"}`；账号服务不可用 → `error{code:"INTERNAL"}`。
+- 未登录 → `error{code:2}`；账号服务不可用 → `error{code:11}`。
 
 ### 4.11 `list_rooms`（v1.5）
 
 ```json
-{"type":"list_rooms"}
+{"type":5}
 ```
+> 数值对照：`5`=list_rooms（帧）；完整表见 §1.3.1。
 
 - 无字段。成功 → 一帧 `room_list`（§5.14）。只包含还没 `ready` 的房间。
-- 未登录 → `error{code:"NOT_LOGGED_IN"}`。客户端在大厅约每 1 秒发一次，不得高于入站限速。
+- 未登录 → `error{code:2}`。客户端在大厅约每 1 秒发一次，不得高于入站限速。
 
 ---
 
@@ -443,8 +602,9 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 ### 5.1 `login_ok`
 
 ```json
-{"type":"login_ok","player_id":"p-3f2a1c","name":"玩家_"}
+{"type":12,"player_id":"p-3f2a1c","name":"玩家_"}
 ```
+> 数值对照：`12`=login_ok（帧）；完整表见 §1.3.1。
 
 - `player_id`：服务端生成的**非空不透明字符串**，用于区分重名玩家。客户端 **MUST NOT** 解析其格式。
   - 游客（`login{name}`）：`p-<6 位十六进制>`，**进程内**唯一，重启即变（与 v1.0 相同）。
@@ -453,22 +613,24 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 ### 5.2 `error`
 
 ```json
-{"type":"error","code":"ILLEGAL_ACTION","message":"该动作当前不可用","detail":{"action":"pass","window":"discard"}}
+{"type":13,"code":6,"message":"该动作当前不可用","detail":{"action":1,"window":1}}
 ```
+> 数值对照：`13`=error（帧）、`1`=pass（动作）、`1`=discard（窗口）、`6`=ILLEGAL_ACTION（错误码）；完整表见 §1.3.1。
 
-- `code`：必须取自 §7.1 的 **14** 个取值之一（v1.6 订正：原文此处写"11 个取值"，而 §7.1 自 v1.3 起已是 **14 条**；以 §7.1 为准）。
+- `code`：**integer**，必须取自 §7.1 的 **14** 个整数取值之一（`1..14`，见 §1.3.1；v1.6 订正：原文此处写"11 个取值"，而 §7.1 自 v1.3 起已是 **14 条**；以 §7.1 为准）。
 - `message`：人类可读、**不得包含他家手牌等私有信息**。
 - `detail`：可选对象；同样不得包含私有信息。
 
 ### 5.3 `room_joined`
 
 ```json
-{"type":"room_joined","room_id":"r-0f3k9m2p7q1sx","seat":0,
+{"type":14,"room_id":"r-0f3k9m2p7q1sx","seat":0,
  "seats":[{"seat":0,"name":"玩家_","is_bot":false},
           {"seat":1,"name":"AI-1","is_bot":true},
           {"seat":2,"name":"AI-2","is_bot":true},
           {"seat":3,"name":"AI-3","is_bot":true}]}
 ```
+> 数值对照：`14`=room_joined（帧）；完整表见 §1.3.1。
 
 - `seat`：本连接玩家的座位（0..3）。`seats` 恒为 4 项，按 `seat` 升序。
 - 收件人：本人。客户端 **MUST** 缓存 `seats[].name`（结算卡片需要，GAME_DESIGN §6.5）。
@@ -476,9 +638,10 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 ### 5.4 `game_start`
 
 ```json
-{"type":"game_start","seat":0,"dealer":0,"round_index":0,"round_count":4,
+{"type":15,"seat":0,"dealer":0,"round_index":0,"round_count":4,
  "hand":["1m","1m","2m","3m","4m","5m","6p","6p","7p","8p","9s","9s","9s","9s"]}
 ```
+> 数值对照：`15`=game_start（帧）；完整表见 §1.3.1。
 
 | 字段 | 说明 |
 | --- | --- |
@@ -500,8 +663,9 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 ### 5.5 `draw`（H5）
 
 ```json
-{"type":"draw","tile":"7m","seat":0,"seq":9}
+{"type":16,"tile":"7m","seat":0,"seq":9}
 ```
+> 数值对照：`16`=draw（帧）；完整表见 §1.3.1。
 
 - 收件人：**仅摸牌者本人**（他家不得收到，UI 只能从其后打出的牌推断）。
 - `seq` = 该摸牌所属窗口（摸牌后立即开窗，见 §6.1）。
@@ -510,8 +674,9 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 ### 5.6 `discard_event`（H5）
 
 ```json
-{"type":"discard_event","seat":1,"tile":"4p","seq":7}
+{"type":17,"seat":1,"tile":"4p","seq":7}
 ```
+> 数值对照：`17`=discard_event（帧）；完整表见 §1.3.1。
 
 - 收件人：广播 4 家（牌河为公开信息）。
 - 不含 `state_sync` 之外的额外字段；服务端 **不**因打牌额外下发 `state_sync`（GAME_DESIGN §11.4）。
@@ -519,50 +684,52 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 ### 5.7 `action_request`
 
 ```json
-{"type":"action_request","seq":7,"deadline_ms":1791174514000,"window":"claim",
- "options":[{"action":"win","tiles":[]},
-            {"action":"pong","tiles":["4p"]},
-            {"action":"pass","tiles":[]}]}
+{"type":18,"seq":7,"deadline_ms":1791174514000,"window":2,
+ "options":[{"action":7,"tiles":[]},
+            {"action":2,"tiles":["4p"]},
+            {"action":1,"tiles":[]}]}
 ```
+> 数值对照：`18`=action_request（帧）、`7`=win（动作）、`2`=pong（动作）、`1`=pass（动作）、`2`=claim（窗口）；完整表见 §1.3.1。
 
 | 字段 | 说明 |
 | --- | --- |
 | `seq` | 本窗口序号（客户端 **MUST** 在 `discard`/`action` 中原样回带） |
 | `deadline_ms` | 窗口截止时刻（epoch ms UTC） |
-| `window` | `"discard"` 或 `"claim"`（**仅此两值**；暗杠/加杠**不新增窗口类型**，它们是 `discard` 窗口的附加 `options`） |
-| `options` | 数组，元素为 `{"action":<动作>, "tiles":[...]}`；**顺序固定** `win → kong → ankan → kakan → pong → chow → pass`（v1.6 在 `kong` 与 `pong` 之间**插入**两项，原有五项的相对顺序逐字不变）；`chow` 可出现多条（每个合法组合一条）。每个窗口只出现其适用的子集 |
-| `riichi_tiles` | **v1.21（仅日麻）**：立直宣言牌的候选**牌面**数组，如 `["2m","5s","6z"]`。只在 `window=="discard"` **且** `options` 含 `{"action":"riichi"}` 时出现；其余情况**该键不写**（classic 帧逐字节不变） |
+| `window` | **integer**：`1`=discard 或 `2`=claim（**常规窗口仅此两值**；日麻抢杠窗口为 `3`=chankan，见 §12.10；暗杠/加杠**不新增窗口类型**，它们是 `discard` 窗口的附加 `options`） |
+| `options` | 数组，元素为 `{"action":<整数>, "tiles":[...]}`；**顺序固定** `7`(win) → `4`(kong) → `5`(ankan) → `6`(kakan) → `2`(pong) → `3`(chow) → `1`(pass)，日麻追加 `8`(riichi)（v1.6 在 `kong` 与 `pong` 之间**插入**两项，原有五项的相对顺序逐字不变）；`chow` 可出现多条（每个合法组合一条）。每个窗口只出现其适用的子集 |
+| `riichi_tiles` | **v1.21（仅日麻）**：立直宣言牌的候选**牌面**数组，如 `["2m","5s","6z"]`。只在 `window==1` **且** `options` 含 `{"action":8}` 时出现；其余情况**该键不写**（classic 帧逐字节不变） |
 
-- 收件人：`window=="claim"` 时**仅发给存在非 `pass` 选项的座位**；不存在非 `pass` 选项时**不下发任何帧**且窗口立即关闭。
-- `window=="discard"` 时**一定发给当前行动座位**，其 `options` 为以下动作的**子集**（各动作的出现条件由 `RULESET.md` §5.2 冻结）：
-  - `{"action":"win","tiles":[]}` —— 自摸/天和成立时；
-  - `{"action":"ankan","tiles":["<T>"]}` —— 手牌凑满 4 张同面且 `remaining ≥ 1` 时（每个可暗杠的牌面一条，按 §2.2 牌面升序）；
-  - `{"action":"kakan","tiles":["<T>"]}` —— 存在可加杠的碰组且 `remaining ≥ 1` 时（每个可加杠的牌面一条，按 §2.2 牌面升序）；
+- 收件人：`window==2` 时**仅发给存在非 `pass` 选项的座位**；不存在非 `pass` 选项时**不下发任何帧**且窗口立即关闭。
+- `window==1` 时**一定发给当前行动座位**，其 `options` 为以下动作的**子集**（各动作的出现条件由 `RULESET.md` §5.2 冻结）：
+  - `{"action":7,"tiles":[]}` —— 自摸/天和成立时；
+  - `{"action":5,"tiles":["<T>"]}` —— 手牌凑满 4 张同面且 `remaining ≥ 1` 时（每个可暗杠的牌面一条，按 §2.2 牌面升序）；
+  - `{"action":6,"tiles":["<T>"]}` —— 存在可加杠的碰组且 `remaining ≥ 1` 时（每个可加杠的牌面一条，按 §2.2 牌面升序）；
   - **可能为空 `[]`**（只能打牌）。「打牌」本身**不进入 `options`**。
 - **v1.6 补充**：`options` 中出现 `ankan`/`kakan` 时，超时代打的默认动作仍然是「打牌」而**不是**杠（§6.4）——即**超时永不选杠**，选项存在只代表"可以选"，不代表"会被代选"。
 - 同一时刻全房间最多一个未决窗口（由 `seq` 唯一标识）。
 - **v1.21 · 立直宣言牌候选**（`mode=riichi`）：
-  - `options` 含 `{"action":"riichi"}` 时 **MUST** 同时带非空 `riichi_tiles`；**候选为空就不得给 `riichi` 选项**（服务端按与 `CanDeclareRiichiNow` 相同的口径算：门前、持点 ≥ 1000、牌山 ≥ 4 张、未振听、打出去仍在听牌）。
+  - `options` 含 `{"action":8}` 时 **MUST** 同时带非空 `riichi_tiles`；**候选为空就不得给 `riichi` 选项**（服务端按与 `CanDeclareRiichiNow` 相同的口径算：门前、持点 ≥ 1000、牌山 ≥ 4 张、未振听、打出去仍在听牌）。
   - 候选是**牌面**不是物理牌：同面只出现一次，恒写普通牌面码（赤 5 写 `5m`，**MUST NOT** 写 `0m`），按 §2.2 牌面升序。
-  - 立直动作本身不变：`action{action:"riichi",tiles:[T],seq}`（§4.6），`T` 必须是候选之一；不在此列 ⇒ `ILLEGAL_ACTION`（客户端在本地就会拦下，不依赖服务端拒）。
+  - 立直动作本身不变：`action{action:8,tiles:[T],seq}`（§4.6），`T` 必须是候选之一；不在此列 ⇒ `ILLEGAL_ACTION`（客户端在本地就会拦下，不依赖服务端拒）。
   - 用途：客户端点「立直」后据此在手牌上**标记**可宣言的牌、压暗其余牌，点高亮牌即宣言并打出（`UI_UX_SPEC` §5.3.2）。
 - 超时代打口径见 §6.4。
 
 ### 5.8 `action_event`（H3、H5、H9）
 
 ```json
-{"type":"action_event","seat":1,"action":"pong","tiles":["9s"],"from_seat":0,"seq":2}
-{"type":"action_event","seat":2,"action":"win","tiles":["8p"],"from_seat":3,"seq":11}
-{"type":"action_event","seat":0,"action":"win","tiles":["5m"],"seq":12}
-{"type":"action_event","seat":0,"action":"ankan","tiles":["5m"],"seq":13}
-{"type":"action_event","seat":0,"action":"kakan","tiles":["7p"],"seq":15}
+{"type":19,"seat":1,"action":2,"tiles":["9s"],"from_seat":0,"seq":2}
+{"type":19,"seat":2,"action":7,"tiles":["8p"],"from_seat":3,"seq":11}
+{"type":19,"seat":0,"action":7,"tiles":["5m"],"seq":12}
+{"type":19,"seat":0,"action":5,"tiles":["5m"],"seq":13}
+{"type":19,"seat":0,"action":6,"tiles":["7p"],"seq":15}
 ```
+> 数值对照：`19`=action_event（帧）、`2`=pong（动作）、`7`=win（动作）、`5`=ankan（动作）、`6`=kakan（动作）；完整表见 §1.3.1。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `seat` | integer | **执行该动作的座位**（鸣牌者 / 自理杠者 / 和牌者） |
-| `action` | string | `∈ {pong, chow, kong, ankan, kakan, win}`（**`pass` 永不出现**；v1.6 由 4 值增至 6 值） |
-| `tiles` | array | `pong`/`kong`/`kakan` = `[T]`；**`ankan` = `[]`（v1.7 修正，见 §11.5）**；`chow` = `[a,b]`（手中的两张）；`win` = `[和牌张]` |
+| `action` | **integer** | `∈ {2, 3, 4, 5, 6, 7}`（`2`=pong、`3`=chow、`4`=kong、`5`=ankan、`6`=kakan、`7`=win；**`1`=pass 永不出现**；日麻立直为 `8`=riichi，见 §12.4 / §1.3.1） |
+| `tiles` | array | `2`=pong / `4`=kong / `6`=kakan = `[T]`；**`5`=ankan = `[]`（v1.7 修正，见 §11.5）**；`3`=chow = `[a,b]`（手中的两张）；`7`=win = `[和牌张]` |
 | `from_seat` | integer | 被鸣 / 被荣和那张牌的**打出者座位**；`pong`/`chow`/`kong`/荣和 **必带**；**自摸和牌、`ankan`、`kakan` MUST NOT 携带**（省略等同于 `null`）——三者都没有"被鸣的那张牌" |
 | `seq` | integer | 触发该动作的窗口序号（= 对应 `action_request.seq`） |
 
@@ -572,39 +739,40 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 2. 被鸣牌**恒为** `from_seat` 座位最近一次打出的那张（鸣牌窗口正是由它触发）。客户端据此从 `from_seat` 的牌河移除**最后一张**即可：既不必匹配 `tiles[0]`，也不必猜测 `chow` 的被鸣牌归属。
 3. `action_event` 是**即时事件**；服务端权威状态以随后到达的 `state_sync` 为准，两者**到达顺序不作保证**（H9）。
 4. **v1.6：`ankan` / `kakan` 不移动任何牌河**（无 `from_seat`）。客户端处理这两类事件时**不得**从任何牌河移除牌；其副露变化一律等随后的 `state_sync.melds[]` 权威覆盖（§5.12 保证自理杠之后必定下发 `state_sync`）。
-   > 这条是**硬约束**：若把暗杠实现成 `action:"kong"` 并带 `from_seat`，旧客户端会误删放炮者的牌河（`game_state.py` 的 `pong/chow/kong` 分支），属于必须避免的兼容性事故。
+   > 这条是**硬约束**：若把暗杠实现成 `action:4` 并带 `from_seat`，旧客户端会误删放炮者的牌河（`game_state.py` 的 `pong/chow/kong` 分支），属于必须避免的兼容性事故。
 
 ### 5.9 `state_sync`（H4、H6）
 
 ```json
-{"type":"state_sync","seq":9,"remaining":83,"current_seat":1,
+{"type":20,"seq":9,"remaining":83,"current_seat":1,
  "hand":["1m","2m","3m","5p","5p"],
- "melds":[{"type":"pong","tiles":["5p","5p","5p"]}],
+ "melds":[{"type":1,"tiles":["5p","5p","5p"]}],
  "seats":[{"seat":0,"name":"玩家_","is_bot":false,"hand_count":10,"discards":["9s","4p"],
-           "melds":[{"type":"pong","tiles":["9s","9s","9s"]}],"disconnected":false},
+           "melds":[{"type":1,"tiles":["9s","9s","9s"]}],"disconnected":false},
           {"seat":1,"name":"AI-1","is_bot":true,"hand_count":13,"discards":[],"melds":[],"disconnected":false},
           {"seat":2,"name":"AI-2","is_bot":true,"hand_count":13,"discards":[],"melds":[],"disconnected":false},
           {"seat":3,"name":"AI-3","is_bot":true,"hand_count":13,"discards":[],"melds":[],"disconnected":true}]}
 ```
+> 数值对照：`20`=state_sync（帧）、`1`=pong（副露）；完整表见 §1.3.1。
 
 | 字段 | 收件人 | 说明 |
 | --- | --- | --- |
 | `hand` | 仅本家 | **本家**手牌（按 §2.2 排序）。**他家的 `hand` 字段 MUST NOT 存在**（H6） |
-| `melds` | 仅本家 | 本家副露数组，元素 `{"type":<pong\|chow\|kong\|ankan\|kakan>,"tiles":[...]}`（H4，v1.6 扩 2 值）。**本家的 `ankan` 带 4 张真实牌面** |
+| `melds` | 仅本家 | 本家副露数组，元素 `{"type":<1\|2\|3\|4\|5>,"tiles":[...]}`（`1`=pong / `2`=chow / `3`=kong / `4`=ankan / `5`=kakan，见 §1.3.1；H4，v1.6 扩 2 值）。**本家的 `ankan` 带 4 张真实牌面** |
 | `seats[]` | 全体公开 | 恒 4 项，按 `seat` 升序；每项 `{seat,name,is_bot,hand_count,discards[],melds[],disconnected}`，**不含 `hand`**。**他家的 `ankan` 元素 `tiles` 恒为 `[]`**（见下） |
 | `remaining` | 全体公开 | 牌山剩余张数（初始值见 `RULESET.md` §1） |
 | `current_seat` | 全体公开 | 当前行动座位（0..3） |
 | `seq` | 全体公开 | 当前窗口序号（见 §6.2）。**场次内跨局单调，不重置** |
 
-**`melds[]` 元素形状（H4；v1.6 由 3 值扩到 5 值）**：`type ∈ {pong, chow, kong, ankan, kakan}`，组顺序 = 成组时间序。
+**`melds[]` 元素形状（H4；v1.6 由 3 值扩到 5 值）**：`type ∈ {1, 2, 3, 4, 5}`（`1`=pong、`2`=chow、`3`=kong、`4`=ankan、`5`=kakan，见 §1.3.1），组顺序 = 成组时间序。
 
-| `type` | `tiles` 张数（本家视角） | `tiles` 张数（他家视角） | 说明 |
-| --- | --- | --- | --- |
-| `pong` | 3 | 3 | 碰，公开 |
-| `chow` | 3 | 3 | 吃，公开 |
-| `kong` | 4 | 4 | **明杠**（鸣他家打出的牌），公开 |
-| `ankan` | **4** | **`[]`（空数组）** | **暗杠**：牌面对他家不可见（v1.6 终裁）。`hand_count` 仍按"1 组副露"计，故 `hand_count + 3×melds ∈ {13,14}` 的不变量不变 |
-| `kakan` | 4 | 4 | **加杠**：由一组 `pong` **原位替换**而来（组数与位置不变），公开 |
+| 值 | `type`（名称） | `tiles` 张数（本家视角） | `tiles` 张数（他家视角） | 说明 |
+| --- | --- | --- | --- | --- |
+| 1 | `pong` | 3 | 3 | 碰，公开 |
+| 2 | `chow` | 3 | 3 | 吃，公开 |
+| 3 | `kong` | 4 | 4 | **明杠**（鸣他家打出的牌），公开 |
+| 4 | `ankan` | **4** | **`[]`（空数组）** | **暗杠**：牌面对他家不可见（v1.6 终裁）。`hand_count` 仍按"1 组副露"计，故 `hand_count + 3×melds ∈ {13,14}` 的不变量不变 |
+| 5 | `kakan` | 4 | 4 | **加杠**：由一组 `pong` **原位替换**而来（组数与位置不变），公开 |
 
 - **暗杠的唯一实现口径（v1.6 终裁，MUST）**：`tiles` 的合法长度只有两种，且**按阶段绑定**，不是"任选其一"——
   - **本家视角**：恒为 **4 张真实牌面**（自己的牌，任何时候都可见）。
@@ -612,7 +780,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
   - **他家视角 + 局终揭示那一份**：恒为 **4 张真实牌面**。
   - **客户端 MUST 同时支持 0 张与 4 张两种长度**的渲染（0 张画 4 张牌背，4 张画牌面）——这条是给客户端的硬要求：即便某天服务端策略变化，客户端也不得只处理一种形状。
 - **暗杠的揭示时序契约（v1.6，MUST）**：
-  1. 暗杠发生后的所有 `state_sync`（含 `sync` 单发）中，**他家** `seats[].melds[]` 里该元素恒为 `{"type":"ankan","tiles":[]}`。
+  1. 暗杠发生后的所有 `state_sync`（含 `sync` 单发）中，**他家** `seats[].melds[]` 里该元素恒为 `{"type":4,"tiles":[]}`。
   2. **局终揭示**：`game_end` 之前的**最后一份** `state_sync`（即 §5.12「和牌后 / 荒庄前」那一份）**必须**把**所有座位**的 `ankan` 补全为 4 张真实牌面，使客户端在结算页能画出完整手牌。**复用这份既有的 `state_sync`，不新增帧、不新增字段。**
   3. `game_end.results[].hand`（扁平手牌，长度 = 14 + 杠数）**总是**包含暗杠的 4 张（局已结束，不再有私有信息）。
   4. 违反 1.（提前泄露）或 2./3.（结算不完整）都按协议缺陷处理。
@@ -623,7 +791,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 > **v1.6：`game_end` 是「局终」帧**，一场 4 局会下发 4 次（连庄各算一次）。字段只增不改；完整形状示例见本节末。v1.5 形状（无 `round_index`/`match_total`/`yaku` 等新增字段）对旧客户端仍然可解析——新增字段一律可忽略。
 
 ```json
-{"type":"game_end","reason":"win_ron",
+{"type":21,"reason":1,
  "results":[{"seat":0,"delta_score":-4,
              "hand":["1p","2p","3p","4s","5s","6s","7z","7z","1z","2z","3z","4z","6m"],"win_type":[]},
             {"seat":1,"delta_score":4,
@@ -636,11 +804,12 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
  "win":{"seat":1,"tile":"8p","from_seat":0,"tsumo":false,
         "tags":["seven_pairs"],"multiplier":4,"per_payer":4,"total":4}}
 ```
+> 数值对照：`21`=game_end（帧）、`1`=win_ron（reason）；完整表见 §1.3.1。
 > 上面这份是 **v1.5 形状（保留作为"既有字段不动"的对照）**；v1.6 追加的字段见本节末的完整示例。
 
 | 字段 | 冻结语义 |
 | --- | --- |
-| `reason` | `"win_ron"` / `"win_tsumo"` / `"draw_exhausted"` 三者之一（**词表不变**） |
+| `reason` | **integer**：`1`=win_ron / `2`=win_tsumo / `3`=draw_exhausted 三者之一（**取值不变，仅由 string 改 integer；见 §1.3.1**） |
 | `results` | 恒 4 项，按 `seat` 升序，`seat` 覆盖 `{0,1,2,3}` 无重复 |
 | `results[].delta_score` | 整数；四家之和 **MUST 为 0**（`RULESET.md` §6） |
 | `results[].hand` | **v4.5：四家均下发扁平数组**（门前手牌 + 副露牌面，按 §2.2 排序；和牌者含和牌张，长度 = `14/13 + 杠数`）。**不替代** `melds[]`，两者并存（H4）；仅存在于 `game_end`，不得提前泄露 |
@@ -683,7 +852,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 - **v1.6 语义澄清**：`game_end` **仍然只表示"局终"**，一场 4 局会下发 **4 次** `game_end`（连庄也各算一次）。"场终"由新增的 `match_end`（§5.15）表达，两者**不合并、不互相替代**。客户端不得把收到 `game_end` 当作"可以关掉对局界面"。`reason` 词表不因场次化而新增取值。
 
 ```json
-{"type":"game_end","reason":"win_ron","round_index":1,"dealer":1,"renchan_count":0,"match_will_continue":true,
+{"type":21,"reason":1,"round_index":1,"dealer":1,"renchan_count":0,"match_will_continue":true,
  "results":[{"seat":0,"delta_score":-M,"hand":[],"win_type":[],"match_total":-M},
             {"seat":1,"delta_score":M,"hand":["…14+杠数 张…"],"win_type":["seven_pairs","ron"],"match_total":M},
             {"seat":2,"delta_score":0,"hand":[],"win_type":[],"match_total":0},
@@ -695,13 +864,15 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
         "han":3,"dealer_bonus":false,"rinshan":false,
         "multiplier":R,"per_payer":R,"total":R}}
 ```
+> 数值对照：`21`=game_end（帧）、`1`=win_ron（reason）；完整表见 §1.3.1。
 > `N`/`R` 是**占位符**：番值、支付公式与封顶口径由 `RULESET.md` 番种表与算分节冻结（本文只冻结**字段形状、顺序、子集关系与零和约束**）。要点：①`Σ yaku[].han == han_breakdown.base`；②`han_breakdown.total = min(base + dealer, 6)`（`tsumo` 恒 0，不参与加法）；③`win.han == han_breakdown.total`；④`tags ⊆ yaku[].id`；⑤`match_total` 与 `delta_score` 在首局相等，从第 2 局起分化。
 
 ### 5.11 `pong`
 
 ```json
-{"type":"pong"}
+{"type":22}
 ```
+> 数值对照：`22`=pong（帧）；完整表见 §1.3.1。
 
 - 对应 `ping`，用于 RTT 显示与心跳保活。
 
@@ -725,9 +896,10 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 ### 5.13 `stats`（v1.3 新增，`ACCOUNT_DESIGN.md` §3.4）
 
 ```json
-{"type":"stats","games":12,"wins":5,"draws":3,"net_score":-14,
- "recent":[{"room_id":"r-7t2h4r8w1n6cz","reason":"win_ron","delta_score":12,"win":true,"ended_at":1759900000}]}
+{"type":23,"games":12,"wins":5,"draws":3,"net_score":-14,
+ "recent":[{"room_id":"r-7t2h4r8w1n6cz","reason":1,"delta_score":12,"win":true,"ended_at":1759900000}]}
 ```
+> 数值对照：`23`=stats（帧）、`1`=win_ron（reason）；完整表见 §1.3.1。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -743,8 +915,9 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 ### 5.14 `room_list`（v1.5）
 
 ```json
-{"type":"room_list","rooms":[{"room_id":"r-0f3k9m2p7q1sx","host":"小明","players":1,"seats":4}]}
+{"type":24,"rooms":[{"room_id":"r-0f3k9m2p7q1sx","host":"小明","players":1,"seats":4}]}
 ```
+> 数值对照：`24`=room_list（帧）；完整表见 §1.3.1。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -759,12 +932,13 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 ### 5.15 `match_end`（**v1.6 新增**，场终）
 
 ```json
-{"type":"match_end","hands_played":5,"renchan_count":1,
+{"type":25,"hands_played":5,"renchan_count":1,
  "rankings":[{"seat":1,"final_score":37,"rank":1},
              {"seat":0,"final_score":0,"rank":2},
              {"seat":3,"final_score":0,"rank":2},
              {"seat":2,"final_score":-37,"rank":4}]}
 ```
+> 数值对照：`25`=match_end（帧）；完整表见 §1.3.1。
 > 上例同时演示三件事：`Σ final_score == 0`；并列第 2（`seat 0` 与 `seat 3` 同分，按 `seat` 升序排列）；**并列跳号**（不存在 `rank == 3`）。
 
 | 字段 | 类型 | 说明 |
@@ -788,9 +962,10 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 ### 5.16 `tenpai`（**v1.7 新增**，听牌提示，**仅发本家**）
 
 ```json
-{"type":"tenpai","tenpai_seq":7,"is_tenpai":true,
+{"type":26,"tenpai_seq":7,"is_tenpai":true,
  "waits":[{"tile":"1m","remaining":2},{"tile":"4m","remaining":3}]}
 ```
+> 数值对照：`26`=tenpai（帧）；完整表见 §1.3.1。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -842,12 +1017,13 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 ### 5.17 `room_update`（**v1.23 新增**，未开局房间的座位快照）
 
 ```json
-{"type":"room_update","room_id":"r-0f3k9m2p7q1sx",
+{"type":27,"room_id":"r-0f3k9m2p7q1sx",
  "seats":[{"seat":0,"name":"小明","is_bot":false},
           {"seat":1,"name":"小红","is_bot":false},
           {"seat":2,"name":"AI-2","is_bot":true},
           {"seat":3,"name":"AI-3","is_bot":true}]}
 ```
+> 数值对照：`27`=room_update（帧）；完整表见 §1.3.1。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -866,10 +1042,10 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 
 ### 6.1 窗口类型与唯一性
 
-| 窗口 | `window` | 开窗时机 | 收件人 | `options` |
+| 窗口 | `window`（值） | 开窗时机 | 收件人 | `options` |
 | --- | --- | --- | --- | --- |
-| 打牌窗口 | `"discard"` | 摸牌后 / 庄家第一打 / 副露后待打牌（含**明杠·暗杠·加杠的补牌后**） | 仅 `current_seat` | `[]`，或以下动作的**子集**（相对顺序固定，v1.6）：`win` → `ankan` → `kakan` |
-| 鸣牌窗口 | `"claim"` | 某座位打出 `T` 且至少一个他家存在非 `pass` 选项 | 仅存在非 `pass` 选项的座位 | 至少含 `pass` + 各自可选动作（`win`/`kong`/`pong`/`chow`） |
+| 打牌窗口 | `1`=discard | 摸牌后 / 庄家第一打 / 副露后待打牌（含**明杠·暗杠·加杠的补牌后**） | 仅 `current_seat` | `[]`，或以下动作的**子集**（相对顺序固定，v1.6）：`win` → `ankan` → `kakan` |
+| 鸣牌窗口 | `2`=claim | 某座位打出 `T` 且至少一个他家存在非 `pass` 选项 | 仅存在非 `pass` 选项的座位 | 至少含 `pass` + 各自可选动作（`win`/`kong`/`pong`/`chow`） |
 
 - **v1.6：窗口类型仍只有两种**。暗杠/加杠是**打牌窗口内的附加选项**，不是新窗口——因此 `seq` 语义、超时机制、`window` 字段取值全部不变。新增窗口类型会同时影响协议、客户端白名单与超时兜底，属于**明确避免**的设计。
 - 同一时刻全房间**最多一个未决窗口**，由 `room.seq` 唯一标识。
@@ -929,22 +1105,22 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 
 > **v1.6 事实订正**：本版**不新增任何错误码**。此前若有文档/任务描述称"现有 11 条错误码"，那是 v1.3 之前的旧数字——自 v1.3 起就是 **14 条**（新增 `AUTH_FAILED` / `USERNAME_TAKEN` / `ALREADY_ONLINE`），权威定义见下表。暗杠/加杠的全部非法情形都复用既有的 `ILLEGAL_ACTION` / `NO_PENDING_ACTION` / `NOT_YOUR_TURN` / `UNKNOWN_TILE` / `BAD_REQUEST`，**不引入新码**；场次/连庄同理。`STALE_SEQ` 依旧不作为错误码（§6.3 静默丢弃）。
 
-| `code` | 触发 | 连接是否保持 |
-| --- | --- | --- |
-| `INVALID_NAME` | `login.name` 为空/超 16 字符/含控制字符 | 保持（第 4 次断开） |
-| `NOT_LOGGED_IN` | 未 `login` 就发送其他帧 | 保持 |
-| `ROOM_NOT_FOUND` | `join_room` 目标不存在/已关闭/满座；不在房间却发房间内消息 | 保持 |
-| `NOT_YOUR_TURN` | `discard` 时非本家回合且无针对本家的打牌窗口 | 保持 |
-| `NO_PENDING_ACTION` | `action` 时本家不在当前窗口内 | 保持 |
-| `ILLEGAL_ACTION` | 动作不在 `options` 中 / `tiles` 不满足条件 / 打牌窗口回 `pass` / 伪造 `win` | 保持 |
-| `UNKNOWN_TILE` | 牌编码非法，或该牌不在本家手牌 | 保持 |
-| `BAD_REQUEST` | 非法 JSON、未知/缺失 `type`、字段类型或 `seq` 缺失、重复 `login`/`create_room`、非法 UTF-8 | 保持（第 10 次坏帧断开） |
-| `FRAME_TOO_LARGE` | 单帧 > 64 KB | **断开** |
-| `RATE_LIMITED` | 入站帧速率超限 | 保持（持续风暴则断开） |
-| `INTERNAL` | 服务端内部错误；账号服务不可用时账号类帧亦回此码（不计配额） | 保持（客户端可提示并返回登录） |
-| `AUTH_FAILED` | 账号不存在或口令错误（v1.3） | 保持（**计入非法操作计数**，第 10 次断开） |
-| `USERNAME_TAKEN` | `register` 的账号名已存在（v1.3） | 保持（不计配额） |
-| `ALREADY_ONLINE` | 该账号已在另一连接登录（v1.3） | 保持（不计配额） |
+| 值 | `code`（名称） | 触发 | 连接是否保持 |
+| --- | --- | --- | --- |
+| 1 | `INVALID_NAME` | `login.name` 为空/超 16 字符/含控制字符 | 保持（第 4 次断开） |
+| 2 | `NOT_LOGGED_IN` | 未 `login` 就发送其他帧 | 保持 |
+| 3 | `ROOM_NOT_FOUND` | `join_room` 目标不存在/已关闭/满座；不在房间却发房间内消息 | 保持 |
+| 4 | `NOT_YOUR_TURN` | `discard` 时非本家回合且无针对本家的打牌窗口 | 保持 |
+| 5 | `NO_PENDING_ACTION` | `action` 时本家不在当前窗口内 | 保持 |
+| 6 | `ILLEGAL_ACTION` | 动作不在 `options` 中 / `tiles` 不满足条件 / 打牌窗口回 `pass` / 伪造 `win` | 保持 |
+| 7 | `UNKNOWN_TILE` | 牌编码非法，或该牌不在本家手牌 | 保持 |
+| 8 | `BAD_REQUEST` | 非法 JSON、未知/缺失 `type`、字段类型或 `seq` 缺失、重复 `login`/`create_room`、非法 UTF-8 | 保持（第 10 次坏帧断开） |
+| 9 | `FRAME_TOO_LARGE` | 单帧 > 64 KB | **断开** |
+| 10 | `RATE_LIMITED` | 入站帧速率超限 | 保持（持续风暴则断开） |
+| 11 | `INTERNAL` | 服务端内部错误；账号服务不可用时账号类帧亦回此码（不计配额） | 保持（客户端可提示并返回登录） |
+| 12 | `AUTH_FAILED` | 账号不存在或口令错误（v1.3） | 保持（**计入非法操作计数**，第 10 次断开） |
+| 13 | `USERNAME_TAKEN` | `register` 的账号名已存在（v1.3） | 保持（不计配额） |
+| 14 | `ALREADY_ONLINE` | 该账号已在另一连接登录（v1.3） | 保持（不计配额） |
 
 - **`STALE_SEQ` 不作为错误码下发**：`seq` 不匹配按 §6.3 静默丢弃（H7）。
 
@@ -992,7 +1168,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 
 ### 8.3 H8：服务端永不采信客户端结论
 
-1. 收到 `action{action:"win"}` **MUST** 用 `RULESET.md` §3 的和牌判定**重算**；不成立 → `ILLEGAL_ACTION`，状态零变更。
+1. 收到 `action{action:7}` **MUST** 用 `RULESET.md` §3 的和牌判定**重算**；不成立 → `ILLEGAL_ACTION`，状态零变更。
 2. 碰/吃/杠同样 **MUST** 按 `RULESET.md` §4 重算合法性（含 `{a,b,T}` 顺子成立、非下家不得吃、`remaining≥1` 才可杠）。**v1.6 补充**：`ankan`（本家 4 张同面）与 `kakan`（已有碰组 + 手牌 1 张同面）同样必须重算，且必须校验 `remaining ≥ 1`（无牌可补时不得开杠，`RULESET.md` §1.5/§4.3）。
 3. `delta_score`、`win_type`、`tags`、`M` **MUST** 由服务端规则库计算；客户端上报的任何分数一律忽略。**v1.6 补充**：`yaku[]`、`han`、`han_breakdown{base,tsumo,dealer,total}`、`dealer_bonus`、`rinshan`、`match_total`、`match_end.rankings[]` 全部由服务端计算，客户端上报一律忽略（派生字段 `han`/`dealer_bonus`/`rinshan` MUST 与 `yaku[]`/`han_breakdown` 恒等，不得各算一次）。
 4. **v1.6：杠补牌不得由客户端触发**。补摸是 `ankan`/`kakan`/`kong` 被服务端接受后的**副作用**，客户端不能单独请求摸牌。
@@ -1018,72 +1194,74 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 
 ## 9. 帧序列示例
 
+> **v2.0 数值对照**：以下序列的控制值均为整数。`type`：`1`=login、`2`=register、`4`=stats_request、`6`=create_room、`8`=ready、`10`=discard、`11`=action、`12`=login_ok、`13`=error、`14`=room_joined、`15`=game_start、`17`=discard_event、`18`=action_request、`23`=stats；`action`：`1`=pass、`2`=pong、`5`=ankan、`6`=kakan、`7`=win、`8`=riichi；`window`：`1`=discard、`2`=claim；`reason`：`2`=win_tsumo；`code`：`12`=AUTH_FAILED。完整八张表见 §1.3.1。
+
 ### 9.1 开局握手（t6 脚本必须按此顺序）
 
 ```
-C→S {"type":"login","name":"玩家_"}
-S→C {"type":"login_ok","player_id":"p-3f2a1c","name":"玩家_"}
-C→S {"type":"create_room"}
-S→C {"type":"room_joined","room_id":"r-0f3k9m2p7q1sx","seat":0,"seats":[…]}
-C→S {"type":"ready"}
-S→C {"type":"game_start","seat":0,"dealer":0,"hand":[14 张]}          # 庄家 = 真人
+C→S {"type":1,"name":"玩家_"}
+S→C {"type":12,"player_id":"p-3f2a1c","name":"玩家_"}
+C→S {"type":6}
+S→C {"type":14,"room_id":"r-0f3k9m2p7q1sx","seat":0,"seats":[…]}
+C→S {"type":8}
+S→C {"type":15,"seat":0,"dealer":0,"hand":[14 张]}          # 庄家 = 真人
 ```
 
 ### 9.1b 账号登录与注册（v1.3，`ACCOUNT_DESIGN.md` §3.6）
 
 ```
-C→S {"type":"login","username":"alice","password":"s3cret"}
-S→C {"type":"login_ok","player_id":"u-000042","name":"爱丽丝"}
-C→S {"type":"create_room"}                     # 之后与 9.1 完全相同
+C→S {"type":1,"username":"alice","password":"s3cret"}
+S→C {"type":12,"player_id":"u-000042","name":"爱丽丝"}
+C→S {"type":6}                     # 之后与 9.1 完全相同
 ```
 
 ```
-C→S {"type":"register","username":"alice","password":"s3cret"}   # 注册成功即登录
-S→C {"type":"login_ok","player_id":"u-000042","name":"alice"}
+C→S {"type":2,"username":"alice","password":"s3cret"}   # 注册成功即登录
+S→C {"type":12,"player_id":"u-000042","name":"alice"}
 ```
 
 ```
-C→S {"type":"login","username":"alice","password":"wrong"}
-S→C {"type":"error","code":"AUTH_FAILED","message":"wrong username or password"}   # 连接保持
+C→S {"type":1,"username":"alice","password":"wrong"}
+S→C {"type":13,"code":12,"message":"wrong username or password"}   # 连接保持
 ```
 
 ### 9.1c 战绩查询（v1.3）
 
 ```
-C→S {"type":"stats_request"}
-S→C {"type":"stats","games":12,"wins":5,"draws":3,"net_score":-14,"recent":[…]}
+C→S {"type":4}
+S→C {"type":23,"games":12,"wins":5,"draws":3,"net_score":-14,"recent":[…]}
 ```
 
 ### 9.2 一次「打牌 → 他家碰 → 鸣牌者打牌」
 
 ```
-S→C {"type":"action_request","seq":1,"deadline_ms":…,"window":"discard","options":[]}   # 仅 seat 0
-C→S {"type":"discard","tile":"9s","seq":1}
+S→C {"type":18,"seq":1,"deadline_ms":…,"window":1,"options":[]}   # 仅 seat 0
+C→S {"type":10,"tile":"9s","seq":1}
 S→C discard_event{seat:0,tile:"9s",seq:1}                       # 广播 4 家
-S→C action_request{seq:2,window:"claim",options:[pong/pass]}    # 仅 seat 1（有非 pass 选项）
-C→S {"type":"action","action":"pong","tiles":["9s"],"seq":2}
-S→C action_event{seat:1,action:"pong",tiles:["9s"],from_seat:0,seq:2}   # 广播
+S→C action_request{seq:2,window:2,options:[pong/pass]}    # 仅 seat 1（有非 pass 选项）
+C→S {"type":11,"action":2,"tiles":["9s"],"seq":2}
+S→C action_event{seat:1,action:2,tiles:["9s"],from_seat:0,seq:2}   # 广播
 S→C state_sync{seq:3,…}                                          # 并行广播 4 家（副露后）
-S→C action_request{seq:3,window:"discard",options:[]}            # seat 1 待打牌（与上一帧 state_sync 同 seq：同窗口过渡共用同一 seq，§6.2 第 1 条）
+S→C action_request{seq:3,window:1,options:[]}            # seat 1 待打牌（与上一帧 state_sync 同 seq：同窗口过渡共用同一 seq，§6.2 第 1 条）
 ```
 
 ### 9.3 一次「自摸和牌」
 
 ```
 S→C draw{tile:"5m",seat:1,seq:9}                    # 仅 seat 1
-S→C action_request{seq:9,window:"discard",options:[{"action":"win","tiles":[]}]}   # 仅 seat 1
-C→S {"type":"action","action":"win","tiles":[],"seq":9}
-S→C action_event{seat:1,action:"win",tiles:["5m"],seq:9}         # 无 from_seat（自摸）
+S→C action_request{seq:9,window:1,options:[{"action":7,"tiles":[]}]}   # 仅 seat 1
+C→S {"type":11,"action":7,"tiles":[],"seq":9}
+S→C action_event{seat:1,action:7,tiles:["5m"],seq:9}         # 无 from_seat（自摸）
 S→C state_sync{seq:10,…}
-S→C game_end{reason:"win_tsumo",results:[…],win:{…,"from_seat":null,"tsumo":true,…}}
+S→C game_end{reason:2,results:[…],win:{…,"from_seat":null,"tsumo":true,…}}
 ```
 
 ### 9.4 一次「全部 pass 的鸣牌窗口」
 
 ```
 S→C discard_event{seat:0,tile:"3p",seq:5}                       # 广播
-S→C action_request{seq:6,window:"claim",options:[…pass…]}       # 仅 seat 1（唯一有选项者）
-C→S {"type":"action","action":"pass","tiles":[],"seq":6}
+S→C action_request{seq:6,window:2,options:[…pass…]}       # 仅 seat 1（唯一有选项者）
+C→S {"type":11,"action":1,"tiles":[],"seq":6}
 （不广播任何 action_event）
 S→C draw{tile:"7m",seat:1,seq:7} + state_sync{seq:7,…}          # 下一家摸牌
 ```
@@ -1092,16 +1270,16 @@ S→C draw{tile:"7m",seat:1,seq:7} + state_sync{seq:7,…}          # 下一家�
 
 ```
 S→C draw{tile:"5m",seat:0,seq:12}                                # 仅 seat 0（摸到第 4 张 5m）
-S→C action_request{seq:12,window:"discard",
-     options:[{"action":"ankan","tiles":["5m"]},                  # 4 张同面 + remaining≥1
-              {"action":"kakan","tiles":["7p"]}]}                 # 另有一组 7p 碰 + 手牌 1 张 7p
-C→S {"type":"action","action":"ankan","tiles":["5m"],"seq":12}
-S→C action_event{seat:0,"action":"ankan","tiles":["5m"],seq:12}   # 广播；**无 from_seat**
+S→C action_request{seq:12,window:1,
+     options:[{"action":5,"tiles":["5m"]},                  # 4 张同面 + remaining≥1
+              {"action":6,"tiles":["7p"]}]}                 # 另有一组 7p 碰 + 手牌 1 张 7p
+C→S {"type":11,"action":5,"tiles":["5m"],"seq":12}
+S→C action_event{seat:0,"action":5,"tiles":["5m"],seq:12}   # 广播；**无 from_seat**
 S→C draw{tile:"9s",seat:0,seq:13}                                # 补牌，仅 seat 0
-S→C state_sync{seq:13, "melds":[{"type":"ankan","tiles":["5m","5m","5m","5m"]}, …],
+S→C state_sync{seq:13, "melds":[{"type":4,"tiles":["5m","5m","5m","5m"]}, …],
      "seats":[{…"melds":[]…}, …]}                                 # 本家带 4 张；他家该组 tiles 为 []
-S→C action_request{seq:13,window:"discard",options:[]}            # 打牌窗口（补牌后）
-C→S {"type":"discard","tile":"9s","seq":13}
+S→C action_request{seq:13,window:1,options:[]}            # 打牌窗口（补牌后）
+C→S {"type":10,"tile":"9s","seq":13}
 ```
 > 关键点：暗杠**不移动任何牌河**（无 `from_seat`）；`seq` 由 12 推进到 13 恰好一次（补牌后开的新打牌窗口）。
 
@@ -1159,13 +1337,13 @@ S→C match_end{hands_played:5,renchan_count:1,
 ### 10.4 t6（端到端脚本）
 
 - [ ] 握手顺序 `login → create_room → ready`（§9.1）
-- [ ] 每帧回带 `seq`；`window=="discard"` 时优先 `win`，否则 `discard{刚摸到的牌}`
+- [ ] 每帧回带 `seq`；`window==1` 时优先 `win`，否则 `discard{刚摸到的牌}`
 - [ ] 断言：`login_ok.player_id` 非空、`game_start.hand` 长度 13/14、至少一次 `draw` 与 `discard_event`、`game_end.results` 长度 4、`Σ delta_score == 0`、全程零 `error`
 - [ ] **v1.6 场次级断言**：`game_end` 次数 == `match_end.hands_played`（4..8）；`hands_played <= match_end.renchan_count + 4`；`match_end` 恰好 1 次且 `Σ final_score == 0`；`rankings` 覆盖 4 个座位且 `rank` 并列跳号；`round_index` 单调不减且连庄处相等；`seq` 跨局严格递增（§6.2 第 5 条）
 - [ ] **v1.6 暗杠断言**：他家视角 `ankan.tiles` 恒 `[]`，局终揭示后被补全；杠后 `remaining` 递减且牌数守恒（`remaining + 各家手牌 + 副露 + 牌河 == 136`）
 - [ ] **v1.6 番数断言**（对齐 `GAME_DESIGN` A13–A15）：①`yaku[]` 严格按冻结判定序、**每 id 至多一条**、`tags ⊆ yaku[].id`；②`Σ yaku[].han == han_breakdown.base`、`han_breakdown.total == min(base + dealer, 6)`（`tsumo` 恒 0、不得参与加法）、`win.han == han_breakdown.total`、`dealer_bonus == (dealer==1)`、`rinshan == (yaku 含 rinshan)`；③同一手牌判番 1000 次、且打乱输入顺序后逐字段相同（确定性回归）
 - [ ] **v1.7 听牌断言**：①`tenpai` **只发本家**（他家连接收不到任何 `tenpai`）；②本家每帧 `is_tenpai == false` 时 `waits == []`（MUST，且"未听牌必须发帧"）；③`waits[]` 按 §2.2 牌序且同面不重复；④`waits[].remaining == 4 − 本家手牌 − 本家副露 − 三家**公开**副露 − 四家牌河`（**他家 `ankan` 计 0**；**不得**用牌山真值；**不得**统计任何跨局数据）；⑤`tenpai_seq` 严格递增、与 `room.seq` 无可比关系；⑥单帧 < 1024 字节（PB-2）
-- [ ] **v1.7 事件断言**：①`action_event{action:"ankan"}` 的 `tiles` 恒为 `[]`（对所有座位）；②`kakan` 的 `tiles` 恒为 `[T]`；③`seq` 在连庄（`round_index` 不变）前后仍严格递增
+- [ ] **v1.7 事件断言**：①`action_event{action:5}` 的 `tiles` 恒为 `[]`（对所有座位）；②`kakan` 的 `tiles` 恒为 `[T]`；③`seq` 在连庄（`round_index` 不变）前后仍严格递增
 
 ---
 
@@ -1299,7 +1477,7 @@ remaining(tile) = 4
 
 - v1.6 §5.8 写"`ankan`/`kakan` = `[T]`"，实现也照此**广播同一份** `action_event`（`room.cc:1201`，四家收到同一 `tiles`）。
 - 但 §5.9/§8.1 又规定**暗杠牌面对他家不可见**。两者直接冲突：`action_event` 是广播帧，带 `[T]` 就等于**把暗杠牌面告诉了三家**——`seats[].melds[].ankan.tiles` 的打码被这一帧完全绕过。
-- **修正口径（v1.7）**：`action_event{action:"ankan"}` 的 `tiles` **恒为 `[]`（对所有收件人，包括暗杠者本人）**。
+- **修正口径（v1.7）**：`action_event{action:5}` 的 `tiles` **恒为 `[]`（对所有收件人，包括暗杠者本人）**。
   - 他人视角：只知道"某座位暗杠了"，不知道杠的是什么——与真实麻将一致（暗杠要报杠、不报牌）。
   - 本家视角：自己的牌面无损失地从紧随其后的 `state_sync.melds[]`（本家视角带 4 张真实牌面，§5.9）或 `action_request` 的 `options` 得知。
   - **`kakan` 不变**：加杠是公开动作，`tiles` 仍为 `[T]`。
@@ -1325,10 +1503,10 @@ remaining(tile) = 4
 | E3 | **出牌** | `discard_event{seat,tile,seq}` | ✅ 100% | 广播 4 家 |
 | E4 | **碰 / 吃 / 明杠** | `action_event{action∈{pong,chow,kong}, seat, tiles, from_seat, seq}` | ✅ 100% | 需从 `from_seat` 牌河 pop 一张（既有规则，§5.8 注 2） |
 | E5 | **本家暗杠/加杠** | `action_event{action∈{ankan,kakan}, seat, seq}` + 随后 `state_sync.melds[]` | ✅ 100% | v1.7 起 `ankan.tiles == []`（§11.5） |
-| E6 | **他家暗杠** | 同上（`seat` + `action:"ankan"`） | ✅ 事件可靠、**牌面不可知**（设计如此） | **不得**指望从任何帧拿到他家暗杠牌面（只有局终揭示那一份 `state_sync` 才有） |
-| E7 | **自摸和牌** | `action_event{action:"win", seat, tiles:[T]}`（**无 `from_seat`**）+ `game_end.win.tsumo == true` | ✅ 双源一致 | 音效必须在 `action_event` 时触发（`game_end` 到达偏晚） |
-| E8 | **荣和** | `action_event{action:"win", seat, from_seat}` + `game_end.win.from_seat` | ✅ 双源一致 | 同 E7 |
-| E9 | **荒庄** | `game_end{reason:"draw_exhausted", win:null}` | ✅ 100% | **荒庄没有 `action_event`** ⇒ 不可只靠 `action_event` 判"本局结束" |
+| E6 | **他家暗杠** | 同上（`seat` + `action:5`） | ✅ 事件可靠、**牌面不可知**（设计如此） | **不得**指望从任何帧拿到他家暗杠牌面（只有局终揭示那一份 `state_sync` 才有） |
+| E7 | **自摸和牌** | `action_event{action:7, seat, tiles:[T]}`（**无 `from_seat`**）+ `game_end.win.tsumo == true` | ✅ 双源一致 | 音效必须在 `action_event` 时触发（`game_end` 到达偏晚） |
+| E8 | **荣和** | `action_event{action:7, seat, from_seat}` + `game_end.win.from_seat` | ✅ 双源一致 | 同 E7 |
+| E9 | **荒庄** | `game_end{reason:3, win:null}` | ✅ 100% | **荒庄没有 `action_event`** ⇒ 不可只靠 `action_event` 判"本局结束" |
 | E10 | **局终** | `game_end`（每局一次） | ✅ 100% | 一场会有 4–8 次（= `hands_played`） |
 | E11 | **连庄** | `game_end.renchan_count`（post-increment）与上一局同字段比较，+1 = 本局触发了连庄 | ✅ 100% | **绝不能靠 `round_index` 区分连庄**：连庄时 `round_index` **不变** |
 | E12 | **场终** | `match_end`（恰好一次）；提前预判用 `game_end.match_will_continue == false` | ✅ 100% | `match_will_continue` 是"还会不会有下一局"的唯一权威 |
@@ -1346,7 +1524,7 @@ remaining(tile) = 4
 
 **回答一个具体提问：连庄时连续两次自摸，客户端能否区分是两次不同事件？**
 
-能，且有三条独立依据：①两次各自有独立的 `action_event{action:"win"}`，其 `seq` **严格递增**（§6.2 第 5 条：`seq` 跨局不重置）；②两次之间必有 `game_end` 与下一局的 `game_start`；③两次的 `game_end.renchan_count` 相差 1。
+能，且有三条独立依据：①两次各自有独立的 `action_event{action:7}`，其 `seq` **严格递增**（§6.2 第 5 条：`seq` 跨局不重置）；②两次之间必有 `game_end` 与下一局的 `game_start`；③两次的 `game_end.renchan_count` 相差 1。
 **但不能用 `round_index`**（连庄时两局同值），也**不能用 `game_end` 的序号**（客户端没有"第几个 game_end"的内置概念，需自己计数——可以，但不如 seq 直接）。**推荐判据：`seq` 单调 + `(type, seq, seat, action)` 作为事件幂等键。**
 
 ### 11.7 客户端实现陷阱（四条，直接影响 B 批能否验收）
@@ -1367,10 +1545,10 @@ remaining(tile) = 4
 
 ### 12.1 玩法开关：`create_room.mode`
 
-| 字段 | 类型 | 必填 | 取值 | 说明 |
+| 字段 | 类型 | 必填 | 值 → 名称 | 说明 |
 | --- | --- | --- | --- | --- |
-| `mode` | string | 否 | `classic` / `riichi` | 缺省 `classic`；未知值 → `BAD_REQUEST` |
-| `length` | string | 否 | `tonpu` / `hanchan` | 缺省 `tonpu`（东场 4 局）；`hanchan` = 半庄 8 局。**仅 `mode=riichi`**：classic 传 `hanchan` → `BAD_REQUEST`（classic 局数由 C15 冻结为 4） |
+| `mode` | **integer** | 否 | `1`=classic / `2`=riichi | 缺省 `1`（classic）；未知值 → `BAD_REQUEST`（`error{code:8}`） |
+| `length` | **integer** | 否 | `1`=tonpu / `2`=hanchan | 缺省 `1`（tonpu，东场 4 局）；`2`=hanchan = 半庄 8 局。**仅 `mode` 为 `2`（riichi）**：classic 传 `2` → `BAD_REQUEST`（classic 局数由 C15 冻结为 4） |
 
 - 玩法是**房间属性**：`join_room` 沿用目标房间的玩法，不需要也不接受 `mode`。
 - **兼容承诺**：客户端不传 `mode` 时，服务端下发的**每一帧与 v1.11 逐字节一致**（`points` / `dora_indicators` / `fu` 等键一律不出现）。
@@ -1399,13 +1577,13 @@ remaining(tile) = 4
 
 ### 12.4 `action` 新增动作 `riichi`
 
-- **窗口**：只出现在 `discard` 窗口的 `options` 里，形状 `{"action":"riichi","tiles":[]}`。
-- **提交**：`{"type":"action","action":"riichi","tiles":["<宣言牌>"],"seq":N}` —— `tiles` **恰 1 个牌面**。
+- **窗口**：只出现在 `discard` 窗口的 `options` 里，形状 `{"action":8,"tiles":[]}`。
+- **提交**：`{"type":11,"action":8,"tiles":["<宣言牌>"],"seq":N}` —— `tiles` **恰 1 个牌面**。
 - **语义**：**宣言与打牌是同一条消息**。服务端先扣 1000 点供托（`points[seat] -= 1000`、`kyoutaku += 1`），
   再执行该牌的打牌流程。客户端**不得**拆成「先 action 再 discard」两条消息。
 - **合法性**：服务端重算（门前清 + 打出该牌后听牌 + **未处于振听** + 持点 ≥ 1000 + 可摸区 ≥ 4），
   不满足 → `ILLEGAL_ACTION`。振听包含舍て牌振听（自家牌河里有自己的等待张）与见逃振听（本局放过了和牌）。
-- **广播**：宣言成功即广播 `action_event{seat, action:"riichi", tiles:[], seq}`（不带 `from_seat`），
+- **广播**：宣言成功即广播 `action_event{seat, action:8, tiles:[], seq}`（不带 `from_seat`），
   供前端起「立直棒 / 横置」动画；权威状态见 `state_sync.seats[].riichi`。
 - **一发**：宣言后至本家下一次摸牌前有效；期间任何鸣牌（吃/碰/杠）立即失效。
 - **立直后（手牌锁定）**：普通 `discard` **只能是刚摸到的那张**（摸切），打其它牌回 `ILLEGAL_ACTION`；
@@ -1464,7 +1642,7 @@ remaining(tile) = 4
 
 | 既有条款 | 日麻下的处理 |
 | --- | --- |
-| §0.4「抢杠和**永久不做**」 | 仅对 classic 生效。日麻**已接线**（v1.15）：加杠时开 `window:"chankan"` 的抢杠窗口，见 §12.10 |
+| §0.4「抢杠和**永久不做**」 | 仅对 classic 生效。日麻**已接线**（v1.15）：加杠时开 `window:3` 的抢杠窗口，见 §12.10 |
 | §0.6「136 / 83 / 84 / 21」 | 每局口径不变；日麻的可摸区改为 122、发牌后 `remaining` 69（见 §12.2） |
 | §0.2 H6（`seats[]` 不含 `hand`） | 两种玩法一致，未放松 |
 | §7.1 错误码 14 条 | **零新增**：立直/无役/振听一律走 `ILLEGAL_ACTION` 或「不给该 option」 |
@@ -1480,9 +1658,10 @@ remaining(tile) = 4
 | `no_yaku` | bool | `is_tenpai == true` 且**所有** `waits[].yaku == false` |
 
 ```json
-{"type":"tenpai","tenpai_seq":12,"is_tenpai":true,"no_yaku":true,
+{"type":26,"tenpai_seq":12,"is_tenpai":true,"no_yaku":true,
  "waits":[{"tile":"6s","remaining":3,"yaku":false},{"tile":"9s","remaining":2,"yaku":false}]}
 ```
+> 数值对照：`26`=tenpai（帧）；完整表见 §1.3.1。
 
 - **判定口径**：逐张把该牌加进手牌、以**荣和**上下文判番（不含门前清自摸、岭上开花这类自摸役，所以
   「门清无役」也会是 `yaku=false`，这类手牌仍然**可以**自摸和牌）。已立直者不逐张计算（立直本身是役）。
@@ -1495,10 +1674,10 @@ remaining(tile) = 4
 
 ### 12.9 局数与场风（**v1.14 增补**）
 
-| 概念 | 取值 | 说明 |
-| --- | --- | --- |
-| 东场（`tonpu`，缺省） | `round_count = 4` | 场风恒东；第 1..4 局依次由四家坐庄 |
-| 半庄（`hanchan`） | `round_count = 8` | 第 1..4 局东场、第 5..8 局南场 |
+| 概念 | 值 | `round_count` | 说明 |
+| --- | --- | --- | --- |
+| 东场（`tonpu`，缺省，`1`） | 1 | `round_count = 4` | 场风恒东；第 1..4 局依次由四家坐庄 |
+| 半庄（`hanchan`，`2`） | 2 | `round_count = 8` | 第 1..4 局东场、第 5..8 局南场 |
 
 - **场风由局号唯一决定**：`round_wind = round_index / 4`（`round_index` 只在该局**轮庄**时 +1，连庄不推进）。
 - **自风口径（修正）**：庄家的自风等于场风 —— 东场庄家是东家、南场庄家是南家。
@@ -1508,11 +1687,11 @@ remaining(tile) = 4
   上限 4 不变。此前日麻共用 4，会让连庄 5 次的半庄在 `round_index=5` 就场终。
 - **兼容**：不传 `length` ⇒ 东场，`round_count` 与 `round_wind` 与 v1.13 完全一致。
 
-### 12.10 抢杠（`window:"chankan"`，**v1.15 增补**）
+### 12.10 抢杠（`window:3`，**v1.15 增补**）
 
-- **触发**：`mode=riichi` 下本家提交 `action{action:"kakan", tiles:[T]}`。服务端**不立即落地**，
+- **触发**：`mode=riichi` 下本家提交 `action{action:6, tiles:[T]}`。服务端**不立即落地**，
   先给另外三家一次抢杠机会；确认无人和牌后才补岭上牌、翻新宝牌、开打牌窗口。
-- **窗口帧**：`window:"chankan"`，比 §5.7 的鸣牌窗口多一个字段：
+- **窗口帧**：`window:3`，比 §5.7 的鸣牌窗口多一个字段：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -1521,9 +1700,9 @@ remaining(tile) = 4
 - **options**：只有 `win` / `pass` —— 加杠的牌不能被吃/碰/大明杠。**只有真能和的家才会收到窗口**；
   三家都不能和时服务端不开窗、直接落地（否则每次加杠都要白等 15 s）。
 - **抢杠是 1 番役**：判番上下文带 `is_chankan=true`，因此**无役的手牌也能抢**（这是它与普通荣和的唯一区别）。
-- **和了**：`game_end.reason = "win_ron"`，`win.yaku[]` 里出现 `chankan`；第 4 张从加杠者手牌移入和牌者手牌，
+- **和了**：`game_end.reason = 1`，`win.yaku[]` 里出现 `chankan`；第 4 张从加杠者手牌移入和牌者手牌，
   **杠不成立**（不会翻新宝牌、不会补岭上牌）。
-- **无人和**：加杠正常落地，客户端随后才会看到 `action_event{action:"kakan"}`（不是先播后撤）。
+- **无人和**：加杠正常落地，客户端随后才会看到 `action_event{action:6}`（不是先播后撤）。
 - **振听**：窗口给了 `win` 却过（含超时）⇒ 本局见逃振听，与普通荣和同口径。
 - **不做**：国士无双抢**暗杠**（本版只做加杠）。
 
@@ -1634,7 +1813,7 @@ remaining(tile) = 4
 | `stats_request` | C→S | — | — |
 | `create_room` / `join_room` / `ready` | C→S | `room_id`（仅 join） | — |
 | `discard` | C→S | `tile`, `seq` | ✅ 必带 |
-| `action` | C→S | `action`（`pass/pong/chow/kong/ankan/kakan/win`）, `tiles[]`, `seq` | ✅ 必带 |
+| `action` | C→S | `action`（**integer** `1..8`，见 §1.3.1）, `tiles[]`, `seq` | ✅ 必带 |
 | `sync` / `ping` | C→S | — | — |
 | `login_ok` | S→C | `player_id`, `name` | — |
 | `error` | S→C | `code`（**14 条之一**）, `message`, `detail?` | — |
@@ -1642,7 +1821,7 @@ remaining(tile) = 4
 | `game_start` | S→C | `hand`, `seat`, `dealer`, `round_index`, `round_count`（后两个 v1.6） | — |
 | `draw` | S→C | `tile`, `seat` | ✅ |
 | `discard_event` | S→C | `seat`, `tile` | ✅ |
-| `action_request` | S→C | `deadline_ms`, `window`（仅 `discard`/`claim`）, `options[]` | ✅ |
+| `action_request` | S→C | `deadline_ms`, `window`（**integer**：`1`=discard / `2`=claim / `3`=chankan 抢杠）, `options[]` | ✅ |
 | `action_event` | S→C | `seat`, `action`, `tiles[]`（**`ankan` 恒 `[]`**，v1.7 §11.5）, `from_seat?`（`ankan`/`kakan`/自摸 不带） | ✅ |
 | `state_sync` | S→C | `hand`, `melds[]`（5 种 type）, `seats[]`（他家 `ankan.tiles` 为 `[]`）, `remaining`, `current_seat` | ✅ |
 | `tenpai` | S→C | **仅本家（v1.7）**：`tenpai_seq`, `is_tenpai`, `waits[]{tile,remaining}` | ❌（走 `tenpai_seq`） |
@@ -1669,6 +1848,7 @@ remaining(tile) = 4
 
 | 版本 | 内容 | 来源 |
 | --- | --- | --- |
+| **v2.0** | **控制字段整数化（破坏性变更、硬切换，不兼容 v1.x）**：`type`、`action`、`window`、`mode`、`length`、`melds[].type`、`reason`、`code` 八域共 **64 个线值**由字符串改为整数（各域 `0` 保留、真实值 `1..N` 连续），字段名不变；新增 §1.3.1 八张冻结枚举表与 `game/protocol/enums.json` 单一真值，由一致性测试守护 C++/Python/JS/文档四方；服务端、Python 客户端、Web、全部测试、golden 日志与文档同批切换，**无双读兼容层、无版本协商**。牌码、`yaku[].id`、`tags`、`win_type`、`limit`、错误 `message` 等展示型字符串保持不变 | 线协议 v2.0 重构（8 域 64 值，见 §1.3.1） |
 | **v1.23** | **等待页座位同步**：新增 S→C 帧 `room_update`（S17，§5.17，15 → 16 条），`join_room` 成功 / 未开局非房主断开后广播房间内全部真人的四席位快照；`room_joined` 仍只回本人，`room_list` 仍只有人数。客户端据此刷新等待页席位与人数提示，不得靠 `players` 反推座位。**零新增错误码、零既有帧字段变化**，旧客户端忽略未知帧即可 | 缺陷修复（好友入座后房主等待页没同步）；用户需求「服务器应该做同步」 |
 | **v1.20** | **场终剩棒归一位**（`mode=riichi`）：§12.13 新增整节 —— 本场以荒庄/击飞收尾时，台面剩下的立直棒全部归**一位**（持点最高，同点 seat 升序），点数计入该局 `results[].delta_score` / `match_total` / `points_after[]`，与 `match_end.rankings[].final_score` 逐点一致；新增**可选字段** `game_end.kyoutaku_award`（`{seat, sticks, points}`，非场终局恒 `null`）。**classic 逐字节不变**，零新增错误码 | 需求（场供归属）；规则口径见 `GAME_DESIGN_RIICHI_DRAFT.md` §7.7 |
 | **v1.19** | **击飞终局**（`mode=riichi`）：§12.12 新增整节 —— 任一持点 **< 0** ⇒ 本场立即终局，优先级高于局数与连庄（`match_will_continue=false`，随后 `match_end`）；击飞那一局**不推进**庄家/局号/本场；**恰好 0 点继续**；负点不截断（箱下照算，`points_after` / `rankings[].final_score` 用真实负值）。**classic 不参与**（无持点），**零新增字段、零新增错误码、零新增 `reason` 值** | 需求（击飞）；规则口径见 `GAME_DESIGN_RIICHI_DRAFT.md` §7.6 |

@@ -1,19 +1,22 @@
 // Wire protocol constants and frame builders.
 //
-// Every value in this header is copied from the frozen spec `game/docs/PROTOCOL.md`.
-// Implementations MUST NOT invent message types, fields or error codes (§0.1): if a
-// needed value is missing, raise a requirement review instead of adding it here.
+// Every enum value in this header is copied from the frozen spec `game/docs/PROTOCOL.md`
+// (v2.0 §1.3.1 keeps the frozen integer tables). Implementations MUST NOT invent message
+// types, fields or error codes (§0.1): if a needed value is missing, raise a requirement
+// review instead of adding it here.
 
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "json.h"
 #include "mahjong_rules.h"
+#include "protocol_enums.h"
 #include "utf8.h"
 
 namespace mahjong::protocol {
@@ -49,53 +52,9 @@ inline constexpr int kMinActionTimeoutMs = 1000;
 inline constexpr int kMaxActionTimeoutMs = 60000;
 
 // ---- §4 client frame types ------------------------------------------------------------
-// The "type" field of every client frame. Declared here because the routing table
-// (player_actor.cc) plus its tests are the two places that must agree on them: a typo in a
-// string literal there would silently become an unknown frame type at runtime.
-inline constexpr char kFrameLogin[] = "login";
-inline constexpr char kFrameRegister[] = "register";
-inline constexpr char kFramePing[] = "ping";
-inline constexpr char kFrameStatsRequest[] = "stats_request";
-inline constexpr char kFrameListRooms[] = "list_rooms";
-inline constexpr char kFrameCreateRoom[] = "create_room";
-inline constexpr char kFrameJoinRoom[] = "join_room";
-inline constexpr char kFrameReady[] = "ready";
-inline constexpr char kFrameSync[] = "sync";
-inline constexpr char kFrameDiscard[] = "discard";
-inline constexpr char kFrameAction[] = "action";
-
-// The same list as a range, so the routing table can assert its own completeness at compile
-// time: adding a frame type here without a row in the routing table (kFrameRoutes in
-// player_agent.h, asserted by the static_assert in player_actor.cc) is a build error rather
-// than a frame that silently answers "unknown frame type" in production.
-inline constexpr std::string_view kClientFrameTypes[] = {
-    kFrameLogin,   kFrameRegister,  kFramePing,   kFrameStatsRequest, kFrameListRooms, kFrameCreateRoom,
-    kFrameJoinRoom, kFrameReady,    kFrameSync,   kFrameDiscard,      kFrameAction,
-};
-
-// ---- §3.2 server frame types ----------------------------------------------------------
-// Copied from PROTOCOL.md §3.2 / §5.17 (v1.10). Deliberately NOT in kClientFrameTypes:
-// the lobby broadcasts it, no client may send it. The older server frames still spell
-// their type inline next to their builder; this one is named because two call sites emit it.
-inline constexpr char kFrameRoomUpdate[] = "room_update";
-
-// ---- §7.1 error codes (exactly these 14; STALE_SEQ is deliberately absent) -------------
-// The last three come from ACCOUNT_DESIGN.md §3.5 (PROTOCOL.md §7.1 was amended from 11 to
-// 14 codes); the semantics and thresholds of the original 11 are unchanged.
-inline constexpr char kCodeInvalidName[] = "INVALID_NAME";
-inline constexpr char kCodeNotLoggedIn[] = "NOT_LOGGED_IN";
-inline constexpr char kCodeRoomNotFound[] = "ROOM_NOT_FOUND";
-inline constexpr char kCodeNotYourTurn[] = "NOT_YOUR_TURN";
-inline constexpr char kCodeNoPendingAction[] = "NO_PENDING_ACTION";
-inline constexpr char kCodeIllegalAction[] = "ILLEGAL_ACTION";
-inline constexpr char kCodeUnknownTile[] = "UNKNOWN_TILE";
-inline constexpr char kCodeBadRequest[] = "BAD_REQUEST";
-inline constexpr char kCodeFrameTooLarge[] = "FRAME_TOO_LARGE";
-inline constexpr char kCodeRateLimited[] = "RATE_LIMITED";
-inline constexpr char kCodeInternal[] = "INTERNAL";
-inline constexpr char kCodeAuthFailed[] = "AUTH_FAILED";
-inline constexpr char kCodeUsernameTaken[] = "USERNAME_TAKEN";
-inline constexpr char kCodeAlreadyOnline[] = "ALREADY_ONLINE";
+// The "type" field of every client frame is an integer wire value (PROTOCOL v2.0 §1.3.1);
+// the frozen FrameType enum and the kClientFrameTypes list live in protocol_enums.h, which
+// the routing table (player_actor.cc) asserts its completeness against at compile time.
 
 // ---- ACCOUNT_DESIGN.md §3.1: login/register field rules --------------------------------
 // Account names and passwords are deliberately ASCII-only, which makes a SQL injection
@@ -145,19 +104,15 @@ inline bool IsValidNickname(std::string_view name) {
 // then propagates here automatically and can never leave the gateway rejecting legal tiles.
 inline bool IsValidTileCode(std::string_view tile) { return ParseTile(tile).has_value(); }
 
-// ---- §4.6 action names ----------------------------------------------------------------
-// The eight names are the wire vocabulary (v1.6: 5 → 7, +ankan/kakan；日麻: +riichi), so the
-// vocabulary lives here next to the tile alphabet. Whether an action is legal *in the current
-// window* is a game-level question that stays in room.cc (ILLEGAL_ACTION); this only says the
-// client spelled a real action.
-inline bool IsKnownActionName(std::string_view action) {
-  return action == "pass" || action == "pong" || action == "chow" || action == "kong" ||
-         action == "ankan" || action == "kakan" || action == "win" || action == "riichi";
-}
+// ---- §4.6 action vocabulary ------------------------------------------------------------
+// The eight actions are the wire vocabulary (v1.6: 5 → 7, +ankan/kakan；日麻: +riichi),
+// frozen as the Action enum in protocol_enums.h. Whether an action is legal *in the current
+// window* is a game-level question that stays in room.cc (ILLEGAL_ACTION); an unknown /
+// out-of-range integer is rejected in frame_parser.cc (BAD_REQUEST).
 
 // ---- §5.2 error frame -----------------------------------------------------------------
-std::string ErrorFrame(std::string_view code, std::string_view message);
-std::string ErrorFrame(std::string_view code, std::string_view message, json::Value detail);
+std::string ErrorFrame(ErrorCode code, std::string_view message);
+std::string ErrorFrame(ErrorCode code, std::string_view message, json::Value detail);
 
 // ---- §5.1 login_ok / §5.11 pong -------------------------------------------------------
 std::string LoginOkFrame(std::string_view player_id, std::string_view name);
@@ -168,12 +123,12 @@ std::string PongFrame();
 // and the wire share one shape instead of two that can drift.
 struct StatsEntry {
   std::string room_id;
-  std::string reason;
+  RoundEndReason reason = RoundEndReason::kInvalid;
   int delta_score = 0;
   bool win = false;
   int64_t ended_at = 0;  // Unix seconds
   // classic / riichi（日麻接入：两种玩法的分数不可比）。放最后：既有聚合初始化不动。
-  std::string mode = "classic";
+  WireMode mode = WireMode::kClassic;
 };
 
 struct StatsSummary {
@@ -197,5 +152,24 @@ inline constexpr size_t kMaxRecentMatches = 10;
 std::string StatsFrame(const StatsSnapshot& snapshot);
 // 兼容重载：只填 classic 的调用（内部与单测）等价于「riichi 桶为空」。
 std::string StatsFrame(const StatsSummary& summary);
+
+// ---- 内部枚举 ↔ 线枚举转换（v2.0）-------------------------------------------------------
+// mahjong_rules.h 的 MeldType 是**内部**枚举（0 基、无 INVALID）；线值用 protocol_enums.h 的
+// WireMeldType（1..5）。转换只发生在线边界（出站帧 / DB 落库），内部逻辑永远比较内部枚举。
+inline WireMeldType ToWire(MeldType type) {
+  switch (type) {
+    case MeldType::kPong:
+      return WireMeldType::kPong;
+    case MeldType::kChow:
+      return WireMeldType::kChow;
+    case MeldType::kKong:
+      return WireMeldType::kKong;
+    case MeldType::kAnkan:
+      return WireMeldType::kAnkan;
+    case MeldType::kKakan:
+      return WireMeldType::kKakan;
+  }
+  return WireMeldType::kInvalid;
+}
 
 }  // namespace mahjong::protocol

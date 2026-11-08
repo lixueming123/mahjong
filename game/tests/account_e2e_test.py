@@ -35,6 +35,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from protocol.enums import ACTION, ERROR_CODE, FRAME_TYPE, MODE, REASON, WINDOW
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_BIN_CANDIDATES = (
@@ -94,14 +98,14 @@ class Client:
         line, _, self.buffer = self.buffer.partition(b"\n")
         return json.loads(line.decode("utf-8"))
 
-    def recv_type(self, expected: str, timeout: float = 20.0) -> dict:
+    def recv_type(self, expected: int, timeout: float = 20.0) -> dict:
         frame = self.recv_frame(timeout)
         check(frame.get("type") == expected, f"{self.name}: expected {expected}, got {frame}")
         return frame
 
-    def recv_error(self, code: str, timeout: float = 20.0) -> dict:
+    def recv_error(self, code: int, timeout: float = 20.0) -> dict:
         frame = self.recv_frame(timeout)
-        check(frame.get("type") == "error", f"{self.name}: expected an error, got {frame}")
+        check(frame.get("type") == FRAME_TYPE.ERROR, f"{self.name}: expected an error, got {frame}")
         check(frame.get("code") == code, f"{self.name}: expected {code}, got {frame}")
         return frame
 
@@ -234,19 +238,19 @@ def answer_request(client: Client, hand: set[str], request: dict) -> None:
     seq = request["seq"]
     options = request.get("options", [])
     actions = {option["action"]: option for option in options}
-    if "win" in actions:
-        client.send({"type": "action", "action": "win", "tiles": [], "seq": seq})
+    if ACTION.WIN in actions:
+        client.send({"type": FRAME_TYPE.ACTION, "action": ACTION.WIN, "tiles": [], "seq": seq})
         return
-    if request["window"] == "discard":
+    if request["window"] == WINDOW.DISCARD:
         tile = sorted(hand)[-1] if hand else None
         check(tile is not None, "the discard window arrived with an empty tracked hand")
-        client.send({"type": "discard", "tile": tile, "seq": seq})
+        client.send({"type": FRAME_TYPE.DISCARD, "tile": tile, "seq": seq})
         return
-    for action in ("pong", "chow"):
+    for action in (ACTION.PONG, ACTION.CHOW):
         if action in actions:
-            client.send({"type": "action", "action": action, "tiles": actions[action]["tiles"], "seq": seq})
+            client.send({"type": FRAME_TYPE.ACTION, "action": action, "tiles": actions[action]["tiles"], "seq": seq})
             return
-    client.send({"type": "action", "action": "pass", "tiles": [], "seq": seq})
+    client.send({"type": FRAME_TYPE.ACTION, "action": ACTION.PASS, "tiles": [], "seq": seq})
 
 
 def play_one_match(client: Client, name: str) -> tuple[str, list[dict], dict, dict]:
@@ -255,8 +259,8 @@ def play_one_match(client: Client, name: str) -> tuple[str, list[dict], dict, di
     返回 `(room_id, ends, match_end, mine)`；`mine` 汇总本座位（seat 0）的
     得分累计 / 和牌局数 / 荒庄局数 / 坐庄手数，供落库核对。
     """
-    client.send({"type": "create_room"})
-    joined = client.recv_type("room_joined")
+    client.send({"type": FRAME_TYPE.CREATE_ROOM})
+    joined = client.recv_type(FRAME_TYPE.ROOM_JOINED)
     check(joined["seat"] == 0, f"{name}: the creator must sit at seat 0")
     check(len(joined["seats"]) == SEAT_COUNT, f"{name}: room_joined needs 4 seats")
     check(joined["seats"][0]["name"] == name, f"{name}: seat 0 must carry the account nickname")
@@ -266,51 +270,51 @@ def play_one_match(client: Client, name: str) -> tuple[str, list[dict], dict, di
     match_end: dict | None = None
     mine = {"delta_total": 0, "wins": 0, "draws": 0, "dealer_rounds": 0}
     deadline = time.monotonic() + 600
-    client.send({"type": "ready"})
+    client.send({"type": FRAME_TYPE.READY})
     while match_end is None:
         if time.monotonic() > deadline:
             raise TestFailure(f"{name}: the match did not finish in time")
-        start = client.recv_type("game_start")
+        start = client.recv_type(FRAME_TYPE.GAME_START)
         if start.get("dealer") == 0:
             mine["dealer_rounds"] += 1
         hand = set(start["hand"])
         while True:
             frame = client.recv_frame()
             kind = frame.get("type")
-            if kind == "game_end":
+            if kind == FRAME_TYPE.GAME_END:
                 ends.append(frame)
                 mine["delta_total"] += next(
                     entry["delta_score"] for entry in frame["results"] if entry["seat"] == 0)
                 if isinstance(frame.get("win"), dict) and frame["win"].get("seat") == 0:
                     mine["wins"] += 1
-                if frame.get("reason") == "draw_exhausted":
+                if frame.get("reason") == REASON.DRAW_EXHAUSTED:
                     mine["draws"] += 1
                 if not frame.get("match_will_continue", False):
                     closing = client.recv_frame()
-                    check(closing.get("type") == "match_end",
+                    check(closing.get("type") == FRAME_TYPE.MATCH_END,
                           f"{name}: expected match_end after the last game_end, got {closing}")
                     match_end = closing
                 break
-            if kind == "match_end":
+            if kind == FRAME_TYPE.MATCH_END:
                 raise TestFailure(f"{name}: match_end arrived before the round's game_end: {frame}")
-            if kind == "draw":
+            if kind == FRAME_TYPE.DRAW:
                 if frame.get("seat") == 0:
                     hand.add(frame["tile"])
-            elif kind == "discard_event":
+            elif kind == FRAME_TYPE.DISCARD_EVENT:
                 if frame.get("seat") == 0:
                     hand.discard(frame["tile"])
-            elif kind == "state_sync":
+            elif kind == FRAME_TYPE.STATE_SYNC:
                 hand = set(frame["hand"])
-            elif kind == "action_request":
+            elif kind == FRAME_TYPE.ACTION_REQUEST:
                 answer_request(client, hand, frame)
-            elif kind == "error":
+            elif kind == FRAME_TYPE.ERROR:
                 raise TestFailure(f"{name}: unexpected error frame: {frame}")
     return room_id, ends, match_end, mine
 
 
 def stats_for(client: Client, label: str) -> dict:
-    client.send({"type": "stats_request"})
-    return client.recv_type("stats")
+    client.send({"type": FRAME_TYPE.STATS_REQUEST})
+    return client.recv_type(FRAME_TYPE.STATS)
 
 
 def run(args: argparse.Namespace) -> None:
@@ -325,11 +329,11 @@ def run(args: argparse.Namespace) -> None:
     try:
         # --- register implies login (§3.2) ------------------------------------------------
         first = Client(server.port, "register")
-        first.send({"type": "register", "username": username, "password": password})
+        first.send({"type": FRAME_TYPE.REGISTER, "username": username, "password": password})
         login_ok = first.recv_frame()
-        if login_ok.get("type") == "error" and login_ok.get("code") == "INTERNAL":
+        if login_ok.get("type") == FRAME_TYPE.ERROR and login_ok.get("code") == ERROR_CODE.INTERNAL:
             skip(f"the server has no account storage: {login_ok.get('message')}")
-        check(login_ok.get("type") == "login_ok", f"register must answer login_ok, got {login_ok}")
+        check(login_ok.get("type") == FRAME_TYPE.LOGIN_OK, f"register must answer login_ok, got {login_ok}")
         player_id = login_ok.get("player_id", "")
         check(player_id.startswith("u-"), f"an account's player_id must be durable, got {player_id}")
         check(login_ok.get("name") == username, f"the nickname defaults to the username: {login_ok}")
@@ -337,20 +341,20 @@ def run(args: argparse.Namespace) -> None:
 
         # --- the account name is unique (§3.2) --------------------------------------------
         second = Client(server.port, "duplicate")
-        second.send({"type": "register", "username": username, "password": password})
-        second.recv_error("USERNAME_TAKEN")
+        second.send({"type": FRAME_TYPE.REGISTER, "username": username, "password": password})
+        second.recv_error(ERROR_CODE.USERNAME_TAKEN)
 
         # --- a wrong password, and the account-not-found case, look identical (§3.1) ------
         # (The unknown name must still satisfy §3.1's 3..16 rule, otherwise the server is right
         # to answer BAD_REQUEST before it ever looks the account up.)
-        second.send({"type": "login", "username": username, "password": "definitely_wrong"})
-        second.recv_error("AUTH_FAILED")
-        second.send({"type": "login", "username": "e2e_absent", "password": password})
-        second.recv_error("AUTH_FAILED")
+        second.send({"type": FRAME_TYPE.LOGIN, "username": username, "password": "definitely_wrong"})
+        second.recv_error(ERROR_CODE.AUTH_FAILED)
+        second.send({"type": FRAME_TYPE.LOGIN, "username": "e2e_absent", "password": password})
+        second.recv_error(ERROR_CODE.AUTH_FAILED)
 
         # --- one account, one live connection (§1.3) --------------------------------------
-        second.send({"type": "login", "username": username, "password": password})
-        second.recv_error("ALREADY_ONLINE")
+        second.send({"type": FRAME_TYPE.LOGIN, "username": username, "password": password})
+        second.recv_error(ERROR_CODE.ALREADY_ONLINE)
 
         # --- a second handshake frame while the first is still in flight -------------------
         # §3.1/§3.2: the check runs before the account query finishes, so the answer is
@@ -358,29 +362,29 @@ def run(args: argparse.Namespace) -> None:
         # and "already logged in" once it has. Without that guard the second frame would reach
         # the database and come back USERNAME_TAKEN, which is not what the spec promises.
         pipelined = Client(server.port, "pipelined")
-        pipelined.send({"type": "register", "username": username + "_b", "password": password})
-        pipelined.send({"type": "register", "username": username + "_b", "password": password})
+        pipelined.send({"type": FRAME_TYPE.REGISTER, "username": username + "_b", "password": password})
+        pipelined.send({"type": FRAME_TYPE.REGISTER, "username": username + "_b", "password": password})
         answers = [pipelined.recv_frame(), pipelined.recv_frame()]
         kinds = sorted(frame.get("type") for frame in answers)
-        check(kinds == ["error", "login_ok"], f"exactly one handshake may win: {answers}")
-        rejected = next(frame for frame in answers if frame.get("type") == "error")
-        check(rejected.get("code") == "BAD_REQUEST" and rejected.get("message") == "already logged in",
+        check(kinds == [FRAME_TYPE.LOGIN_OK, FRAME_TYPE.ERROR], f"exactly one handshake may win: {answers}")
+        rejected = next(frame for frame in answers if frame.get("type") == FRAME_TYPE.ERROR)
+        check(rejected.get("code") == ERROR_CODE.BAD_REQUEST and rejected.get("message") == "already logged in",
               f"the second handshake frame must be refused as a duplicate: {rejected}")
         pipelined.close()
 
         # --- the account is free again once that connection goes away (§1.3) --------------
         first.close()
         third = Client(server.port, "relogin")
-        third.send({"type": "login", "username": username, "password": password})
+        third.send({"type": FRAME_TYPE.LOGIN, "username": username, "password": password})
         deadline = time.monotonic() + 10
         while True:
             frame = third.recv_frame()
-            if frame.get("type") == "login_ok":
+            if frame.get("type") == FRAME_TYPE.LOGIN_OK:
                 break
-            check(frame.get("code") == "ALREADY_ONLINE", f"unexpected answer while waiting: {frame}")
+            check(frame.get("code") == ERROR_CODE.ALREADY_ONLINE, f"unexpected answer while waiting: {frame}")
             if time.monotonic() > deadline:
                 raise TestFailure("the account was never released by the closed connection")
-            third.send({"type": "login", "username": username, "password": password})
+            third.send({"type": FRAME_TYPE.LOGIN, "username": username, "password": password})
         check(frame["player_id"] == player_id, f"the durable id must not change: {frame}")
 
         # --- a fresh account has an empty history (§3.4) ----------------------------------
@@ -390,8 +394,8 @@ def run(args: argparse.Namespace) -> None:
 
         # --- guests keep working and get a zeroed payload (§3.3) --------------------------
         guest = Client(server.port, "guest")
-        guest.send({"type": "login", "name": "游客_测试"})
-        guest_ok = guest.recv_type("login_ok")
+        guest.send({"type": FRAME_TYPE.LOGIN, "name": "游客_测试"})
+        guest_ok = guest.recv_type(FRAME_TYPE.LOGIN_OK)
         check(guest_ok["player_id"].startswith("p-"), f"a guest keeps a per-process id: {guest_ok}")
         guest_stats = stats_for(guest, "guest")
         check(guest_stats["games"] == 0, f"a guest has no history: {guest_stats}")
@@ -399,7 +403,7 @@ def run(args: argparse.Namespace) -> None:
         # --- play one WHOLE match and check it was recorded (§4, E5) ----------------------
         room_id, ends, match_end, mine = play_one_match(third, username)
         for end in ends:
-            check(end["reason"] in ("win_ron", "win_tsumo", "draw_exhausted"), f"bad reason: {end}")
+            check(end["reason"] in (REASON.WIN_RON, REASON.WIN_TSUMO, REASON.DRAW_EXHAUSTED), f"bad reason: {end}")
             check(len(end["results"]) == SEAT_COUNT, f"game_end must carry 4 results: {end}")
             check(sum(entry["delta_score"] for entry in end["results"]) == 0,
                   f"the results must stay zero-sum: {end}")
@@ -439,7 +443,7 @@ def run(args: argparse.Namespace) -> None:
               f"stats must carry classic/riichi buckets: {sorted(stats)}")
         check(stats["riichi"]["games"] == 0,
               f"this match is classic, so the riichi bucket must be empty: {stats['riichi']}")
-        check(all(entry.get("mode") == "classic" for entry in stats["recent"]),
+        check(all(entry.get("mode") == MODE.CLASSIC for entry in stats["recent"]),
               f"recent entries must carry mode=classic: {stats['recent'][:2]}")
         print(f"[account-e2e] match history recorded: games={stats['games']} "
               f"net_score={stats['net_score']}")
@@ -474,14 +478,14 @@ def run(args: argparse.Namespace) -> None:
         # gets a brand-new room — that reconnect-and-replay handshake is all the client's
         # rematch button does, and the server needs no new frame for it.
         rematch = Client(server.port, "rematch")
-        rematch.send({"type": "login", "username": username, "password": password})
-        check(rematch.recv_frame().get("type") == "login_ok", "rematch must be able to log in again")
-        rematch.send({"type": "create_room"})
-        rejoined = rematch.recv_type("room_joined")
+        rematch.send({"type": FRAME_TYPE.LOGIN, "username": username, "password": password})
+        check(rematch.recv_frame().get("type") == FRAME_TYPE.LOGIN_OK, "rematch must be able to log in again")
+        rematch.send({"type": FRAME_TYPE.CREATE_ROOM})
+        rejoined = rematch.recv_type(FRAME_TYPE.ROOM_JOINED)
         check(rejoined["room_id"] != room_id,
               f"a rematch must open a NEW room, not the finished one: {rejoined} vs {room_id}")
-        rematch.send({"type": "ready"})
-        check(rematch.recv_type("game_start")["seat"] == 0, "the rematch room must start normally")
+        rematch.send({"type": FRAME_TYPE.READY})
+        check(rematch.recv_type(FRAME_TYPE.GAME_START)["seat"] == 0, "the rematch room must start normally")
         second_room_id = rejoined["room_id"]
         rematch.close()
         print(f"[account-e2e] rematch opened a fresh room {second_room_id} after {room_id}")
@@ -490,8 +494,8 @@ def run(args: argparse.Namespace) -> None:
         server.stop()
         server.start()
         after_restart = Client(server.port, "after-restart")
-        after_restart.send({"type": "login", "username": username, "password": password})
-        again = after_restart.recv_type("login_ok")
+        after_restart.send({"type": FRAME_TYPE.LOGIN, "username": username, "password": password})
+        again = after_restart.recv_type(FRAME_TYPE.LOGIN_OK)
         check(again["player_id"] == player_id, f"the player_id must survive a restart: {again}")
         check(stats_for(after_restart, "after-restart")["games"] == ends_count,
               "the match history must survive a restart")

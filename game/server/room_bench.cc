@@ -44,7 +44,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <sys/resource.h>
 #include <thread>
 #include <variant>
 #include <vector>
@@ -52,6 +51,7 @@
 #include <exec/task.hpp>
 #include <spdlog/spdlog.h>
 #include <stdexec/execution.hpp>
+#include <sys/resource.h>
 
 #include "actor_scope.h"
 #include "ex_actor/api.h"
@@ -149,7 +149,7 @@ struct ClientStats {
   // handler never suspends, so no two of them overlap) and read after the whole batch drained.
   std::vector<int64_t> turnarounds_ns;
   // The timeout dump: what this seat last heard, and the room's own numbers as of that frame.
-  std::vector<std::string> last_types;
+  std::vector<int64_t> last_types;  // frame types as the wire integers of PROTOCOL v2.0 §1.3.1
   int64_t last_seq = -1;
   int64_t last_remaining = -1;
   int64_t last_current_seat = -1;
@@ -193,7 +193,7 @@ class AutoClient : public mj::SeatEndpoint {
     }
 
     const std::string& text = *payload;
-    const std::string type = StringField(text, "type");
+    const int64_t type = IntField(text, "type");
     stats_->last_types.push_back(type);  // a rolling window of the last few kinds
     if (stats_->last_types.size() > 12) {
       stats_->last_types.erase(stats_->last_types.begin());
@@ -206,41 +206,44 @@ class AutoClient : public mj::SeatEndpoint {
     if (frame_index % 50 == 0 && frame_index / 50 >= 1 && frame_index / 50 <= 4) {
       stats_->milestone_ns[frame_index / 50 - 1] = now;
     }
-    if (type == "game_end") {
+    if (type == mj::protocol::WireOf(mj::protocol::FrameType::kGameEnd)) {
       stats_->game_end_ns = now;
     }
-    if (type == "state_sync") {
+    if (type == mj::protocol::WireOf(mj::protocol::FrameType::kStateSync)) {
       stats_->max_seq.store(IntField(text, "seq"), std::memory_order_relaxed);
       stats_->last_seq = IntField(text, "seq");
       stats_->last_remaining = IntField(text, "remaining");
       stats_->last_current_seat = IntField(text, "current_seat");
       co_return;
     }
-    if (type == "draw") {
+    if (type == mj::protocol::WireOf(mj::protocol::FrameType::kDraw)) {
       drawn_ = StringField(text, "tile");  // discarding the drawn tile is always legal
       co_return;
     }
-    if (type == "game_start") {
+    if (type == mj::protocol::WireOf(mj::protocol::FrameType::kGameStart)) {
       if (first_tile_.empty()) {
         first_tile_ = FirstHandTile(text);
       }
       co_return;
     }
-    if (type != "action_request") {
+    if (type != mj::protocol::WireOf(mj::protocol::FrameType::kActionRequest)) {
       co_return;
     }
 
     const int64_t seq = IntField(text, "seq");
-    const bool claim = StringField(text, "window") == "claim";
+    const bool claim = IntField(text, "window") == mj::protocol::WireOf(mj::protocol::Window::kClaim);
     std::string reply;
     if (claim) {
-      reply = "{\"type\":\"action\",\"action\":\"pass\",\"tiles\":[],\"seq\":" + std::to_string(seq) + "}";
+      reply = "{\"type\":" + std::to_string(mj::protocol::WireOf(mj::protocol::FrameType::kAction)) +
+              ",\"action\":" + std::to_string(mj::protocol::WireOf(mj::protocol::Action::kPass)) +
+              ",\"tiles\":[],\"seq\":" + std::to_string(seq) + "}";
     } else {
       const std::string tile = drawn_.empty() ? first_tile_ : drawn_;
       if (tile.empty()) {
         co_return;  // unreachable: a discard window always has a draw record or a dealt hand
       }
-      reply = "{\"type\":\"discard\",\"tile\":\"" + tile + "\",\"seq\":" + std::to_string(seq) + "}";
+      reply = "{\"type\":" + std::to_string(mj::protocol::WireOf(mj::protocol::FrameType::kDiscard)) + ",\"tile\":\"" +
+              tile + "\",\"seq\":" + std::to_string(seq) + "}";
       discard_probe_ns_ = NowNs();
     }
     std::string error;
@@ -354,8 +357,7 @@ void StartPoker() {
         for (const ex_actor::ActorRef<mj::RoomActor>& room : g_rooms) {
           // A seat the room does not know: SeatOf() returns -1 and the handler returns without
           // touching any state. A pure "is the room still running messages" probe.
-          mj::ActorSendScope().spawn(
-              room.Send<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::PlayerDisconnected(nobody)));
+          mj::ActorSendScope().spawn(room.Send<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::PlayerDisconnected(nobody)));
         }
       }
     }
@@ -409,8 +411,7 @@ void DumpStalled(const std::vector<RoomRun>& runs, const Batch& batch) {
   for (const RoomRun& run : runs) {
     before.push_back(run.stats.empty() ? 0 : run.stats.front()->frames.load(std::memory_order_relaxed));
     for (const mj::PlayerInfo& player : run.wired_players) {
-      mj::ActorSendScope().spawn(
-          run.room.Send<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::Sync(player)));
+      mj::ActorSendScope().spawn(run.room.Send<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::Sync(player)));
     }
   }
   std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -431,8 +432,8 @@ void DumpStalled(const std::vector<RoomRun>& runs, const Batch& batch) {
       printf("    seat %zu: %lld frames, last_remaining=%lld last_current_seat=%lld  heard:", seat,
              static_cast<long long>(stats.frames.load()), static_cast<long long>(stats.last_remaining),
              static_cast<long long>(stats.last_current_seat));
-      for (const std::string& type : stats.last_types) {
-        printf(" %s", type.c_str());
+      for (int64_t type : stats.last_types) {
+        printf(" %s", std::string(mj::protocol::NameOf(static_cast<mj::protocol::FrameType>(type))).c_str());
       }
       printf("\n      first frame at %.1f ms, game_end at %.1f ms, last frame at %.1f ms (since Ready)\n",
              static_cast<double>(stats.first_frame_ns - g_ready_ns.load()) / 1e6,
@@ -476,9 +477,8 @@ RoomRun SpawnRoom(const std::string& room_id, uint64_t seed, Shape shape, std::s
     if (g_trace) {
       fprintf(stderr, "    spawn client %d\n", seat);
     }
-    ex_actor::ActorRef<AutoClient> client =
-        std::get<0>(ex::sync_wait(ex_actor::Spawn<AutoClient>(seats[static_cast<size_t>(seat)].player.player_id, stats))
-                        .value());
+    ex_actor::ActorRef<AutoClient> client = std::get<0>(
+        ex::sync_wait(ex_actor::Spawn<AutoClient>(seats[static_cast<size_t>(seat)].player.player_id, stats)).value());
     seats[static_cast<size_t>(seat)].endpoint = client;
     clients.push_back(client);
     run.wired_players.push_back(seats[static_cast<size_t>(seat)].player);
@@ -495,12 +495,12 @@ RoomRun SpawnRoom(const std::string& room_id, uint64_t seed, Shape shape, std::s
   if (g_trace) {
     fprintf(stderr, "    spawn room\n");
   }
-  run.room = std::get<0>(ex::sync_wait(ex_actor::Spawn<mj::RoomActor>(
-                                        room_id, seed, action_timeout_ms, std::move(seats), nullptr, 0, -1,
-                                        ex_actor::ActorRef<mj::RoomOwner> {},
-                                        mj::TimeoutScheduler([](int64_t, uint64_t) {}),
-                                        mj::RoomFinishedCallback([batch](const mj::GameSettlement&) { batch->OnFinished(); })))
-                                    .value());
+  run.room = std::get<0>(
+      ex::sync_wait(ex_actor::Spawn<mj::RoomActor>(
+                        room_id, seed, action_timeout_ms, std::move(seats), nullptr, 0, -1,
+                        ex_actor::ActorRef<mj::RoomOwner> {}, mj::TimeoutScheduler([](int64_t, uint64_t) {}),
+                        mj::RoomFinishedCallback([batch](const mj::GameSettlement&) { batch->OnFinished(); })))
+          .value());
   for (const ex_actor::ActorRef<AutoClient>& client : clients) {
     if (g_trace) {
       fprintf(stderr, "    setroom\n");
@@ -552,8 +552,7 @@ std::optional<RunResult> RunRound(Shape shape, int rooms, uint64_t base_seed, in
     }
   }
   for (const RoomRun& run : runs) {
-    mj::ActorSendScope().spawn(
-        run.room.Send<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::Ready(run.ready_player)));
+    mj::ActorSendScope().spawn(run.room.Send<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::Ready(run.ready_player)));
   }
   // A game takes tens of milliseconds at ai_delay 0, so a quarter of a minute is ~300x the
   // expected time: if it has not finished by then it never will, and the dump below is the

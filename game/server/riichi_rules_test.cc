@@ -2,13 +2,13 @@
 //
 // 这些断言是「算分正确性」的唯一防线：房间层只做分派，不重新算分。
 
-#include <gtest/gtest.h>
+#include "riichi_rules.h"
 
 #include <optional>
 #include <string>
 #include <vector>
 
-#include "riichi_rules.h"
+#include <gtest/gtest.h>
 
 namespace mahjong::riichi {
 namespace {
@@ -125,8 +125,8 @@ TEST(RiichiScore, RiichiPinfuRon2000) {
 
 // 断幺九 + 平和 + 自摸：20 符 3 番 → 700 / 1300，合计 2700
 TEST(RiichiScore, TanyaoPinfuTsumo) {
-  const std::vector<Tile> hand = Tiles({"2m", "3m", "4m", "5m", "6m", "7m",
-                                        "2p", "3p", "4p", "5p", "6p", "7p", "8s", "8s"});
+  const std::vector<Tile> hand =
+      Tiles({"2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "5p", "6p", "7p", "8s", "8s"});
   const ScoreResult score = ScoreHand(hand, {}, *ParseTile("4m"), Tsumo());
 
   EXPECT_TRUE(HasId(score.yaku, "tanyao"));
@@ -150,8 +150,7 @@ TEST(RiichiScore, Chiitoitsu1600) {
 
 // 副露役牌：1 番 30 符荣和 → 1000（明刻中 +4 符，副露 20 符按 30 符）
 TEST(RiichiScore, OpenYakuhai1000) {
-  const std::vector<Tile> concealed =
-      Tiles({"2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "8s", "8s"});
+  const std::vector<Tile> concealed = Tiles({"2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "8s", "8s"});
   const std::vector<Meld> melds = {Pong({"7z", "7z", "7z"})};
   std::vector<Tile> hand = concealed;
   hand.push_back(*ParseTile("4p"));
@@ -168,8 +167,8 @@ TEST(RiichiScore, OpenYakuhai1000) {
 
 // 满贯以上：清一色门前必然踩到分档（≥ 满贯 8000）
 TEST(RiichiScore, ManganOrAbove) {
-  const std::vector<Tile> hand = Tiles({"1m", "2m", "3m", "4m", "5m", "6m", "7m",
-                                        "8m", "9m", "1m", "2m", "3m", "5m", "5m"});
+  const std::vector<Tile> hand =
+      Tiles({"1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1m", "2m", "3m", "5m", "5m"});
   const ScoreResult score = ScoreHand(hand, {}, *ParseTile("3m"), Ron(2));
 
   EXPECT_TRUE(HasId(score.yaku, "chinitsu"));
@@ -180,23 +179,23 @@ TEST(RiichiScore, ManganOrAbove) {
 
 // 役满：国士十三面（和牌张正是那张对子 ⇒ 和牌前十三种各一张）→ **双倍役满**，闲家 64000
 TEST(RiichiScore, KokushiThirteenSidedDoubleYakuman) {
-  const std::vector<Tile> hand = Tiles({"1m", "9m", "1p", "9p", "1s", "9s", "1z",
-                                        "2z", "3z", "4z", "5z", "6z", "7z", "1z"});
+  const std::vector<Tile> hand =
+      Tiles({"1m", "9m", "1p", "9p", "1s", "9s", "1z", "2z", "3z", "4z", "5z", "6z", "7z", "1z"});
   const ScoreResult score = ScoreHand(hand, {}, *ParseTile("1z"), Ron(2));
 
   ASSERT_TRUE(HasId(score.yaku, "kokushi_13"));
   EXPECT_FALSE(HasId(score.yaku, "kokushi"));
   EXPECT_EQ(score.yakuman_count, 2);
   EXPECT_EQ(score.limit, Limit::kYakuman);
-  EXPECT_EQ(score.han, 26);       // 13 × 2（`han_breakdown.base` 与 `win.han` 仍相等）
+  EXPECT_EQ(score.han, 26);        // 13 × 2（`han_breakdown.base` 与 `win.han` 仍相等）
   EXPECT_EQ(score.points, 64000);  // 闲家荣和 = 16000 base × 4
 }
 
 // 国士无双（单骑：和牌张是缺的那一种）→ 1 倍役满 32000
 TEST(RiichiScore, KokushiSingleWaitYakuman) {
   // 和牌前：缺 7z、1z 成对；和 7z ⇒ 1z 才是对子 ⇒ 只听 7z，不构成十三面
-  const std::vector<Tile> hand = Tiles({"1m", "9m", "1p", "9p", "1s", "9s", "1z",
-                                        "2z", "3z", "4z", "5z", "6z", "1z", "7z"});
+  const std::vector<Tile> hand =
+      Tiles({"1m", "9m", "1p", "9p", "1s", "9s", "1z", "2z", "3z", "4z", "5z", "6z", "1z", "7z"});
   const ScoreResult score = ScoreHand(hand, {}, *ParseTile("7z"), Ron(2));
 
   ASSERT_TRUE(HasId(score.yaku, "kokushi"));
@@ -250,20 +249,18 @@ TEST(RiichiFuriten, OwnDiscardBlocksRon) {
 
 // 振听时 ClaimOptions 不产出 win
 TEST(RiichiFuriten, ClaimOptionsDropsWin) {
-  const std::vector<Tile> hand =
-      Tiles({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "2s", "3s", "9p", "9p"});
+  const std::vector<Tile> hand = Tiles({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "2s", "3s", "9p", "9p"});
   const std::optional<Tile> winning = ParseTile("4s");
   ASSERT_TRUE(winning.has_value());
   const std::vector<Option> open_claim = ClaimOptions(hand, {}, *winning, 30, true, /*furiten=*/false);
   const std::vector<Option> furiten = ClaimOptions(hand, {}, *winning, 30, true, /*furiten=*/true);
-  EXPECT_TRUE(FindOption(open_claim, "win") != nullptr);
-  EXPECT_TRUE(FindOption(furiten, "win") == nullptr);
+  EXPECT_TRUE(FindOption(open_claim, protocol::Action::kWin) != nullptr);
+  EXPECT_TRUE(FindOption(furiten, protocol::Action::kWin) == nullptr);
 }
 
 // 无役不能和：只有宝牌不算役（房间层会过滤 win 选项，这里验第二道防线）
 TEST(RiichiScore, NoYakuCannotWin) {
-  const std::vector<Tile> concealed =
-      Tiles({"3p", "4p", "5p", "6p", "7p", "8p", "2s", "3s", "4s", "5z"});
+  const std::vector<Tile> concealed = Tiles({"3p", "4p", "5p", "6p", "7p", "8p", "2s", "3s", "4s", "5z"});
   const std::vector<Meld> melds = {Pong({"2m", "2m", "2m"})};
   std::vector<Tile> hand = concealed;
   hand.push_back(*ParseTile("5z"));
@@ -280,16 +277,15 @@ TEST(RiichiScore, NoYakuCannotWin) {
 // 抢杠（v1.15）：只有 win / pass；抢杠本身是 1 番役，所以「无役」的手牌也能抢
 TEST(RiichiChankan, OpenHandWithoutYakuCanStillRob) {
   const std::vector<Meld> melds = {Chow({"2m", "3m", "4m"})};
-  const std::vector<Tile> concealed =
-      Tiles({"1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "2z", "2z"});
+  const std::vector<Tile> concealed = Tiles({"1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "2z", "2z"});
   WinContext ctx = Ron(1);
   ctx.seat_wind = 0;
 
   // 同一手牌在普通荣和里无役（见 WinningWaits 用例），但抢杠 1 番让它成立
   const std::vector<Option> options = ChankanOptions(concealed, melds, *ParseTile("6s"), ctx, false);
   ASSERT_EQ(options.size(), 2u);
-  EXPECT_EQ(options[0].action, "win");
-  EXPECT_EQ(options[1].action, "pass");
+  EXPECT_EQ(options[0].action, protocol::Action::kWin);
+  EXPECT_EQ(options[1].action, protocol::Action::kPass);
 
   const ScoreResult score = ScoreHand(
       [&] {
@@ -298,7 +294,8 @@ TEST(RiichiChankan, OpenHandWithoutYakuCanStillRob) {
         SortTiles(hand);
         return hand;
       }(),
-      melds, *ParseTile("6s"), [&] {
+      melds, *ParseTile("6s"),
+      [&] {
         WinContext chankan = ctx;
         chankan.is_chankan = true;
         return chankan;
@@ -311,19 +308,17 @@ TEST(RiichiChankan, OpenHandWithoutYakuCanStillRob) {
 // 牌型不成和 / 振听 ⇒ 只有 pass
 TEST(RiichiChankan, NotAWinningHandOrFuritenGivesPassOnly) {
   const std::vector<Meld> melds = {Chow({"2m", "3m", "4m"})};
-  const std::vector<Tile> concealed =
-      Tiles({"1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "2z", "2z"});
+  const std::vector<Tile> concealed = Tiles({"1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "2z", "2z"});
   WinContext ctx = Ron(1);
   ctx.seat_wind = 0;
 
-  const std::vector<Option> not_winning =
-      ChankanOptions(concealed, melds, *ParseTile("1p"), ctx, false);
+  const std::vector<Option> not_winning = ChankanOptions(concealed, melds, *ParseTile("1p"), ctx, false);
   ASSERT_EQ(not_winning.size(), 1u);
-  EXPECT_EQ(not_winning[0].action, "pass");
+  EXPECT_EQ(not_winning[0].action, protocol::Action::kPass);
 
   const std::vector<Option> furiten = ChankanOptions(concealed, melds, *ParseTile("6s"), ctx, true);
   ASSERT_EQ(furiten.size(), 1u);
-  EXPECT_EQ(furiten[0].action, "pass");
+  EXPECT_EQ(furiten[0].action, protocol::Action::kPass);
 }
 
 // ---- 国士无双（v1.17）：牌型门禁 + 等待张 ------------------------------------
@@ -355,8 +350,8 @@ TEST(RiichiKokushi, ShapeAndScoring) {
   SortTiles(broke);
   EXPECT_FALSE(IsKokushiHand(broke, {}));
   // 少一种（缺 6z）⇒ 不是
-  EXPECT_FALSE(IsKokushiHand(
-      Tiles({"1m", "9m", "1p", "9p", "1s", "9s", "1z", "2z", "3z", "4z", "5z", "7z", "7z"}), {}));
+  EXPECT_FALSE(
+      IsKokushiHand(Tiles({"1m", "9m", "1p", "9p", "1s", "9s", "1z", "2z", "3z", "4z", "5z", "7z", "7z"}), {}));
 }
 
 // 十三面听：13 种各一张 ⇒ 任何幺九字都能和；单骑听：缺一种 + 一对 ⇒ 只听缺的那张
@@ -378,17 +373,17 @@ TEST(RiichiKokushi, WaitTiles) {
 // 窗口：手里已经是国士时，打牌窗口 / 鸣牌窗口都要给 win
 TEST(RiichiKokushi, WindowsOfferWin) {
   const std::vector<Tile> hand = KokushiHand();
-  EXPECT_TRUE(FindOption(DiscardOptions(hand, {}, 30, /*riichi_declared=*/false), "win") != nullptr);
+  EXPECT_TRUE(FindOption(DiscardOptions(hand, {}, 30, /*riichi_declared=*/false), protocol::Action::kWin) != nullptr);
 
   std::vector<Tile> hand13 = hand;
   hand13.pop_back();
   const std::vector<Option> claim = ClaimOptions(hand13, {}, *ParseTile("7z"), /*remaining=*/30,
-                                                /*is_next_player=*/false, /*furiten=*/false);
-  EXPECT_TRUE(FindOption(claim, "win") != nullptr);
+                                                 /*is_next_player=*/false, /*furiten=*/false);
+  EXPECT_TRUE(FindOption(claim, protocol::Action::kWin) != nullptr);
 
   // 振听仍然封住荣和（国士也一样）
   const std::vector<Option> furiten = ClaimOptions(hand13, {}, *ParseTile("7z"), 30, false, true);
-  EXPECT_TRUE(FindOption(furiten, "win") == nullptr);
+  EXPECT_TRUE(FindOption(furiten, protocol::Action::kWin) == nullptr);
 }
 
 // 天和 / 地和（v1.17）：第一巡自摸的役满，由房间按牌河/副露状态置位
@@ -422,9 +417,9 @@ TEST(RiichiYakuman, TenhouAndChiihou) {
 TEST(RiichiWind, RoundAndSeatWind) {
   EXPECT_EQ(RoundWindOf(0), 0);
   EXPECT_EQ(RoundWindOf(3), 0);
-  EXPECT_EQ(RoundWindOf(4), 1);   // 南场 1 局
+  EXPECT_EQ(RoundWindOf(4), 1);  // 南场 1 局
   EXPECT_EQ(RoundWindOf(7), 1);
-  EXPECT_EQ(RoundWindOf(8), 2);   // 西入（本版不做半庄以上，但公式不该崩）
+  EXPECT_EQ(RoundWindOf(8), 2);  // 西入（本版不做半庄以上，但公式不该崩）
 
   // 东场：庄家（seat 0）是东，下家南、对家西、上家北
   EXPECT_EQ(SeatWindOf(0, 0, 0), 0);
@@ -451,16 +446,14 @@ TEST(RiichiWind, RoundAndSeatWind) {
 // 副露无役：吃 234m + 暗手 123m 456p 78s 22z，形听 6s/9s，但两张都无役 ⇒ 死听
 TEST(RiichiTenpaiHint, OpenHandWithoutYakuHasNoWinningWait) {
   const std::vector<Meld> melds = {Chow({"2m", "3m", "4m"})};
-  const std::vector<Tile> concealed =
-      Tiles({"1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "2z", "2z"});
+  const std::vector<Tile> concealed = Tiles({"1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "2z", "2z"});
 
   const std::vector<Tile> shape_waits = WaitingTiles(concealed, melds);
   ASSERT_EQ(shape_waits.size(), 2u);  // 6s / 9s：形听成立（流局要收罚符）
 
   WinContext ctx = Ron(1);
   ctx.seat_wind = 0;  // 2z = 南，既非场风也非自风
-  EXPECT_TRUE(WinningWaits(concealed, melds, ctx).empty())
-      << "副露无役：形听但没有任何一张能荣和";
+  EXPECT_TRUE(WinningWaits(concealed, melds, ctx).empty()) << "副露无役：形听但没有任何一张能荣和";
 }
 
 // 副露但有役（白）：两张等待张都能和
@@ -475,8 +468,8 @@ TEST(RiichiTenpaiHint, OpenHandWithYakuhaiKeepsWaits) {
 
 // 门清逐张不同：123p 无役、234p 有断幺 —— 提示必须只留下 4p
 TEST(RiichiTenpaiHint, PerWaitYakuDiffers) {
-  const std::vector<Tile> concealed = Tiles({"2m", "3m", "4m", "5m", "6m", "7m",
-                                             "8s", "8s", "8s", "2p", "3p", "8p", "8p"});
+  const std::vector<Tile> concealed =
+      Tiles({"2m", "3m", "4m", "5m", "6m", "7m", "8s", "8s", "8s", "2p", "3p", "8p", "8p"});
   const std::vector<Tile> shape_waits = WaitingTiles(concealed, {});
   ASSERT_EQ(shape_waits.size(), 2u);  // 1p / 4p
 
@@ -487,8 +480,8 @@ TEST(RiichiTenpaiHint, PerWaitYakuDiffers) {
 
 // 已立直：立直本身就是役 ⇒ 全部等待张都能和（这也是「立直治无役」的实现口径）
 TEST(RiichiTenpaiHint, RiichiMakesEveryWaitLive) {
-  const std::vector<Tile> concealed = Tiles({"2m", "3m", "4m", "5m", "6m", "7m",
-                                             "8s", "8s", "8s", "2p", "3p", "8p", "8p"});
+  const std::vector<Tile> concealed =
+      Tiles({"2m", "3m", "4m", "5m", "6m", "7m", "8s", "8s", "8s", "2p", "3p", "8p", "8p"});
   WinContext ctx = Ron(1);
   ctx.is_riichi = true;
   EXPECT_EQ(WinningWaits(concealed, {}, ctx).size(), 2u);
@@ -496,8 +489,8 @@ TEST(RiichiTenpaiHint, RiichiMakesEveryWaitLive) {
 
 // 非等待态（14 张）没有「等待张」可谈
 TEST(RiichiTenpaiHint, NonWaitingStateIsEmpty) {
-  const std::vector<Tile> hand = Tiles({"2m", "3m", "4m", "5m", "6m", "7m", "8s", "8s",
-                                        "8s", "2p", "3p", "4p", "8p", "8p"});
+  const std::vector<Tile> hand =
+      Tiles({"2m", "3m", "4m", "5m", "6m", "7m", "8s", "8s", "8s", "2p", "3p", "4p", "8p", "8p"});
   EXPECT_TRUE(WinningWaits(hand, {}, Ron(1)).empty());
 }
 
@@ -519,23 +512,22 @@ TEST(RiichiRiichi, CanDeclare) {
   EXPECT_TRUE(CanDeclareRiichi(PinfuHand(), {}, 30));
 
   const std::vector<Meld> open_meld = {Pong({"7z", "7z", "7z"})};
-  const std::vector<Tile> open_hand =
-      Tiles({"2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "5p", "6p"});
+  const std::vector<Tile> open_hand = Tiles({"2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "5p", "6p"});
   EXPECT_FALSE(CanDeclareRiichi(open_hand, open_meld, 30));
 
   EXPECT_FALSE(CanDeclareRiichi(PinfuHand(), {}, 3));  // 牌山不足 4 张
 
   // 未听牌（三张孤张字牌，打掉任意一张都不听）
-  const std::vector<Tile> not_tenpai = Tiles({"1z", "2z", "4z", "3z", "2m", "5m",
-                                              "8m", "2p", "5p", "8p", "2s", "5s", "8s", "1m"});
+  const std::vector<Tile> not_tenpai =
+      Tiles({"1z", "2z", "4z", "3z", "2m", "5m", "8m", "2p", "5p", "8p", "2s", "5s", "8s", "1m"});
   EXPECT_FALSE(CanDeclareRiichi(not_tenpai, {}, 30));
 }
 
 // 立直宣言牌候选（v1.21）：只有「打出去仍在听牌」的牌面才算，且按牌面升序去重。
 TEST(RiichiRiichi, DiscardCandidatesOnlyTenpaiLeavingFaces) {
   // 123456789m 11p 34p 9s：只有打 9s 之后仍听 2p/5p，其余牌打完都不听。
-  const std::vector<Tile> hand = Tiles({"1m", "2m", "3m", "4m", "5m", "6m", "7m",
-                                        "8m", "9m", "1p", "1p", "3p", "4p", "9s"});
+  const std::vector<Tile> hand =
+      Tiles({"1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "1p", "3p", "4p", "9s"});
   const std::vector<Face> faces = RiichiDiscardFaces(hand, {});
   ASSERT_EQ(faces.size(), 1u);
   EXPECT_EQ(faces.front(), FaceOf(*ParseTile("9s")));
@@ -549,8 +541,8 @@ TEST(RiichiRiichi, DiscardCandidatesOnlyTenpaiLeavingFaces) {
 
 TEST(RiichiRiichi, DiscardCandidatesSortedAndDeduplicated) {
   // 七对子 14 张：打掉任意一面都还在单骑听，且**每面两张只收一次**（去重）。
-  const std::vector<Tile> hand = Tiles({"1z", "1z", "2z", "2z", "3z", "3z", "4z", "4z",
-                                        "5z", "5z", "6z", "6z", "7z", "7z"});
+  const std::vector<Tile> hand =
+      Tiles({"1z", "1z", "2z", "2z", "3z", "3z", "4z", "4z", "5z", "5z", "6z", "6z", "7z", "7z"});
   const std::vector<Face> faces = RiichiDiscardFaces(hand, {});
   ASSERT_EQ(faces.size(), 7u) << "14 张 = 7 个牌面，不因为成对就出现 14 条";
   for (size_t index = 0; index < faces.size(); ++index) {
@@ -561,40 +553,37 @@ TEST(RiichiRiichi, DiscardCandidatesSortedAndDeduplicated) {
 
 // 立直后不在打牌窗口提供杠；宣告前提供
 TEST(RiichiRiichi, DiscardOptionsDropKanAfterRiichi) {
-  const std::vector<Tile> hand = Tiles({"1m", "1m", "1m", "1m", "2m", "3m", "4m",
-                                        "5m", "6m", "7m", "2p", "3p", "4p", "8s"});
+  const std::vector<Tile> hand =
+      Tiles({"1m", "1m", "1m", "1m", "2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "8s"});
   const std::vector<Option> before = DiscardOptions(hand, {}, 30, /*riichi_declared=*/false);
   const std::vector<Option> after = DiscardOptions(hand, {}, 30, /*riichi_declared=*/true);
-  EXPECT_TRUE(FindOption(before, "ankan") != nullptr);
-  EXPECT_TRUE(FindOption(after, "ankan") == nullptr);
-  EXPECT_TRUE(FindOption(after, "riichi") == nullptr);  // 已立直，不再重复宣告
+  EXPECT_TRUE(FindOption(before, protocol::Action::kAnkan) != nullptr);
+  EXPECT_TRUE(FindOption(after, protocol::Action::kAnkan) == nullptr);
+  EXPECT_TRUE(FindOption(after, protocol::Action::kRiichi) == nullptr);  // 已立直，不再重复宣告
 }
 
 // 立直后：只有「不改变听牌」的暗杠被放行（v1.16）
 TEST(RiichiRiichi, AnkanAfterRiichiOnlyWhenWaitsUnchanged) {
   // 1111m 234m 567m 234p 8s：听 8s 单骑
-  const std::vector<Tile> hand = Tiles({"1m", "1m", "1m", "1m", "2m", "3m", "4m",
-                                        "5m", "6m", "7m", "2p", "3p", "4p", "8s"});
+  const std::vector<Tile> hand =
+      Tiles({"1m", "1m", "1m", "1m", "2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "8s"});
   // 摸到第 4 张 1m 再杠掉：听牌仍是 8s ⇒ 放行
-  const std::vector<Option> legal = DiscardOptions(hand, {}, 30, /*riichi_declared=*/true,
-                                                  *ParseTile("1m"));
-  EXPECT_TRUE(FindOption(legal, "ankan") != nullptr);
-  EXPECT_TRUE(FindOption(legal, "kakan") == nullptr);   // 立直手不可能有碰组
-  EXPECT_TRUE(FindOption(legal, "riichi") == nullptr);  // 不重复宣告
+  const std::vector<Option> legal = DiscardOptions(hand, {}, 30, /*riichi_declared=*/true, *ParseTile("1m"));
+  EXPECT_TRUE(FindOption(legal, protocol::Action::kAnkan) != nullptr);
+  EXPECT_TRUE(FindOption(legal, protocol::Action::kKakan) == nullptr);   // 立直手不可能有碰组
+  EXPECT_TRUE(FindOption(legal, protocol::Action::kRiichi) == nullptr);  // 不重复宣告
 
   // 摸到的是 8s：杠掉 1m 会把单骑从 1m 变成 8s ⇒ 听牌变了，拒绝
-  const std::vector<Option> changed =
-      DiscardOptions(hand, {}, 30, /*riichi_declared=*/true, *ParseTile("8s"));
-  EXPECT_TRUE(FindOption(changed, "ankan") == nullptr);
+  const std::vector<Option> changed = DiscardOptions(hand, {}, 30, /*riichi_declared=*/true, *ParseTile("8s"));
+  EXPECT_TRUE(FindOption(changed, protocol::Action::kAnkan) == nullptr);
 
   // 不知道摸了什么 ⇒ 保守：一个杠都不给（老调用点行为不变）
   const std::vector<Option> unknown = DiscardOptions(hand, {}, 30, /*riichi_declared=*/true);
-  EXPECT_TRUE(FindOption(unknown, "ankan") == nullptr);
+  EXPECT_TRUE(FindOption(unknown, protocol::Action::kAnkan) == nullptr);
 
   // 未立直：原有行为不变
-  const std::vector<Option> before_riichi =
-      DiscardOptions(hand, {}, 30, /*riichi_declared=*/false, *ParseTile("1m"));
-  EXPECT_TRUE(FindOption(before_riichi, "ankan") != nullptr);
+  const std::vector<Option> before_riichi = DiscardOptions(hand, {}, 30, /*riichi_declared=*/false, *ParseTile("1m"));
+  EXPECT_TRUE(FindOption(before_riichi, protocol::Action::kAnkan) != nullptr);
 }
 
 // ============================================================================
@@ -604,8 +593,8 @@ TEST(RiichiRiichi, AnkanAfterRiichiOnlyWhenWaitsUnchanged) {
 // 手牌里的赤 5：平和 + 赤 ⇒ 2 番 30 符 2000（同一个牌型不换赤牌时是 1000）
 TEST(RiichiAka, ConcealedAkaAddsOneHan) {
   const std::vector<Tile> plain = PinfuHand();
-  const std::vector<Tile> aka = Tiles({"1m", "2m", "3m", "4m", "0m", "6m", "7p", "8p",
-                                       "9p", "2s", "3s", "4s", "9p", "9p"});
+  const std::vector<Tile> aka =
+      Tiles({"1m", "2m", "3m", "4m", "0m", "6m", "7p", "8p", "9p", "2s", "3s", "4s", "9p", "9p"});
   const ScoreResult without = ScoreHand(plain, {}, *ParseTile("4s"), Ron(2));
   const ScoreResult with = ScoreHand(aka, {}, *ParseTile("4s"), Ron(2));
 
@@ -626,8 +615,7 @@ TEST(RiichiAka, ConcealedAkaAddsOneHan) {
 TEST(RiichiAka, AkaInsideMeldCounts) {
   const std::vector<Meld> melds = {Pong({"0s", "5s", "5s"})};
   // 234m 567m 234p 77s + 碰 5s，和 2p：断幺九 1 番 + 赤 1 番
-  const std::vector<Tile> hand =
-      Tiles({"2m", "3m", "4m", "5m", "6m", "7m", "3p", "4p", "7s", "7s", "2p"});
+  const std::vector<Tile> hand = Tiles({"2m", "3m", "4m", "5m", "6m", "7m", "3p", "4p", "7s", "7s", "2p"});
   const ScoreResult score = ScoreHand(hand, melds, *ParseTile("2p"), Ron(2));
 
   EXPECT_TRUE(HasId(score.yaku, "tanyao"));
@@ -641,8 +629,7 @@ TEST(RiichiAka, AkaInsideMeldCounts) {
 TEST(RiichiAka, AkaIsNotAYaku) {
   const std::vector<Meld> melds = {Pong({"0s", "5s", "5s"})};
   // 123m 789p 123s 5z5z + 碰 5s、和 2s：一个役都没有（无断幺、无平和、无役牌）
-  const std::vector<Tile> hand =
-      Tiles({"1m", "2m", "3m", "7p", "8p", "9p", "1s", "3s", "5z", "5z", "2s"});
+  const std::vector<Tile> hand = Tiles({"1m", "2m", "3m", "7p", "8p", "9p", "1s", "3s", "5z", "5z", "2s"});
   const ScoreResult score = ScoreHand(hand, melds, *ParseTile("2s"), Ron(2));
 
   EXPECT_FALSE(HasId(score.yaku, "aka_dora"));  // 无役 ⇒ 整个手牌不算（与宝牌同口径）
@@ -677,8 +664,8 @@ TEST(RiichiYakuman, MultiplierTable) {
 
 // 四暗刻单骑：111m 222m 333m 555s（含赤）+ 5p 单骑自摸 ⇒ 2 倍役满，闲家 64000
 TEST(RiichiYakuman, SuuankouTankiIsDouble) {
-  const std::vector<Tile> hand = Tiles({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m",
-                                        "3m", "0s", "5s", "5s", "5p", "5p"});
+  const std::vector<Tile> hand =
+      Tiles({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "0s", "5s", "5s", "5p", "5p"});
   const ScoreResult score = ScoreHand(hand, {}, *ParseTile("5p"), Tsumo());
 
   ASSERT_TRUE(HasId(score.yaku, "suuankou_tanki"));
@@ -691,8 +678,8 @@ TEST(RiichiYakuman, SuuankouTankiIsDouble) {
 
 // 四暗刻（双碰自摸，非单骑）⇒ 1 倍役满 32000
 TEST(RiichiYakuman, SuuankouShanponIsSingle) {
-  const std::vector<Tile> hand = Tiles({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m",
-                                        "3m", "4p", "4p", "4p", "5s", "5s"});
+  const std::vector<Tile> hand =
+      Tiles({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4p", "4p", "4p", "5s", "5s"});
   const ScoreResult score = ScoreHand(hand, {}, *ParseTile("4p"), Tsumo());
 
   ASSERT_TRUE(HasId(score.yaku, "suuankou"));
@@ -703,16 +690,16 @@ TEST(RiichiYakuman, SuuankouShanponIsSingle) {
 
 // 纯正九莲：1112345678999 + 任意一张 ⇒ 九面听 2 倍；非纯正（本例单骑 9m）⇒ 1 倍
 TEST(RiichiYakuman, ChuurenJunseiIsDouble) {
-  const std::vector<Tile> junsei = Tiles({"1m", "1m", "1m", "2m", "3m", "4m", "5m",
-                                          "5m", "6m", "7m", "8m", "9m", "9m", "9m"});
+  const std::vector<Tile> junsei =
+      Tiles({"1m", "1m", "1m", "2m", "3m", "4m", "5m", "5m", "6m", "7m", "8m", "9m", "9m", "9m"});
   const ScoreResult pure = ScoreHand(junsei, {}, *ParseTile("5m"), Tsumo());
   ASSERT_TRUE(HasId(pure.yaku, "chuuren_junsei"));
   EXPECT_EQ(pure.yakuman_count, 2);
   EXPECT_EQ(pure.points, 64000);
 
   // 1m1m1m 2m2m 3..8m 9m9m + 和 9m ⇒ 只听 9m 的九莲，不是九面听
-  const std::vector<Tile> single = Tiles({"1m", "1m", "1m", "2m", "2m", "3m", "4m",
-                                          "5m", "6m", "7m", "8m", "9m", "9m", "9m"});
+  const std::vector<Tile> single =
+      Tiles({"1m", "1m", "1m", "2m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "9m", "9m"});
   const ScoreResult plain = ScoreHand(single, {}, *ParseTile("9m"), Tsumo());
   ASSERT_TRUE(HasId(plain.yaku, "chuuren"));
   EXPECT_EQ(plain.yakuman_count, 1);
@@ -722,8 +709,7 @@ TEST(RiichiYakuman, ChuurenJunseiIsDouble) {
 // 多役满叠加：大四喜（2）+ 字一色（1）= 3 倍 ⇒ 闲家荣和 96000
 TEST(RiichiYakuman, StackedYakumanAddsMultipliers) {
   const std::vector<Meld> melds = {Pong({"4z", "4z", "4z"})};  // 北 副露，排除四暗刻
-  const std::vector<Tile> hand = Tiles({"1z", "1z", "1z", "2z", "2z", "2z",
-                                        "3z", "3z", "3z", "5z", "5z"});
+  const std::vector<Tile> hand = Tiles({"1z", "1z", "1z", "2z", "2z", "2z", "3z", "3z", "3z", "5z", "5z"});
   const ScoreResult score = ScoreHand(hand, melds, *ParseTile("5z"), Ron(2));
 
   ASSERT_TRUE(HasId(score.yaku, "daisuushii"));

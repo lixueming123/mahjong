@@ -38,6 +38,7 @@ if GAME_DIR not in sys.path:
 from client import theme as T  # noqa: E402
 from client.app import GameApp  # noqa: E402
 from client.login_store import DISABLE_ENV, LoginStore  # noqa: E402
+from protocol.enums import FRAME_TYPE  # noqa: E402
 
 FAILURES: list[str] = []
 
@@ -166,7 +167,7 @@ def test_auto_login(tmpdir: str) -> None:
         check(app.login_stage == "CONNECTING", f"直接进连接阶段（实际 {app.login_stage}）")
         frame_type, fields = app.pending_auth or ("", {})
         check(
-            frame_type == "login" and fields.get("username") == ACCOUNT,
+            frame_type == FRAME_TYPE.LOGIN and fields.get("username") == ACCOUNT,
             f"握手第一帧是账号登录：{(frame_type, fields.get('username'))!r}",
         )
         check(fields.get("password") == PASSWORD, "口令取自存档（不是空串）")

@@ -5,18 +5,18 @@
 
 namespace mahjong::protocol {
 
-std::string ErrorFrame(std::string_view code, std::string_view message) {
+std::string ErrorFrame(ErrorCode code, std::string_view message) {
   json::Value frame = json::Value::Obj();
-  frame.Set("type", json::Value::Str("error"));
-  frame.Set("code", json::Value::Str(std::string(code)));
+  frame.Set("type", json::Value::Int(WireOf(FrameType::kError)));
+  frame.Set("code", json::Value::Int(WireOf(code)));
   frame.Set("message", json::Value::Str(std::string(message)));
   return frame.Dump();
 }
 
-std::string ErrorFrame(std::string_view code, std::string_view message, json::Value detail) {
+std::string ErrorFrame(ErrorCode code, std::string_view message, json::Value detail) {
   json::Value frame = json::Value::Obj();
-  frame.Set("type", json::Value::Str("error"));
-  frame.Set("code", json::Value::Str(std::string(code)));
+  frame.Set("type", json::Value::Int(WireOf(FrameType::kError)));
+  frame.Set("code", json::Value::Int(WireOf(code)));
   frame.Set("message", json::Value::Str(std::string(message)));
   frame.Set("detail", std::move(detail));
   return frame.Dump();
@@ -24,7 +24,7 @@ std::string ErrorFrame(std::string_view code, std::string_view message, json::Va
 
 std::string LoginOkFrame(std::string_view player_id, std::string_view name) {
   json::Value frame = json::Value::Obj();
-  frame.Set("type", json::Value::Str("login_ok"));
+  frame.Set("type", json::Value::Int(WireOf(FrameType::kLoginOk)));
   frame.Set("player_id", json::Value::Str(std::string(player_id)));
   frame.Set("name", json::Value::Str(std::string(name)));
   return frame.Dump();
@@ -32,7 +32,7 @@ std::string LoginOkFrame(std::string_view player_id, std::string_view name) {
 
 std::string PongFrame() {
   json::Value frame = json::Value::Obj();
-  frame.Set("type", json::Value::Str("pong"));
+  frame.Set("type", json::Value::Int(WireOf(FrameType::kPong)));
   return frame.Dump();
 }
 
@@ -43,8 +43,8 @@ json::Value RecentJson(const StatsSummary& summary) {
   for (const StatsEntry& entry : summary.recent) {
     json::Value item = json::Value::Obj();
     item.Set("room_id", json::Value::Str(entry.room_id));
-    item.Set("reason", json::Value::Str(entry.reason));
-    item.Set("mode", json::Value::Str(entry.mode));
+    item.Set("reason", json::Value::Int(WireOf(entry.reason)));
+    item.Set("mode", json::Value::Int(WireOf(entry.mode)));
     item.Set("delta_score", json::Value::Int(entry.delta_score));
     item.Set("win", json::Value::Bool(entry.win));
     item.Set("ended_at", json::Value::Int(entry.ended_at));
@@ -68,7 +68,7 @@ json::Value SummaryJson(const StatsSummary& summary) {
 
 std::string StatsFrame(const StatsSnapshot& snapshot) {
   json::Value frame = json::Value::Obj();
-  frame.Set("type", json::Value::Str("stats"));
+  frame.Set("type", json::Value::Int(WireOf(FrameType::kStats)));
   // 兼容层：顶层四字段 + recent 继续表示 classic（老客户端读这些键，帧形状不变）
   frame.Set("games", json::Value::Int(snapshot.classic.games));
   frame.Set("wins", json::Value::Int(snapshot.classic.wins));

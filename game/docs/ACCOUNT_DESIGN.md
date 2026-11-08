@@ -26,7 +26,7 @@
 
 1. **两种会话**：**游客**（`login{name}`，昵称即身份，进程内 `player_id`）与**账号**（`login{username,password}` 或 `register{...}`，持久身份）。同一连接二选一，登录后不可切换。
 2. **身份映射**：账号的 `player_id = "u-" + <accounts.id 十进制>`（如 `u-000042`）；游客仍是既有 `PlayerIdAllocator` 的 `p-<6 位十六进制>`；机器人是 `bot-<seat>`。前缀 `u-` / `p-` / `bot-` 互不重叠，`player_id` 对客户端仍是不透明串。
-3. **一个账号同时只有一个在线连接**：第二个连接用同一账号登录 → `error{code:"ALREADY_ONLINE"}`，连接保持（该连接仍可改用游客身份登录）。首个连接关闭时释放。
+3. **一个账号同时只有一个在线连接**：第二个连接用同一账号登录 → `error{code:14}`，连接保持（该连接仍可改用游客身份登录）。首个连接关闭时释放。
    - 释放时机是**连接关闭**（FIN/RST、心跳超时断开、配额断开），而不是「进入房间」或「对局结束」。因此登录后一直挂在登录界面、又持续 `ping` 保活的连接，会一直占用该账号（这是刻意的：简单、可预期，且客户端把 `ALREADY_ONLINE` 单独提示为「该账号已在别处登录」而不是泛化错误）。
 4. **账号不改变对局语义**：房间、座位、窗口、超时、托管、结算一律与游客相同；账号只影响身份来源、战绩落库与战绩查询。
 5. 账号的昵称（`nickname`）在注册时确定，默认取账号名；对局内展示用的是昵称，规则仍受 `GAME_DESIGN` §3.5 约束（1..16 字符、无控制字符，**允许重名**）。
@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS match_results (
 | --- | --- |
 | 启动时连不上 / 建表失败 | 记一条 error 日志说明原因，账号功能标记为不可用；**服务端照常启动**（游客登录与整局游戏完全不受影响） |
 | 运行中查询失败 | 该次操作按失败处理，并尝试在下一个任务前重连；连续失败不致命 |
-| 账号相关帧（`register` / 带凭据的 `login` / `stats_request`） | `error{code:"INTERNAL", message:"account service unavailable"}`，连接保持；**不计入任何配额**（这是服务端故障，不是客户端错误） |
+| 账号相关帧（`register` / 带凭据的 `login` / `stats_request`） | `error{code:11, message:"account service unavailable"}`，连接保持；**不计入任何配额**（这是服务端故障，不是客户端错误） |
 | 战绩落库 | fire-and-forget；失败只记日志，**绝不影响 `game_end` 的广播**（客户端必须照常收到结算） |
 
 ## 3. 协议增补（对 `PROTOCOL.md` 的增补，编号沿用其章节）
@@ -111,8 +111,8 @@ CREATE TABLE IF NOT EXISTS match_results (
 ### 3.1 `login`（扩展 §4.1）
 
 ```json
-{"type":"login","name":"玩家_"}
-{"type":"login","username":"alice","password":"s3cret"}
+{"type":1,"name":"玩家_"}
+{"type":1,"username":"alice","password":"s3cret"}
 ```
 
 | 字段 | 类型 | 必填 | 校验 |
@@ -123,16 +123,16 @@ CREATE TABLE IF NOT EXISTS match_results (
 
 - **判定规则**：帧中出现 `username` 即走账号路径（此时 `password` 必填，`name` 忽略）；否则走既有游客路径，行为与 v1.2 逐字相同。
 - 账号路径成功 → `login_ok{player_id:"u-<id>", name:<nickname>}`（**字段形状与游客路径完全相同**，仅取值不同）。
-- 账号路径失败 → `error{code:"AUTH_FAILED", message:"wrong username or password"}`（账号不存在与口令错误**返回同一错误**，不泄露账号是否存在）；该错误**计入 §7.2 的 illegal-operation 计数**（累计 10 次断开，与既有配额机制一致），连接保持。
-- 同一账号在别处在线 → `error{code:"ALREADY_ONLINE"}`，连接保持。
-- 重复 `login`（含账号路径挂起期间再发）→ `error{code:"BAD_REQUEST", message:"already logged in"}`，连接保持。
-- 账号路径校验不过（用户名/口令长度或字符集非法）→ `error{code:"BAD_REQUEST"}`，连接保持。
+- 账号路径失败 → `error{code:12, message:"wrong username or password"}`（账号不存在与口令错误**返回同一错误**，不泄露账号是否存在）；该错误**计入 §7.2 的 illegal-operation 计数**（累计 10 次断开，与既有配额机制一致），连接保持。
+- 同一账号在别处在线 → `error{code:14}`，连接保持。
+- 重复 `login`（含账号路径挂起期间再发）→ `error{code:8, message:"already logged in"}`，连接保持。
+- 账号路径校验不过（用户名/口令长度或字符集非法）→ `error{code:8}`，连接保持。
 - 账号路径是**异步**的：服务端收到后先发起查询，`login_ok` 出现前该连接上除 `login` 外的帧仍一律 `NOT_LOGGED_IN`（与既有 §4.1 末条一致）。
 
 ### 3.2 `register`（新增，**注册成功即登录**）
 
 ```json
-{"type":"register","username":"alice","password":"s3cret","name":"爱丽丝"}
+{"type":2,"username":"alice","password":"s3cret","name":"爱丽丝"}
 ```
 
 | 字段 | 类型 | 必填 | 校验 |
@@ -142,26 +142,26 @@ CREATE TABLE IF NOT EXISTS match_results (
 | `name` | string | 否 | 昵称；缺省取 `username`；给出时按既有昵称规则校验（1..16 字符、无控制字符） |
 
 - 成功 → **直接下发 `login_ok{player_id:"u-<id>", name:<nickname>}`**（不新增 `register_ok` 帧）：注册即登录，客户端后续流程与游客完全一致（`create_room` → `ready`）。
-- 账号名已存在 → `error{code:"USERNAME_TAKEN", message:"username already taken"}`，连接保持，可换名重试。
-- 字段缺失/类型错/校验不过 → `error{code:"BAD_REQUEST"}`。
-- 已登录（含账号路径挂起期间）再发 `register` → `error{code:"BAD_REQUEST", message:"already logged in"}`。
+- 账号名已存在 → `error{code:13, message:"username already taken"}`，连接保持，可换名重试。
+- 字段缺失/类型错/校验不过 → `error{code:8}`。
+- 已登录（含账号路径挂起期间）再发 `register` → `error{code:8, message:"already logged in"}`。
 
 ### 3.3 `stats_request`（新增）
 
 ```json
-{"type":"stats_request"}
+{"type":4}
 ```
 
 - 无字段。成功 → 下发 `stats`（§3.4）。
 - **游客也可发**：游客没有账号，返回零值载荷（`games/wins/draws/net_score` 全 0、`recent` 为空数组），**不是错误**——客户端因此不必区分会话类型。
-- 未登录 → `error{code:"NOT_LOGGED_IN"}`（与其它帧一致）。
-- 账号服务不可用 → `error{code:"INTERNAL", message:"account service unavailable"}`。
+- 未登录 → `error{code:2}`（与其它帧一致）。
+- 账号服务不可用 → `error{code:11, message:"account service unavailable"}`。
 
 ### 3.4 `stats`（新增）
 
 ```json
-{"type":"stats","games":12,"wins":5,"draws":3,"net_score":-14,
- "recent":[{"room_id":"r-0007","reason":"win_ron","delta_score":12,"win":true,"ended_at":1759900000}]}
+{"type":23,"games":12,"wins":5,"draws":3,"net_score":-14,
+ "recent":[{"room_id":"r-0007","reason":1,"delta_score":12,"win":true,"ended_at":1759900000}]}
 ```
 
 | 字段 | 类型 | 说明 |
@@ -213,7 +213,7 @@ C→S stats_request → S→C stats{...}
 1. **写入时机**：`RoomActor` 判定局终（和牌或荒庄）后，随既有「局终通知」一次性发出（该通知已有「每局恰好一次」的实现与测试保证），由 `LobbyActor` 提交落库；**fire-and-forget**，不阻塞、不改变任何对局行为。
 2. **写什么**：每局每个**账号座位**一行（`!is_bot` 且 `account_id != 0`）。游客座位、AI 座位不写。
 3. **取值**：`reason` 取 `game_end.reason`；`delta_score` 取该座位在 `game_end.results[]` 中的值（零和口径不变）；`win` 为该座位是否和牌方。
-4. **荒庄**：照记（`reason = "draw_exhausted"`，四家 `delta_score = 0`，`win = 0`），并计入 `games` 与 `draws`。
+4. **荒庄**：照记（`reason = 3`，四家 `delta_score = 0`，`win = 0`），并计入 `games` 与 `draws`。
 5. **中途断线托管后跑完的局**：照记（局终事件与断线无关）。
 6. 写入失败只记日志；同一局重复通知不会重复入库（依赖既有的「恰好一次」保证，不做去重键）。
 7. **场次汇总（v1.3 新增，写 `match_results`）**：**一场一个账号一行**（不是一局一行）。写入时机是**场终**（`PROTOCOL.md` §5.15 `match_end`）之后，与 §4 第 1 条的局终写入**是两条独立路径**，互不替代：

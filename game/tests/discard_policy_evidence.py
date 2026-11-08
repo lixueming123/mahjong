@@ -32,6 +32,10 @@ import subprocess
 import sys
 import tempfile
 import collections
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from protocol.enums import ACTION, FRAME_TYPE
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SERVER_DIR = os.path.join(REPO_ROOT, "game", "server")
@@ -114,7 +118,7 @@ def replay(start: int, wall: list[str], log_path: str) -> dict:
         if not frame:
             continue
         kind = frame.get("type")
-        if kind == "draw":  # unicast: only the human seat is visible, which validates the method
+        if kind == FRAME_TYPE.DRAW:  # unicast: only the human seat is visible, which validates the method
             drawn = wall[cursor - start]
             if drawn != frame["tile"]:
                 raise SystemExit(f"method invalid: wall says {drawn} but frame says {frame['tile']}")
@@ -122,12 +126,12 @@ def replay(start: int, wall: list[str], log_path: str) -> dict:
             seen_draw = (frame["seat"], drawn)
             human_draw_checks += 1
             continue
-        if kind == "action_event":
-            claim = (frame["seat"], frame["action"] == "kong")
+        if kind == FRAME_TYPE.ACTION_EVENT:
+            claim = (frame["seat"], frame["action"] == ACTION.KONG)
             continue
-        if kind == "game_end":
+        if kind == FRAME_TYPE.GAME_END:
             break
-        if kind != "discard_event":
+        if kind != FRAME_TYPE.DISCARD_EVENT:
             continue
         seat, tile = frame["seat"], frame["tile"]
         if seen_draw is not None and seen_draw[0] == seat:

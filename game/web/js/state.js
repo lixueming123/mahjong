@@ -12,6 +12,7 @@
  * 渲染层只读，不碰网络。
  */
 import { RIVER, HAND, HAND_SIZE } from './config.js';
+import { ACTION, REASON, MELD_TYPE, nameOf } from './protocol_enums.js';
 
 const WINDS = ['東', '南', '西', '北'];
 
@@ -50,12 +51,12 @@ function toViewMeld(viewSeat, meld, claimedTile = null) {
       const at = tiles.indexOf(claimedTile);
       if (at >= 0) rotated = at;
     }
-    if (rotated < 0 && meld.type !== 'ankan') rotated = 0;
+    if (rotated < 0 && meld.type !== MELD_TYPE.ANKAN) rotated = 0;
   }
   return {
     seat: viewSeat,
-    // 渲染层认 chi/pong/kong/ankan/kakan 五种 kind
-    kind: meld.type === 'chow' ? 'chi' : meld.type,
+    // kind 是渲染层 UI 别名（字符串），不是线值；由线枚举反查名称，吃沿用 'chi'
+    kind: meld.type === MELD_TYPE.CHOW ? 'chi' : nameOf('meld_type', meld.type),
     type: meld.type,
     tiles,
     rotated,
@@ -380,7 +381,7 @@ export function createState() {
     }
     const view = viewSeat(event.seat);
     const action = event.action;
-    if (action === 'pong' || action === 'chow' || action === 'kong') {
+    if (action === ACTION.PONG || action === ACTION.CHOW || action === ACTION.KONG) {
       if (Number.isInteger(event.from_seat)) {
         const river = state.rivers[viewSeat(event.from_seat)];
         if (river.length) {
@@ -395,17 +396,17 @@ export function createState() {
         console.warn('action_event 缺少 from_seat（协议异常）', action);
         state.meldClaims[view].push(null);
       }
-    } else if (action === 'ankan') {
+    } else if (action === ACTION.ANKAN) {
       // 暗杠没有「被鸣的那张」，但组数 +1，占位保持下标对齐
       state.meldClaims[view].push(null);
-    } else if (action === 'riichi') {
+    } else if (action === ACTION.RIICHI) {
       state.riichi[view] = true;
-    } else if (action === 'win') {
+    } else if (action === ACTION.WIN) {
       state.phase = 'ended';
       state.winSeat = Number.isInteger(event.seat) ? event.seat : null;
     }
     // F-TP-11：和牌或任何副露生效 ⇒ 牌形已变，旧的听牌 waits 是脏数据
-    if (['win', 'pong', 'chow', 'kong', 'ankan', 'kakan'].includes(action)) {
+    if ([ACTION.WIN, ACTION.PONG, ACTION.CHOW, ACTION.KONG, ACTION.ANKAN, ACTION.KAKAN].includes(action)) {
       state.tenpai = { isTenpai: false, waits: [], noYaku: false };
     }
     state.riichiTiles = [];
@@ -595,11 +596,12 @@ const YAKU_NAMES = {
 };
 
 const ACTION_LABELS = {
-  pong: '碰', chow: '吃', kong: '杠', ankan: '暗杠', kakan: '加杠', win: '和牌', riichi: '立直',
+  [ACTION.PONG]: '碰', [ACTION.CHOW]: '吃', [ACTION.KONG]: '杠', [ACTION.ANKAN]: '暗杠',
+  [ACTION.KAKAN]: '加杠', [ACTION.WIN]: '和牌', [ACTION.RIICHI]: '立直',
 };
 
 const REASON_LABELS = {
-  win_ron: '荣和', win_tsumo: '自摸', draw_exhausted: '荒庄流局',
+  [REASON.WIN_RON]: '荣和', [REASON.WIN_TSUMO]: '自摸', [REASON.DRAW_EXHAUSTED]: '荒庄流局',
 };
 
 export function actionLabel(action) {

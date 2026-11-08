@@ -49,6 +49,16 @@ from typing import Callable, Iterable, Sequence
 from . import vo_durations as VO
 from .tiles import LIMIT_LABEL, RIICHI_YAKU_LABEL
 
+import sys
+from pathlib import Path
+
+_game_root = next(
+    p for p in Path(__file__).resolve().parents
+    if (p / "protocol" / "enums.json").is_file()
+)
+sys.path.insert(0, str(_game_root))
+from protocol.enums import REASON
+
 log = logging.getLogger("mahjong.client.broadcast")
 
 # ---------------------------------------------------------------- 预算与节拍（RULINGS §2.1）
@@ -168,10 +178,11 @@ FOCUS_YAKU = "yaku"
 FOCUS_CHAIN = "chain"
 FOCUS_PAY = "pay"
 
+# 键是 reason 整数常量，值是中文显示文案（PROTOCOL v2.0）
 REASON_LABEL = {
-    "win_tsumo": "自摸",
-    "win_ron": "荣和",
-    "draw_exhausted": "荒庄（牌山摸尽）",
+    REASON.WIN_TSUMO: "自摸",
+    REASON.WIN_RON: "荣和",
+    REASON.DRAW_EXHAUSTED: "荒庄（牌山摸尽）",
 }
 
 #: 14 番种 id → 中文名（`result.py` 的同名表迁到这里，成为唯一来源）
@@ -467,7 +478,7 @@ class Plan:
     """一局结算页要用的全部派生数据（渲染只读它，不再自己解析协议）。"""
 
     level: str
-    reason: str
+    reason: int
     has_winner: bool
     round_text: str
     winner_name: str
@@ -629,7 +640,7 @@ def plan_for(
 ) -> Plan:
     """`game_end` → 渲染/节拍要用的全部派生数据（含四级降级判定）。"""
     payload = game_end if isinstance(game_end, dict) else {}
-    reason = payload.get("reason") if isinstance(payload.get("reason"), str) else "结算"
+    reason = payload.get("reason") if isinstance(payload.get("reason"), int) else REASON.INVALID
     interlude = interlude_of(payload)
     budget = budget_of(interlude)
 
@@ -805,8 +816,8 @@ def plan_for(
     )
 
 
-def _round_text(round_index: int | None, renchan: int | None, reason: str) -> str:
-    label = REASON_LABEL.get(reason, str(reason or "结算"))
+def _round_text(round_index: int | None, renchan: int | None, reason: int) -> str:
+    label = REASON_LABEL.get(reason, "结算")
     x = (round_index + 1) if round_index is not None else 1
     n = renchan if renchan is not None else 0
     return f"第 {x} 局 · 连庄 {n} · {label}"
@@ -853,7 +864,7 @@ def _conclusion(
 
 def _build_lines(
     *,
-    reason: str,
+    reason: int,
     winner_name: str,
     payer_name: str,
     rel_label: Callable[[int], str] | None,
@@ -993,7 +1004,7 @@ def _build_lines(
 
 def _draw_plan(
     payload: dict,
-    reason: str,
+    reason: int,
     round_text: str,
     interlude: int,
     budget: int,

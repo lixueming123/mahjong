@@ -1,4 +1,5 @@
 import { createState, drawnIndex, sortHand } from '../../web/js/state.js';
+import { ACTION, MELD_TYPE } from '../../web/js/protocol_enums.js';
 
 let pass = 0; let fail = 0;
 const ok = (name, cond, extra = '') => {
@@ -54,10 +55,10 @@ const seatFrame = (bySeat = []) => ({
   const app = createState();
   app.startRound({ hand: ['1m', '2m', '3m', '4m', '5p', '6p', '7p', '8p', '9p', '1s', '2s', '3s', '1z'], seat: 0, dealer: 0, round_index: 0, round_count: 4 });
   app.state.rivers[3] = ['5m'];
-  app.applyActionEvent({ seat: 0, action: 'pong', tiles: ['5m'], from_seat: 3 });
+  app.applyActionEvent({ seat: 0, action: ACTION.PONG, tiles: ['5m'], from_seat: 3 });
   ok('碰：牌河末张被记为被鸣牌', app.state.meldClaims[0][0] === '5m', JSON.stringify(app.state.meldClaims[0]));
-  app.applySync({ ...seatFrame(), hand: ['2m', '3m', '4m', '5p', '6p', '7p', '8p', '9p', '1s', '2s'], melds: [{ type: 'pong', tiles: ['5m', '5m', '5m'] }], remaining: 60, current_seat: 1, seq: 12 });
-  const pong = app.state.melds.find((m) => m.seat === 0 && m.type === 'pong');
+  app.applySync({ ...seatFrame(), hand: ['2m', '3m', '4m', '5p', '6p', '7p', '8p', '9p', '1s', '2s'], melds: [{ type: MELD_TYPE.PONG, tiles: ['5m', '5m', '5m'] }], remaining: 60, current_seat: 1, seq: 12 });
+  const pong = app.state.melds.find((m) => m.seat === 0 && m.type === MELD_TYPE.PONG);
   ok('碰：横放对到组内下标', pong && pong.rotated === 0, JSON.stringify(pong));
   ok('碰：牌面保持服务端顺序', JSON.stringify(pong.tiles) === JSON.stringify(['5m', '5m', '5m']));
 }
@@ -67,9 +68,9 @@ const seatFrame = (bySeat = []) => ({
   const app = createState();
   app.startRound({ hand: ['2m', '4m', '1p', '2p', '3p', '4p', '5p', '6p', '7p', '8p', '9p', '1s', '1z'], seat: 0, dealer: 0, round_index: 0, round_count: 4 });
   app.state.rivers[3] = ['3m'];
-  app.applyActionEvent({ seat: 0, action: 'chow', tiles: ['2m', '4m'], from_seat: 3 });
-  app.applySync({ ...seatFrame(), hand: ['1p', '2p', '3p', '4p'], melds: [{ type: 'chow', tiles: ['2m', '3m', '4m'] }], remaining: 60, current_seat: 1, seq: 14 });
-  const chi = app.state.melds.find((m) => m.seat === 0 && m.type === 'chow');
+  app.applyActionEvent({ seat: 0, action: ACTION.CHOW, tiles: ['2m', '4m'], from_seat: 3 });
+  app.applySync({ ...seatFrame(), hand: ['1p', '2p', '3p', '4p'], melds: [{ type: MELD_TYPE.CHOW, tiles: ['2m', '3m', '4m'] }], remaining: 60, current_seat: 1, seq: 14 });
+  const chi = app.state.melds.find((m) => m.seat === 0 && m.type === MELD_TYPE.CHOW);
   ok('吃：横放的是被鸣的 3m（下标 1）', chi && chi.rotated === 1, JSON.stringify(chi));
   ok('吃：组内仍是 2m3m4m 顺序', JSON.stringify(chi.tiles) === JSON.stringify(['2m', '3m', '4m']));
   ok('吃：手牌被对家副露占用后只剩 4 张', app.state.hand.length === 4);
@@ -81,11 +82,11 @@ const seatFrame = (bySeat = []) => ({
   app.startRound({ hand: ['1m', '2m', '3m', '4m', '5p', '6p', '7p', '8p', '9p', '1s', '2s', '3s', '1z'], seat: 0, dealer: 0, round_index: 0, round_count: 4 });
   app.state.rivers[0] = ['7p'];
   // 下家（seat 1）吃我打出的 7p
-  app.applyActionEvent({ seat: 1, action: 'chow', tiles: ['6p', '8p'], from_seat: 0 });
+  app.applyActionEvent({ seat: 1, action: ACTION.CHOW, tiles: ['6p', '8p'], from_seat: 0 });
   ok('他家：牌河末张被记录', app.state.meldClaims[1][0] === '7p', JSON.stringify(app.state.meldClaims[1]));
-  const frame = seatFrame({ 1: [{ type: 'chow', tiles: ['6p', '7p', '8p'] }] });
+  const frame = seatFrame({ 1: [{ type: MELD_TYPE.CHOW, tiles: ['6p', '7p', '8p'] }] });
   app.applySync({ ...frame, hand: app.state.hand.slice(), melds: [], remaining: 60, current_seat: 1, seq: 16 });
-  const chi = app.state.melds.find((m) => m.seat === 1 && m.type === 'chow');
+  const chi = app.state.melds.find((m) => m.seat === 1 && m.type === MELD_TYPE.CHOW);
   ok('他家：吃也横放被鸣那张', chi && chi.rotated === 1, JSON.stringify(chi));
 }
 
@@ -93,13 +94,13 @@ const seatFrame = (bySeat = []) => ({
 {
   const app = createState();
   app.startRound({ hand: ['1m', '2m', '3m', '4m', '5p', '6p', '7p', '8p', '9p', '1s', '2s', '3s', '1z'], seat: 0, dealer: 0, round_index: 0, round_count: 4 });
-  const frame = seatFrame({ 1: [{ type: 'pong', tiles: ['9p', '9p', '9p'] }] });
+  const frame = seatFrame({ 1: [{ type: MELD_TYPE.PONG, tiles: ['9p', '9p', '9p'] }] });
   app.applySync({ ...frame, hand: app.state.hand.slice(), melds: [], remaining: 60, current_seat: 1, seq: 18 });
-  const pong = app.state.melds.find((m) => m.seat === 1 && m.type === 'pong');
+  const pong = app.state.melds.find((m) => m.seat === 1 && m.type === MELD_TYPE.PONG);
   ok('无 claim 记录时碰仍横放组首', pong && pong.rotated === 0, JSON.stringify(pong));
-  const ankan = seatFrame({ 1: [{ type: 'ankan', tiles: [] }] });
+  const ankan = seatFrame({ 1: [{ type: MELD_TYPE.ANKAN, tiles: [] }] });
   app.applySync({ ...ankan, hand: app.state.hand.slice(), melds: [], remaining: 60, current_seat: 1, seq: 20 });
-  const kan = app.state.melds.find((m) => m.seat === 1 && m.type === 'ankan');
+  const kan = app.state.melds.find((m) => m.seat === 1 && m.type === MELD_TYPE.ANKAN);
   ok('他家暗杠 4 张背牌、不横放', kan && kan.tiles.length === 4 && kan.rotated === -1, JSON.stringify(kan));
 }
 

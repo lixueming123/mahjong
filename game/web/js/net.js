@@ -8,6 +8,8 @@
  * 心跳：§1.6 冻结 5000 ms 一次 `ping`，服务端原样回 `pong`。
  */
 
+import { FRAME_TYPE, MAXS } from './protocol_enums.js';
+
 const PING_INTERVAL_MS = 5000;
 /** §1.2 第 3 条：单行超过 64 KB 视为协议错误 */
 const MAX_LINE = 65536;
@@ -84,12 +86,12 @@ export class Net {
             console.warn('丢弃非法帧', line.slice(0, 200), err.message);
             continue;
           }
-          if (!frame || typeof frame.type !== 'string') {
+          if (!frame || !Number.isInteger(frame.type) || frame.type < 1 || frame.type > MAXS.frame_type) {
             this.badFrames += 1;
             continue;
           }
           this.recvFrames += 1;
-          if (frame.type === 'pong') {
+          if (frame.type === FRAME_TYPE.PONG) {
             this.rtt = this._pingAt ? Math.round(performance.now() - this._pingAt) : this.rtt;
             this.emit('rtt', this.rtt);
           }
@@ -137,7 +139,7 @@ export class Net {
     if (this.pingTimer) return;
     this.pingTimer = setInterval(() => {
       this._pingAt = performance.now();
-      this.send({ type: 'ping' });
+      this.send({ type: FRAME_TYPE.PING });
     }, PING_INTERVAL_MS);
   }
 

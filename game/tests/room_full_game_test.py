@@ -43,6 +43,10 @@ import sys
 import tempfile
 import time
 from collections import Counter
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from protocol.enums import ACTION, ERROR_CODE, FRAME_TYPE, MELD_TYPE, REASON, WINDOW
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_BIN_CANDIDATES = (
@@ -126,7 +130,7 @@ def is_grouped_and_sorted(tiles: list[str]) -> bool:
     return len(set(suits)) == len(suits)
 
 
-def sorted_melds(melds: list[dict]) -> list[tuple[str, tuple[str, ...]]]:
+def sorted_melds(melds: list[dict]) -> list[tuple[int, tuple[str, ...]]]:
     return [(meld["type"], tuple(sorted_tiles(meld["tiles"]))) for meld in melds]
 
 
@@ -176,9 +180,9 @@ class TableModel:
 
     def on_action_event(self, event: dict) -> None:
         action = event["action"]
-        check(action != "pass", "pass must never be emitted as an action_event (§5.8)")
+        check(action != ACTION.PASS, "pass must never be emitted as an action_event (§5.8)")
         seat = event["seat"]
-        if action == "win":
+        if action == ACTION.WIN:
             # from_seat is present exactly for a ron (§5.8); a tsumo tile was already added
             # by the preceding draw frame.
             if "from_seat" in event:
@@ -191,19 +195,22 @@ class TableModel:
         claimed = self.rivers[from_seat][-1]
         self.rivers[from_seat].pop()
         if seat == self.seat:
-            if action == "pong":
+            if action == ACTION.PONG:
                 for _ in range(2):
                     self.hand.remove(claimed)
                 meld_tiles = [claimed] * 3
-            elif action == "kong":
+                meld_type = MELD_TYPE.PONG
+            elif action == ACTION.KONG:
                 for _ in range(3):
                     self.hand.remove(claimed)
                 meld_tiles = [claimed] * 4
+                meld_type = MELD_TYPE.KONG
             else:  # chow
                 for tile in event["tiles"]:
                     self.hand.remove(tile)
                 meld_tiles = list(event["tiles"]) + [claimed]
-            self.melds.append({"type": action, "tiles": sorted_tiles(meld_tiles)})
+                meld_type = MELD_TYPE.CHOW
+            self.melds.append({"type": meld_type, "tiles": sorted_tiles(meld_tiles)})
             self.drawn = None
 
     # ---- authoritative snapshot -----------------------------------------------------
@@ -258,37 +265,37 @@ def answer_request(client: Client, model: TableModel, request: dict) -> str:
     window = request["window"]
     options = request.get("options", [])
     actions = {option["action"]: option for option in options}
-    if "win" in actions:
-        client.send({"type": "action", "action": "win", "tiles": [], "seq": seq})
+    if ACTION.WIN in actions:
+        client.send({"type": FRAME_TYPE.ACTION, "action": ACTION.WIN, "tiles": [], "seq": seq})
         return "win"
-    if window == "discard":
+    if window == WINDOW.DISCARD:
         tile = model.drawn if model.drawn is not None else sorted_tiles(model.hand)[-1]
-        client.send({"type": "discard", "tile": tile, "seq": seq})
+        client.send({"type": FRAME_TYPE.DISCARD, "tile": tile, "seq": seq})
         return "discard"
-    if "pong" in actions:
-        client.send({"type": "action", "action": "pong", "tiles": actions["pong"]["tiles"], "seq": seq})
+    if ACTION.PONG in actions:
+        client.send({"type": FRAME_TYPE.ACTION, "action": ACTION.PONG, "tiles": actions[ACTION.PONG]["tiles"], "seq": seq})
         return "pong"
-    if "chow" in actions:
-        client.send({"type": "action", "action": "chow", "tiles": actions["chow"]["tiles"], "seq": seq})
+    if ACTION.CHOW in actions:
+        client.send({"type": FRAME_TYPE.ACTION, "action": ACTION.CHOW, "tiles": actions[ACTION.CHOW]["tiles"], "seq": seq})
         return "chow"
-    client.send({"type": "action", "action": "pass", "tiles": [], "seq": seq})
+    client.send({"type": FRAME_TYPE.ACTION, "action": ACTION.PASS, "tiles": [], "seq": seq})
     return "pass"
 
 
 def pass_handshake(client: Client, name: str) -> dict:
-    client.send({"type": "login", "name": name})
+    client.send({"type": FRAME_TYPE.LOGIN, "name": name})
     login_ok = client.recv_frame()
-    check(login_ok["type"] == "login_ok", f"expected login_ok, got {login_ok}")
-    client.send({"type": "create_room"})
+    check(login_ok["type"] == FRAME_TYPE.LOGIN_OK, f"expected login_ok, got {login_ok}")
+    client.send({"type": FRAME_TYPE.CREATE_ROOM})
     joined = client.recv_frame()
-    check(joined["type"] == "room_joined", f"expected room_joined, got {joined}")
+    check(joined["type"] == FRAME_TYPE.ROOM_JOINED, f"expected room_joined, got {joined}")
     check(joined["seat"] == 0, "the room creator must sit at seat 0")
     check(len(joined["seats"]) == SEAT_COUNT, "room_joined.seats must hold 4 entries")
     check(joined["seats"][0]["is_bot"] is False, "seat 0 must be the human")
     check(all(seat["is_bot"] for seat in joined["seats"][1:]), "seats 1..3 must be bots")
-    client.send({"type": "ready"})
+    client.send({"type": FRAME_TYPE.READY})
     start = client.recv_frame()
-    check(start["type"] == "game_start", f"expected game_start, got {start}")
+    check(start["type"] == FRAME_TYPE.GAME_START, f"expected game_start, got {start}")
     check(start["seat"] == 0 and start["dealer"] == 0, "the human is the dealer")
     check(len(start["hand"]) == 14, "the dealer starts with 14 tiles")
     check(is_grouped_and_sorted(start["hand"]), f"game_start.hand must be sorted (§2.2): {start['hand']}")
@@ -308,46 +315,46 @@ def play_game(client: Client, model: TableModel, verbose: bool,
         kind = frame["type"]
         if verbose:
             print(f"[e2e] <- {frame.get('type')} {json.dumps(frame, ensure_ascii=False)[:160]}")
-        if kind == "error":
+        if kind == FRAME_TYPE.ERROR:
             stats["errors"].append(frame)
             continue
-        if kind == "game_start":
+        if kind == FRAME_TYPE.GAME_START:
             # v1.6 整场模式：新一局的 game_start = 牌桌整体重置（§10.1）。
             model.reset_for_new_round(frame["seat"], frame["hand"], frame["dealer"])
             stats["starts"] = stats.get("starts", 0) + 1
             continue
-        if kind == "match_end":
+        if kind == FRAME_TYPE.MATCH_END:
             stats["match_end"] = frame
             return frame, stats
-        if kind == "game_end":
+        if kind == FRAME_TYPE.GAME_END:
             return frame, stats
-        if kind == "draw":
+        if kind == FRAME_TYPE.DRAW:
             check(frame["seat"] == model.seat, "draw must only be sent to the drawer (§5.5)")
             check("seq" in frame and frame["seq"] > 0, "draw must carry seq (§5.5 H5)")
             model.on_draw(frame["seat"], frame["tile"])
             stats["draws"] += 1
             stats["max_seq"] = max(stats["max_seq"], frame["seq"])
             continue
-        if kind == "discard_event":
+        if kind == FRAME_TYPE.DISCARD_EVENT:
             check(frame["seq"] > 0, "discard_event must carry seq (H5)")
             check(frame["seq"] >= previous_event_seq, "discard_event seq must not go backwards")
             previous_event_seq = frame["seq"]
             model.on_discard_event(frame["seat"], frame["tile"])
             stats["discard_events"] += 1
             continue
-        if kind == "action_event":
+        if kind == FRAME_TYPE.ACTION_EVENT:
             check(frame["seq"] > 0, "action_event must carry seq (H5)")
             check(frame["seq"] >= previous_event_seq, "action_event seq must not go backwards")
             previous_event_seq = frame["seq"]
             model.on_action_event(frame)
             stats["action_events"].append(frame)
             continue
-        if kind == "state_sync":
+        if kind == FRAME_TYPE.STATE_SYNC:
             model.check_and_adopt(frame)
             stats["state_syncs"] += 1
             stats["last_state_sync"] = frame
             continue
-        if kind == "tenpai":
+        if kind == FRAME_TYPE.TENPAI:
             # v1.7 §5.16：听牌帧只发本家、独立 tenpai_seq、**不参与 room.seq**，
             # 也不得污染 state_sync 的任何字段。e2e 只做形状与单调性校验。
             check("tenpai_seq" in frame and frame["tenpai_seq"] > 0, "tenpai needs tenpai_seq")
@@ -365,8 +372,8 @@ def play_game(client: Client, model: TableModel, verbose: bool,
             stats["tenpai_frames"] = stats.get("tenpai_frames", 0) + 1
             stats["tenpai_non_empty"] = stats.get("tenpai_non_empty", 0) + (1 if waits else 0)
             continue
-        if kind == "action_request":
-            check(frame["window"] in ("discard", "claim"), f"unknown window: {frame}")
+        if kind == FRAME_TYPE.ACTION_REQUEST:
+            check(frame["window"] in (WINDOW.DISCARD, WINDOW.CLAIM), f"unknown window: {frame}")
             check(frame["seq"] > previous_request_seq, "action_request.seq must strictly increase")
             check(frame.get("deadline_ms", 0) > 0, "action_request needs deadline_ms")
             previous_request_seq = frame["seq"]
@@ -375,7 +382,7 @@ def play_game(client: Client, model: TableModel, verbose: bool,
             answer_request(client, model, frame)
             # A mid-game `sync` must answer with an authoritative snapshot (§4.7).
             if stats["requests"] == 3:
-                client.send({"type": "sync"})
+                client.send({"type": FRAME_TYPE.SYNC})
             if max_requests is not None and stats["requests"] >= max_requests:
                 return None, stats
             continue
@@ -385,24 +392,24 @@ def play_game(client: Client, model: TableModel, verbose: bool,
 def verify_game_end(end: dict, stats: dict, model: TableModel) -> str:
     check(not stats["errors"], f"the game produced error frames: {stats['errors']}")
     check(stats["requests"] > 0 and stats["draws"] > 0, "the game never drove a turn")
-    check(end["reason"] in ("win_ron", "win_tsumo", "draw_exhausted"), f"bad reason: {end['reason']}")
+    check(end["reason"] in (REASON.WIN_RON, REASON.WIN_TSUMO, REASON.DRAW_EXHAUSTED), f"bad reason: {end['reason']}")
     results = end["results"]
     check(len(results) == SEAT_COUNT, "game_end.results must hold 4 entries")
     check(sorted(entry["seat"] for entry in results) == list(range(SEAT_COUNT)), "seats must be 0..3")
     total = sum(entry["delta_score"] for entry in results)
     check(total == 0, f"Σ delta_score must be zero, got {total}")
 
-    if end["reason"] == "draw_exhausted":
+    if end["reason"] == REASON.DRAW_EXHAUSTED:
         check(end["win"] is None, "a drawn game must report win = null")
         check(all(entry["delta_score"] == 0 for entry in results), "a drawn game scores nothing")
         check(model.remaining == 0, f"draw_exhausted with remaining={model.remaining}")
-        return "draw_exhausted"
+        return REASON.DRAW_EXHAUSTED
 
     win = end["win"]
     check(isinstance(win, dict), "a winning game must report a win object")
     winner = win["seat"]
     tsumo = win["tsumo"]
-    check(tsumo == (end["reason"] == "win_tsumo"), "reason and win.tsumo disagree")
+    check(tsumo == (end["reason"] == REASON.WIN_TSUMO), "reason and win.tsumo disagree")
     multiplier = win["multiplier"]
     # v1.6 番数制：multiplier = 2^han ∈ {1..64}（旧倍率制 M ∈ {1,4,16} 作废）。
     check(multiplier >= 1 and multiplier <= 64 and (multiplier & (multiplier - 1)) == 0,
@@ -449,7 +456,7 @@ def verify_game_end(end: dict, stats: dict, model: TableModel) -> str:
     kongs = 0
     if stats["last_state_sync"] is not None:
         for meld in stats["last_state_sync"]["seats"][winner]["melds"]:
-            if meld["type"] in ("kong", "ankan", "kakan"):  # v2.0：三种杠都 +1 张账面
+            if meld["type"] in (MELD_TYPE.KONG, MELD_TYPE.ANKAN, MELD_TYPE.KAKAN):  # v2.0：三种杠都 +1 张账面
                 kongs += 1
     check(len(flat) == 14 + kongs, f"the winner's flat hand must hold 14+kong tiles, got {len(flat)}")
     check(Counter(flat).most_common(1)[0][1] <= 4, "the flat hand cannot hold more than 4 copies of a face")
@@ -481,9 +488,9 @@ def run_full_game(binary: str, seed: int, name: str, verbose: bool, port: int | 
             end, stats = play_game(client, model, verbose)
             reason = verify_game_end(end, stats, model)
             # After game_end a `sync` still returns the authoritative snapshot (§4.7).
-            client.send({"type": "sync"})
+            client.send({"type": FRAME_TYPE.SYNC})
             sync = client.recv_frame()
-            check(sync["type"] == "state_sync", f"expected state_sync after game_end, got {sync}")
+            check(sync["type"] == FRAME_TYPE.STATE_SYNC, f"expected state_sync after game_end, got {sync}")
             model.check_and_adopt(sync)
             print(f"[e2e] game finished: reason={reason} requests={stats['requests']} draws={stats['draws']} "
                   f"discards={stats['discard_events']} action_events={len(stats['action_events'])} "
@@ -545,14 +552,14 @@ def run_full_match(binary: str, seed: int, name: str, verbose: bool, port: int |
                       f"dealer {end['dealer']} != expected {expected_dealer}")
                 reason = end["reason"]
                 winner = end["win"]["seat"] if isinstance(end.get("win"), dict) else None
-                if reason != "draw_exhausted" and winner != expected_dealer:
+                if reason != REASON.DRAW_EXHAUSTED and winner != expected_dealer:
                     expected_round += 1
                     expected_dealer = (expected_dealer + 1) % SEAT_COUNT
 
                 if not end.get("match_will_continue", False):
                     # 场终：match_end 紧随本局 game_end（中间不应有别的对局帧）。
                     frame = client.recv_frame(timeout=10.0)
-                    check(frame["type"] == "match_end", f"expected match_end, got {frame}")
+                    check(frame["type"] == FRAME_TYPE.MATCH_END, f"expected match_end, got {frame}")
                     match_end = frame
                     break
 
@@ -562,9 +569,9 @@ def run_full_match(binary: str, seed: int, name: str, verbose: bool, port: int |
                 for _ in range(2):
                     if bad_request_probes >= 4:
                         break
-                    client.send({"type": "discard", "tile": "1m", "seq": 1})
+                    client.send({"type": FRAME_TYPE.DISCARD, "tile": "1m", "seq": 1})
                     frame = client.recv_frame(timeout=inter_hand_delay_ms / 1000.0 + 2.0)
-                    check(frame["type"] == "error" and frame["code"] == "BAD_REQUEST",
+                    check(frame["type"] == FRAME_TYPE.ERROR and frame["code"] == ERROR_CODE.BAD_REQUEST,
                           f"局间对局帧必须回 BAD_REQUEST，got {frame}")
                     bad_request_probes += 1
 
@@ -572,8 +579,8 @@ def run_full_match(binary: str, seed: int, name: str, verbose: bool, port: int |
                 # 局间不得有 state_sync；match_end 已被 match_will_continue=False 排除。
                 gap_started = time.monotonic()
                 frame = client.recv_frame(timeout=inter_hand_delay_ms / 1000.0 + 5.0)
-                while frame["type"] != "game_start":
-                    check(frame["type"] != "state_sync",
+                while frame["type"] != FRAME_TYPE.GAME_START:
+                    check(frame["type"] != FRAME_TYPE.STATE_SYNC,
                           f"局间不得下发 state_sync：{frame.get('type')}")
                     frame = client.recv_frame(timeout=inter_hand_delay_ms / 1000.0 + 5.0)
                 gap_ms = (time.monotonic() - gap_started) * 1000.0
@@ -652,9 +659,9 @@ def run_timeout_scenario(binary: str, seed: int, verbose: bool, port: int | None
                 frame = client.recv_frame(timeout=8)
                 if verbose:
                     print(f"[e2e-timeout] <- {json.dumps(frame, ensure_ascii=False)[:160]}")
-                if frame["type"] == "discard_event" and frame["seat"] == 0:
+                if frame["type"] == FRAME_TYPE.DISCARD_EVENT and frame["seat"] == 0:
                     discarded = frame["tile"]
-                elif frame["type"] == "error":
+                elif frame["type"] == FRAME_TYPE.ERROR:
                     raise TestFailure(f"timeout scenario produced an error: {frame}")
             check(discarded is not None, "the server never played the timed-out window")
             # A dealer's first window has no draw record: the default is the largest tile.
@@ -662,7 +669,7 @@ def run_timeout_scenario(binary: str, seed: int, verbose: bool, port: int | None
                   f"expected the largest tile {start['hand'][-1]} to be discarded, got {discarded}")
 
             # A late reply carrying the expired window seq stays silent (§6.3).
-            client.send({"type": "discard", "tile": start["hand"][0], "seq": 1})
+            client.send({"type": FRAME_TYPE.DISCARD, "tile": start["hand"][0], "seq": 1})
             deadline = time.monotonic() + 0.6
             while time.monotonic() < deadline:
                 client.sock.settimeout(max(0.05, deadline - time.monotonic()))
@@ -675,7 +682,7 @@ def run_timeout_scenario(binary: str, seed: int, verbose: bool, port: int | None
                 for line in chunk.split(b"\n"):
                     if line:
                         frame = json.loads(line.decode("utf-8"))
-                        check(frame["type"] != "error",
+                        check(frame["type"] != FRAME_TYPE.ERROR,
                               f"a stale seq must be dropped silently, got {frame}")
             print("[e2e] timeout scenario ok: default discard =", discarded)
         finally:
@@ -752,15 +759,15 @@ def run_multi_room_scenario(binary: str, seed: int, verbose: bool, port: int | N
             for index in range(rooms):
                 client = Client(server_port, f"multi-room-{index}")
                 clients.append(client)
-                client.send({"type": "login", "name": f"多房玩家{index}"})
+                client.send({"type": FRAME_TYPE.LOGIN, "name": f"多房玩家{index}"})
                 login_ok = client.recv_frame()
-                check(login_ok["type"] == "login_ok", f"expected login_ok, got {login_ok}")
-                client.send({"type": "create_room"})
+                check(login_ok["type"] == FRAME_TYPE.LOGIN_OK, f"expected login_ok, got {login_ok}")
+                client.send({"type": FRAME_TYPE.CREATE_ROOM})
                 joined = client.recv_frame()
-                check(joined["type"] == "room_joined", f"expected room_joined, got {joined}")
-                client.send({"type": "ready"})
+                check(joined["type"] == FRAME_TYPE.ROOM_JOINED, f"expected room_joined, got {joined}")
+                client.send({"type": FRAME_TYPE.READY})
                 start = client.recv_frame()
-                check(start["type"] == "game_start", f"expected game_start, got {start}")
+                check(start["type"] == FRAME_TYPE.GAME_START, f"expected game_start, got {start}")
                 check(len(start["hand"]) == 14, "the dealer starts with 14 tiles")
                 results.append((joined["room_id"], start["hand"]))
             return results

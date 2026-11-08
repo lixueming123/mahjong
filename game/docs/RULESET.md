@@ -257,7 +257,7 @@ win_type = tags + [ (tsumo ? "tsumo" : "ron") ]     # 牌型 tags 在前，和�
 ### 4.1 碰（pong）
 
 - 前置：他家（打出者 `S`）打出 `T`；本家 `count(T, 手牌) ≥ 2`。
-- 消耗：手牌移除 2 张 `T`；新增副露 `{"type":"pong","tiles":[T,T,T]}`（按 §1.2 排序）。
+- 消耗：手牌移除 2 张 `T`；新增副露 `{"type":1,"tiles":[T,T,T]}`（按 §1.2 排序）。
 - 之后：鸣牌者成为 `current_seat`，开打牌窗口。
 
 ### 4.2 吃（chow）
@@ -266,13 +266,13 @@ win_type = tags + [ (tsumo ? "tsumo" : "ron") ]     # 牌型 tags 在前，和�
 - **字牌不可吃（v1.2 冻结）**：`T` 为字牌（`1z`..`7z`）时**永远不产生 `chow` 选项**；`a`、`b` 也必须是数牌。字牌只能碰/杠（§4.1/§4.3）。
 - 组合枚举（`T` 的 rank = `r`，且 `T` 为数牌）：候选 `{a,b} ∈ {{r−2,r−1}, {r−1,r+1}, {r+1,r+2}}`，rank 必须落在 `1..9`，且 `a`、`b` 都在手牌中。每个合法组合是一条独立的 `chow` 选项。
   例：`T = 3p` → `{1p,2p}`、`{2p,4p}`、`{4p,5p}`；`T = 5z` → **无 chow 选项**。
-- 消耗：手牌移除 `a`、`b`；新增副露 `{"type":"chow","tiles":[a,b,T]}`（按 §1.2 排序）。
+- 消耗：手牌移除 `a`、`b`；新增副露 `{"type":2,"tiles":[a,b,T]}`（按 §1.2 排序）。
 - `chow` 的 `tiles` 在协议中只携带手中的两张（`PROTOCOL.md` §4.6），被鸣牌 `T` 由 `from_seat` 的牌河确定。
 
 ### 4.3 明杠（kong）
 
 - 前置：他家打出 `T`；本家 `count(T, 手牌) == 3`；**且 `remaining ≥ 1`**（否则不提供该选项）。
-- 消耗：手牌移除 3 张 `T`；新增副露 `{"type":"kong","tiles":[T,T,T,T]}`（4 张，含额外张）；`kans++`。
+- 消耗：手牌移除 3 张 `T`；新增副露 `{"type":3,"tiles":[T,T,T,T]}`（4 张，含额外张）；`kans++`。
 - 之后：**立即补摸 1 张**（`remaining` 按 §1.5 的派生式重算），再开打牌窗口。
 - 杠的第 4 张是「额外张」，账面按 3 张计入面子（§2.2）。
 - **可见性**：`tiles` 4 张牌面对**四家全部公开**（与碰/吃同）。
@@ -281,9 +281,9 @@ win_type = tags + [ (tsumo ? "tsumo" : "ron") ]     # 牌型 tags 在前，和�
 
 | 项 | 规则 |
 | --- | --- |
-| 窗口 | **只在自家打牌窗口**（`window == "discard"`）；**不能**在鸣牌窗口、不能以他家打出的牌为对象 |
+| 窗口 | **只在自家打牌窗口**（`window == 1`）；**不能**在鸣牌窗口、不能以他家打出的牌为对象 |
 | 前置 | 本家为行动态（`concealed + 3×melds == 14`）；手中存在牌面 `F` 使 `count(F, concealed) == 4`；**且 `remaining ≥ 1`**（否则不提供该选项） |
-| 消耗 | 手牌移除 4 张 `F`；新增副露 `{"type":"ankan","tiles":[F,F,F,F]}`（按 §1.2 排序）；`melds++`、`kans++` |
+| 消耗 | 手牌移除 4 张 `F`；新增副露 `{"type":4,"tiles":[F,F,F,F]}`（按 §1.2 排序）；`melds++`、`kans++` |
 | 之后 | **立即补摸 1 张**（同 §4.3 的补牌口径）→ **重新开打牌窗口**（可继续暗杠/加杠/杠上开花和牌/打牌） |
 | 张数 | 动作前 `c+3m=14` → 扣 4、`m+1` ⇒ 账面 13 → 补 1 ⇒ **14** ✅（§2.3） |
 | 可见性 | 对**本家**暴露 4 张牌面；对**其他三家** `tiles` 为**空数组 `[]`**（只暴露「此处有一组暗杠」）；局终时最后一份 `state_sync` 揭示（GAME_DESIGN §4.4） |
@@ -295,7 +295,7 @@ win_type = tags + [ (tsumo ? "tsumo" : "ron") ]     # 牌型 tags 在前，和�
 | --- | --- |
 | 窗口 | **只在自家打牌窗口**（同 §4.4） |
 | 前置 | 本家为行动态；`melds` 中存在 `type == "pong"` 且牌面为 `F` 的组；手中 `count(F, concealed) ≥ 1`；**且 `remaining ≥ 1`** |
-| 消耗 | 手牌移除 1 张 `F`；该 `pong` 组**就地升级**为 `{"type":"kakan","tiles":[F,F,F,F]}`（**组序不变**，第 4 张追加在末尾）；`melds` **不变**、`kans++` |
+| 消耗 | 手牌移除 1 张 `F`；该 `pong` 组**就地升级**为 `{"type":5,"tiles":[F,F,F,F]}`（**组序不变**，第 4 张追加在末尾）；`melds` **不变**、`kans++` |
 | 之后 | 同 §4.4（补摸 1 张 → 重新开打牌窗口） |
 | 张数 | 动作前 14 → 扣 1、`m` 不变 ⇒ 账面 13 → 补 1 ⇒ **14** ✅（§2.3） |
 | 门前清 | **必然破门前清**（加杠必然起于一个 `pong`，而 `pong` 已破门前清）—— 结构结论，无需判据 |
@@ -333,9 +333,9 @@ win_type = tags + [ (tsumo ? "tsumo" : "ron") ]     # 牌型 tags 在前，和�
 
 | 情况 | `options` |
 | --- | --- |
-| 本家（行动态 14 张逻辑牌）成和牌型（含自摸/天和） | `[{"action":"win","tiles":[]}]` |
-| 手中某牌面恰好 4 张 **且** `remaining ≥ 1`（**v1.3**） | 追加 `{"action":"ankan","tiles":[F,F,F,F]}` |
-| 存在 `pong` 组且手中有该面第 4 张 **且** `remaining ≥ 1`（**v1.3**） | 追加 `{"action":"kakan","tiles":[F]}`（只带**手中那一张**） |
+| 本家（行动态 14 张逻辑牌）成和牌型（含自摸/天和） | `[{"action":7,"tiles":[]}]` |
+| 手中某牌面恰好 4 张 **且** `remaining ≥ 1`（**v1.3**） | 追加 `{"action":5,"tiles":[F,F,F,F]}` |
+| 存在 `pong` 组且手中有该面第 4 张 **且** `remaining ≥ 1`（**v1.3**） | 追加 `{"action":6,"tiles":[F]}`（只带**手中那一张**） |
 | 其他 | `[]` |
 
 - `options` 数组内顺序固定为 `win → ankan → kakan`（`discard` 排在最后，但**不进入 `options`**）。
@@ -357,10 +357,10 @@ win_type = tags + [ (tsumo ? "tsumo" : "ron") ]     # 牌型 tags 在前，和�
 
 ```
 default_action(window, hand, melds, drawn_tile) -> Discard | Pass
-  window == "discard":
+  window == 1:
       if drawn_tile exists:  discard(drawn_tile)          # 含杠补牌
       else:                  discard(sorted(hand).back()) # 庄家第一打 / 碰吃后待打牌
-  window == "claim":
+  window == 2:
       pass
 ```
 
@@ -452,8 +452,8 @@ R          = 2^han                            // R ∈ {1,2,4,8,16,32,64}
 
 | 条件 | 判定 | 结果 |
 | --- | --- | --- |
-| 和牌 | 荣和（鸣牌窗口内 `win` 被裁决选中）或自摸（`action{win}`） | `reason = "win_ron"` / `"win_tsumo"`，按 §6.2 计分 |
-| 荒庄 | **需要摸牌（含杠补牌）而 `remaining == 0`** | `reason = "draw_exhausted"`，四家 `delta_score = 0`，`win = null` |
+| 和牌 | 荣和（鸣牌窗口内 `win` 被裁决选中）或自摸（`action{win}`） | `reason = 1` / `"win_tsumo"`，按 §6.2 计分 |
+| 荒庄 | **需要摸牌（含杠补牌）而 `remaining == 0`** | `reason = 3`，四家 `delta_score = 0`，`win = null` |
 
 - 一局**必然终止**：`remaining` 每次摸牌严格递减且下界为 0；和牌或荒庄二者必居其一。
 - 单局上限：最多 **83** 次摸牌 + 1 次庄家第一打 = **84** 次打牌（§1.1 口径）；单座位牌河上限 `⌈84/4⌉ = **21**`。**三种杠只把一次普通摸牌换成一次补摸，不改变「摸牌:打牌 = 1:1」**，故 84/21 不因杠而变化。
@@ -600,8 +600,8 @@ ScoreResult score_draw();                                          // 全 0
 | P3 | 14 张（自摸形态）`1m 1m 3m 3m 5m 5m 7m 7m 2p 2p 6p 6p 8p 8p` | 七对子，和；`tags = {seven_pairs}`，`M = 4` |
 | P4 | 14 张（自摸形态）`1m 1m 1m 2m 2m 2m 3m 3m 3m 4m 5m 6m 7m 7m` | 清一色 + 标准型，和；`tags = {pure_one_suit}`，`M = 4` |
 | P5 | 14 张（自摸形态）`1m 1m 2m 2m 3m 3m 4m 4m 5m 5m 6m 6m 7m 7m` | 清一色 + 七对子，和；`tags = {seven_pairs, pure_one_suit}`，`M = 16` |
-| P6 | `melds = [{"type":"pong","tiles":["5p","5p","5p"]}]` + 门前 10 张 `1m 2m 3m 4m 5m 6m 7s 8s 9s 3p` + 和牌张 `3p` | 标准型（3 面子 + 将），和 |
-| P7 | `melds = [{"type":"kong","tiles":["9s","9s","9s","9s"]}]` + 门前 10 张 `1m 2m 3m 4p 5p 6p 7s 8s 9s 2m` + 和牌张 `2m` | 逻辑 14 张，和（物理持有 15 张） |
+| P6 | `melds = [{"type":1,"tiles":["5p","5p","5p"]}]` + 门前 10 张 `1m 2m 3m 4m 5m 6m 7s 8s 9s 3p` + 和牌张 `3p` | 标准型（3 面子 + 将），和 |
+| P7 | `melds = [{"type":3,"tiles":["9s","9s","9s","9s"]}]` + 门前 10 张 `1m 2m 3m 4p 5p 6p 7s 8s 9s 2m` + 和牌张 `2m` | 逻辑 14 张，和（物理持有 15 张） |
 | P8 | 14 张（自摸形态）`1z 1z 1z 2m 3m 4m 5p 5p 5p 7s 8s 9s 5z 5z` | **字牌刻子 + 字牌将**，和；`tags = {}`（字牌不算清一色），`M = 1` |
 | P9 | 14 张（自摸形态）`1z 1z 2z 2z 3m 3m 4m 4m 5p 5p 6p 6p 7s 7s` | 七对子（含 2 对字牌），和；`tags = {seven_pairs}`，`M = 4` |
 | P10 | 14 张（自摸形态）`5z 5z 5z 6z 6z 6z 7z 7z 7z 1m 1m 1m 9s 9s` | **3 组字牌刻子 + 1 组数牌刻子 + 将**，和；`tags = {}`（字牌不产生 `pure_one_suit`），`M = 1` |

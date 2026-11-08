@@ -19,6 +19,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from protocol.enums import FRAME_TYPE
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_BIN_CANDIDATES = (
@@ -63,7 +67,7 @@ class Client:
         line, _, self.buffer = self.buffer.partition(b"\n")
         return json.loads(line.decode("utf-8"))
 
-    def expect(self, expected: str, timeout: float = 5.0) -> dict:
+    def expect(self, expected: int, timeout: float = 5.0) -> dict:
         frame = self.recv(timeout)
         if frame.get("type") != expected:
             raise TestFailure(f"{self.name}: expected {expected!r}, got {frame!r}")
@@ -117,23 +121,23 @@ def run(port: int) -> None:
     owner = Client(port, "房主")
     guest = Client(port, "好友")
     try:
-        owner.send({"type": "login", "name": "房主"})
-        owner.expect("login_ok")
-        owner.send({"type": "create_room"})
-        created = owner.expect("room_joined")
+        owner.send({"type": FRAME_TYPE.LOGIN, "name": "房主"})
+        owner.expect(FRAME_TYPE.LOGIN_OK)
+        owner.send({"type": FRAME_TYPE.CREATE_ROOM})
+        created = owner.expect(FRAME_TYPE.ROOM_JOINED)
         room_id = created["room_id"]
         check(created["seat"] == 0, "房主坐 0 号位")
         check(len(created["seats"]) == 4, "初始四席位")
 
-        guest.send({"type": "login", "name": "好友"})
-        guest.expect("login_ok")
-        guest.send({"type": "join_room", "room_id": room_id})
-        joined = guest.expect("room_joined")
+        guest.send({"type": FRAME_TYPE.LOGIN, "name": "好友"})
+        guest.expect(FRAME_TYPE.LOGIN_OK)
+        guest.send({"type": FRAME_TYPE.JOIN_ROOM, "room_id": room_id})
+        joined = guest.expect(FRAME_TYPE.ROOM_JOINED)
         guest_seat = joined["seat"]
         check(guest_seat >= 1, f"好友入座 {guest_seat} 号位")
 
         # §5.17：房主（先到的真人）必须收到广播，而不是继续显示 3 个 AI
-        owner_update = owner.expect("room_update")
+        owner_update = owner.expect(FRAME_TYPE.ROOM_UPDATE)
         check(owner_update["room_id"] == room_id, "广播带正确 room_id")
         check(len(owner_update["seats"]) == 4, "广播四席位")
         joined_seat = seat_of(owner_update, "好友")
@@ -143,12 +147,12 @@ def run(port: int) -> None:
               "好友座位号与 room_joined 一致")
 
         # 新加入者也会收到同一份快照（幂等渲染）
-        guest_update = guest.expect("room_update")
+        guest_update = guest.expect(FRAME_TYPE.ROOM_UPDATE)
         check(guest_update["seats"] == owner_update["seats"], "两位真人收到同一份座位快照")
 
         guest.close()
         # 未开局的非房主断开：座位恢复 AI，房主同样要收到广播
-        left = owner.expect("room_update")
+        left = owner.expect(FRAME_TYPE.ROOM_UPDATE)
         check(left["room_id"] == room_id, "离开广播带正确 room_id")
         freed = next((seat for seat in left["seats"] if seat["seat"] == guest_seat), None)
         check(freed is not None and freed["is_bot"] is True, "好友离开后座位恢复为 AI")

@@ -22,11 +22,11 @@ TEST(AccountFieldRules, UsernameIsAsciiIdentifierOfThreeToSixteenChars) {
   EXPECT_TRUE(protocol::IsValidAccountName("Alice_99"));
   EXPECT_TRUE(protocol::IsValidAccountName("abcdefghijklmnop"));  // exactly 16
 
-  EXPECT_FALSE(protocol::IsValidAccountName(""));                  // empty
-  EXPECT_FALSE(protocol::IsValidAccountName("ab"));                // too short
+  EXPECT_FALSE(protocol::IsValidAccountName(""));                   // empty
+  EXPECT_FALSE(protocol::IsValidAccountName("ab"));                 // too short
   EXPECT_FALSE(protocol::IsValidAccountName("abcdefghijklmnopq"));  // 17, one too many
-  EXPECT_FALSE(protocol::IsValidAccountName("a b"));               // space
-  EXPECT_FALSE(protocol::IsValidAccountName("a-b"));               // not in [A-Za-z0-9_]
+  EXPECT_FALSE(protocol::IsValidAccountName("a b"));                // space
+  EXPECT_FALSE(protocol::IsValidAccountName("a-b"));                // not in [A-Za-z0-9_]
   EXPECT_FALSE(protocol::IsValidAccountName("玩家"));               // non-ASCII
   EXPECT_FALSE(protocol::IsValidAccountName("a'b; DROP TABLE accounts; --"));
 }
@@ -36,12 +36,12 @@ TEST(AccountFieldRules, PasswordIsSixToSixtyFourPrintableAsciiChars) {
   EXPECT_TRUE(protocol::IsValidPassword("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"));
   EXPECT_TRUE(protocol::IsValidPassword(std::string(64, 'x')));
 
-  EXPECT_FALSE(protocol::IsValidPassword("12345"));                // too short
-  EXPECT_FALSE(protocol::IsValidPassword(std::string(65, 'x')));   // too long
-  EXPECT_FALSE(protocol::IsValidPassword("12345\n"));              // control character
-  EXPECT_FALSE(protocol::IsValidPassword("12\t3456"));             // control character
-  EXPECT_FALSE(protocol::IsValidPassword("12345\x7F"));            // DEL
-  EXPECT_FALSE(protocol::IsValidPassword("密码123456"));            // non-ASCII
+  EXPECT_FALSE(protocol::IsValidPassword("12345"));               // too short
+  EXPECT_FALSE(protocol::IsValidPassword(std::string(65, 'x')));  // too long
+  EXPECT_FALSE(protocol::IsValidPassword("12345\n"));             // control character
+  EXPECT_FALSE(protocol::IsValidPassword("12\t3456"));            // control character
+  EXPECT_FALSE(protocol::IsValidPassword("12345\x7F"));           // DEL
+  EXPECT_FALSE(protocol::IsValidPassword("密码123456"));          // non-ASCII
 }
 
 TEST(AccountFieldRules, NicknameKeepsTheFrozenLoginRule) {
@@ -51,7 +51,7 @@ TEST(AccountFieldRules, NicknameKeepsTheFrozenLoginRule) {
   EXPECT_TRUE(protocol::IsValidNickname("十六个中文字符测试一下啊啊"));  // 14 code points
 
   EXPECT_FALSE(protocol::IsValidNickname(""));
-  EXPECT_FALSE(protocol::IsValidNickname("abcdefghijklmnopq"));      // 17 code points
+  EXPECT_FALSE(protocol::IsValidNickname("abcdefghijklmnopq"));  // 17 code points
   EXPECT_FALSE(protocol::IsValidNickname("a\nb"));
   EXPECT_FALSE(protocol::IsValidNickname("a\x7F b"));
 }
@@ -98,7 +98,7 @@ TEST(StatsFrameTest, CarriesTheFrozenFields) {
   summary.wins = 5;
   summary.draws = 3;
   summary.net_score = -14;
-  summary.recent.push_back(protocol::StatsEntry {"r-0007", "win_ron", 12, true, 1759900000});
+  summary.recent.push_back(protocol::StatsEntry {"r-0007", protocol::RoundEndReason::kWinRon, 12, true, 1759900000});
 
   const std::string text = protocol::StatsFrame(summary);
   std::string error;
@@ -108,7 +108,7 @@ TEST(StatsFrameTest, CarriesTheFrozenFields) {
 
   const json::Value* type = parsed->Find("type");
   ASSERT_NE(type, nullptr);
-  EXPECT_EQ(type->AsString(), "stats");
+  EXPECT_EQ(type->AsInt(), protocol::WireOf(protocol::FrameType::kStats));
   EXPECT_EQ(parsed->Find("games")->AsInt(), 12);
   EXPECT_EQ(parsed->Find("wins")->AsInt(), 5);
   EXPECT_EQ(parsed->Find("draws")->AsInt(), 3);
@@ -120,7 +120,7 @@ TEST(StatsFrameTest, CarriesTheFrozenFields) {
   ASSERT_EQ(recent->AsArray().size(), 1u);
   const json::Value& entry = recent->AsArray().front();
   EXPECT_EQ(entry.Find("room_id")->AsString(), "r-0007");
-  EXPECT_EQ(entry.Find("reason")->AsString(), "win_ron");
+  EXPECT_EQ(entry.Find("reason")->AsInt(), protocol::WireOf(protocol::RoundEndReason::kWinRon));
   EXPECT_EQ(entry.Find("delta_score")->AsInt(), 12);
   EXPECT_TRUE(entry.Find("win")->AsBool());
   EXPECT_EQ(entry.Find("ended_at")->AsInt(), 1759900000);
@@ -141,8 +141,9 @@ TEST(StatsFrameTest, UnaffectedByMatchResultsPersistence) {
   summary.wins = 1;
   summary.draws = 1;
   summary.net_score = 6;
-  summary.recent.push_back(protocol::StatsEntry {"r-0001", "win_tsumo", 24, true, 1759900100});
-  summary.recent.push_back(protocol::StatsEntry {"r-0001", "draw_exhausted", 0, false, 1759900200});
+  summary.recent.push_back(protocol::StatsEntry {"r-0001", protocol::RoundEndReason::kWinTsumo, 24, true, 1759900100});
+  summary.recent.push_back(
+      protocol::StatsEntry {"r-0001", protocol::RoundEndReason::kDrawExhausted, 0, false, 1759900200});
 
   const std::string text = protocol::StatsFrame(summary);
   std::string error;
@@ -175,16 +176,16 @@ TEST(StatsFrameTest, UnaffectedByMatchResultsPersistence) {
   EXPECT_NE(entry.Find("delta_score"), nullptr);
   EXPECT_NE(entry.Find("win"), nullptr);
   EXPECT_NE(entry.Find("ended_at"), nullptr);
-  EXPECT_EQ(entry.Find("mode")->AsString(), "classic");
+  EXPECT_EQ(entry.Find("mode")->AsInt(), protocol::WireOf(protocol::WireMode::kClassic));
 }
 
 // The three codes ACCOUNT_DESIGN.md §3.5 adds must not disturb the frozen eleven.
 TEST(ErrorCodes, NewCodesAreTheOnlyAdditions) {
-  EXPECT_EQ(std::string(protocol::kCodeAuthFailed), "AUTH_FAILED");
-  EXPECT_EQ(std::string(protocol::kCodeUsernameTaken), "USERNAME_TAKEN");
-  EXPECT_EQ(std::string(protocol::kCodeAlreadyOnline), "ALREADY_ONLINE");
-  EXPECT_EQ(std::string(protocol::kCodeInvalidName), "INVALID_NAME");
-  EXPECT_EQ(std::string(protocol::kCodeInternal), "INTERNAL");
+  EXPECT_EQ(protocol::WireOf(protocol::ErrorCode::kAuthFailed), 12);
+  EXPECT_EQ(protocol::WireOf(protocol::ErrorCode::kUsernameTaken), 13);
+  EXPECT_EQ(protocol::WireOf(protocol::ErrorCode::kAlreadyOnline), 14);
+  EXPECT_EQ(protocol::WireOf(protocol::ErrorCode::kInvalidName), 1);
+  EXPECT_EQ(protocol::WireOf(protocol::ErrorCode::kInternal), 11);
 }
 
 }  // namespace

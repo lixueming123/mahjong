@@ -60,6 +60,10 @@ import sys
 import tempfile
 import time
 import unicodedata
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from protocol.enums import ACTION, ERROR_CODE, FRAME_TYPE, MELD_TYPE, REASON, WINDOW
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_BINARY = os.path.join(REPO_ROOT, "build-release", "game", "mahjong_server")
@@ -97,7 +101,7 @@ YAKU_FROZEN_ORDER = [
 BASELINE = {
     "label": "旧: t6 小结 (108 张 / 牌山 55)",
     "games": 200,
-    "reason_counts": {"draw_exhausted": 172, "win_ron": 27, "win_tsumo": 1},
+    "reason_counts": {REASON.DRAW_EXHAUSTED: 172, REASON.WIN_RON: 27, REASON.WIN_TSUMO: 1},
     "tile_total": 108,
     "wall_size": 55,
     "avg_discards": 59.71,
@@ -111,15 +115,15 @@ TARGET = {"faces": 34, "tile_total": 136, "wall_size": 83, "max_discards": 84, "
 # once the discard policy builds hands, rounds end on a win and never exhaust the 83-tile wall.
 HISTORY = [
     {"label": "旧(更正): 108 张 / 旧策略", "games": 200,
-     "reason_counts": {"draw_exhausted": 173, "win_ron": 26, "win_tsumo": 1},
+     "reason_counts": {REASON.DRAW_EXHAUSTED: 173, REASON.WIN_RON: 26, REASON.WIN_TSUMO: 1},
      "tile_total": 108, "wall_size": 55, "avg_discards": 59.71, "avg_draws_per_player": 13.00,
      "source": "t17 三次独立复测（t6 小结的 172/27/1 把 seed 199 重复计入）"},
     {"label": "中: 136 张 / 旧策略 (t18)", "games": 200,
-     "reason_counts": {"draw_exhausted": 194, "win_ron": 6, "win_tsumo": 0},
+     "reason_counts": {REASON.DRAW_EXHAUSTED: 194, REASON.WIN_RON: 6, REASON.WIN_TSUMO: 0},
      "tile_total": 136, "wall_size": 83, "avg_discards": 89.59, "avg_draws_per_player": 20.55,
      "source": "t18 实测（加字牌但弃牌策略不变）"},
     {"label": "136 张 / 牌效率策略 (t23 参考)", "games": 200,
-     "reason_counts": {"draw_exhausted": 13, "win_ron": 187, "win_tsumo": 0},
+     "reason_counts": {REASON.DRAW_EXHAUSTED: 13, REASON.WIN_RON: 187, REASON.WIN_TSUMO: 0},
      "tile_total": 136, "wall_size": 83, "avg_discards": 52.77, "avg_draws_per_player": 11.20,
      "source": "t23 实测（自摸路径尚未修复，全部和牌均为荣和）"},
 ]
@@ -241,14 +245,14 @@ def answer_request(client: Client, request: dict) -> str:
     seq = request["seq"]
     options = request.get("options", [])
     actions = [option.get("action") for option in options]
-    if "win" in actions:
-        client.send({"type": "action", "action": "win", "tiles": [], "seq": seq})
+    if ACTION.WIN in actions:
+        client.send({"type": FRAME_TYPE.ACTION, "action": ACTION.WIN, "tiles": [], "seq": seq})
         return "action:win"
-    if request.get("window") == "discard":
+    if request.get("window") == WINDOW.DISCARD:
         tile = client.choose_discard()
-        client.send({"type": "discard", "tile": tile, "seq": seq})
+        client.send({"type": FRAME_TYPE.DISCARD, "tile": tile, "seq": seq})
         return f"discard:{tile}"
-    client.send({"type": "action", "action": "pass", "tiles": [], "seq": seq})
+    client.send({"type": FRAME_TYPE.ACTION, "action": ACTION.PASS, "tiles": [], "seq": seq})
     return "action:pass"
 
 
@@ -338,18 +342,18 @@ def require_own_listener(port: int, process: subprocess.Popen, server_log_path: 
 
 def handshake(client: Client, recorder: Recorder) -> dict:
     """login -> create_room -> ready (PROTOCOL.md §9.1); asserts A's handshake half."""
-    client.send({"type": "login", "name": "端到端真人"})
+    client.send({"type": FRAME_TYPE.LOGIN, "name": "端到端真人"})
     login_ok = client.recv_frame(15.0)
-    if login_ok.get("type") != "login_ok":
+    if login_ok.get("type") != FRAME_TYPE.LOGIN_OK:
         raise Failure(f"expected login_ok, got {login_ok}")
     player_id = login_ok.get("player_id")
     if not isinstance(player_id, str) or not player_id:
         raise Failure(f"login_ok.player_id must be a non-empty string, got {player_id!r}")
     recorder.write({"event": "login_ok", "player_id": player_id})
 
-    client.send({"type": "create_room"})
+    client.send({"type": FRAME_TYPE.CREATE_ROOM})
     joined = client.recv_frame(15.0)
-    if joined.get("type") != "room_joined":
+    if joined.get("type") != FRAME_TYPE.ROOM_JOINED:
         raise Failure(f"expected room_joined, got {joined}")
     if len(joined.get("seats", [])) != SEAT_COUNT:
         raise Failure(f"room_joined.seats must hold {SEAT_COUNT} entries, got {joined.get('seats')}")
@@ -359,9 +363,9 @@ def handshake(client: Client, recorder: Recorder) -> dict:
     client.seat = joined["seat"]
     recorder.write({"event": "room_joined", "seat": client.seat, "room_id": joined.get("room_id")})
 
-    client.send({"type": "ready"})
+    client.send({"type": FRAME_TYPE.READY})
     start = client.recv_frame(15.0)
-    if start.get("type") != "game_start":
+    if start.get("type") != FRAME_TYPE.GAME_START:
         raise Failure(f"expected game_start, got {start}")
     hand = start.get("hand")
     if not isinstance(hand, list) or len(hand) not in (13, 14):
@@ -391,35 +395,35 @@ def play(client: Client, recorder: Recorder, deadline: float, verbose: bool) -> 
             print(f"[e2e] <- {json.dumps(frame, ensure_ascii=False)[:160]}")
 
         kind = frame.get("type")
-        if kind == "error":
+        if kind == FRAME_TYPE.ERROR:
             # C: recorded here, asserted once at the end so the log holds every error frame.
             stats["errors"].append(frame)
             continue
-        if kind == "game_end":
+        if kind == FRAME_TYPE.GAME_END:
             return frame, stats
-        if kind == "pong":
+        if kind == FRAME_TYPE.PONG:
             continue
-        if kind == "draw":
+        if kind == FRAME_TYPE.DRAW:
             if frame.get("seat") == client.seat:
                 client.note_draw(frame["tile"])
             stats["draws"] += 1
             continue
-        if kind == "discard_event":
+        if kind == FRAME_TYPE.DISCARD_EVENT:
             client.note_discard_event(frame["seat"], frame["tile"])
             stats["discard_events"] += 1
             continue
-        if kind == "state_sync":
+        if kind == FRAME_TYPE.STATE_SYNC:
             client.adopt_state_sync(frame)
             if stats["first_state_sync"] is None:
                 stats["first_state_sync"] = frame
             stats["last_state_sync"] = frame
             continue
-        if kind == "action_event":
+        if kind == FRAME_TYPE.ACTION_EVENT:
             # The human only ever wins (ron); a claim window without `win` is passed.
-            if frame.get("seat") == client.seat and frame.get("action") == "win" and "from_seat" in frame:
+            if frame.get("seat") == client.seat and frame.get("action") == ACTION.WIN and "from_seat" in frame:
                 client.hand.extend(frame.get("tiles", []))
             continue
-        if kind == "action_request":
+        if kind == FRAME_TYPE.ACTION_REQUEST:
             stats["action_requests"] += 1
             decision = answer_request(client, frame)
             recorder.write({"event": "decision", "window": frame.get("window"), "seq": frame.get("seq"),
@@ -548,9 +552,9 @@ def normalize_frame(frame: dict) -> str:
     其余字段（含 seq、hand、yaku、rankings）参与逐字节比对。
     """
     cleaned = json.loads(json.dumps(frame, ensure_ascii=False))
-    if cleaned.get("type") == "action_request" and "deadline_ms" in cleaned:
+    if cleaned.get("type") == FRAME_TYPE.ACTION_REQUEST and "deadline_ms" in cleaned:
         cleaned["deadline_ms"] = 0
-    if cleaned.get("type") == "login_ok":
+    if cleaned.get("type") == FRAME_TYPE.LOGIN_OK:
         cleaned.pop("player_id", None)
     return json.dumps(cleaned, ensure_ascii=False, sort_keys=True)
 
@@ -628,7 +632,7 @@ def assert_round_frames(end: dict, last_sync: dict | None, first_sync_total: int
     if last_sync is not None:
         for entry in last_sync.get("seats") or []:
             for meld in entry.get("melds") or []:
-                if meld.get("type") != "ankan":
+                if meld.get("type") != MELD_TYPE.ANKAN:
                     continue
                 tiles = meld.get("tiles") or []
                 if len(tiles) == 0:
@@ -674,7 +678,7 @@ def play_match(client: Client, recorder: Recorder, deadline: float, verbose: boo
         if len(stats["ends"]) == 1 and not stats["m7_probe_armed"] and stats["m7_bad_requests"] == 0:
             stats["m7_probe_armed"] = True
             seq = stats["request_seqs"][-1] if stats["request_seqs"] else 1
-            client.send({"type": "discard", "tile": "1m", "seq": seq})
+            client.send({"type": FRAME_TYPE.DISCARD, "tile": "1m", "seq": seq})
             recorder.write({"event": "m7_probe", "seq": seq})
 
     while True:
@@ -689,53 +693,53 @@ def play_match(client: Client, recorder: Recorder, deadline: float, verbose: boo
         if verbose:
             print(f"[e2e] <- {json.dumps(frame, ensure_ascii=False)[:160]}")
         kind = frame.get("type")
-        if kind == "error":
-            if stats["m7_probe_armed"] and frame.get("code") == "BAD_REQUEST":
+        if kind == FRAME_TYPE.ERROR:
+            if stats["m7_probe_armed"] and frame.get("code") == ERROR_CODE.BAD_REQUEST:
                 # M7 探针的预期回答：单独计数，不计入 C 的 error 断言。
                 stats["m7_probe_armed"] = False
                 stats["m7_bad_requests"] += 1
                 continue
             stats["errors"].append(frame)
             continue
-        if kind == "match_end":
+        if kind == FRAME_TYPE.MATCH_END:
             stats["match_end"] = frame
             return stats
-        if kind == "pong":
+        if kind == FRAME_TYPE.PONG:
             continue
-        if kind == "game_start":
+        if kind == FRAME_TYPE.GAME_START:
             if stats["last_end_monotonic"] is not None:
                 gap_ms = (time.monotonic() - stats["last_end_monotonic"]) * 1000.0
                 stats["inter_hand_gaps_ms"].append(gap_ms)
             stats["starts"].append(frame)
             round_started_monotonic = time.monotonic()
             continue
-        if kind == "game_end":
+        if kind == FRAME_TYPE.GAME_END:
             finish_round(frame)
             send_m7_probe_once()
             continue
-        if kind == "draw":
+        if kind == FRAME_TYPE.DRAW:
             if frame.get("seat") == client.seat:
                 client.note_draw(frame["tile"])
             stats["draws"] += 1
             continue
-        if kind == "discard_event":
+        if kind == FRAME_TYPE.DISCARD_EVENT:
             client.note_discard_event(frame["seat"], frame["tile"])
             stats["discard_events"] += 1
             continue
-        if kind == "state_sync":
+        if kind == FRAME_TYPE.STATE_SYNC:
             client.adopt_state_sync(frame)
             if stats["first_sync_total"] is None:
                 stats["first_sync_total"] = tile_total_of(frame)
             stats["last_state_sync"] = frame
             continue
-        if kind == "action_event":
+        if kind == FRAME_TYPE.ACTION_EVENT:
             action = frame.get("action")
-            if action in ("ankan", "kakan") and "from_seat" in frame:
+            if action in (ACTION.ANKAN, ACTION.KAKAN) and "from_seat" in frame:
                 raise Failure(f"P7 失败：{action} 的 action_event 不得携带 from_seat：{frame}")
-            if frame.get("seat") == client.seat and action == "win" and "from_seat" in frame:
+            if frame.get("seat") == client.seat and action == ACTION.WIN and "from_seat" in frame:
                 client.hand.extend(frame.get("tiles", []))
             continue
-        if kind == "action_request":
+        if kind == FRAME_TYPE.ACTION_REQUEST:
             stats["action_requests"] += 1
             seq = frame.get("seq")
             stats["request_seqs"].append(seq)
@@ -811,7 +815,7 @@ def assert_match(starts: list, ends: list, match_end: dict, stats: dict,
         reason = end.get("reason")
         win = end.get("win")
         winner = win.get("seat") if isinstance(win, dict) else None
-        if reason != "draw_exhausted" and winner != expected_dealer:
+        if reason != REASON.DRAW_EXHAUSTED and winner != expected_dealer:
             expected_round += 1
             expected_dealer = (expected_dealer + 1) % SEAT_COUNT
     # C15：一场打完时 round_index 已走满 4（或被连庄闸截断）。
@@ -1048,7 +1052,7 @@ def percentile(sorted_values: list[int], fraction: float) -> int:
 
 def summarize(records: list[dict]) -> dict:
     games = len(records)
-    counts = {"draw_exhausted": 0, "win_ron": 0, "win_tsumo": 0}
+    counts = {REASON.DRAW_EXHAUSTED: 0, REASON.WIN_RON: 0, REASON.WIN_TSUMO: 0}
     for record in records:
         counts[record["reason"]] = counts.get(record["reason"], 0) + 1
     walls = [record["wall_size"] for record in records if record["wall_size"] is not None]
@@ -1060,8 +1064,8 @@ def summarize(records: list[dict]) -> dict:
     return {
         "games": games,
         "reason_counts": counts,
-        "draw_rate": counts["draw_exhausted"] / games if games else None,
-        "win_rate": (counts["win_ron"] + counts["win_tsumo"]) / games if games else None,
+        "draw_rate": counts[REASON.DRAW_EXHAUSTED] / games if games else None,
+        "win_rate": (counts[REASON.WIN_RON] + counts[REASON.WIN_TSUMO]) / games if games else None,
         "avg_discards": mean([record["discards"] for record in records]),
         "discards_min": discard_values[0] if discard_values else None,
         "discards_p10": percentile(discard_values, 0.10) if discard_values else None,
@@ -1084,7 +1088,7 @@ def print_report(summary: dict, requested: int, failed: list[dict], elapsed: flo
                  baseline: dict) -> None:
     base_games = baseline["games"]
     base_counts = baseline["reason_counts"]
-    base_draw_rate = base_counts["draw_exhausted"] / base_games
+    base_draw_rate = base_counts[REASON.DRAW_EXHAUSTED] / base_games
     counts = summary["reason_counts"]
     games = summary["games"]
     draw_rate = summary["draw_rate"] or 0.0
@@ -1097,8 +1101,8 @@ def print_report(summary: dict, requested: int, failed: list[dict], elapsed: flo
         def num(value: float | None) -> str:
             return f"{value:.2f}" if value is not None else "-"
 
-        return (pad(label, label_width) + " " + pad(str(total), 5, ">") + "  " + pad(pct(c["draw_exhausted"]), 14, ">")
-                + "  " + pad(pct(c["win_ron"]), 13, ">") + "  " + pad(pct(c["win_tsumo"]), 13, ">")
+        return (pad(label, label_width) + " " + pad(str(total), 5, ">") + "  " + pad(pct(c[REASON.DRAW_EXHAUSTED]), 14, ">")
+                + "  " + pad(pct(c[REASON.WIN_RON]), 13, ">") + "  " + pad(pct(c[REASON.WIN_TSUMO]), 13, ">")
                 + f"  {(rate * 100 if rate is not None else 0):>7.1f}%"
                 + "  " + pad(num(avg_discards), 12, ">") + "  " + pad(num(avg_draws_per_player), 12, ">"))
 
@@ -1118,7 +1122,7 @@ def print_report(summary: dict, requested: int, failed: list[dict], elapsed: flo
     print("-" * 124)
     for entry in HISTORY + [baseline]:
         print(row(entry["label"], entry["games"], entry["reason_counts"],
-                  entry["reason_counts"]["draw_exhausted"] / entry["games"],
+                  entry["reason_counts"][REASON.DRAW_EXHAUSTED] / entry["games"],
                   entry.get("avg_discards"), entry.get("avg_draws_per_player")))
     print("-" * 124)
     print(row(detected_label, games, counts, summary["draw_rate"],
@@ -1128,7 +1132,7 @@ def print_report(summary: dict, requested: int, failed: list[dict], elapsed: flo
     print(f"本次局数: {games}/{requested}"
           + (f"（提前中止，失败 {len(failed)} 局）" if failed else "（全部完成）")
           + f"   用时 {elapsed:.1f}s"
-          + f"   自摸局数: {counts['win_tsumo']}（要求 > 0）")
+          + f"   自摸局数: {counts[REASON.WIN_TSUMO]}（要求 > 0）")
     if summary["avg_discards"] is not None:
         print(f"平均每局打牌次数: {summary['avg_discards']:.2f} 次（门槛 ≥ 45）")
         print(f"每局打牌次数分布: 最小 {summary['discards_min']} / p10 {summary['discards_p10']} / "
@@ -1178,7 +1182,7 @@ def conclusion_lines(summary: dict, base_draw_rate: float, failed: list[dict]) -
         ]
     rate = summary["draw_rate"] or 0.0
     discards = summary["avg_discards"]
-    tsumo = summary["reason_counts"]["win_tsumo"]
+    tsumo = summary["reason_counts"][REASON.WIN_TSUMO]
     lines = []
     # t25 thresholds: pass = draws < 70% AND avg discards/round >= 45; 70-85% = needs_revision;
     # >= 86% = fail. The old ">= 18 draws per player" gate is retired: with a healthy policy the
@@ -1344,9 +1348,11 @@ def run_concurrency_check(args: argparse.Namespace) -> int:
             payload = json.load(handle)
         payloads.append(payload)
         summary = payload["summary"]
+        # json.dump 把整数键写成字符串；读回后还原，才能用 REASON 常量索引。
+        reason_counts = {int(key): value for key, value in summary['reason_counts'].items()}
         print(f"[concurrency] 实例 {label}: {payload['games_completed']}/{payload['games_requested']} 局，"
-              f"荒庄 {summary['reason_counts']['draw_exhausted']}、荣和 {summary['reason_counts']['win_ron']}、"
-              f"自摸 {summary['reason_counts']['win_tsumo']}，error 帧 {summary['errors']}，"
+              f"荒庄 {reason_counts[REASON.DRAW_EXHAUSTED]}、荣和 {reason_counts[REASON.WIN_RON]}、"
+              f"自摸 {reason_counts[REASON.WIN_TSUMO]}，error 帧 {summary['errors']}，"
               f"口径合法 {payload['measurement_valid_for_target']}，端口 {len(payload['ports_used'])} 个")
         if payload["games_completed"] != payload["games_requested"]:
             failures.append(f"实例 {label} 未完成全部局数")

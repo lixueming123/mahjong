@@ -32,6 +32,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from protocol.enums import ACTION, ERROR_CODE, FRAME_TYPE, WINDOW
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BIN_CANDIDATES = ("build/game/mahjong_server", "build-release/game/mahjong_server")
@@ -105,7 +109,7 @@ def run(args: argparse.Namespace) -> int:
                 time.sleep(0.05)
         client = Client(port)
         username = f"e2match{int(time.monotonic()) % 1000000}"
-        client.send({"type": "register", "username": username, "password": "pw_e2match"})
+        client.send({"type": FRAME_TYPE.REGISTER, "username": username, "password": "pw_e2match"})
         ends: list[dict] = []
         starts: list[dict] = []
         gaps_ms: list[float] = []
@@ -122,17 +126,17 @@ def run(args: argparse.Namespace) -> int:
             if frame is None:
                 break
             kind = frame.get("type")
-            if kind == "error":
-                if m7_armed and frame.get("code") == "BAD_REQUEST":
+            if kind == FRAME_TYPE.ERROR:
+                if m7_armed and frame.get("code") == ERROR_CODE.BAD_REQUEST:
                     m7_armed = False
                     m7_bad += 1
                     continue
                 errors.append(frame)
-            elif kind == "login_ok":
-                client.send({"type": "create_room"})
-            elif kind == "room_joined":
-                client.send({"type": "ready"})
-            elif kind == "game_start":
+            elif kind == FRAME_TYPE.LOGIN_OK:
+                client.send({"type": FRAME_TYPE.CREATE_ROOM})
+            elif kind == FRAME_TYPE.ROOM_JOINED:
+                client.send({"type": FRAME_TYPE.READY})
+            elif kind == FRAME_TYPE.GAME_START:
                 if last_end_at is not None:
                     gap_ms = (time.monotonic() - last_end_at) * 1000.0
                     gaps_ms.append(gap_ms)
@@ -143,7 +147,7 @@ def run(args: argparse.Namespace) -> int:
                         raise SystemExit(f"E2 FAIL: M8 局间隔 {gap_ms:.0f}ms 异常长")
                 starts.append(frame)
                 hand = set(frame["hand"])
-            elif kind == "game_end":
+            elif kind == FRAME_TYPE.GAME_END:
                 ends.append(frame)
                 last_end_at = time.monotonic()
                 if frame.get("match_will_continue") is False:
@@ -151,31 +155,31 @@ def run(args: argparse.Namespace) -> int:
                 # M7：首个局间发一帧对局帧（服务端必处局间态），预期恰好一条 BAD_REQUEST。
                 if len(ends) == 1 and not m7_armed and m7_bad == 0:
                     m7_armed = True
-                    client.send({"type": "discard", "tile": "1m", "seq": 1})
+                    client.send({"type": FRAME_TYPE.DISCARD, "tile": "1m", "seq": 1})
                 # 与 pygame 客户端一致：账号会话局间拉一次战绩 + 心跳照发（不影响判定）。
-                client.send({"type": "stats_request"})
-            elif kind == "match_end":
+                client.send({"type": FRAME_TYPE.STATS_REQUEST})
+            elif kind == FRAME_TYPE.MATCH_END:
                 match_end = frame
-            elif kind == "stats":
+            elif kind == FRAME_TYPE.STATS:
                 continue
-            elif kind == "draw":
+            elif kind == FRAME_TYPE.DRAW:
                 if frame.get("seat") == 0:
                     hand.add(frame["tile"])
-            elif kind == "discard_event":
+            elif kind == FRAME_TYPE.DISCARD_EVENT:
                 if frame.get("seat") == 0:
                     hand.discard(frame["tile"])
-            elif kind == "state_sync":
+            elif kind == FRAME_TYPE.STATE_SYNC:
                 hand = set(frame["hand"])
-            elif kind == "action_request":
+            elif kind == FRAME_TYPE.ACTION_REQUEST:
                 seq = frame["seq"]
                 window = frame["window"]
                 options = {o.get("action") for o in frame.get("options", [])}
-                if window == "discard":
-                    client.send({"type": "discard", "tile": sorted(hand)[-1], "seq": seq})
-                elif "win" in options:
-                    client.send({"type": "action", "action": "win", "tiles": [], "seq": seq})
+                if window == WINDOW.DISCARD:
+                    client.send({"type": FRAME_TYPE.DISCARD, "tile": sorted(hand)[-1], "seq": seq})
+                elif ACTION.WIN in options:
+                    client.send({"type": FRAME_TYPE.ACTION, "action": ACTION.WIN, "tiles": [], "seq": seq})
                 else:
-                    client.send({"type": "action", "action": "pass", "tiles": [], "seq": seq})
+                    client.send({"type": FRAME_TYPE.ACTION, "action": ACTION.PASS, "tiles": [], "seq": seq})
         if match_end is None:
             raise SystemExit("E2 FAIL: stream ended without match_end")
         if errors:

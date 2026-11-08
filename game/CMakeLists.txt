@@ -130,6 +130,12 @@ add_test(NAME mahjong_session_test COMMAND mahjong_session_test)
 set_tests_properties(mahjong_session_test PROPERTIES TIMEOUT 60)
 
 # TCP JSON 网关协议冒烟测试（Python 标准库 socket，无第三方依赖）
+# Frozen wire enums (PROTOCOL v2.0): header-only behaviour test + cross-language guard.
+add_executable(mahjong_protocol_enums_test server/protocol_enums_test.cc)
+target_include_directories(mahjong_protocol_enums_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_link_libraries(mahjong_protocol_enums_test PRIVATE GTest::gtest_main)
+add_test(NAME mahjong_protocol_enums_test COMMAND mahjong_protocol_enums_test)
+
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
   add_test(
@@ -137,6 +143,11 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/gateway_smoke_test.py
             --server-bin $<TARGET_FILE:mahjong_server>)
   set_tests_properties(gateway_smoke_test PROPERTIES TIMEOUT 120)
+
+  add_test(
+    NAME protocol_enums_consistency
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/protocol_enums_consistency_test.py)
 endif()
 
 # t4：RoomActor 状态机单测（回合驱动 / seq 作废 / 非法操作 / AI / 结算零和）

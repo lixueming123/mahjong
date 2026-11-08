@@ -13,6 +13,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
 
 import pygame  # noqa: E402
+from protocol.enums import FRAME_TYPE, MELD_TYPE  # noqa: E402
 
 from tests.client_headless_test import (  # noqa: E402
     ARTIFACTS,
@@ -23,7 +24,7 @@ from tests.client_headless_test import (  # noqa: E402
 )
 
 SIDE_LAYOUT = {
-    "type": "state_sync",
+    "type": FRAME_TYPE.STATE_SYNC,
     "seq": 12,
     "remaining": 24,
     "current_seat": 0,
@@ -46,7 +47,7 @@ SIDE_LAYOUT = {
             "is_bot": True,
             "hand_count": 6,
             "discards": ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m"],
-            "melds": [{"type": "pong", "tiles": ["7z", "7z", "7z"]}],
+            "melds": [{"type": MELD_TYPE.PONG, "tiles": ["7z", "7z", "7z"]}],
             "disconnected": False,
         },
         {
@@ -64,7 +65,7 @@ SIDE_LAYOUT = {
             "is_bot": True,
             "hand_count": 5,
             "discards": ["1s", "2s", "3s", "4s", "5s", "6s", "7s", "8s"],
-            "melds": [{"type": "chow", "tiles": ["4p", "5p", "6p"]}],
+            "melds": [{"type": MELD_TYPE.CHOW, "tiles": ["4p", "5p", "6p"]}],
             "disconnected": False,
         },
     ],

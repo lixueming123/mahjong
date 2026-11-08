@@ -27,6 +27,16 @@ from . import broadcast as broadcast_view
 from . import stats as stats_view
 from . import widgets as W
 
+import sys
+from pathlib import Path
+
+_game_root = next(
+    p for p in Path(__file__).resolve().parents
+    if (p / "protocol" / "enums.json").is_file()
+)
+sys.path.insert(0, str(_game_root))
+from protocol.enums import REASON
+
 log = logging.getLogger("mahjong.client.result")
 
 #: 纯装饰图层缓存（金色细线 / 和牌光晕）：尺寸固定，没必要每帧重建 Surface
@@ -40,10 +50,11 @@ def _decor(key: tuple, build) -> pygame.Surface:
         _DECOR[key] = surface
     return surface
 
+# 键是 reason 整数常量，值是中文显示文案（PROTOCOL v2.0）
 REASON_LABEL = {
-    "win_tsumo": "自摸",
-    "win_ron": "荣和",
-    "draw_exhausted": "荒庄（牌山摸尽）",
+    REASON.WIN_TSUMO: "自摸",
+    REASON.WIN_RON: "荣和",
+    REASON.DRAW_EXHAUSTED: "荒庄（牌山摸尽）",
 }
 
 # v2.0（§9.4）：番种 id → 中文标签（id 逐字取自 PROTOCOL v1.6 / RULESET §6.4；14 项全量）。
@@ -256,7 +267,7 @@ def _next_dealer(state: GameState) -> int | None:
     if not isinstance(dealer, int):
         return None
     reason = result.get("reason")
-    if reason == "draw_exhausted":
+    if reason == REASON.DRAW_EXHAUSTED:
         return dealer  # 荒庄一律连庄（§3.3 消歧）
     win = result.get("win")
     winner = win.get("seat") if isinstance(win, dict) else None

@@ -88,7 +88,7 @@ json::Value BuildSeatArray(const std::vector<RoomSeat>& seats) {
 
 std::string BuildRoomJoinedFrame(const std::string& room_id, int seat, const std::vector<RoomSeat>& seats) {
   json::Value frame = json::Value::Obj();
-  frame.Set("type", json::Value::Str("room_joined"));
+  frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kRoomJoined)));
   frame.Set("room_id", json::Value::Str(room_id));
   frame.Set("seat", json::Value::Int(seat));
   frame.Set("seats", BuildSeatArray(seats));
@@ -120,23 +120,21 @@ stdexec::task<void> LobbyActor::ReplyFrame(const ex_actor::ActorRef<SeatEndpoint
   co_await conn.Send<&SeatEndpoint::Dispatch>(PlayerEnvelope::SeatFrame(std::move(frame)));
 }
 
-stdexec::task<void> LobbyActor::ReplyError(const ex_actor::ActorRef<SeatEndpoint>& conn, std::string_view code,
-                                        std::string_view message) {
+stdexec::task<void> LobbyActor::ReplyError(const ex_actor::ActorRef<SeatEndpoint>& conn, protocol::ErrorCode code,
+                                           std::string_view message) {
   if (conn.IsEmpty()) {
     co_return;
   }
-  const QuotaKind quota = code == protocol::kCodeBadRequest ? QuotaKind::kBadFrame : QuotaKind::kNone;
-  co_await conn.Send<&SeatEndpoint::Dispatch>(
-      PlayerEnvelope::SeatError(protocol::ErrorFrame(code, message), quota));
+  const QuotaKind quota = code == protocol::ErrorCode::kBadRequest ? QuotaKind::kBadFrame : QuotaKind::kNone;
+  co_await conn.Send<&SeatEndpoint::Dispatch>(PlayerEnvelope::SeatError(protocol::ErrorFrame(code, message), quota));
 }
 
 // PROTOCOL.md §5.17 (v1.10): `room_joined` is addressed to the player who just sat down,
 // so the other humans in a waiting room would never learn about it. Broadcast the roster
 // on every pre-game change; the frame has no per-recipient fields, so one payload serves all.
-stdexec::task<void> LobbyActor::BroadcastRoomUpdate(const std::string& room_id,
-                                                   const std::vector<RoomSeat>& seats) {
+stdexec::task<void> LobbyActor::BroadcastRoomUpdate(const std::string& room_id, const std::vector<RoomSeat>& seats) {
   json::Value frame = json::Value::Obj();
-  frame.Set("type", json::Value::Str(protocol::kFrameRoomUpdate));
+  frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kRoomUpdate)));
   frame.Set("room_id", json::Value::Str(room_id));
   frame.Set("seats", BuildSeatArray(seats));
   const std::string payload = frame.Dump();
@@ -204,12 +202,12 @@ stdexec::task<void> LobbyActor::CreateRoomWithMode(ex_actor::ActorRef<SeatEndpoi
     self = self_ref_;
   }
   if (reject == Reject::kAlready) {
-    co_await ReplyError(conn, protocol::kCodeBadRequest, "already in a room");
+    co_await ReplyError(conn, protocol::ErrorCode::kBadRequest, "already in a room");
     co_return;
   }
   if (reject == Reject::kNoSelf) {
     spdlog::error("lobby: no self reference installed, refusing to create a room for {}", player.player_id);
-    co_await ReplyError(conn, protocol::kCodeInternal, "failed to create room");
+    co_await ReplyError(conn, protocol::ErrorCode::kInternal, "failed to create room");
     co_return;
   }
 
@@ -240,7 +238,7 @@ stdexec::task<void> LobbyActor::CreateRoomWithMode(ex_actor::ActorRef<SeatEndpoi
   if (!spawn_error.empty()) {
     spdlog::error("lobby: failed to create a room for player {}: {}", player.player_id, spawn_error);
     if (owned) {
-      co_await ReplyError(conn, protocol::kCodeInternal, "failed to create room");
+      co_await ReplyError(conn, protocol::ErrorCode::kInternal, "failed to create room");
     }
     co_return;
   }
@@ -276,9 +274,10 @@ stdexec::task<void> LobbyActor::OnRoomFinished(GameSettlement settlement) {
       if (seat.is_bot || seat.player.account_id == 0) {
         continue;  // guests and bots have no history to keep (§4.2)
       }
-      ActorSendScope().spawn(db_.RecordMatch(MatchRecord {seat.player.account_id, settlement.room_id,
-                                                          settlement.reason, seat.delta_score, seat.winner,
-                                                          settlement.mode}));
+      // DB 落库仍是字符串词表（v2.0 只改线格式），在边界用 NameOf 翻译一次。
+      ActorSendScope().spawn(db_.RecordMatch(
+          MatchRecord {seat.player.account_id, settlement.room_id, std::string(protocol::NameOf(settlement.reason)),
+                       seat.delta_score, seat.winner, std::string(protocol::NameOf(settlement.mode))}));
     }
   }
   // ACCOUNT_DESIGN.md v1.3 §4 item 7: the match summary is written ONCE per match (at
@@ -293,7 +292,7 @@ stdexec::task<void> LobbyActor::OnRoomFinished(GameSettlement settlement) {
       MatchResultRecord result;
       result.account_id = seat.player.account_id;
       result.room_id = settlement.room_id;
-      result.mode = settlement.mode;
+      result.mode = std::string(protocol::NameOf(settlement.mode));
       result.hands_played = settlement.hands_played;
       result.dealer_hands = settlement.dealer_hands[seat_index];
       result.final_score = settlement.totals[seat_index];
@@ -338,13 +337,14 @@ stdexec::task<void> LobbyActor::ListRooms(ex_actor::ActorRef<SeatEndpoint> conn)
     }
   }
   json::Value frame = json::Value::Obj();
-  frame.Set("type", json::Value::Str("room_list"));
+  frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kRoomList)));
   frame.Set("rooms", std::move(rooms));
   co_await ReplyFrame(conn, frame.Dump());
 }
 
-stdexec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player, std::string room_id) {
-  std::string code;
+stdexec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player,
+                                         std::string room_id) {
+  protocol::ErrorCode code = protocol::ErrorCode::kInvalid;
   std::string message;
   RoomSeat claimed;
   std::vector<RoomSeat> snapshot;
@@ -352,19 +352,19 @@ stdexec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, 
   bool same_room = false;
   const PlayerState* state = FindPlayer(player.player_id);
   if (creating_.contains(player.player_id)) {
-    code = protocol::kCodeBadRequest;
+    code = protocol::ErrorCode::kBadRequest;
     message = "already in a room";
   } else if (state != nullptr && state->room_id == room_id) {
     same_room = true;
     snapshot = room_seats_[room_id];
   } else if (state != nullptr && !state->room_id.empty()) {
-    code = protocol::kCodeBadRequest;
+    code = protocol::ErrorCode::kBadRequest;
     message = "already in a room";
   } else if (const auto started = room_started_.find(room_id);
              !rooms_.contains(room_id) || (started != room_started_.end() && started->second)) {
     // Do not use operator[]: a missing room must not be inserted as "not started".
     const bool already_started = started != room_started_.end() && started->second;
-    code = protocol::kCodeRoomNotFound;
+    code = protocol::ErrorCode::kRoomNotFound;
     message = already_started ? "room already started" : "no such room: " + room_id;
   } else {
     std::vector<RoomSeat>& seats = room_seats_[room_id];
@@ -376,7 +376,7 @@ stdexec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, 
       }
     }
     if (free < 0) {
-      code = protocol::kCodeRoomNotFound;
+      code = protocol::ErrorCode::kRoomNotFound;
       message = "room is full";
     } else {
       claimed = seats[static_cast<size_t>(free)];
@@ -390,7 +390,7 @@ stdexec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, 
       room = rooms_[room_id];
     }
   }
-  if (!code.empty()) {
+  if (code != protocol::ErrorCode::kInvalid) {
     co_await ReplyError(conn, code, message);
     co_return;
   }
@@ -417,7 +417,7 @@ stdexec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, 
       bot.player.name = "AI-" + std::to_string(claimed.seat);
       seats_now[static_cast<size_t>(claimed.seat)] = bot;
     }
-    co_await ReplyError(conn, protocol::kCodeRoomNotFound, "room already started");
+    co_await ReplyError(conn, protocol::ErrorCode::kRoomNotFound, "room already started");
     co_return;
   }
   co_await conn.Send<&SeatEndpoint::Dispatch>(PlayerEnvelope::SetRoom(room));
@@ -445,7 +445,7 @@ stdexec::task<void> LobbyActor::Ready(ex_actor::ActorRef<SeatEndpoint> conn, Pla
     }
   }
   if (!error.empty()) {
-    co_await ReplyError(conn, protocol::kCodeRoomNotFound, error);
+    co_await ReplyError(conn, protocol::ErrorCode::kRoomNotFound, error);
     co_return;
   }
   ActorSendScope().spawn(room.Send<&RoomActor::Dispatch>(RoomEnvelope::Ready(std::move(player))));
@@ -464,7 +464,7 @@ stdexec::task<void> LobbyActor::Sync(ex_actor::ActorRef<SeatEndpoint> conn, Play
     }
   }
   if (!error.empty()) {
-    co_await ReplyError(conn, protocol::kCodeRoomNotFound, error);
+    co_await ReplyError(conn, protocol::ErrorCode::kRoomNotFound, error);
     co_return;
   }
   ActorSendScope().spawn(room.Send<&RoomActor::Dispatch>(RoomEnvelope::Sync(std::move(player))));
@@ -525,9 +525,7 @@ stdexec::task<void> LobbyActor::OnConnectionClosed(PlayerInfo player) {
   spdlog::info("lobby: player {} disconnected, room {} dropped", player.player_id, room_id);
 }
 
-stdexec::task<size_t> LobbyActor::room_count() {
-  co_return rooms_.size();
-}
+stdexec::task<size_t> LobbyActor::room_count() { co_return rooms_.size(); }
 
 stdexec::task<void> LobbyActor::ReapRoom(std::string room_id) {
   // Drop the registry in one synchronous section, then close sockets in another. The close

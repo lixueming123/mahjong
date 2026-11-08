@@ -6,10 +6,7 @@
 // observable in well under a second. No socket is involved: the connection is a real
 // Connection over an invalid fd, which is enough to carry the outbox and the close request.
 
-#include "actor_scope.h"
 #include "lobby.h"
-
-#include "player_actor.h"
 
 #include <chrono>
 #include <iostream>
@@ -21,14 +18,15 @@
 #include <utility>
 
 #include <exec/async_scope.hpp>
-
 #include <gtest/gtest.h>
 #include <spdlog/spdlog.h>
 
+#include "actor_scope.h"
 #include "connection.h"
 #include "ex_actor/api.h"
 #include "json.h"
 #include "player.h"
+#include "player_actor.h"
 #include "room.h"
 #include "timer.h"
 
@@ -113,8 +111,8 @@ class LobbyTest : public ::testing::Test {
   // connector's own actor ref is what the lobby answers on.
   ex_actor::ActorRef<SeatEndpoint> SpawnConnector(const std::shared_ptr<Connection>& conn,
                                                   ex_actor::ActorRef<LobbyActor> lobby) {
-    ex_actor::ActorRef<PlayerActor> connector = WaitValue(
-        ex_actor::Spawn<PlayerActor>(conn, player_ids_, /*db=*/DbService {}, sessions_, lobby));
+    ex_actor::ActorRef<PlayerActor> connector =
+        WaitValue(ex_actor::Spawn<PlayerActor>(conn, player_ids_, /*db=*/DbService {}, sessions_, lobby));
     stdexec::sync_wait(connector.Send<&PlayerActor::Dispatch>(PlayerEnvelope::SetSelfRef(connector)));
     return connector;
   }
@@ -141,8 +139,7 @@ TEST_F(LobbyTest, ReclaimsARoomAndItsConnectionAfterMatchEnd) {
 
   // Ready starts the match; with a 1ms window every human window times out, so the whole match
   // (4..8 rounds) plays itself through the real scheduler.
-  stdexec::sync_wait(
-      lobby.Send<&LobbyActor::Ready>(SpawnConnector(conn, lobby), MakePlayer()));
+  stdexec::sync_wait(lobby.Send<&LobbyActor::Ready>(SpawnConnector(conn, lobby), MakePlayer()));
 
   const auto room_count = [&lobby]() { return WaitValue(lobby.Send<&LobbyActor::room_count>()); };
   // C10 专项：局终（game_end）不回收 —— 房间必须跨局存活足够久（这里等前 3 局的时间量级，
@@ -170,10 +167,8 @@ TEST_F(LobbyTest, ReapRoomIsIdempotentAndLeavesOtherRoomsAlone) {
   bob.player_id = "p-bob";
   bob.name = "Bob";
 
-  stdexec::sync_wait(
-      lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(first, lobby), alice));
-  stdexec::sync_wait(
-      lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(second, lobby), bob));
+  stdexec::sync_wait(lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(first, lobby), alice));
+  stdexec::sync_wait(lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(second, lobby), bob));
   ASSERT_EQ(WaitValue(lobby.Send<&LobbyActor::room_count>()), 2u);
 
   const std::string first_room = JoinedRoomId(first);
@@ -212,12 +207,12 @@ TEST_F(LobbyTest, RoomIdsAreUniqueAcrossLobbiesAndRooms) {
   auto second_conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/2, /*wake_write_fd=*/-1);
   auto third_conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/3, /*wake_write_fd=*/-1);
 
-  stdexec::sync_wait(first_lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(first_conn, first_lobby),
-                                                                   make_player("p-alice")));
-  stdexec::sync_wait(second_lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(second_conn, second_lobby),
-                                                                    make_player("p-bob")));
-  stdexec::sync_wait(first_lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(third_conn, first_lobby),
-                                                                   make_player("p-carol")));
+  stdexec::sync_wait(
+      first_lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(first_conn, first_lobby), make_player("p-alice")));
+  stdexec::sync_wait(
+      second_lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(second_conn, second_lobby), make_player("p-bob")));
+  stdexec::sync_wait(
+      first_lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(third_conn, first_lobby), make_player("p-carol")));
 
   const std::string first_id = JoinedRoomId(first_conn);
   const std::string second_id = JoinedRoomId(second_conn);
@@ -260,8 +255,14 @@ TEST_F(LobbyTest, PipelinedCreateRoomKeepsOneRoomPerPlayer) {
 
   std::string outbox;
   conn->DrainOutbox(&outbox);
-  EXPECT_EQ(CountOccurrences(outbox, "room_joined"), 1) << outbox;
-  EXPECT_EQ(CountOccurrences(outbox, "BAD_REQUEST"), 1) << "the second create_room must be rejected: " << outbox;
+  // The wire is integer-typed (PROTOCOL v2.0 §1.3.1), so counting needle strings pins the frame
+  // kinds by their frozen wire values: one room_joined, one BAD_REQUEST-coded error frame.
+  EXPECT_EQ(CountOccurrences(outbox, "\"type\":" + std::to_string(protocol::WireOf(protocol::FrameType::kRoomJoined))),
+            1)
+      << outbox;
+  EXPECT_EQ(CountOccurrences(outbox, "\"code\":" + std::to_string(protocol::WireOf(protocol::ErrorCode::kBadRequest))),
+            1)
+      << "the second create_room must be rejected: " << outbox;
 }
 
 // PROTOCOL §1.4.3 / GAME_DESIGN §8.3: a lobby disconnect destroys the room. That must hold
@@ -274,8 +275,7 @@ TEST_F(LobbyTest, DisconnectAroundCreateRoomLeavesNoRoom) {
   auto conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1, /*wake_write_fd=*/-1);
 
   stdexec::sync_wait(lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(conn, lobby), MakePlayer()));
-  stdexec::sync_wait(
-      lobby.Send<&LobbyActor::OnConnectionClosed>(MakePlayer()));
+  stdexec::sync_wait(lobby.Send<&LobbyActor::OnConnectionClosed>(MakePlayer()));
 
   const auto room_count = [&lobby]() { return WaitValue(lobby.Send<&LobbyActor::room_count>()); };
   ASSERT_TRUE(WaitFor([&room_count]() { return room_count() == 0; }))
@@ -347,20 +347,21 @@ TEST(LobbyPerf, RegistryLock) {
   const auto parallel_started = std::chrono::steady_clock::now();
   exec::async_scope creates;
   for (int i = 0; i < kRooms; ++i) {
-    creates.spawn(parallel_lobby.Send<&LobbyActor::CreateRoom>(parallel_seats[static_cast<size_t>(i)],
-                                                                    make_player(kRooms + i)));
+    creates.spawn(
+        parallel_lobby.Send<&LobbyActor::CreateRoom>(parallel_seats[static_cast<size_t>(i)], make_player(kRooms + i)));
   }
   stdexec::sync_wait(creates.on_empty());
   const auto parallel_us =
-      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - parallel_started).count();
+      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - parallel_started)
+          .count();
   ASSERT_EQ(WaitValue(parallel_lobby.Send<&LobbyActor::room_count>()), static_cast<size_t>(kRooms));
 
   std::cout << "BENCH sequential CreateRoom x" << kRooms << ": " << (sequential_us / 1000) << " ms ("
             << (sequential_us / kRooms) << " us/op)\n";
   std::cout << "BENCH parallel   CreateRoom x" << kRooms << ": " << (parallel_us / 1000) << " ms ("
             << (parallel_us / kRooms) << " us/op)\n";
-  std::cout << "BENCH room_count burst x" << kLookups << ": " << (lookup_us / 1000) << " ms ("
-            << (lookup_us / kLookups) << " us/op)\n";
+  std::cout << "BENCH room_count burst x" << kLookups << ": " << (lookup_us / 1000) << " ms (" << (lookup_us / kLookups)
+            << " us/op)\n";
 
   timer->Stop();
   stdexec::sync_wait(ActorSendScope().on_empty());
@@ -399,8 +400,8 @@ TEST(RoomPerf, ConcurrentRooms) {
     actors.reserve(static_cast<size_t>(rooms));
     for (int i = 0; i < rooms; ++i) {
       actors.push_back(WaitValue(ex_actor::Spawn<RoomActor>("r-" + std::to_string(i), static_cast<uint64_t>(i + 1),
-                                                           /*action_timeout_ms=*/15000, make_seats(i), nullptr,
-                                                           /*ai_delay_ms=*/0)));
+                                                            /*action_timeout_ms=*/15000, make_seats(i), nullptr,
+                                                            /*ai_delay_ms=*/0)));
       // v1.6：**不装**调度器 —— 本基准的座位全部自动化，局间推进走"无调度器即 inline"回退
       // （B2 C6），一场 4..8 局在同一消息内打完；装了丢弃型调度器反而会让推进令牌石沉大海。
       PlayerInfo player;
@@ -427,8 +428,8 @@ TEST(RoomPerf, ConcurrentRooms) {
       ASSERT_TRUE(WaitValue(room.Send<&RoomActor::game_finished>()));
       seq_sum += WaitValue(room.Send<&RoomActor::seq>());
     }
-    std::cout << "BENCH " << rooms << " rooms on " << kPool << " workers: " << us << " us ("
-              << (us / rooms) << " us/room, mean seq " << (seq_sum / static_cast<uint64_t>(rooms)) << ")\n";
+    std::cout << "BENCH " << rooms << " rooms on " << kPool << " workers: " << us << " us (" << (us / rooms)
+              << " us/room, mean seq " << (seq_sum / static_cast<uint64_t>(rooms)) << ")\n";
   };
 
   play(1);

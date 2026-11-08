@@ -1,4 +1,6 @@
 // 针对「对照 game/client 补齐的逻辑」做合成帧断言：不连服务端、不开浏览器。
+import { FRAME_TYPE, REASON, ERROR_CODE } from '../../web/js/protocol_enums.js';
+
 const mk = () => ({
   textContent: '', disabled: false, hidden: false, dataset: {}, style: {},
   classList: { toggle() {}, add() {}, remove() {} },
@@ -40,16 +42,16 @@ function makeClient(options = {}) {
 // ---------- 1. 登录帧（§4.1） ----------
 {
   const { client } = makeClient({ name: '  a\nb  ' });
-  check('游客昵称去掉控制字符并 trim', client.authFrame(), { type: 'login', name: 'ab' });
+  check('游客昵称去掉控制字符并 trim', client.authFrame(), { type: FRAME_TYPE.LOGIN, name: 'ab' });
 }
 {
   const { client } = makeClient({ user: 'alice', pass: 's3cret', name: '爱丽丝' });
   check('账号形态（出现 username 即账号登录）', client.authFrame(),
-    { type: 'login', username: 'alice', password: 's3cret', name: '爱丽丝' });
+    { type: FRAME_TYPE.LOGIN, username: 'alice', password: 's3cret', name: '爱丽丝' });
 }
 {
   const { client } = makeClient({ user: 'bob', pass: 'pw1234', register: true });
-  check('注册形态', client.authFrame(), { type: 'register', username: 'bob', password: 'pw1234' });
+  check('注册形态', client.authFrame(), { type: FRAME_TYPE.REGISTER, username: 'bob', password: 'pw1234' });
 }
 {
   const { client } = makeClient({ name: 'x'.repeat(40) });
@@ -60,7 +62,7 @@ function makeClient(options = {}) {
 {
   const { app, client } = makeClient();
   client.handleFrame({
-    type: 'game_end', reason: 'win_ron', renchan_count: 2, match_will_continue: true,
+    type: FRAME_TYPE.GAME_END, reason: REASON.WIN_RON, renchan_count: 2, match_will_continue: true,
     results: [
       { seat: 0, delta_score: -1000, match_total: -1000, hand: [] },
       { seat: 1, delta_score: 1000, match_total: 1000, hand: ['1m'] },
@@ -69,7 +71,7 @@ function makeClient(options = {}) {
     ],
     win: { seat: 1, tile: '3p', tsumo: false, yaku: [{ id: 'tanyao', han: 1 }], han: 1 },
   });
-  check('game_end 原始载荷留档', app.state.result?.reason, 'win_ron');
+  check('game_end 原始载荷留档', app.state.result?.reason, REASON.WIN_RON);
   check('和牌者座位', app.state.winSeat, 1);
   check('match_will_continue', app.state.matchWillContinue, true);
   check('连庄数进 honba', app.state.honba, 2);
@@ -77,7 +79,7 @@ function makeClient(options = {}) {
 {
   const { app, client } = makeClient();
   client.handleFrame({
-    type: 'match_end', hands_played: 5, renchan_count: 1,
+    type: FRAME_TYPE.MATCH_END, hands_played: 5, renchan_count: 1,
     rankings: [{ seat: 0, rank: 1, final_score: 31000 }, { seat: 1, rank: 2, final_score: 25000 }],
   });
   check('场终名次留档', app.state.rankings.length, 2);
@@ -89,7 +91,7 @@ function makeClient(options = {}) {
 {
   const { app, client } = makeClient();
   client.handleFrame({
-    type: 'tenpai', tenpai_seq: 1, is_tenpai: true,
+    type: FRAME_TYPE.TENPAI, tenpai_seq: 1, is_tenpai: true,
     waits: [{ tile: 'zz', remaining: 1 }, { tile: '3p', remaining: 2 }],
   });
   check('tenpai 只保留合法牌面', app.state.tenpai.waits.map((w) => w.tile), ['3p']);
@@ -99,7 +101,7 @@ function makeClient(options = {}) {
 {
   const { app, client } = makeClient();
   client.handleFrame({
-    type: 'state_sync', seq: 3, remaining: 70, current_seat: 1, hand: ['1m', '2m'],
+    type: FRAME_TYPE.STATE_SYNC, seq: 3, remaining: 70, current_seat: 1, hand: ['1m', '2m'],
     melds: [],
     seats: [
       { seat: 0, name: '我', hand_count: 2, discards: [], melds: [] },
@@ -126,15 +128,15 @@ function makeClient(options = {}) {
 // ---------- 6. 错误码分支（§7） ----------
 {
   const { app, client } = makeClient();
-  client.handleError({ code: 'RATE_LIMITED', message: 'slow down' });
+  client.handleError({ code: ERROR_CODE.RATE_LIMITED, message: 'slow down' });
   check('RATE_LIMITED 本地锁 1 秒', client.rateLimitedUntil > performance.now(), true);
   check('RATE_LIMITED 提示文案', byId['log-text'].textContent.includes('操作过于频繁'), true);
-  check('限流期不发帧', client.send({ type: 'sync' }), false);
+  check('限流期不发帧', client.send({ type: FRAME_TYPE.SYNC }), false);
   client.rateLimitedUntil = 0;
 }
 {
   const { client } = makeClient();
-  client.handleError({ code: 'ILLEGAL_ACTION', message: 'cannot declare riichi now' });
+  client.handleError({ code: ERROR_CODE.ILLEGAL_ACTION, message: 'cannot declare riichi now' });
   check('立直被拒改中文提示', byId['log-text'].textContent.includes('换一张再点立直'), true);
   check('非法操作计数 +1', client.illegalCount, 1);
 }
@@ -143,7 +145,7 @@ function makeClient(options = {}) {
   app.state.roomId = 'r-1';
   client.room = { roomId: 'r-1' };
   client.roomRequested = true;
-  client.handleError({ code: 'ROOM_NOT_FOUND' });
+  client.handleError({ code: ERROR_CODE.ROOM_NOT_FOUND });
   check('房间不存在清空房间', [client.room, app.state.roomId], [null, null]);
   check('允许重新建房', client.roomRequested, false);
 }
@@ -153,17 +155,17 @@ function makeClient(options = {}) {
   const { app, client, sent } = makeClient();
   let heartbeat = 0;
   client.net.startHeartbeat = () => { heartbeat += 1; };
-  client.handleFrame({ type: 'game_start', seat: 0, dealer: 0, round_index: 0, round_count: 4, hand: [] });
+  client.handleFrame({ type: FRAME_TYPE.GAME_START, seat: 0, dealer: 0, round_index: 0, round_count: 4, hand: [] });
   check('login_ok 之前不启动心跳', heartbeat, 0);
-  check('空手牌立刻要 sync', sent.some((f) => f.type === 'sync'), true);
-  client.handleFrame({ type: 'login_ok', player_id: 'p-x', name: '我' });
+  check('空手牌立刻要 sync', sent.some((f) => f.type === FRAME_TYPE.SYNC), true);
+  client.handleFrame({ type: FRAME_TYPE.LOGIN_OK, player_id: 'p-x', name: '我' });
   check('login_ok 后启动心跳', heartbeat, 1);
-  check('游客不拉战绩', sent.some((f) => f.type === 'stats_request'), false);
+  check('游客不拉战绩', sent.some((f) => f.type === FRAME_TYPE.STATS_REQUEST), false);
 }
 {
   const { client, sent } = makeClient();
-  client.handleFrame({ type: 'login_ok', player_id: 'u-9', name: '账号' });
-  check('账号会话拉战绩', sent.some((f) => f.type === 'stats_request'), true);
+  client.handleFrame({ type: FRAME_TYPE.LOGIN_OK, player_id: 'u-9', name: '账号' });
+  check('账号会话拉战绩', sent.some((f) => f.type === FRAME_TYPE.STATS_REQUEST), true);
   check('账号会话标记', client.hasAccount, true);
 }
 

@@ -69,7 +69,7 @@
 **可以向后兼容地增补，不需要线上版本协商**（帧里根本没有 version 字段）。但三件事必须同时做到，否则"旧客户端不崩"不成立：
 
 1. **不新增 `window` 取值**（`action_request.window`）。旧客户端 `game_state.py:305` 的白名单是 `(discard, claim)`，其他值直接丢帧 → 该窗口永远无人应答，每窗口干等 15s 超时（不崩，但完全不可玩）。
-2. **暗杠/加杠不得复用 `action:"kong"`**。旧客户端 `game_state.py:354-363` 对 `pong/chow/kong` 会**去 `from_seat` 的牌河删最后一张**；如果暗杠复用 `kong` 且不带 `from_seat`，旧客户端会打一条 WARN 然后什么都不做（尚可），一旦误带 `from_seat` 就会删错牌河。用新动作名 `ankan`/`kakan` 则旧客户端既不渲染按钮也不动牌河，只 `clear_pending()`，**退化安全**。
+2. **暗杠/加杠不得复用 `action:4`**。旧客户端 `game_state.py:354-363` 对 `pong/chow/kong` 会**去 `from_seat` 的牌河删最后一张**；如果暗杠复用 `kong` 且不带 `from_seat`，旧客户端会打一条 WARN 然后什么都不做（尚可），一旦误带 `from_seat` 就会删错牌河。用新动作名 `ankan`/`kakan` 则旧客户端既不渲染按钮也不动牌河，只 `clear_pending()`，**退化安全**。
 3. **副露类型继续用 `"kong"`**。旧客户端 `game_state.py:36`/`:55` 的 `MELD_TYPES` 只认 `pong/chow/kong`，未知类型会**整组丢弃** → 手牌张数自检 `len(hand)+3*melds ∈ {13,14}` 全部报 WARN。暗杠/加杠的"暗"用**附加字段**（如 `"concealed": true`）表达，旧客户端读不到就忽略（`PROTOCOL.md:97` 明令未知字段必须忽略）。
 
 ### 2.2 受影响帧逐条
@@ -78,7 +78,7 @@
 | --- | --- | --- | --- | --- |
 | `game_start` | S→C | 增 `round_index`(0..3)、`round_count`(=4)、`totals[4]`（累计分）；`dealer` **值域变化**（不再恒 0，`PROTOCOL.md:436` 现写"本里程碑恒为 0"） | ✅ 纯增字段；旧客户端只读 `hand/seat/dealer`，且 `_apply_game_start` 会整体重置本地状态（`game_state.py:221-258`）→ **旧客户端收到第二局的 `game_start` 会自然切回牌桌**（这是本方案最省事的兼容点） | `room.cc:501-503`、`:593-599` |
 | `state_sync` | S→C | **建议不加任何字段** | ✅ | 热路径：每次摸牌广播 4 份（`room.cc:447-466`、`PROTOCOL.md:568-577`）。场次进度用低频帧承载，避免每帧变大 |
-| `action_request` | S→C | `window` **不加新值**；`options` 增加 `{"action":"ankan","tiles":["5m"]}` / `{"action":"kakan","tiles":["5m"]}`（`tiles` 用单张面码，与 `kong` 同口径） | ⚠️ 旧客户端：按钮不渲染、超时按默认打牌 → **可继续玩，只是不能杠**（可接受退化） | `room.cc:81-90`、`:701-705`；`mahjong_rules.cc:429-436`；`actionbar.py:68-84` |
+| `action_request` | S→C | `window` **不加新值**；`options` 增加 `{"action":5,"tiles":["5m"]}` / `{"action":6,"tiles":["5m"]}`（`tiles` 用单张面码，与 `kong` 同口径） | ⚠️ 旧客户端：按钮不渲染、超时按默认打牌 → **可继续玩，只是不能杠**（可接受退化） | `room.cc:81-90`、`:701-705`；`mahjong_rules.cc:429-436`；`actionbar.py:68-84` |
 | `action_event` | S→C | `action` 值域 `{pong,chow,kong,win}` → `+{ankan,kakan}`；**两者 MUST NOT 携带 `from_seat`**（同自摸口径） | ⚠️ 旧客户端：走 `clear_pending()` 分支，不动牌河；随后 `state_sync` 全量覆盖 `hand`/`melds` 纠偏（`room.cc:985` 保证副露后必发 sync） | `room.cc:92-104`、`:954-962`；`PROTOCOL.md:489-501`；`game_state.py:346-369` |
 | `game_end` | S→C | **语义保持"局终"不变**（`reason` 词表不动：`win_ron`/`win_tsumo`/`draw_exhausted`）；增 `round_index`、`match_over`(bool)；`win` 内增 `han`(int) 与 `yaku[]`（`{id,han}` 数组），`win.tags` **保留但改填 yaku id 列表** | ✅ 纯增字段；旧客户端 `result.py:29` 对未知 tag 回落到 `str(t)`，只影响文案 | `room.cc:505-553`；`result.py:21-29`；`PROTOCOL.md:541-556` |
 | **`match_end`（新）** | S→C | 新帧：`type`、`rounds_played`、`renchan`（连庄次数）、`totals[4]`、`ranking[4]`、`best_win{seat,han,yaku[]}` | ✅ 旧客户端忽略未知帧（`PROTOCOL.md:98`、`game_state.py:213-216`）→ 停在最后一局结算页，正是想要的退化 | 设计参考：`GAME_DESIGN.md:662` 已预留"协议新增 `match_state`" |

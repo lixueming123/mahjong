@@ -20,11 +20,12 @@
 import { Net } from './net.js';
 import { normTile, isValidTile, drawnIndex } from './state.js';
 import { buildVoiceCues, voiceDuration } from './voice.js';
+import { FRAME_TYPE, ACTION, WINDOW, MODE, LENGTH, ERROR_CODE } from './protocol_enums.js';
 
 const FALLBACK_NAMES = ['自', '右', '对', '左'];
 
 /** §6.1 两种窗口 + §12.10 抢杠窗口（日麻） */
-const WINDOW_TYPES = new Set(['discard', 'claim', 'chankan']);
+const WINDOW_TYPES = new Set([WINDOW.DISCARD, WINDOW.CLAIM, WINDOW.CHANKAN]);
 
 /** 生命周期闸门（参考端 app.py 的同名常量） */
 const LOGIN_TIMEOUT_MS = 6000;      // 建连后等 login_ok
@@ -238,7 +239,7 @@ export class MahjongClient {
     const name = sanitizeName(cred.name);
     if (cred.user) {
       const frame = {
-        type: cred.register ? 'register' : 'login',
+        type: cred.register ? FRAME_TYPE.REGISTER : FRAME_TYPE.LOGIN,
         username: String(cred.user),
         password: String(cred.pass || ''),
       };
@@ -248,7 +249,7 @@ export class MahjongClient {
     }
     const guest = name || `web${Math.floor(Math.random() * 9000 + 1000)}`;
     this.name = guest;
-    return { type: 'login', name: guest };
+    return { type: FRAME_TYPE.LOGIN, name: guest };
   }
 
   // ---------------------------------------------------------------- 操作栏
@@ -256,11 +257,11 @@ export class MahjongClient {
   bindButtons() {
     const buttons = this.buttons;
     if (buttons.discard) buttons.discard.addEventListener('click', () => this.discardSelected());
-    if (buttons.pass) buttons.pass.addEventListener('click', () => this.action('pass', []));
-    if (buttons.win) buttons.win.addEventListener('click', () => this.action('win', []));
-    if (buttons.chi) buttons.chi.addEventListener('click', () => this.actionFromOptions('chow'));
-    if (buttons.pong) buttons.pong.addEventListener('click', () => this.actionFromOptions('pong'));
-    if (buttons.kong) buttons.kong.addEventListener('click', () => this.actionFromOptions(['kong', 'ankan', 'kakan']));
+    if (buttons.pass) buttons.pass.addEventListener('click', () => this.action(ACTION.PASS, []));
+    if (buttons.win) buttons.win.addEventListener('click', () => this.action(ACTION.WIN, []));
+    if (buttons.chi) buttons.chi.addEventListener('click', () => this.actionFromOptions(ACTION.CHOW));
+    if (buttons.pong) buttons.pong.addEventListener('click', () => this.actionFromOptions(ACTION.PONG));
+    if (buttons.kong) buttons.kong.addEventListener('click', () => this.actionFromOptions([ACTION.KONG, ACTION.ANKAN, ACTION.KAKAN]));
     if (buttons.riichi) buttons.riichi.addEventListener('click', () => this.declareRiichi());
     this.applyButtons();
   }
@@ -286,13 +287,13 @@ export class MahjongClient {
       if (button) button.disabled = !enabled;
     };
     const buttons = this.buttons;
-    set(buttons.discard, base && win.window === 'discard' && this.state.selected >= 0);
-    set(buttons.pass, base && this.hasOption('pass'));
-    set(buttons.win, base && this.hasOption('win'));
-    set(buttons.chi, base && this.hasOption('chow'));
-    set(buttons.pong, base && this.hasOption('pong'));
-    set(buttons.kong, base && (this.hasOption('kong') || this.hasOption('ankan') || this.hasOption('kakan')));
-    set(buttons.riichi, base && this.hasOption('riichi'));
+    set(buttons.discard, base && win.window === WINDOW.DISCARD && this.state.selected >= 0);
+    set(buttons.pass, base && this.hasOption(ACTION.PASS));
+    set(buttons.win, base && this.hasOption(ACTION.WIN));
+    set(buttons.chi, base && this.hasOption(ACTION.CHOW));
+    set(buttons.pong, base && this.hasOption(ACTION.PONG));
+    set(buttons.kong, base && (this.hasOption(ACTION.KONG) || this.hasOption(ACTION.ANKAN) || this.hasOption(ACTION.KAKAN)));
+    set(buttons.riichi, base && this.hasOption(ACTION.RIICHI));
   }
 
   // ---------------------------------------------------------------- 对局动作
@@ -304,7 +305,7 @@ export class MahjongClient {
 
   /** 打牌：必须回带最近一次 action_request.seq（H2），等服务端 discard_event 落地 */
   discardSelected() {
-    if (!this.window || this.window.window !== 'discard') {
+    if (!this.window || this.window.window !== WINDOW.DISCARD) {
       this.hint('现在不是你的出牌窗口');
       return false;
     }
@@ -332,7 +333,7 @@ export class MahjongClient {
     const tile = this.state.hands[0][this.state.selected];
     if (!tile) return false;
     const seq = this.window.seq;
-    if (!this.send({ type: 'discard', tile, seq })) return false;
+    if (!this.send({ type: FRAME_TYPE.DISCARD, tile, seq })) return false;
     this.markPending(`打牌 ${tile}`);
     return true;
   }
@@ -389,18 +390,18 @@ export class MahjongClient {
       return false;
     }
     // 打牌窗口永不提供「过」（§4.6 合法性矩阵）：即便服务端误发也不发帧
-    if (action === 'pass' && !['claim', 'chankan'].includes(this.window.window)) {
+    if (action === ACTION.PASS && ![WINDOW.CLAIM, WINDOW.CHANKAN].includes(this.window.window)) {
       this.hint('打牌窗口不能「过」，直接打牌或宣言');
       return false;
     }
     const tilesOut = option.tiles || [];
     // §4.6：ankan/kakan/riichi 的 tiles 恰好 1 个牌面，多了服务端会回 ILLEGAL_ACTION
-    if ((action === 'riichi' || action === 'ankan' || action === 'kakan') && tilesOut.length !== 1) {
+    if ((action === ACTION.RIICHI || action === ACTION.ANKAN || action === ACTION.KAKAN) && tilesOut.length !== 1) {
       this.hint(`${action} 需要恰好 1 张牌`);
       return false;
     }
     const seq = this.window.seq;
-    if (!this.send({ type: 'action', action, tiles: tilesOut, seq })) return false;
+    if (!this.send({ type: FRAME_TYPE.ACTION, action, tiles: tilesOut, seq })) return false;
     this.markPending(actionLabelOf(action));
     return true;
   }
@@ -411,11 +412,11 @@ export class MahjongClient {
    * 宣言与打牌是同一条 action 帧，绝不拆成两条。
    */
   declareRiichi() {
-    if (!this.window || this.window.window !== 'discard') {
+    if (!this.window || this.window.window !== WINDOW.DISCARD) {
       this.hint('现在不是你的出牌窗口');
       return false;
     }
-    if (!this.hasOption('riichi')) {
+    if (!this.hasOption(ACTION.RIICHI)) {
       this.hint('当前不能立直');
       return false;
     }
@@ -459,7 +460,7 @@ export class MahjongClient {
     if (this.pending || this.frozen || this.remainingMs() <= 0) return false;
     const seq = this.window.seq;
     // 宣言牌发手上那张物理牌（可能是赤 0m）：服务端按牌面裁决，牌河要显示真正离手的那张
-    if (!this.send({ type: 'action', action: 'riichi', tiles: [tile], seq })) return false;
+    if (!this.send({ type: FRAME_TYPE.ACTION, action: ACTION.RIICHI, tiles: [tile], seq })) return false;
     this.markPending(`立直 ${tile}`);
     return true;
   }
@@ -501,7 +502,7 @@ export class MahjongClient {
 
   handleFrame(frame) {
     switch (frame.type) {
-      case 'login_ok':
+      case FRAME_TYPE.LOGIN_OK:
         this.playerId = frame.player_id;
         this.name = frame.name || this.name;
         // `u-` 前缀 = 账号会话（ACCOUNT_DESIGN §1.2）：只有账号才有战绩
@@ -514,13 +515,13 @@ export class MahjongClient {
         this.hint(`已登录：${this.name}${this.hasAccount ? '（账号）' : ''}`);
         this.app.emit('session', { stage: 'lobby' });
         this.app.emit('login_ok', { name: this.name, hasAccount: this.hasAccount, playerId: this.playerId });
-        if (this.hasAccount) this.send({ type: 'stats_request' });
+        if (this.hasAccount) this.send({ type: FRAME_TYPE.STATS_REQUEST });
         // 大厅路径：停在 hall 等玩家选玩法；URL 一步到位：直接建房
         if (this.lobbyDriven) this.listRooms();
         else this.createRoom();
         break;
 
-      case 'room_joined':
+      case FRAME_TYPE.ROOM_JOINED:
         this.room = {
           roomId: frame.room_id,
           seat: frame.seat,
@@ -545,7 +546,7 @@ export class MahjongClient {
         }
         break;
 
-      case 'room_update':
+      case FRAME_TYPE.ROOM_UPDATE:
         // PROTOCOL §5.17：未开局房间的座位快照，服务端广播给房内所有真人。
         // `room_list` 只有人数没有名单，等待页必须靠这一帧同步他人入座/离开。
         if (typeof frame.room_id !== 'string') break;
@@ -556,7 +557,7 @@ export class MahjongClient {
         this.app.emit('room_update', this.room);
         break;
 
-      case 'game_start':
+      case FRAME_TYPE.GAME_START:
         this.room = this.room || {};
         this.room.seat = frame.seat ?? this.room.seat ?? 0;
         this.clearWindow(true);
@@ -580,12 +581,12 @@ export class MahjongClient {
         this.maybeSyncEmptyHand();
         break;
 
-      case 'draw':
+      case FRAME_TYPE.DRAW:
         if (!this.acceptSeq(frame)) break;
         this.app.drawTile(frame);
         break;
 
-      case 'discard_event':
+      case FRAME_TYPE.DISCARD_EVENT:
         if (!this.acceptSeq(frame)) break;
         this.app.discardTile(frame);
         if (frame.seat === this.state.mySeat) {
@@ -595,31 +596,31 @@ export class MahjongClient {
         }
         break;
 
-      case 'action_request':
+      case FRAME_TYPE.ACTION_REQUEST:
         this.openWindow(frame);
         break;
 
-      case 'action_event':
+      case FRAME_TYPE.ACTION_EVENT:
         if (!this.acceptSeq(frame)) break;
         this.pending = false;
         this.pendingLabel = '';
         this.app.applyActionEvent(frame);
-        if (frame.action === 'win') this.frozen = true;
-        if (frame.seat === this.state.mySeat || frame.action === 'win') this.clearWindow();
+        if (frame.action === ACTION.WIN) this.frozen = true;
+        if (frame.seat === this.state.mySeat || frame.action === ACTION.WIN) this.clearWindow();
         this.announceAction(frame);
         break;
 
-      case 'state_sync':
+      case FRAME_TYPE.STATE_SYNC:
         if (!this.acceptSeq(frame)) break;
         this.app.applySync(frame);
         break;
 
-      case 'tenpai':
+      case FRAME_TYPE.TENPAI:
         this.app.applyTenpai(frame);
         console.debug('tenpai', this.state.tenpai);
         break;
 
-      case 'game_end':
+      case FRAME_TYPE.GAME_END:
         this.clearWindow(true);
         this.frozen = true;
         this.stage = 'idle';
@@ -632,10 +633,10 @@ export class MahjongClient {
           if (this.state.phase === 'ended') this.ui?.showResult?.(frame, this.state);
         }, 900);
         // 本局刚落库（ACCOUNT_DESIGN §4.1）：账号会话补拉一次累计战绩
-        if (this.hasAccount) this.send({ type: 'stats_request' });
+        if (this.hasAccount) this.send({ type: FRAME_TYPE.STATS_REQUEST });
         break;
 
-      case 'match_end':
+      case FRAME_TYPE.MATCH_END:
         this.clearWindow(true);
         this.frozen = true;
         this.stage = 'idle';
@@ -645,7 +646,7 @@ export class MahjongClient {
         console.info('[场终]', this.describeRankings(frame));
         break;
 
-      case 'stats':
+      case FRAME_TYPE.STATS:
         this.stats = frame;
         this.state.stats = frame;
         console.info('[战绩]', frame);
@@ -653,7 +654,7 @@ export class MahjongClient {
         this.app.changed();
         break;
 
-      case 'room_list':
+      case FRAME_TYPE.ROOM_LIST:
         this.rooms = Array.isArray(frame.rooms) ? frame.rooms : [];
         this.state.rooms = this.rooms;
         this.app.emit('rooms', this.rooms);
@@ -661,11 +662,11 @@ export class MahjongClient {
         console.debug('[房间列表]', this.rooms.length, '间');
         break;
 
-      case 'error':
+      case FRAME_TYPE.ERROR:
         this.handleError(frame);
         break;
 
-      case 'pong':
+      case FRAME_TYPE.PONG:
         break;
 
       default:
@@ -697,45 +698,46 @@ export class MahjongClient {
    *  - RATE_LIMITED 短暂锁发送；FRAME_TOO_LARGE / NOT_LOGGED_IN 直接断开。
    */
   handleError(frame) {
-    const code = typeof frame.code === 'string' ? frame.code : 'INTERNAL';
+    const code = Number.isInteger(frame.code) ? frame.code : ERROR_CODE.INTERNAL;
     const message = typeof frame.message === 'string' ? frame.message : '';
     const rejected = this.pending;
     this.pending = false;
     this.pendingLabel = '';
     this.applyButtons();
 
-    const counted = ['ILLEGAL_ACTION', 'NOT_YOUR_TURN', 'NO_PENDING_ACTION', 'UNKNOWN_TILE', 'AUTH_FAILED'];
+    const counted = [ERROR_CODE.ILLEGAL_ACTION, ERROR_CODE.NOT_YOUR_TURN, ERROR_CODE.NO_PENDING_ACTION, ERROR_CODE.UNKNOWN_TILE, ERROR_CODE.AUTH_FAILED];
     if (counted.includes(code)) this.illegalCount += 1;
 
     let text = `${code}: ${message}`;
-    if (code === 'ILLEGAL_ACTION' && message.includes('riichi')) {
+    // message 是服务端自由文案：'riichi' 与下面的 'already in a room' 是既有的服务端文案耦合，保留
+    if (code === ERROR_CODE.ILLEGAL_ACTION && message.includes('riichi')) {
       // 立直被拒最常见的原因是「这张牌打完不听牌」，中文说清下一步
       text = '立直失败：这张牌打出后不听牌，换一张再点立直';
       this.state.selected = -1;
-    } else if (code === 'RATE_LIMITED') {
+    } else if (code === ERROR_CODE.RATE_LIMITED) {
       this.rateLimitedUntil = performance.now() + 1000;
       text = '操作过于频繁，请稍候';
-    } else if (code === 'FRAME_TOO_LARGE') {
+    } else if (code === ERROR_CODE.FRAME_TOO_LARGE) {
       text = '发送帧过大，已断开连接';
       this.net.close('发送帧过大');
-    } else if (code === 'NOT_LOGGED_IN') {
+    } else if (code === ERROR_CODE.NOT_LOGGED_IN) {
       text = '会话未建立，请刷新页面重新登录';
       this.net.close('会话未建立');
-    } else if (code === 'ROOM_NOT_FOUND') {
+    } else if (code === ERROR_CODE.ROOM_NOT_FOUND) {
       this.room = null;
       this.state.roomId = null;
       this.readySent = false;
       this.roomRequested = false;
       text = '房间不存在或已关闭';
-    } else if (code === 'INTERNAL') {
+    } else if (code === ERROR_CODE.INTERNAL) {
       text = `服务端内部错误：${message || '未知原因'}`;
-    } else if (code === 'AUTH_FAILED') {
+    } else if (code === ERROR_CODE.AUTH_FAILED) {
       text = '账号或密码错误';
-    } else if (code === 'USERNAME_TAKEN') {
+    } else if (code === ERROR_CODE.USERNAME_TAKEN) {
       text = '账号名已被占用，换一个再注册';
-    } else if (code === 'ALREADY_ONLINE') {
+    } else if (code === ERROR_CODE.ALREADY_ONLINE) {
       text = '该账号已在另一处登录';
-    } else if (code === 'INVALID_NAME') {
+    } else if (code === ERROR_CODE.INVALID_NAME) {
       text = '昵称非法：需 1~16 个字符，且不含换行或控制字符';
     }
     if (this.illegalCount >= ILLEGAL_LIMIT) {
@@ -746,7 +748,7 @@ export class MahjongClient {
 
     console.warn('服务端错误', frame);
     this.state.lastError = { code, message };
-    if (['ILLEGAL_ACTION', 'NOT_YOUR_TURN', 'NO_PENDING_ACTION', 'UNKNOWN_TILE'].includes(code)) {
+    if ([ERROR_CODE.ILLEGAL_ACTION, ERROR_CODE.NOT_YOUR_TURN, ERROR_CODE.NO_PENDING_ACTION, ERROR_CODE.UNKNOWN_TILE].includes(code)) {
       // 参考端 clear_pending：被拒的动作不再挂着，选中与立直宣言模式一并清掉
       this.riichiArming = false;
       this.state.selected = -1;
@@ -757,10 +759,11 @@ export class MahjongClient {
     this.app.changed();
 
     // 被拒后本地可能已与服务端不一致：这几类错误必须拉权威状态
-    const resync = ['BAD_REQUEST', 'NOT_YOUR_TURN', 'NO_PENDING_ACTION', 'UNKNOWN_TILE'];
-    if (code === 'BAD_REQUEST' || (rejected && resync.includes(code))) this.requestSync();
+    const resync = [ERROR_CODE.BAD_REQUEST, ERROR_CODE.NOT_YOUR_TURN, ERROR_CODE.NO_PENDING_ACTION, ERROR_CODE.UNKNOWN_TILE];
+    if (code === ERROR_CODE.BAD_REQUEST || (rejected && resync.includes(code))) this.requestSync();
     // 「already in a room」= 旧房间还没被回收（场终后 30 秒）：换一条连接回大厅最稳
-    if (code === 'BAD_REQUEST' && message.includes('already in a room') && this.lobbyDriven) {
+    // message.includes('already in a room') 是既有的服务端文案耦合，保留
+    if (code === ERROR_CODE.BAD_REQUEST && message.includes('already in a room') && this.lobbyDriven) {
       this.returnToLobby();
     }
   }
@@ -770,7 +773,7 @@ export class MahjongClient {
     const now = performance.now();
     if (now - this._lastSyncAt < 1000) return false;
     this._lastSyncAt = now;
-    return this.send({ type: 'sync' });
+    return this.send({ type: FRAME_TYPE.SYNC });
   }
 
   /** 牌桌里手牌为空（丢帧 / 重连）⇒ 只补一次 sync（参考端 `_empty_hand_synced`） */
@@ -785,12 +788,12 @@ export class MahjongClient {
     if (!this.net.connected) return false;
     // 大厅、等待页（waiting）、已点开始（start）都要刷：等待页靠它兜底人数
     if (!['lobby', 'waiting', 'start', 'ready'].includes(this.stage)) return false;
-    return this.send({ type: 'list_rooms' });
+    return this.send({ type: FRAME_TYPE.LIST_ROOMS });
   }
 
   /** 主动查战绩（§4.10）；游客会拿到零值载荷，不是错误 */
   requestStats() {
-    return this.send({ type: 'stats_request' });
+    return this.send({ type: FRAME_TYPE.STATS_REQUEST });
   }
 
   /** 开局信号（§4.4）：重复调用不会再发（服务端会回 BAD_REQUEST） */
@@ -800,7 +803,7 @@ export class MahjongClient {
     // 只有发出 ready 之后才开始计「等 game_start」的 10 s 超时（§8.6）
     this.stage = 'start';
     this.stageSince = performance.now();
-    return this.send({ type: 'ready' });
+    return this.send({ type: FRAME_TYPE.READY });
   }
 
   /** 建房（大厅点「创建房间并开始」）：mode/length 由大厅传入，缺省用 URL/默认值 */
@@ -812,12 +815,13 @@ export class MahjongClient {
     this.stage = 'room';
     this.stageSince = performance.now();
     if (this.config.room) {
-      return this.send({ type: 'join_room', room_id: this.config.room });
+      return this.send({ type: FRAME_TYPE.JOIN_ROOM, room_id: this.config.room });
     }
-    const mode = this.config.mode === 'riichi' ? 'riichi' : 'classic';
-    const frame = { type: 'create_room', mode };
+    // config.mode/length 是 URL/大厅的 UI 字符串；仅在构造线帧时翻译成 v2.0 整数
+    const mode = this.config.mode === 'riichi' ? MODE.RIICHI : MODE.CLASSIC;
+    const frame = { type: FRAME_TYPE.CREATE_ROOM, mode };
     // 半庄只对日麻有效（§12.1：classic 传 hanchan 回 BAD_REQUEST）
-    if (mode === 'riichi' && this.config.length === 'hanchan') frame.length = 'hanchan';
+    if (mode === MODE.RIICHI && this.config.length === 'hanchan') frame.length = LENGTH.HANCHAN;
     return this.send(frame);
   }
 
@@ -828,7 +832,7 @@ export class MahjongClient {
     this.roomRequested = true;
     this.stage = 'room';
     this.stageSince = performance.now();
-    return this.send({ type: 'join_room', room_id: roomId });
+    return this.send({ type: FRAME_TYPE.JOIN_ROOM, room_id: roomId });
   }
 
   /** 退出登录：断开连接、清空本局状态，回到登录页 */
@@ -892,7 +896,7 @@ export class MahjongClient {
     }
 
     const options = (Array.isArray(frame.options) ? frame.options : [])
-      .filter((item) => item && typeof item.action === 'string')
+      .filter((item) => item && Number.isInteger(item.action))
       .map((item) => ({ action: item.action, tiles: Array.isArray(item.tiles) ? [...item.tiles] : [] }));
 
     // §6.2：显示用剩余 = min(服务端剩余, 本地兜底)，本地兜底窗口夹在 [1s, 60s]
@@ -914,7 +918,7 @@ export class MahjongClient {
 
     // §12.10：抢杠窗口必须带被抢的那张牌（它不在任何人的牌河里）
     let windowTile = null;
-    if (frame.window === 'chankan') {
+    if (frame.window === WINDOW.CHANKAN) {
       if (isValidTile(frame.tile)) windowTile = frame.tile;
       else console.warn('chankan 窗口缺少合法 tile', frame.tile);
     }
@@ -940,7 +944,7 @@ export class MahjongClient {
     // 鸣牌时在牌河里点亮被指的那张。打出者以 lastDiscard 为准：
     // 只有吃限定上家；碰/和可鸣任何一家刚打出的牌，随局轮转。
     const ld = this.state.lastDiscard;
-    this.state.claimTarget = frame.window === 'claim' && ld
+    this.state.claimTarget = frame.window === WINDOW.CLAIM && ld
       ? { seat: ld.seat, index: (this.state.rivers[ld.seat] || []).length - 1 }
       : null;
     this.state.selected = -1;          // 新窗口不继承上一手的选中（参考端同口径）
@@ -948,7 +952,7 @@ export class MahjongClient {
     this.app.changed();
 
     this.showClaimTip(frame, options);
-    if (frame.window === 'chankan') {
+    if (frame.window === WINDOW.CHANKAN) {
       this.hint(`抢杠 ${this.window.tile || ''}：可以和或过`);
     }
   }
@@ -962,7 +966,7 @@ export class MahjongClient {
   showClaimTip(frame, options) {
     if (!this.ui?.claimTip) return;
     const actions = options.map((item) => item.action);
-    if (frame.window === 'discard') { this.ui.hideClaimTip?.(); return; }
+    if (frame.window === WINDOW.DISCARD) { this.ui.hideClaimTip?.(); return; }
 
     let tile = isValidTile(frame.tile) ? frame.tile : null;
     if (!tile) {
@@ -974,9 +978,9 @@ export class MahjongClient {
     }
     if (!tile) { this.ui.hideClaimTip?.(); return; }
 
-    const chows = options.filter((item) => item.action === 'chow').length;
+    const chows = options.filter((item) => item.action === ACTION.CHOW).length;
     let note = '';
-    if (frame.window === 'chankan') note = '抢杠';
+    if (frame.window === WINDOW.CHANKAN) note = '抢杠';
     else if (chows > 1) note = `${chows} 种吃法`;
     this.ui.claimTip(actions, tile, note);
   }
@@ -1169,21 +1173,22 @@ export class MahjongClient {
   /** 副露 / 立直 / 和牌的中央播报（§5.8 action_event 即权威事件源） */
   announceAction(frame) {
     const labels = {
-      pong: '碰', chow: '吃', kong: '杠', ankan: '暗杠', kakan: '加杠', riichi: '立直', win: '和',
+      [ACTION.PONG]: '碰', [ACTION.CHOW]: '吃', [ACTION.KONG]: '杠', [ACTION.ANKAN]: '暗杠',
+      [ACTION.KAKAN]: '加杠', [ACTION.RIICHI]: '立直', [ACTION.WIN]: '和',
     };
     const label = labels[frame.action];
     if (!label) return;
     const view = this.app.viewSeat(frame.seat);
     const name = this.state.seatNames[view] || '';
     this.ui?.broadcast?.(label, name, 820);
-    if (frame.action === 'riichi') this.sfx?.play?.('click');
+    if (frame.action === ACTION.RIICHI) this.sfx?.play?.('click');
   }
 }
 
 function actionLabelOf(action) {
   return {
-    pong: '碰', chow: '吃', kong: '杠', ankan: '暗杠', kakan: '加杠', win: '和牌',
-    pass: '过', riichi: '立直',
+    [ACTION.PONG]: '碰', [ACTION.CHOW]: '吃', [ACTION.KONG]: '杠', [ACTION.ANKAN]: '暗杠',
+    [ACTION.KAKAN]: '加杠', [ACTION.WIN]: '和牌', [ACTION.PASS]: '过', [ACTION.RIICHI]: '立直',
   }[action] || action;
 }
 

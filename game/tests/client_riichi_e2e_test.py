@@ -36,6 +36,7 @@ import pygame  # noqa: E402
 from client.app import GameApp  # noqa: E402
 from client.game_state import SCREEN_LOBBY, SCREEN_TABLE  # noqa: E402
 from client.tiles import tile_face  # noqa: E402
+from protocol.enums import ACTION, FRAME_TYPE, WINDOW  # noqa: E402
 
 FAILURES: list[str] = []
 
@@ -197,13 +198,13 @@ def main() -> int:
     try:
         check(wait_port(port), f"真实服务端已启动（port={port}）")
 
-        inbound: list[str] = []
+        inbound: list[int] = []
         frames: list[dict] = []
         orig_on_frame = app._on_frame
 
         def spy_on_frame(frame, now, _orig=orig_on_frame):
             if isinstance(frame, dict):
-                inbound.append(str(frame.get("type")))
+                inbound.append(frame.get("type"))
                 frames.append(frame)
             return _orig(frame, now)
 
@@ -240,11 +241,11 @@ def main() -> int:
         )
         check(len(app.state.dora_indicators) == 1, f"宝牌指示牌：{app.state.dora_indicators}")
         check(app.state.round_count == 8, f"半庄局数来自服务端：round_count={app.state.round_count}")
-        check("error" not in inbound and app.state.error_count == 0, "全程零 error 帧")
+        check(FRAME_TYPE.ERROR not in inbound and app.state.error_count == 0, "全程零 error 帧")
 
         # 4) 真打一张：`game_start` 不带 remaining，第一份 `state_sync` 要等有人摸牌。
         #    这一步同时验证日麻窗口下的打牌链路（选中 → discard → 他家摸牌 → 广播 state_sync）。
-        if app.state.window is not None and app.state.window.window == "discard":
+        if app.state.window is not None and app.state.window.window == WINDOW.DISCARD:
             app.state.selected_index = len(app.state.hand) - 1
             check(app._confirm_discard(), "日麻窗口下成功提交一次打牌")
         pump(app, 20.0, until=lambda: app.state.remaining is not None)
@@ -252,7 +253,7 @@ def main() -> int:
             app.state.remaining is not None and app.state.remaining <= 69,
             f"牌山剩余（已切 14 张王牌）：{app.state.remaining}",
         )
-        check("error" not in inbound and app.state.error_count == 0, "打牌之后仍然零 error 帧")
+        check(FRAME_TYPE.ERROR not in inbound and app.state.error_count == 0, "打牌之后仍然零 error 帧")
 
         # 5) 一直打到「能立直」，然后真的点一次立直（AI 节流已关，几十手也只是秒级）
         declared = False
@@ -269,15 +270,15 @@ def main() -> int:
                 pump(app, 0.3, until=lambda: app.state.window is not None)
                 continue
             prev_seq = win.seq
-            if win.window != "discard":
-                app._do_action("pass", [])
+            if win.window != WINDOW.DISCARD:
+                app._do_action(ACTION.PASS, [])
                 pump(app, 0.3, until=lambda: app.state.window is None
                      or app.state.window.seq != prev_seq)
                 continue
             if not app.state.hand:
                 pump(app, 0.3, until=lambda: bool(app.state.hand))
                 continue
-            if win.has("riichi"):
+            if win.has(ACTION.RIICHI):
                 offered = True
                 # v1.21：服务端直接下发「哪些牌能作宣言牌」，客户端照它挑，一次点对。
                 check(
@@ -287,7 +288,7 @@ def main() -> int:
                 # 服务端只接受「打出后仍听牌」的那张；没有候选时退回本地自算逐个试。
                 def riichi_broadcast() -> bool:
                     return any(
-                        f.get("type") == "action_event" and f.get("action") == "riichi"
+                        f.get("type") == FRAME_TYPE.ACTION_EVENT and f.get("action") == ACTION.RIICHI
                         for f in frames
                     )
 
@@ -308,7 +309,7 @@ def main() -> int:
                         break
                     if app.state.error_count > errors_before:
                         last_error = next(
-                            (f for f in reversed(frames) if f.get("type") == "error"), None
+                            (f for f in reversed(frames) if f.get("type") == FRAME_TYPE.ERROR), None
                         )
                         print(f"  [DEBUG] 宣言牌 {app.state.hand[index]} 被拒：{last_error}")
                         continue  # 该宣言牌不成立（ILLEGAL_ACTION），换下一张
@@ -329,19 +330,19 @@ def main() -> int:
                 seat = app.state.my_seat or 0
                 check(app.state.points[seat] == 24000,
                       f"立直后扣掉 1000 点供托：points={app.state.points}")
-                check(any(f.get("type") == "action_event" and f.get("action") == "riichi" for f in frames),
+                check(any(f.get("type") == FRAME_TYPE.ACTION_EVENT and f.get("action") == ACTION.RIICHI for f in frames),
                       "广播里出现 action_event{action:riichi}")
-                last_sync = next((f for f in reversed(frames) if f.get("type") == "state_sync"), None)
+                last_sync = next((f for f in reversed(frames) if f.get("type") == FRAME_TYPE.STATE_SYNC), None)
                 seat_flag = last_sync.get("seats", [{}])[seat].get("riichi") if last_sync else None
                 check(app.state.seat_view(seat).riichi,
                       f"客户端座位状态已置立直（帧内 seats[].riichi={seat_flag}）")
 
                 # 立直后手牌锁定：故意打一张「不是刚摸到」的牌，服务端必须拒绝
                 pump(app, 5.0, until=lambda: app.state.window is not None
-                     and app.state.window.window == "discard"
+                     and app.state.window.window == WINDOW.DISCARD
                      and app.state.drawn_index is not None)
                 current = app.state.window
-                if (current is not None and current.window == "discard"
+                if (current is not None and current.window == WINDOW.DISCARD
                         and app.state.drawn_index is not None and len(app.state.hand) > 1):
                     other = next(
                         (i for i in range(len(app.state.hand)) if i != app.state.drawn_index), None
@@ -353,7 +354,7 @@ def main() -> int:
                         pump(app, 1.5, until=lambda: app.state.error_count > errors_before)
                         check(app.state.error_count > errors_before,
                               "立直后打非摸牌被拒（立直锁手牌，只能摸切）")
-                        last = next((f for f in reversed(frames) if f.get("type") == "error"), None)
+                        last = next((f for f in reversed(frames) if f.get("type") == FRAME_TYPE.ERROR), None)
                         if last is not None:
                             print(f"  [INFO] 拒绝原因：{last.get('code')} {last.get('message')}")
                 else:

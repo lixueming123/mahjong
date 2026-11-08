@@ -8,6 +8,7 @@
  */
 import { ALL_CODES } from './config.js';
 import { normTile } from './state.js';
+import { ACTION, REASON } from './protocol_enums.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -17,10 +18,12 @@ const DORA_INDEX = new Map(ALL_CODES.map((code, i) => [code, i]));
 
 const WIND_CHARS = ['東', '南', '西', '北'];
 const HONOR_LABELS = { 1: '东', 2: '南', 3: '西', 4: '北', 5: '白', 6: '发', 7: '中' };
-const ROUND_LABELS = { win_ron: '荣和', win_tsumo: '自摸', draw_exhausted: '荒庄流局' };
+const ROUND_LABELS = {
+  [REASON.WIN_RON]: '荣和', [REASON.WIN_TSUMO]: '自摸', [REASON.DRAW_EXHAUSTED]: '荒庄流局',
+};
 const ACTION_LABELS = {
-  pong: '碰', chow: '吃', kong: '杠', ankan: '暗杠', kakan: '加杠',
-  riichi: '立直', win: '和', pass: '过',
+  [ACTION.PONG]: '碰', [ACTION.CHOW]: '吃', [ACTION.KONG]: '杠', [ACTION.ANKAN]: '暗杠',
+  [ACTION.KAKAN]: '加杠', [ACTION.RIICHI]: '立直', [ACTION.WIN]: '和', [ACTION.PASS]: '过',
 };
 const YAKU_LABELS = {
   menzen: '门前清', tsumo: '门前清自摸', tanyao: '断幺九', pinfu: '平和', iipeikou: '一杯口',
@@ -294,13 +297,13 @@ export class UI {
   claimTip(actions, tile, note = '') {
     const el = this.el.claimTip;
     if (!el) return;
-    const real = (actions || []).filter((action) => action !== 'pass');
+    const real = (actions || []).filter((action) => action !== ACTION.PASS);
     if (!real.length) { el.hidden = true; return; }
-    const order = ['win', 'kong', 'pong', 'chow'];
+    const order = [ACTION.WIN, ACTION.KONG, ACTION.PONG, ACTION.CHOW];
     real.sort((a, b) => order.indexOf(a) - order.indexOf(b));
     const badges = real.map((action) => {
       const label = ACTION_LABELS[action] || action;
-      return `<span class="ct-act${action === 'win' ? ' win' : ''}">${esc(label)}</span>`;
+      return `<span class="ct-act${action === ACTION.WIN ? ' win' : ''}">${esc(label)}</span>`;
     }).join('');
     el.innerHTML = badges
       + `<span class="ct-tile">${esc(tileLabel(tile))}</span>`
@@ -374,7 +377,7 @@ export class UI {
       const isLoser = frame.win && frame.win.from_seat === result.seat && !frame.win.tsumo;
       const role = isWinner ? (frame.win.tsumo ? '自摸' : '荣和')
         : isLoser ? '放铳'
-          : (frame.reason === 'draw_exhausted' && frame.tenpai?.[result.seat] ? '听牌' : '—');
+          : (frame.reason === REASON.DRAW_EXHAUSTED && frame.tenpai?.[result.seat] ? '听牌' : '—');
       const delta = result.delta_score;
       const total = isRiichi ? frame.points_after[result.seat] : result.match_total;
       const dealer = frame.dealer === result.seat ? '<em>亲</em>' : '';
@@ -418,12 +421,14 @@ export class UI {
       return;
     }
     const view = this.viewOf(win.seat, state);
+    // 贴图挂在独立的 .rsface 内层：被鸣张横放时只旋转这一层，外层仍按 64x46
+    // 占位。早先把 background-size 直接贴在变形的外层上，图案会被拉扁成「矮牌」。
     const face = (code, cls = '') => {
       const idx = DORA_INDEX.has(code) ? DORA_INDEX.get(code) : DORA_INDEX.get('back');
       const col = idx % 8;
       const row = Math.floor(idx / 8);
-      return `<i class="rstile${cls ? ` ${cls}` : ''}" style="background-image:url(${DORA_ATLAS_URL});`
-        + `background-size:800% 500%;background-position:${col / 7 * 100}% ${row / 4 * 100}%"></i>`;
+      return `<i class="rstile${cls ? ` ${cls}` : ''}"><i class="rsface" style="background-image:url(${DORA_ATLAS_URL});`
+        + `background-size:800% 500%;background-position:${col / 7 * 100}% ${row / 4 * 100}%"></i></i>`;
     };
 
     // 副露分组：被鸣的那张横置（meld.rotated 是 action_event 反查的下标）；
@@ -433,6 +438,7 @@ export class UI {
       const tiles = (meld.tiles || []).map((t) => (typeof t === 'string' ? t : 'back'));
       if (!tiles.length) return '';
       const inner = tiles.map((t, i) => {
+        // meld.kind 是渲染层 UI 别名（chi/pong/kong/ankan/kakan），非线协议字段，按硬规则 2 保留字符串
         const rotated = meld.kind !== 'ankan' && i === meld.rotated;
         return face(normTile(t) || t, rotated ? 'claim' : '');
       }).join('');

@@ -1,5 +1,6 @@
 // 结算期验收：v4.5 摊牌（results[].hand 扣副露 → revealHands）+ 日麻语音 cue 口径
 // + 摊牌渲染冒烟（真 three.js 驱动 OpponentHandsView，不开浏览器）
+import { FRAME_TYPE, MELD_TYPE } from '../../web/js/protocol_enums.js';
 
 // DOM/canvas stub：tile3d 的牌背纹理要 2d canvas；本测试不做 GL 渲染，够用
 globalThis.document = {
@@ -32,14 +33,14 @@ app.applySync({
   seats: [
     { seat: 1, hand_count: 13, melds: [] },
     { seat: 2, hand_count: 13, melds: [] },
-    { seat: 3, hand_count: 10, melds: [{ type: 'pong', tiles: ['5m', '5m', '5m'] }] },
+    { seat: 3, hand_count: 10, melds: [{ type: MELD_TYPE.PONG, tiles: ['5m', '5m', '5m'] }] },
     { seat: 0, hand_count: 13, melds: [] },
   ],
 });
 
 // 荒庄没人和牌 ⇒ 不摊牌（用户口径：只有和牌者亮牌）
 app.applyGameEnd({
-  type: 'game_end',
+  type: FRAME_TYPE.GAME_END,
   results: [
     { seat: 1, delta_score: 0, hand: ['1m', '2m', '3m', '4m', '5m', '6m', '7m', '8m', '9m', '1p', '2p', '3p', '4p'] },
     { seat: 3, delta_score: 0, hand: ['1s', '2s', '3s', '5m', '5m', '5m', '7z', '7z', '2p', '3p', '4p', '6z', '6z'] },
@@ -51,7 +52,7 @@ check('摊牌：荒庄无和牌者高亮', s.revealWinner, null);
 
 // 和牌者高亮换算到屏幕视角（本家协议 seat 1 和牌 → view 0）；只有和牌者亮
 app.applyGameEnd({
-  type: 'game_end',
+  type: FRAME_TYPE.GAME_END,
   win: { seat: 1, tsumo: false, han: 2 },
   results: [
     { seat: 1, delta_score: 2000, hand: ['1m', '2m', '3m'] },
@@ -65,7 +66,7 @@ check('摊牌：放炮者也不亮', s.revealHands[3], null);
 
 // 和牌者带副露：扁手牌扣掉碰出的 5m（对家 view2 的副露在 applySync 里已就位）
 app.applyGameEnd({
-  type: 'game_end',
+  type: FRAME_TYPE.GAME_END,
   win: { seat: 3, tsumo: true, han: 1 },
   results: [
     { seat: 3, delta_score: 1000,
@@ -76,7 +77,7 @@ check('摊牌：和牌者扣副露', s.revealHands[2],
   ['1s', '2s', '3s', '7z', '7z', '2p', '3p', '4p', '6z', '6z', '6z']);
 check('摊牌：他家暗杠 back 占位不会误删门前牌', (() => {
   // 给和牌家补一组暗杠占位（'back'），门前牌不应被减掉合法牌
-  s.melds.push({ seat: 2, kind: 'ankan', type: 'ankan', tiles: ['back', 'back', 'back', 'back'], rotated: -1 });
+  s.melds.push({ seat: 2, kind: 'ankan', type: MELD_TYPE.ANKAN, tiles: ['back', 'back', 'back', 'back'], rotated: -1 });
   const concealed = ['1s', '2s', '3s', '7z', '7z'];
   for (const meld of s.melds) {
     if (meld.seat !== 2) continue;
@@ -152,7 +153,7 @@ const s2 = app2.state;
 app2.startRound({ seat: 0, dealer: 0, round_index: 0, round_count: 4, hand: ['1m'] });
 for (let v = 1; v < 4; v++) s2.hands[v] = Array(13).fill('back');
 app2.applyGameEnd({
-  type: 'game_end',
+  type: FRAME_TYPE.GAME_END,
   win: { seat: 2, tsumo: true, han: 1 },
   results: [
     { seat: 0, delta_score: 0, hand: Array(13).fill('1m') },
@@ -202,6 +203,51 @@ check('面板：荒庄不显示和牌详情', ui.el.rsHand.hidden, true);
 // 缺数据（revealHands 为空）：给占位而不是崩
 ui.renderWinHand({ win: { seat: 1, tsumo: true, tile: '', han: 1, yaku: [] } }, s2);
 check('面板：数据缺失有占位', ui.el.rsHand.innerHTML.includes('rshand-empty'), true);
+
+// 副露被鸣张：碰 2s / 吃 4m（用户截图实锤）——每组恰好一张横放，
+// 且牌面贴图必须挂在独立内层上，否则会被 background-size 拉扁成「矮牌」。
+const claimState = {
+  mySeat: 0,
+  melds: [
+    { seat: 0, kind: 'pong', tiles: ['2s', '2s', '2s'], rotated: 0 },
+    { seat: 0, kind: 'chi', tiles: ['4m', '5m', '6m'], rotated: 0 },
+  ],
+  revealHands: [['7m', '7m', '3p', '0p', '5z', '5z', '5z'], null, null, null],
+};
+const claimFrame = { win: { seat: 0, tsumo: false, tile: '3s', han: 1, yaku: [] } };
+ui.renderWinHand(claimFrame, claimState);
+const claimHtml = ui.el.rsHand.innerHTML;
+check('面板：两组副露各有分组框', (claimHtml.match(/class="rsmeld"/g) || []).length, 2);
+check('面板：每组恰好一张被鸣牌横放', (claimHtml.match(/class="rstile claim"/g) || []).length, 2);
+check('面板：每张牌都有独立贴图内层',
+  (claimHtml.match(/class="rsface"/g) || []).length,
+  (claimHtml.match(/class="rstile/g) || []).length);
+check('面板：横放牌的贴图在内层而非外层',
+  claimHtml.includes('class="rstile claim"><i class="rsface"'), true);
+const claimStyles = [...claimHtml.matchAll(/class="rstile claim"><i class="rsface" style="([^"]*)"/g)]
+  .map((m) => m[1]);
+// 图集顺序走 config 的 ALL_CODES（与 tile-codes.json 同源），避免硬编码浮点百分比
+const { ALL_CODES } = await import('../../web/js/config.js');
+const bgPos = (code) => {
+  const idx = ALL_CODES.indexOf(code);
+  return `${(idx % 8) / 7 * 100}% ${Math.floor(idx / 8) / 4 * 100}%`;
+};
+check('面板：横放的是 2 条与 4 万',
+  claimStyles.length === 2
+    && claimStyles.some((s) => s.includes(`background-position:${bgPos('2s')}`))
+    && claimStyles.some((s) => s.includes(`background-position:${bgPos('4m')}`)), true);
+ui.renderWinHand(claimFrame, {
+  ...claimState,
+  melds: [...claimState.melds,
+    { seat: 0, kind: 'ankan', tiles: ['back', 'back', 'back', 'back'], rotated: -1 }],
+});
+check('面板：暗杠不参与横放', (ui.el.rsHand.innerHTML.match(/class="rstile claim"/g) || []).length, 2);
+const { readFile } = await import('node:fs/promises');
+const uiCss = await readFile(new URL('../../web/css/ui.css', import.meta.url), 'utf8');
+const claimRule = uiCss.match(/\.rstile\.claim\s*>\s*\.rsface\s*\{([^}]*)\}/)?.[1] || '';
+check('面板：横放牌面旋转 90°（与 3D 的 rot+1 一致）', claimRule.includes('rotate(90deg)'), true);
+check('面板：横放牌面保持 46x64 原始比例',
+  /width:\s*46px/.test(claimRule) && /height:\s*64px/.test(claimRule), true);
 
 console.log(`\n${pass} pass, ${fail} fail`);
 process.exit(fail ? 1 : 0);

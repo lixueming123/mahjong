@@ -36,7 +36,7 @@ json::Value MeldsToJson(const std::vector<Meld>& melds, bool red) {
   json::Value array = json::Value::Arr(melds.size());
   for (const Meld& meld : melds) {
     json::Value entry = json::Value::Obj(2);  // type, tiles
-    entry.Set("type", json::Value::Str(MeldTypeName(meld.type)));
+    entry.Set("type", json::Value::Int(protocol::WireOf(protocol::ToWire(meld.type))));
     entry.Set("tiles", TilesToJson(meld.tiles, red));
     array.Append(std::move(entry));
   }
@@ -47,7 +47,7 @@ json::Value OptionsToJson(const std::vector<Option>& options, bool red) {
   json::Value array = json::Value::Arr(options.size());
   for (const Option& option : options) {
     json::Value entry = json::Value::Obj(2);  // action, tiles
-    entry.Set("action", json::Value::Str(option.action));
+    entry.Set("action", json::Value::Int(protocol::WireOf(option.action)));
     entry.Set("tiles", TilesToJson(option.tiles, red));
     array.Append(std::move(entry));
   }
@@ -55,13 +55,12 @@ json::Value OptionsToJson(const std::vector<Option>& options, bool red) {
 }
 
 std::string BuildGameStartFrame(int for_seat, int dealer, int round_index, int round_count,
-                                const std::vector<Tile>& hand, GameMode mode,
-                                const std::array<int, kSeatCount>& points,
+                                const std::vector<Tile>& hand, GameMode mode, const std::array<int, kSeatCount>& points,
                                 const std::vector<Tile>& dora_indicators, int round_wind) {
   // PROTOCOL v1.6 §5.4：+round_index / round_count（低频场次信息，state_sync 不带，§5.9 性能注）。
   // 日麻追加：持点、宝牌指示牌、场风/自风（classic 下不写这些键，帧字节与之前一致）。
   json::Value frame = json::Value::Obj(mode == GameMode::kRiichi ? 10 : 6);
-  frame.Set("type", json::Value::Str("game_start"));
+  frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kGameStart)));
   frame.Set("seat", json::Value::Int(for_seat));
   frame.Set("dealer", json::Value::Int(dealer));
   frame.Set("round_index", json::Value::Int(round_index));
@@ -82,7 +81,7 @@ std::string BuildGameStartFrame(int for_seat, int dealer, int round_index, int r
 
 std::string BuildDrawFrame(Tile tile, int seat, uint64_t seq, bool red) {
   json::Value frame = json::Value::Obj(4);  // type, tile, seat, seq
-  frame.Set("type", json::Value::Str("draw"));
+  frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kDraw)));
   frame.Set("tile", json::Value::Str(FormatTile(tile, red)));
   frame.Set("seat", json::Value::Int(seat));
   frame.Set("seq", json::Value::Int(static_cast<int64_t>(seq)));
@@ -91,25 +90,22 @@ std::string BuildDrawFrame(Tile tile, int seat, uint64_t seq, bool red) {
 
 std::string BuildDiscardEventFrame(int seat, Tile tile, uint64_t seq, bool red) {
   json::Value frame = json::Value::Obj(4);  // type, seat, tile, seq
-  frame.Set("type", json::Value::Str("discard_event"));
+  frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kDiscardEvent)));
   frame.Set("seat", json::Value::Int(seat));
   frame.Set("tile", json::Value::Str(FormatTile(tile, red)));
   frame.Set("seq", json::Value::Int(static_cast<int64_t>(seq)));
   return frame.Dump();
 }
 
-std::string BuildActionRequestFrame(uint64_t seq, int64_t deadline_ms, std::string_view window,
-                                    const std::vector<Option>& options,
-                                    std::optional<Tile> claimed = std::nullopt,
-                                    bool red = false,
-                                    const std::vector<Tile>& riichi_tiles = {}) {
+std::string BuildActionRequestFrame(uint64_t seq, int64_t deadline_ms, protocol::Window window,
+                                    const std::vector<Option>& options, std::optional<Tile> claimed = std::nullopt,
+                                    bool red = false, const std::vector<Tile>& riichi_tiles = {}) {
   const bool has_riichi_tiles = !riichi_tiles.empty();
-  json::Value frame =
-      json::Value::Obj((claimed.has_value() ? 6 : 5) + (has_riichi_tiles ? 1 : 0));
-  frame.Set("type", json::Value::Str("action_request"));
+  json::Value frame = json::Value::Obj((claimed.has_value() ? 6 : 5) + (has_riichi_tiles ? 1 : 0));
+  frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kActionRequest)));
   frame.Set("seq", json::Value::Int(static_cast<int64_t>(seq)));
   frame.Set("deadline_ms", json::Value::Int(deadline_ms));
-  frame.Set("window", json::Value::Str(std::string(window)));
+  frame.Set("window", json::Value::Int(protocol::WireOf(window)));
   frame.Set("options", OptionsToJson(options, red));
   if (claimed.has_value()) {
     // 抢杠的那张牌不在任何人的牌河里，客户端没法从 state_sync 推出来，必须显式带上。
@@ -124,12 +120,12 @@ std::string BuildActionRequestFrame(uint64_t seq, int64_t deadline_ms, std::stri
   return frame.Dump();
 }
 
-std::string BuildActionEventFrame(int seat, std::string_view action, const std::vector<Tile>& tiles, int from_seat,
+std::string BuildActionEventFrame(int seat, protocol::Action action, const std::vector<Tile>& tiles, int from_seat,
                                   uint64_t seq, bool red) {
   json::Value frame = json::Value::Obj(6);  // type, seat, action, tiles, seq (+ from_seat)
-  frame.Set("type", json::Value::Str("action_event"));
+  frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kActionEvent)));
   frame.Set("seat", json::Value::Int(seat));
-  frame.Set("action", json::Value::Str(std::string(action)));
+  frame.Set("action", json::Value::Int(protocol::WireOf(action)));
   frame.Set("tiles", TilesToJson(tiles, red));
   if (from_seat >= 0) {  // a tsumo win MUST NOT carry from_seat (PROTOCOL.md §5.8)
     frame.Set("from_seat", json::Value::Int(from_seat));
@@ -138,11 +134,11 @@ std::string BuildActionEventFrame(int seat, std::string_view action, const std::
   return frame.Dump();
 }
 
-int ActionPriority(std::string_view action) {
-  if (action == "win") return 4;
-  if (action == "kong") return 3;
-  if (action == "pong") return 2;
-  if (action == "chow") return 1;
+int ActionPriority(protocol::Action action) {
+  if (action == protocol::Action::kWin) return 4;
+  if (action == protocol::Action::kKong) return 3;
+  if (action == protocol::Action::kPong) return 2;
+  if (action == protocol::Action::kChow) return 1;
   return -1;  // pass / anything else: no claim
 }
 
@@ -213,9 +209,9 @@ std::vector<Tile> TakeFaces(std::vector<Tile>* hand, Face face, int count) {
   return taken;
 }
 
-MeldType MeldTypeForAction(std::string_view action) {
-  if (action == "pong") return MeldType::kPong;
-  if (action == "chow") return MeldType::kChow;
+MeldType MeldTypeForAction(protocol::Action action) {
+  if (action == protocol::Action::kPong) return MeldType::kPong;
+  if (action == protocol::Action::kChow) return MeldType::kChow;
   return MeldType::kKong;
 }
 
@@ -361,7 +357,7 @@ void RoomActor::NotifyFinished(const Settlement& settlement) {
   GameSettlement finished;
   finished.room_id = room_id_;
   finished.reason = settlement.reason;
-  finished.mode = std::string(GameModeName(mode_));
+  finished.mode = ToWire(mode_);
   // C10：match_over = 「本场到此为止」（match_end 已/即将下发）；lobby 只据此 arm 回收。
   finished.match_over = !settlement.match_will_continue;
   // B3：场终快照随 match_over 的那次通知带出，lobby 据此写 match_results。
@@ -395,8 +391,10 @@ void RoomActor::NotifyFinished(const Settlement& settlement) {
 
 bool RoomActor::ScheduleAiAction(int64_t delay_ms) {
   if (!timeout_scheduler_) {
-    spdlog::error("room {}: no window timeout scheduler installed for the AI delay; "
-                  "deciding inline instead", room_id_);
+    spdlog::error(
+        "room {}: no window timeout scheduler installed for the AI delay; "
+        "deciding inline instead",
+        room_id_);
     return false;
   }
   // Same mechanism as OpenWindowTimer(), different tag: the token carries the current seq
@@ -414,7 +412,7 @@ stdexec::task<bool> RoomActor::BotDeclaresTsumo(int seat) {
   const std::vector<Meld>& melds = melds_[static_cast<size_t>(seat)];
   const std::vector<Option> options = DiscardOptionsFor(seat);
   const Tile winning = TsumoWinningTile(seat);
-  if (FindOption(options, "win") == nullptr || !IsWinShape(hand, melds, winning, /*is_tsumo=*/true)) {
+  if (FindOption(options, protocol::Action::kWin) == nullptr || !IsWinShape(hand, melds, winning, /*is_tsumo=*/true)) {
     co_return false;
   }
   discard_window_open_ = false;
@@ -485,12 +483,13 @@ void RoomActor::ResolveAutomatedClaimAnswers() {
     if (seats_[static_cast<size_t>(seat)].is_bot) {
       const Option choice = ChooseClaimAnswer(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)],
                                               claim_options_[static_cast<size_t>(seat)], claim_tile_);
-      answer.action = choice.action.empty() ? "pass" : choice.action;
+      answer.action = choice.action;
       answer.tiles = choice.tiles;
-    } else if (const Option* pass = FindOption(claim_options_[static_cast<size_t>(seat)], "pass"); pass != nullptr) {
+    } else if (const Option* pass = FindOption(claim_options_[static_cast<size_t>(seat)], protocol::Action::kPass);
+               pass != nullptr) {
       answer.action = pass->action;
     } else {
-      answer.action = "pass";
+      answer.action = protocol::Action::kPass;
     }
     answer.answered = true;
     claim_answers_[static_cast<size_t>(seat)] = std::move(answer);
@@ -500,7 +499,7 @@ void RoomActor::ResolveAutomatedClaimAnswers() {
 bool RoomActor::HasPendingHumanWin() const {
   for (int seat = 0; seat < kSeatCount; ++seat) {
     const ClaimAnswer& answer = claim_answers_[static_cast<size_t>(seat)];
-    if (answer.answered && answer.action == "win" && !seats_[static_cast<size_t>(seat)].is_bot) {
+    if (answer.answered && answer.action == protocol::Action::kWin && !seats_[static_cast<size_t>(seat)].is_bot) {
       return true;
     }
   }
@@ -539,16 +538,16 @@ stdexec::task<void> RoomActor::ReplyFrame(int seat, std::string frame) {
   co_await Deliver(std::move(frames));
 }
 
-stdexec::task<void> RoomActor::ReplyError(int seat, std::string_view code, std::string_view message) {
+stdexec::task<void> RoomActor::ReplyError(int seat, protocol::ErrorCode code, std::string_view message) {
   // PROTOCOL §7.2: the disconnect quota counts every error answered to a connection, so a
   // rejected room-level action is accounted too. The frame and the quota travel in ONE message,
   // which is what keeps "the frame is already queued" true before a quota can ask for a close.
   // ROOM_NOT_FOUND and INTERNAL are in neither bucket.
   QuotaKind quota = QuotaKind::kNone;
-  if (code == protocol::kCodeBadRequest) {
+  if (code == protocol::ErrorCode::kBadRequest) {
     quota = QuotaKind::kBadFrame;
-  } else if (code == protocol::kCodeNotYourTurn || code == protocol::kCodeNoPendingAction ||
-             code == protocol::kCodeIllegalAction || code == protocol::kCodeUnknownTile) {
+  } else if (code == protocol::ErrorCode::kNotYourTurn || code == protocol::ErrorCode::kNoPendingAction ||
+             code == protocol::ErrorCode::kIllegalAction || code == protocol::ErrorCode::kUnknownTile) {
     quota = QuotaKind::kIllegalOp;
   }
   const RoomSeat& room_seat = seats_[static_cast<size_t>(seat)];
@@ -622,7 +621,7 @@ json::Value RoomActor::BuildSeatsArray(int viewer) const {
     json::Value melds = json::Value::Arr(melds_[static_cast<size_t>(room_seat.seat)].size());
     for (const Meld& meld : melds_[static_cast<size_t>(room_seat.seat)]) {
       json::Value item = json::Value::Obj(2);  // type, tiles
-      item.Set("type", json::Value::Str(MeldTypeName(meld.type)));
+      item.Set("type", json::Value::Int(protocol::WireOf(protocol::ToWire(meld.type))));
       if (meld.type == MeldType::kAnkan && !reveal) {
         item.Set("tiles", json::Value::Arr(0));  // 他家视角：恒空数组
       } else {
@@ -649,7 +648,7 @@ std::string RoomActor::BuildStateSync(int for_seat, const std::string& seats_jso
   // 因此 state_sync 的字段集与 v1.6 完全一致（§11.2 的「state_sync.waits」是同一文档里的
   // 过期草案，§5.16/§8.1/§11.3 与客户端契约均以 tenpai 帧为准）。
   json::Value frame = json::Value::Obj(mode_ == GameMode::kRiichi ? 9 : 7);  // + points / dora_indicators
-  frame.Set("type", json::Value::Str("state_sync"));
+  frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kStateSync)));
   frame.Set("seq", json::Value::Int(static_cast<int64_t>(seq_)));
   frame.Set("remaining", json::Value::Int(remaining_));
   frame.Set("current_seat", json::Value::Int(current_seat_));
@@ -683,8 +682,7 @@ json::Value RoomActor::BuildTenpaiFrame(int seat) const {
   std::vector<Tile> faces;
   if (waiting_state) {
     // 日麻多认一种等待：国士无双（共享的 `WaitingTiles` 只认标准型 / 七对子）
-    faces = mode_ == GameMode::kRiichi ? riichi::RiichiWaitingTiles(concealed, melds)
-                                       : WaitingTiles(concealed, melds);
+    faces = mode_ == GameMode::kRiichi ? riichi::RiichiWaitingTiles(concealed, melds) : WaitingTiles(concealed, melds);
   }
   // 日麻（v1.13 §12.8）：`is_tenpai` 仍是**形式听牌**（流局罚符与立直资格都看它），
   // 但提示必须区分「形听」与「能和」——副露无役时形听却永远和不了。这里逐张按荣和口径
@@ -698,7 +696,7 @@ json::Value RoomActor::BuildTenpaiFrame(int seat) const {
     no_yaku = winning.empty();
   }
   if (!faces.empty()) {
-    FaceCounts visible{};
+    FaceCounts visible {};
     visible.fill(0);
     for (Tile tile : concealed) ++visible[FaceOf(tile)];
     for (int other = 0; other < kSeatCount; ++other) {
@@ -725,7 +723,7 @@ json::Value RoomActor::BuildTenpaiFrame(int seat) const {
   }
   const bool riichi_mode = mode_ == GameMode::kRiichi;
   json::Value frame = json::Value::Obj(riichi_mode ? 5 : 4);  // type, tenpai_seq, is_tenpai, waits (+ no_yaku)
-  frame.Set("type", json::Value::Str("tenpai"));
+  frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kTenpai)));
   frame.Set("tenpai_seq", json::Value::Int(static_cast<int64_t>(tenpai_seq_[static_cast<size_t>(seat)])));
   frame.Set("is_tenpai", json::Value::Bool(!faces.empty()));
   frame.Set("waits", std::move(waits));
@@ -745,8 +743,7 @@ stdexec::task<void> RoomActor::DeliverTenpai(int seat) {
   ++tenpai_seq_[static_cast<size_t>(seat)];  // 每座位独立计数，跨局不重置
   const auto started = std::chrono::steady_clock::now();
   const std::string frame = BuildTenpaiFrame(seat).Dump();
-  const double us =
-      std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - started).count();
+  const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - started).count();
   // PB-2 的 300 µs 是 classic 口径；日麻要多做一次「逐张判役」（v1.13 §12.8），
   // 九面听这类宽听最坏约 600 µs，故日麻用 1000 µs 的门槛，classic 仍按 300 µs 卡。
   const double budget_us = mode_ == GameMode::kRiichi ? 1000.0 : 300.0;
@@ -759,9 +756,8 @@ stdexec::task<void> RoomActor::DeliverTenpai(int seat) {
 }
 
 std::string RoomActor::BuildGameStart(int for_seat) const {
-  return BuildGameStartFrame(for_seat, dealer_, round_index_, round_count_,
-                             hands_[static_cast<size_t>(for_seat)], mode_, points_,
-                             dora_indicators_, round_wind_);
+  return BuildGameStartFrame(for_seat, dealer_, round_index_, round_count_, hands_[static_cast<size_t>(for_seat)],
+                             mode_, points_, dora_indicators_, round_wind_);
 }
 
 std::string RoomActor::BuildMatchEnd() const {
@@ -775,8 +771,8 @@ std::string RoomActor::BuildMatchEnd() const {
   std::array<Ranked, kSeatCount> standings {};
   for (int seat = 0; seat < kSeatCount; ++seat) {
     // 日麻按终局持点排名（25000 起），classic 按累计得失分
-    const int score = mode_ == GameMode::kRiichi ? points_[static_cast<size_t>(seat)]
-                                                 : match_totals_[static_cast<size_t>(seat)];
+    const int score =
+        mode_ == GameMode::kRiichi ? points_[static_cast<size_t>(seat)] : match_totals_[static_cast<size_t>(seat)];
     standings[static_cast<size_t>(seat)] = Ranked {seat, score, 1};
   }
   std::sort(standings.begin(), standings.end(), [](const Ranked& a, const Ranked& b) {
@@ -793,7 +789,7 @@ std::string RoomActor::BuildMatchEnd() const {
     standings[i].rank = rank;
   }
   json::Value frame = json::Value::Obj(4);  // type, hands_played, renchan_count, rankings
-  frame.Set("type", json::Value::Str("match_end"));
+  frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kMatchEnd)));
   // D2 裁决：hands_played = 实际计入局数 = round_index 终值 + 1（截断场），正常场 = round_count。
   // 恒等式「game_end 次数 = hands_played + renchan_count」在含 C15 截断的一切场景成立。
   frame.Set("hands_played", json::Value::Int(hands_played_));
@@ -812,11 +808,12 @@ std::string RoomActor::BuildMatchEnd() const {
 
 std::string RoomActor::BuildGameEnd(const Settlement& settlement) const {
   const bool riichi_mode = mode_ == GameMode::kRiichi;
-  json::Value frame = json::Value::Obj(riichi_mode ? 11 : 9);  // type, reason, round_index, dealer,
-                                            // renchan_count, match_will_continue, interlude_ms,
-                                            // results (+ win)；日麻再加 points_after / kyoutaku_award
-  frame.Set("type", json::Value::Str("game_end"));
-  frame.Set("reason", json::Value::Str(settlement.reason));
+  json::Value frame =
+      json::Value::Obj(riichi_mode ? 11 : 9);  // type, reason, round_index, dealer,
+                                               // renchan_count, match_will_continue, interlude_ms,
+                                               // results (+ win)；日麻再加 points_after / kyoutaku_award
+  frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kGameEnd)));
+  frame.Set("reason", json::Value::Int(protocol::WireOf(settlement.reason)));
   // v1.6 新增顶层字段：场次进度（game_end 是低频帧，state_sync 不带这些，§5.9 性能注）
   frame.Set("round_index", json::Value::Int(settlement.round_index));
   frame.Set("dealer", json::Value::Int(settlement.dealer));
@@ -963,7 +960,7 @@ stdexec::task<void> RoomActor::StartMatch() {
   match_totals_ = {};
   dealer_hands_ = {};  // B3：坐庄手数随场次清零
   tenpai_seq_ = {};    // v1.7 §5.16：tenpai_seq 从 1 起；跨局不重置，新场次才归零
-  dealer_ = 0;  // 首局庄家 = seat 0（GAME_DESIGN v1.10 §3.3）
+  dealer_ = 0;         // 首局庄家 = seat 0（GAME_DESIGN v1.10 §3.3）
   match_end_pending_ = false;
   // 日麻：起家 25000 点、无供托/本场；局数按 length（东场 4 / 半庄 8），classic 恒 4（C15）。
   if (mode_ == GameMode::kRiichi) {
@@ -1059,7 +1056,8 @@ stdexec::task<void> RoomActor::Pump() {
     switch (phase_) {
       case Phase::kIdle:
       case Phase::kRoundEnd:
-      case Phase::kMatchEnd: co_return;
+      case Phase::kMatchEnd:
+        co_return;
 
       case Phase::kTurnStart: {
         if (remaining_ <= 0) {
@@ -1159,16 +1157,16 @@ stdexec::task<void> RoomActor::OpenDiscardWindow(bool win_check, std::optional<T
     // 这里同时取走「立直宣言牌候选」，随帧下发（v1.21 §4.4）。
     options = DiscardOptionsFor(seat, &riichi_tiles);
   }
-  co_await ReplyFrame(seat, BuildActionRequestFrame(seq_, clock::EpochMs() + action_timeout_ms_, "discard", options,
-                                                    std::nullopt, mode_ == GameMode::kRiichi,
-                                                    riichi_tiles));
+  co_await ReplyFrame(
+      seat, BuildActionRequestFrame(seq_, clock::EpochMs() + action_timeout_ms_, protocol::Window::kDiscard, options,
+                                    std::nullopt, mode_ == GameMode::kRiichi, riichi_tiles));
   OpenWindowTimer();
 }
 
 stdexec::task<void> RoomActor::ApplyDiscard(int seat, Tile tile) {
   const uint64_t old_seq = seq_;
-  if (mode_ == GameMode::kRiichi && ippatsu_[static_cast<size_t>(seat)] &&
-      !ippatsu_armed_[static_cast<size_t>(seat)] && drawn_tile_.has_value()) {
+  if (mode_ == GameMode::kRiichi && ippatsu_[static_cast<size_t>(seat)] && !ippatsu_armed_[static_cast<size_t>(seat)] &&
+      drawn_tile_.has_value()) {
     ippatsu_[static_cast<size_t>(seat)] = false;  // 摸打一巡已过，一发失效
   }
   // 赤 5（v1.18）与普通 5 是两张**不同**的物理牌：优先按 id 精确移除，退不到再按牌面移。
@@ -1206,8 +1204,8 @@ stdexec::task<void> RoomActor::ApplyDiscard(int seat, Tile tile) {
     if (other == seat) {
       continue;
     }
-    options[static_cast<size_t>(other)] = ClaimOptionsFor(
-        other, tile, /*is_next_player=*/other == (seat + 1) % kSeatCount, /*from_seat=*/seat);
+    options[static_cast<size_t>(other)] =
+        ClaimOptionsFor(other, tile, /*is_next_player=*/other == (seat + 1) % kSeatCount, /*from_seat=*/seat);
     if (HasNonPassOption(options[static_cast<size_t>(other)])) {
       recipients[static_cast<size_t>(other)] = true;
       any_claim = true;
@@ -1227,8 +1225,8 @@ stdexec::task<void> RoomActor::ApplyDiscard(int seat, Tile tile) {
 }
 
 stdexec::task<void> RoomActor::OpenClaimWindow(int from_seat, Tile tile, const std::array<bool, kSeatCount>& recipients,
-                                const std::array<std::vector<Option>, kSeatCount>& options,
-                                bool chankan) {
+                                               const std::array<std::vector<Option>, kSeatCount>& options,
+                                               bool chankan) {
   claim_open_ = true;
   claim_chankan_ = chankan;
   claim_from_seat_ = from_seat;
@@ -1261,25 +1259,25 @@ stdexec::task<void> RoomActor::OpenClaimWindow(int from_seat, Tile tile, const s
       if (seats_[static_cast<size_t>(seat)].is_bot) {
         choice = ChooseClaimAnswer(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)],
                                    options[static_cast<size_t>(seat)], tile);
-      } else if (const Option* pass = FindOption(options[static_cast<size_t>(seat)], "pass"); pass != nullptr) {
+      } else if (const Option* pass = FindOption(options[static_cast<size_t>(seat)], protocol::Action::kPass);
+                 pass != nullptr) {
         choice = *pass;
       } else {
-        choice.action = "pass";
+        choice.action = protocol::Action::kPass;
       }
       ClaimAnswer answer;
       answer.answered = true;
-      answer.action = choice.action.empty() ? "pass" : choice.action;
+      answer.action = choice.action;
       answer.tiles = choice.tiles;
       claim_answers_[static_cast<size_t>(seat)] = std::move(answer);
       continue;
     }
     ++claim_pending_humans_;
     if (!seats_[static_cast<size_t>(seat)].endpoint.IsEmpty()) {
-      requests[static_cast<size_t>(seat)] =
-          BuildActionRequestFrame(seq_, clock::EpochMs() + action_timeout_ms_,
-                                  chankan ? "chankan" : "claim", options[static_cast<size_t>(seat)],
-                                  chankan ? std::optional<Tile>(tile) : std::nullopt,
-                                  mode_ == GameMode::kRiichi);
+      requests[static_cast<size_t>(seat)] = BuildActionRequestFrame(
+          seq_, clock::EpochMs() + action_timeout_ms_, chankan ? protocol::Window::kChankan : protocol::Window::kClaim,
+          options[static_cast<size_t>(seat)], chankan ? std::optional<Tile>(tile) : std::nullopt,
+          mode_ == GameMode::kRiichi);
     }
   }
   co_await Deliver(std::move(requests));
@@ -1300,12 +1298,12 @@ stdexec::task<void> RoomActor::OpenClaimWindow(int from_seat, Tile tile, const s
 Option RoomActor::ChooseClaimAnswer(const std::vector<Tile>& hand, const std::vector<Meld>& melds,
                                     const std::vector<Option>& options, Tile claimed) {
   Option pass;
-  if (const Option* declared = FindOption(options, "pass"); declared != nullptr) {
+  if (const Option* declared = FindOption(options, protocol::Action::kPass); declared != nullptr) {
     pass = *declared;
   } else {
-    pass.action = "pass";
+    pass.action = protocol::Action::kPass;
   }
-  if (const Option* win = FindOption(options, "win"); win != nullptr) {
+  if (const Option* win = FindOption(options, protocol::Action::kWin); win != nullptr) {
     return *win;  // never leave a win on the table
   }
 
@@ -1315,7 +1313,7 @@ Option RoomActor::ChooseClaimAnswer(const std::vector<Tile>& hand, const std::ve
 
   // Pong is considered first, so it keeps a tie against any chow combination (the frozen
   // claim priority is win > kong > pong > chow > pass).
-  if (const Option* pong = FindOption(options, "pong"); pong != nullptr) {
+  if (const Option* pong = FindOption(options, protocol::Action::kPong); pong != nullptr) {
     const std::vector<Tile> consume(2, claimed);
     if (const std::optional<int> after = ShantenAfterMeld(hand, melds, claimed, consume, MeldType::kPong);
         after.has_value() && *after <= before) {
@@ -1326,7 +1324,7 @@ Option RoomActor::ChooseClaimAnswer(const std::vector<Tile>& hand, const std::ve
   // Every chow combination is evaluated; the lowest post-meld shanten wins, ties keep the
   // order of |options| (ClaimOptions is frozen, so this stays deterministic).
   for (const Option& option : options) {
-    if (option.action != "chow") {
+    if (option.action != protocol::Action::kChow) {
       continue;
     }
     const std::optional<int> after = ShantenAfterMeld(hand, melds, claimed, option.tiles, MeldType::kChow);
@@ -1356,7 +1354,7 @@ stdexec::task<void> RoomActor::ResolveClaimWindow() {
   int best_seat = -1;
   int best_priority = -1;
   int best_distance = kSeatCount;
-  std::string best_action;
+  protocol::Action best_action = protocol::Action::kInvalid;
   std::vector<Tile> best_tiles;
   for (int seat = 0; seat < kSeatCount; ++seat) {
     if (!claim_recipient_[static_cast<size_t>(seat)] || !claim_answers_[static_cast<size_t>(seat)].answered) {
@@ -1385,10 +1383,10 @@ stdexec::task<void> RoomActor::ResolveClaimWindow() {
       if (!claim_recipient_[static_cast<size_t>(seat)]) {
         continue;
       }
-      if (FindOption(claim_options_[static_cast<size_t>(seat)], "win") == nullptr) {
+      if (FindOption(claim_options_[static_cast<size_t>(seat)], protocol::Action::kWin) == nullptr) {
         continue;
       }
-      if (claim_answers_[static_cast<size_t>(seat)].action != "win") {
+      if (claim_answers_[static_cast<size_t>(seat)].action != protocol::Action::kWin) {
         furiten_ever_[static_cast<size_t>(seat)] = true;
       }
     }
@@ -1403,7 +1401,7 @@ stdexec::task<void> RoomActor::ResolveClaimWindow() {
     if (chankan) {
       // 没人抢杠：加杠继续落地（补牌、翻宝牌、开打牌窗口都在 ApplySelfKan 里）。
       // 抢杠窗口自己的 seq 已经由开窗时的 Transition 拿到，这里不再转 —— ApplySelfKan 会转一次。
-      co_await ApplySelfKan(from_seat, "kakan", std::vector<Tile> {tile});
+      co_await ApplySelfKan(from_seat, protocol::Action::kKakan, std::vector<Tile> {tile});
       co_return;
     }
     // Everybody passed: the next player draws inside the new window.
@@ -1412,7 +1410,7 @@ stdexec::task<void> RoomActor::ResolveClaimWindow() {
     phase_ = Phase::kTurnStart;
     co_return;
   }
-  if (best_action == "win") {
+  if (best_action == protocol::Action::kWin) {
     if (chankan) {
       // 被抢杠：杠没成立，第 4 张从加杠者手里离开（随后 EndRoundWithWin 会把它放进和牌者手里）。
       RemoveOneTile(&hands_[static_cast<size_t>(from_seat)], tile);
@@ -1425,15 +1423,15 @@ stdexec::task<void> RoomActor::ResolveClaimWindow() {
   co_await ApplyMeld(best_seat, best_action, best_tiles, from_seat, tile);
 }
 
-stdexec::task<void> RoomActor::ApplyMeld(int seat, const std::string& action, const std::vector<Tile>& client_tiles,
-                                      int from_seat, Tile claimed_tile) {
+stdexec::task<void> RoomActor::ApplyMeld(int seat, protocol::Action action, const std::vector<Tile>& client_tiles,
+                                         int from_seat, Tile claimed_tile) {
   const Face claimed_face = FaceOf(claimed_tile);
   Meld meld;
   meld.type = MeldTypeForAction(action);
   std::vector<Tile> from_hand;
-  if (action == "pong") {
+  if (action == protocol::Action::kPong) {
     from_hand = TakeFaces(&hands_[static_cast<size_t>(seat)], claimed_face, 2);
-  } else if (action == "kong") {
+  } else if (action == protocol::Action::kKong) {
     from_hand = TakeFaces(&hands_[static_cast<size_t>(seat)], claimed_face, 3);
   } else {  // chow：客户端提交的两张就是要离开手牌的那两张（赤 5 走 id 精确匹配）
     for (Tile tile : client_tiles) {
@@ -1463,19 +1461,19 @@ stdexec::task<void> RoomActor::ApplyMeld(int seat, const std::string& action, co
 
   // Broadcast to all four seats (§5.8) with no seat-specific field, so one build serves them all.
   std::array<std::string, kSeatCount> events;
-  const std::string event = BuildActionEventFrame(seat, action, client_tiles, from_seat, old_seq,
-                                                  mode_ == GameMode::kRiichi);
+  const std::string event =
+      BuildActionEventFrame(seat, action, client_tiles, from_seat, old_seq, mode_ == GameMode::kRiichi);
   for (int target = 0; target < kSeatCount; ++target) {
     if (!seats_[static_cast<size_t>(target)].endpoint.IsEmpty()) {
       events[static_cast<size_t>(target)] = event;
     }
   }
   co_await Deliver(std::move(events));
-  spdlog::info("room {}: seat {} {} {} from seat {} (seq {} -> {})", room_id_, seat, action, FormatTile(claimed_tile),
-               from_seat, old_seq, seq_);
+  spdlog::info("room {}: seat {} {} {} from seat {} (seq {} -> {})", room_id_, seat, protocol::NameOf(action),
+               FormatTile(claimed_tile), from_seat, old_seq, seq_);
 
   std::optional<Tile> replacement;
-  if (action == "kong") {
+  if (action == protocol::Action::kKong) {
     if (remaining_ <= 0) {
       // No tile left for the replacement draw: the round ends (GAME_DESIGN §4.2 step 12).
       co_await EndRoundWithDraw();
@@ -1498,7 +1496,7 @@ stdexec::task<void> RoomActor::ApplyMeld(int seat, const std::string& action, co
   // v1.7 §5.16 T2：本家副露（含杠补牌）生效后重算听牌——此刻是 14 逻辑张（待打牌），
   // 因此实际下发的是「清空」信号（is_tenpai=false / waits: []），T1 会在打牌后补上真值。
   co_await DeliverTenpai(seat);
-  co_await OpenDiscardWindow(/*win_check=*/action == "kong", replacement);
+  co_await OpenDiscardWindow(/*win_check=*/action == protocol::Action::kKong, replacement);
 }
 
 // 抢杠窗口（v1.15）：加杠者之外的三家各拿一份「和 / 过」。只有真能和的家才收窗，
@@ -1514,13 +1512,13 @@ stdexec::task<void> RoomActor::OpenChankanWindow(int kan_seat, Tile tile) {
     const riichi::WinContext ctx = BuildRiichiContext(seat, kan_seat, /*tsumo=*/false, tile);
     options[static_cast<size_t>(seat)] = riichi::ChankanOptions(
         hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)], tile, ctx, IsFuriten(seat));
-    if (FindOption(options[static_cast<size_t>(seat)], "win") != nullptr) {
+    if (FindOption(options[static_cast<size_t>(seat)], protocol::Action::kWin) != nullptr) {
       recipients[static_cast<size_t>(seat)] = true;
       any_can_rob = true;
     }
   }
   if (!any_can_rob) {
-    co_await ApplySelfKan(kan_seat, "kakan", std::vector<Tile> {tile});
+    co_await ApplySelfKan(kan_seat, protocol::Action::kKakan, std::vector<Tile> {tile});
     co_return;
   }
   // 换 seq 再开窗：加杠者的打牌窗口刚被关掉，而它的超时令牌带的是**同一个** seq。
@@ -1532,11 +1530,10 @@ stdexec::task<void> RoomActor::OpenChankanWindow(int kan_seat, Tile tile) {
 // v1.6 自理杠（ankan / kakan，PROTOCOL §4.6）：仅本家打牌窗口可触发（HandleAction 已重算合法性）。
 // 张数公式逐字不变：一个杠在 melds 里仍是 1 组、账面 3 张，第 4 张由 kans 单独补回 ——
 // 三个杠的差别只在「第 4 张从哪来」，本函数只负责把它放进去并补摸 1 张。
-stdexec::task<void> RoomActor::ApplySelfKan(int seat, const std::string& action,
-                                         const std::vector<Tile>& client_tiles) {
+stdexec::task<void> RoomActor::ApplySelfKan(int seat, protocol::Action action, const std::vector<Tile>& client_tiles) {
   const Face face = FaceOf(client_tiles.front());
   std::optional<KongResult> result;
-  if (action == "ankan") {
+  if (action == protocol::Action::kAnkan) {
     result = ApplyAnkan(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)], face);
   } else {  // kakan：找到与该牌面同面的 pong 组（KakanMeldIndices 升序 ⇒ 第一个同面组，确定）
     for (int index : KakanMeldIndices(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)])) {
@@ -1549,7 +1546,8 @@ stdexec::task<void> RoomActor::ApplySelfKan(int seat, const std::string& action,
   }
   if (!result.has_value()) {
     // 理论不可达：HandleAction 已按 DiscardOptions 的窗口选项重算过合法性。
-    co_await ReplyError(seat, protocol::kCodeIllegalAction, action + " is not legal anymore");
+    co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction,
+                        std::string(protocol::NameOf(action)) + " is not legal anymore");
     co_return;
   }
   hands_[static_cast<size_t>(seat)] = std::move(result->hand);
@@ -1566,17 +1564,17 @@ stdexec::task<void> RoomActor::ApplySelfKan(int seat, const std::string& action,
   // PROTOCOL v1.7 §11.5 修正：`ankan` 的 `tiles` **恒为 []（对所有收件人，含暗杠者本人）**——
   // action_event 是广播帧，v1.6 带 [T] 等于把暗杠牌面告诉三家，绕过 state_sync 的打码；
   // 本家牌面不受损（紧随其后的 state_sync.melds[] 带 4 张真实牌面）。`kakan` 不变（公开动作）。
-  const std::vector<Tile> event_tiles = action == "ankan" ? std::vector<Tile> {} : client_tiles;
+  const std::vector<Tile> event_tiles = action == protocol::Action::kAnkan ? std::vector<Tile> {} : client_tiles;
   std::array<std::string, kSeatCount> events;
-  const std::string event = BuildActionEventFrame(seat, action, event_tiles, /*from_seat=*/-1, old_seq,
-                                                  mode_ == GameMode::kRiichi);
+  const std::string event =
+      BuildActionEventFrame(seat, action, event_tiles, /*from_seat=*/-1, old_seq, mode_ == GameMode::kRiichi);
   for (int target = 0; target < kSeatCount; ++target) {
     if (!seats_[static_cast<size_t>(target)].endpoint.IsEmpty()) {
       events[static_cast<size_t>(target)] = event;
     }
   }
   co_await Deliver(std::move(events));
-  spdlog::info("room {}: seat {} {} (seq {} -> {})", room_id_, seat, action, old_seq, seq_);
+  spdlog::info("room {}: seat {} {} (seq {} -> {})", room_id_, seat, protocol::NameOf(action), old_seq, seq_);
 
   // 立即补摸 1 张（无抢杠窗口，§0.4）；remaining 只能由 kTileCount - next_index_ 派生。
   if (remaining_ <= 0) {
@@ -1608,8 +1606,7 @@ stdexec::task<void> RoomActor::ApplySelfKan(int seat, const std::string& action,
 Tile RoomActor::DrawReplacementTile() {
   // 岭上补牌：日麻从王牌头部取一张，并用牌山山顶牌补满王牌（王牌恒 14 张）。
   // 王牌 0..3 是岭上牌，翻出 4 张之后退回普通摸牌路径（不越界到宝牌指示牌）。
-  if (mode_ != GameMode::kRiichi || dead_wall_.size() < 14 || dead_draw_index_ >= 4 ||
-      next_index_ >= drawable_end_) {
+  if (mode_ != GameMode::kRiichi || dead_wall_.size() < 14 || dead_draw_index_ >= 4 || next_index_ >= drawable_end_) {
     Tile tile = wall_[static_cast<size_t>(next_index_)];
     ++next_index_;
     remaining_ = drawable_end_ - next_index_;
@@ -1671,23 +1668,22 @@ std::vector<Option> RoomActor::DiscardOptionsFor(int seat, std::vector<Tile>* ri
   }
   // 立直后只放行「不改变听牌」的暗杠：判据要刚摸到的那张，只有当前行动座位才有。
   const std::optional<Tile> drawn = seat == current_seat_ ? drawn_tile_ : std::nullopt;
-  std::vector<Option> options =
-      riichi::DiscardOptions(hand, melds, remaining_, RiichiDeclared(seat), drawn);
+  std::vector<Option> options = riichi::DiscardOptions(hand, melds, remaining_, RiichiDeclared(seat), drawn);
   const Tile winning = TsumoWinningTile(seat);
-  if (FindOption(options, "win") != nullptr && !HasYakuForWin(seat, winning, /*tsumo=*/true, -1)) {
+  if (FindOption(options, protocol::Action::kWin) != nullptr && !HasYakuForWin(seat, winning, /*tsumo=*/true, -1)) {
     // 日麻无役不能和：把 win 从窗口里摘掉（客户端因此不会看到「胡」按钮）
     options.erase(std::remove_if(options.begin(), options.end(),
-                                 [](const Option& option) { return option.action == "win"; }),
+                                 [](const Option& option) { return option.action == protocol::Action::kWin; }),
                   options.end());
   }
   if (riichi_tiles != nullptr) {
     // v1.21：立直选项与「宣言牌候选」必须同时成立 —— 候选为空（振听 / 打了都不听）
     // 就把选项一并摘掉，别让玩家点开一个注定被拒的按钮。
     std::vector<Tile> candidates = RiichiDiscardTilesFor(seat);
-    const bool offer = FindOption(options, "riichi") != nullptr && !candidates.empty();
+    const bool offer = FindOption(options, protocol::Action::kRiichi) != nullptr && !candidates.empty();
     if (!offer) {
       options.erase(std::remove_if(options.begin(), options.end(),
-                                   [](const Option& option) { return option.action == "riichi"; }),
+                                   [](const Option& option) { return option.action == protocol::Action::kRiichi; }),
                     options.end());
     }
     *riichi_tiles = offer ? std::move(candidates) : std::vector<Tile> {};
@@ -1695,33 +1691,32 @@ std::vector<Option> RoomActor::DiscardOptionsFor(int seat, std::vector<Tile>* ri
   return options;
 }
 
-std::vector<Option> RoomActor::ClaimOptionsFor(int seat, Tile tile, bool is_next_player,
-                                               int from_seat) const {
+std::vector<Option> RoomActor::ClaimOptionsFor(int seat, Tile tile, bool is_next_player, int from_seat) const {
   const std::vector<Tile>& hand = hands_[static_cast<size_t>(seat)];
   const std::vector<Meld>& melds = melds_[static_cast<size_t>(seat)];
   if (mode_ != GameMode::kRiichi) {
     return ClaimOptions(hand, melds, tile, remaining_, is_next_player);
   }
-  std::vector<Option> options =
-      riichi::ClaimOptions(hand, melds, tile, remaining_, is_next_player, IsFuriten(seat));
+  std::vector<Option> options = riichi::ClaimOptions(hand, melds, tile, remaining_, is_next_player, IsFuriten(seat));
   if (RiichiDeclared(seat)) {
     // 立直后手牌锁定：吃/碰/杠一律不可（只保留 win / pass）
     options.erase(std::remove_if(options.begin(), options.end(),
                                  [](const Option& option) {
-                                   return option.action != "win" && option.action != "pass";
+                                   return option.action != protocol::Action::kWin &&
+                                          option.action != protocol::Action::kPass;
                                  }),
                   options.end());
   }
-  if (FindOption(options, "win") != nullptr && !HasYakuForWin(seat, tile, /*tsumo=*/false, from_seat)) {
+  if (FindOption(options, protocol::Action::kWin) != nullptr &&
+      !HasYakuForWin(seat, tile, /*tsumo=*/false, from_seat)) {
     options.erase(std::remove_if(options.begin(), options.end(),
-                                 [](const Option& option) { return option.action == "win"; }),
+                                 [](const Option& option) { return option.action == protocol::Action::kWin; }),
                   options.end());
   }
   return options;
 }
 
-bool RoomActor::HasYakuForWin(int seat, Tile winning_tile, bool tsumo, int from_seat,
-                               bool is_chankan) const {
+bool RoomActor::HasYakuForWin(int seat, Tile winning_tile, bool tsumo, int from_seat, bool is_chankan) const {
   if (mode_ != GameMode::kRiichi) {
     return true;
   }
@@ -1730,13 +1725,12 @@ bool RoomActor::HasYakuForWin(int seat, Tile winning_tile, bool tsumo, int from_
     hand.push_back(winning_tile);  // 荣和：和牌张还在对方牌河里
   }
   SortTiles(hand);
-  const riichi::WinContext ctx =
-      BuildRiichiContext(seat, from_seat, tsumo, winning_tile, is_chankan);
+  const riichi::WinContext ctx = BuildRiichiContext(seat, from_seat, tsumo, winning_tile, is_chankan);
   return !riichi::DetectYaku(hand, melds_[static_cast<size_t>(seat)], winning_tile, ctx).empty();
 }
 
-bool RoomActor::IsWinShape(const std::vector<Tile>& concealed, const std::vector<Meld>& melds,
-                           Tile winning_tile, bool tsumo) const {
+bool RoomActor::IsWinShape(const std::vector<Tile>& concealed, const std::vector<Meld>& melds, Tile winning_tile,
+                           bool tsumo) const {
   if (mode_ == GameMode::kRiichi) {
     return riichi::IsRiichiWinningHand(concealed, melds, winning_tile, tsumo);
   }
@@ -1750,8 +1744,7 @@ bool RoomActor::IsFuriten(int seat) const {
   if (furiten_ever_[static_cast<size_t>(seat)]) {
     return true;  // 见逃：本局内不可再荣和
   }
-  return riichi::IsPermanentFuriten(hands_[static_cast<size_t>(seat)],
-                                    melds_[static_cast<size_t>(seat)],
+  return riichi::IsPermanentFuriten(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)],
                                     discards_[static_cast<size_t>(seat)]);
 }
 
@@ -1797,8 +1790,8 @@ stdexec::task<void> RoomActor::DeclareRiichi(int seat) {
   // 广播「发生了立直」：立直棒与横置是公开信息，前端据此起动画；权威状态在
   // state_sync.seats[].riichi（紧随其后的打牌广播会带上）。tiles 恒空、不带 from_seat。
   std::array<std::string, kSeatCount> events;
-  const std::string event = BuildActionEventFrame(seat, "riichi", {}, /*from_seat=*/-1, seq_,
-                                                  mode_ == GameMode::kRiichi);
+  const std::string event =
+      BuildActionEventFrame(seat, protocol::Action::kRiichi, {}, /*from_seat=*/-1, seq_, mode_ == GameMode::kRiichi);
   for (int target = 0; target < kSeatCount; ++target) {
     if (!seats_[static_cast<size_t>(target)].endpoint.IsEmpty()) {
       events[static_cast<size_t>(target)] = event;
@@ -1819,8 +1812,8 @@ bool RoomActor::BotShouldRiichi(int seat) const {
   return points_[static_cast<size_t>(seat)] >= riichi::kRiichiStickPoints;
 }
 
-riichi::WinContext RoomActor::BuildRiichiContext(int winner_seat, int from_seat, bool tsumo,
-                                                 Tile winning_tile, bool is_chankan) const {
+riichi::WinContext RoomActor::BuildRiichiContext(int winner_seat, int from_seat, bool tsumo, Tile winning_tile,
+                                                 bool is_chankan) const {
   riichi::WinContext ctx;
   ctx.winner_seat = winner_seat;
   ctx.from_seat = tsumo ? -1 : from_seat;
@@ -1830,17 +1823,15 @@ riichi::WinContext RoomActor::BuildRiichiContext(int winner_seat, int from_seat,
   ctx.seat_wind = riichi::SeatWindOf(round_wind_, winner_seat, dealer_);
   ctx.is_riichi = riichi_[static_cast<size_t>(winner_seat)];
   ctx.is_ippatsu = ippatsu_[static_cast<size_t>(winner_seat)];
-  ctx.is_rinshan =
-      tsumo && kong_draw_tile_.has_value() && FaceOf(*kong_draw_tile_) == FaceOf(winning_tile);
+  ctx.is_rinshan = tsumo && kong_draw_tile_.has_value() && FaceOf(*kong_draw_tile_) == FaceOf(winning_tile);
   ctx.is_chankan = is_chankan;
   // 天和 / 地和（v1.17）：第一巡自摸。用「牌河/副露是否为空」判定，不另维护回合计数 ——
   // 一个座位打牌一定早于它的下一次摸牌，所以「本家牌河为空」就等价于「这仍是它的第一巡」。
   if (tsumo) {
     const bool no_discards =
-        std::all_of(discards_.begin(), discards_.end(),
-                    [](const std::vector<Tile>& river) { return river.empty(); });
-    const bool no_melds = std::all_of(melds_.begin(), melds_.end(),
-                                      [](const std::vector<Meld>& list) { return list.empty(); });
+        std::all_of(discards_.begin(), discards_.end(), [](const std::vector<Tile>& river) { return river.empty(); });
+    const bool no_melds =
+        std::all_of(melds_.begin(), melds_.end(), [](const std::vector<Meld>& list) { return list.empty(); });
     if (winner_seat == dealer_) {
       ctx.is_tenhou = no_discards && no_melds;
     } else {
@@ -1883,7 +1874,7 @@ Tile RoomActor::TsumoWinningTile(int seat) const {
 }
 
 stdexec::task<void> RoomActor::EndRoundWithWin(int winner_seat, int from_seat, Tile winning_tile, bool tsumo,
-                                             bool is_chankan) {
+                                               bool is_chankan) {
   const uint64_t old_seq = seq_;
   if (!tsumo) {
     // Ron: the winning tile completes the winner's hand (it stays visible in the river).
@@ -1897,10 +1888,8 @@ stdexec::task<void> RoomActor::EndRoundWithWin(int winner_seat, int from_seat, T
   riichi::ScoreResult riichi_score;
   bool was_riichi = false;
   if (mode_ == GameMode::kRiichi) {
-    const riichi::WinContext ctx =
-        BuildRiichiContext(winner_seat, from_seat, tsumo, winning_tile, is_chankan);
-    riichi_score = riichi::ScoreHand(concealed, melds_[static_cast<size_t>(winner_seat)],
-                                     winning_tile, ctx);
+    const riichi::WinContext ctx = BuildRiichiContext(winner_seat, from_seat, tsumo, winning_tile, is_chankan);
+    riichi_score = riichi::ScoreHand(concealed, melds_[static_cast<size_t>(winner_seat)], winning_tile, ctx);
     was_riichi = ctx.is_riichi;
     score.delta = riichi_score.delta;
     score.han = riichi_score.han;
@@ -1927,7 +1916,7 @@ stdexec::task<void> RoomActor::EndRoundWithWin(int winner_seat, int from_seat, T
   kong_draw_tile_.reset();
 
   Settlement settlement;
-  settlement.reason = tsumo ? "win_tsumo" : "win_ron";
+  settlement.reason = tsumo ? protocol::RoundEndReason::kWinTsumo : protocol::RoundEndReason::kWinRon;
   settlement.winner_seat = winner_seat;
   settlement.winner_flat_hand = concealed;
   for (const Meld& meld : melds_[static_cast<size_t>(winner_seat)]) {
@@ -1967,9 +1956,9 @@ stdexec::task<void> RoomActor::EndRoundWithWin(int winner_seat, int from_seat, T
     settlement.aka_dora = riichi_score.aka;
     settlement.dora_indicators = dora_indicators_;
     settlement.dealer_bonus = winner_seat == dealer_ ? 1 : 0;
-    settlement.rinshan = riichi_score.yaku.size() > 0 &&
-                         std::any_of(riichi_score.yaku.begin(), riichi_score.yaku.end(),
-                                     [](const riichi::Yaku& item) { return item.id == "rinshan"; });
+    settlement.rinshan =
+        riichi_score.yaku.size() > 0 && std::any_of(riichi_score.yaku.begin(), riichi_score.yaku.end(),
+                                                    [](const riichi::Yaku& item) { return item.id == "rinshan"; });
     settlement.yaku.clear();
     for (const riichi::Yaku& item : riichi_score.yaku) {
       settlement.yaku.push_back(Yaku {item.id, item.han});
@@ -2002,8 +1991,8 @@ stdexec::task<void> RoomActor::EndRoundWithWin(int winner_seat, int from_seat, T
 
   // Broadcast to all four seats (§5.8) with no seat-specific field, so one build serves them all.
   std::array<std::string, kSeatCount> events;
-  const std::string event = BuildActionEventFrame(winner_seat, "win", {winning_tile}, tsumo ? -1 : from_seat,
-                                                  old_seq, mode_ == GameMode::kRiichi);
+  const std::string event = BuildActionEventFrame(winner_seat, protocol::Action::kWin, {winning_tile},
+                                                  tsumo ? -1 : from_seat, old_seq, mode_ == GameMode::kRiichi);
   for (int target = 0; target < kSeatCount; ++target) {
     if (!seats_[static_cast<size_t>(target)].endpoint.IsEmpty()) {
       events[static_cast<size_t>(target)] = event;
@@ -2026,14 +2015,13 @@ stdexec::task<void> RoomActor::EndRoundWithDraw() {
 
   const ScoreResult score = ScoreDraw();
   Settlement settlement;
-  settlement.reason = "draw_exhausted";
+  settlement.reason = protocol::RoundEndReason::kDrawExhausted;
   settlement.winner_seat = -1;
   if (mode_ == GameMode::kRiichi) {
     // 荒庄时四家都是 13 张等待态：逐家判听牌，再按 3000 点平摊收付。
     for (int seat = 0; seat < kSeatCount; ++seat) {
       settlement.tenpai[static_cast<size_t>(seat)] =
-          !riichi::RiichiWaitingTiles(hands_[static_cast<size_t>(seat)],
-                                      melds_[static_cast<size_t>(seat)]).empty();
+          !riichi::RiichiWaitingTiles(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)]).empty();
     }
     draw_dealer_tenpai_ = settlement.tenpai[static_cast<size_t>(dealer_)];
     settlement.delta = riichi::DrawPenalty(settlement.tenpai);
@@ -2109,8 +2097,8 @@ stdexec::task<void> RoomActor::AdvanceAfterRound(Settlement& settlement, const S
   settlement.match_will_continue = !match_over;
   settlement.renchan_count = renchan_count_;
   if (busted) {
-    spdlog::info("room {}: match over by bust (round_index={}, points={},{},{},{})", room_id_,
-                 settlement.round_index, points_[0], points_[1], points_[2], points_[3]);
+    spdlog::info("room {}: match over by bust (round_index={}, points={},{},{},{})", room_id_, settlement.round_index,
+                 points_[0], points_[1], points_[2], points_[3]);
   }
 
   // v1.20（雀魂口径）：**场终时台面上的立直棒归一位**。
@@ -2132,8 +2120,8 @@ stdexec::task<void> RoomActor::AdvanceAfterRound(Settlement& settlement, const S
       settlement.kyoutaku_award = award.sticks;
       settlement.kyoutaku_award_seat = award.seat;
       kyoutaku_ = 0;
-      spdlog::info("room {}: match over, {} leftover riichi stick(s) awarded to seat {} (+{} points)",
-                   room_id_, award.sticks, award.seat, award.points);
+      spdlog::info("room {}: match over, {} leftover riichi stick(s) awarded to seat {} (+{} points)", room_id_,
+                   award.sticks, award.seat, award.points);
     }
   }
   if (match_over) {
@@ -2145,8 +2133,8 @@ stdexec::task<void> RoomActor::AdvanceAfterRound(Settlement& settlement, const S
 
   co_await BroadcastSettlement(settlement);  // game_end（局终帧，一场 4..8 次）
   spdlog::info("room {}: round over (reason={}, round_index={}, dealer={}, winner={}, R={}, han={}, seq {} -> {})",
-               room_id_, settlement.reason, settlement.round_index, settlement.dealer, settlement.winner_seat,
-               score.multiplier, settlement.han, seq_, seq_);
+               room_id_, protocol::NameOf(settlement.reason), settlement.round_index, settlement.dealer,
+               settlement.winner_seat, score.multiplier, settlement.han, seq_, seq_);
 
   NotifyFinished(settlement);  // C10：逐局通知；lobby 只在 match_over 时回收
   if (!match_over) {
@@ -2196,15 +2184,14 @@ stdexec::task<void> RoomActor::FinishMatch() {
     }
   }
   co_await Deliver(std::move(frames));
-  spdlog::info("room {}: match over (rounds={}, renchan={}, hands_played={})", room_id_, round_index_,
-               renchan_count_, hands_played_);
+  spdlog::info("room {}: match over (rounds={}, renchan={}, hands_played={})", room_id_, round_index_, renchan_count_,
+               hands_played_);
 }
 
 // match_end.rankings 的 rank（并列跳号）；D2/B3：场终快照与 match_end 必须同源，故独立成函数。
 std::array<int, kSeatCount> RoomActor::ComputeFinalRanks() const {
   // classic：按累计得失分；日麻：按终局持点（25000 起，不可与零和得失分混排）
-  const std::array<int, kSeatCount>& source =
-      mode_ == GameMode::kRiichi ? points_ : match_totals_;
+  const std::array<int, kSeatCount>& source = mode_ == GameMode::kRiichi ? points_ : match_totals_;
   std::array<int, kSeatCount> ranks {};
   for (int seat = 0; seat < kSeatCount; ++seat) {
     int rank = 1;
@@ -2269,8 +2256,7 @@ stdexec::task<void> RoomActor::OnWindowTimeout(uint64_t token) {
   if (round_advance) {
     if (phase_ == Phase::kRoundEnd && round_advance_pending_) {
       round_advance_pending_ = false;
-      spdlog::info("room {}: inter-hand delay elapsed, starting round {} (dealer={})", room_id_, round_index_,
-                   dealer_);
+      spdlog::info("room {}: inter-hand delay elapsed, starting round {} (dealer={})", room_id_, round_index_, dealer_);
       co_await StartRound();
     }
     co_return;
@@ -2280,8 +2266,8 @@ stdexec::task<void> RoomActor::OnWindowTimeout(uint64_t token) {
   if (match_end) {
     if (phase_ == Phase::kRoundEnd && match_end_pending_) {
       match_end_pending_ = false;
-      spdlog::info("room {}: broadcast window elapsed, finishing match (rounds={}, hands_played={})",
-                   room_id_, round_index_, hands_played_);
+      spdlog::info("room {}: broadcast window elapsed, finishing match (rounds={}, hands_played={})", room_id_,
+                   round_index_, hands_played_);
       co_await FinishMatch();
     }
     co_return;
@@ -2312,7 +2298,7 @@ stdexec::task<void> RoomActor::OnWindowTimeout(uint64_t token) {
       if (claim_recipient_[static_cast<size_t>(seat)] && !claim_answers_[static_cast<size_t>(seat)].answered) {
         ClaimAnswer answer;
         answer.answered = true;
-        answer.action = "pass";
+        answer.action = protocol::Action::kPass;
         claim_answers_[static_cast<size_t>(seat)] = std::move(answer);
       }
     }
@@ -2339,7 +2325,7 @@ stdexec::task<void> RoomActor::Sync(PlayerInfo player) {
     co_return;
   }
   if (!game_started_) {
-    co_await ReplyError(seat, protocol::kCodeInternal, "the game has not started yet");
+    co_await ReplyError(seat, protocol::ErrorCode::kInternal, "the game has not started yet");
     co_return;
   }
   co_await ReplyFrame(seat, BuildStateSync(seat));
@@ -2361,7 +2347,7 @@ stdexec::task<void> RoomActor::OnPlayerDisconnected(PlayerInfo player) {
       !claim_answers_[static_cast<size_t>(seat)].answered) {
     ClaimAnswer answer;
     answer.answered = true;
-    answer.action = "pass";
+    answer.action = protocol::Action::kPass;
     claim_answers_[static_cast<size_t>(seat)] = std::move(answer);
     --claim_pending_humans_;
   }
@@ -2381,23 +2367,26 @@ stdexec::task<void> RoomActor::HandleGameFrame(PlayerInfo player, json::Value fr
     co_return;
   }
   if (phase_ == Phase::kRoundEnd) {
-    co_await ReplyError(seat, protocol::kCodeBadRequest, "the round has ended; wait for the next game_start");
+    co_await ReplyError(seat, protocol::ErrorCode::kBadRequest, "the round has ended; wait for the next game_start");
     co_return;
   }
+  // v2.0：type 已由 frame_parser 校验为 1..27 的整数线值（§1.3.1）；这里再取一次只为记日志，
+  // 房间只路由它拥有的两条对局帧（§4.5/§6.3 的游戏级检查在各 Handle* 里做）。
   const json::Value* type = frame.Find("type");
   const json::Value* seq_value = frame.Find("seq");
-  if (type == nullptr || !type->IsString() || seq_value == nullptr || !seq_value->IsInteger()) {
+  if (type == nullptr || !type->IsInteger() || seq_value == nullptr || !seq_value->IsInteger()) {
     co_return;  // PlayerActor already answers BAD_REQUEST for a malformed frame
   }
   const uint64_t seq = static_cast<uint64_t>(seq_value->AsInt());
   if (seq != seq_) {
     // PROTOCOL.md §6.3: a reply for a window that already moved on is dropped silently.
-    spdlog::debug("room {}: stale {} (seq {} != {}) dropped", room_id_, type->AsString(), seq, seq_);
+    spdlog::debug("room {}: stale {} (seq {} != {}) dropped", room_id_, type->AsInt(), seq, seq_);
     co_return;
   }
-  if (type->AsString() == "discard") {
+  const std::optional<protocol::FrameType> frame_type = protocol::ParseFrameType(type->AsInt());
+  if (frame_type == protocol::FrameType::kDiscard) {
     co_await HandleDiscard(seat, std::move(frame));
-  } else if (type->AsString() == "action") {
+  } else if (frame_type == protocol::FrameType::kAction) {
     co_await HandleAction(seat, std::move(frame));
   }
 }
@@ -2405,30 +2394,28 @@ stdexec::task<void> RoomActor::HandleGameFrame(PlayerInfo player, json::Value fr
 stdexec::task<void> RoomActor::HandleDiscard(int seat, json::Value frame) {
   const json::Value* tile_value = frame.Find("tile");
   if (phase_ != Phase::kDiscardWindow || !discard_window_open_ || seat != current_seat_) {
-    co_await ReplyError(seat, protocol::kCodeNotYourTurn, "there is no discard window for you");
+    co_await ReplyError(seat, protocol::ErrorCode::kNotYourTurn, "there is no discard window for you");
     co_return;
   }
   if (tile_value == nullptr || !tile_value->IsString()) {
-    co_await ReplyError(seat, protocol::kCodeBadRequest, "discard requires a string \"tile\"");
+    co_await ReplyError(seat, protocol::ErrorCode::kBadRequest, "discard requires a string \"tile\"");
     co_return;
   }
   std::optional<Tile> tile = ParseTile(tile_value->AsString());
   // 赤 5（`0m`/`0p`/`0s`）必须真的在手里那一张；普通 `5m` 只要求牌面在手（可能是赤牌那张）。
   const bool holds_tile =
       tile.has_value() &&
-      (IsRedFive(*tile)
-           ? std::find(hands_[static_cast<size_t>(seat)].begin(),
-                       hands_[static_cast<size_t>(seat)].end(), *tile) !=
-                 hands_[static_cast<size_t>(seat)].end()
-           : HandHasFace(hands_[static_cast<size_t>(seat)], FaceOf(*tile)));
+      (IsRedFive(*tile) ? std::find(hands_[static_cast<size_t>(seat)].begin(), hands_[static_cast<size_t>(seat)].end(),
+                                    *tile) != hands_[static_cast<size_t>(seat)].end()
+                        : HandHasFace(hands_[static_cast<size_t>(seat)], FaceOf(*tile)));
   if (!tile.has_value() || !holds_tile) {
-    co_await ReplyError(seat, protocol::kCodeUnknownTile, "tile is not in your hand: " + tile_value->AsString());
+    co_await ReplyError(seat, protocol::ErrorCode::kUnknownTile, "tile is not in your hand: " + tile_value->AsString());
     co_return;
   }
   if (mode_ == GameMode::kRiichi && RiichiDeclared(seat) && drawn_tile_.has_value() &&
       FaceOf(*tile) != FaceOf(*drawn_tile_)) {
     // 立直后手牌锁定：只能把刚摸到的那张打出去（摸切）。宣言那一条走 action{riichi}，不经过这里。
-    co_await ReplyError(seat, protocol::kCodeIllegalAction,
+    co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction,
                         "after riichi you may only discard the tile you drew");
     co_return;
   }
@@ -2440,38 +2427,45 @@ stdexec::task<void> RoomActor::HandleDiscard(int seat, json::Value frame) {
 stdexec::task<void> RoomActor::HandleAction(int seat, json::Value frame) {
   const json::Value* action_value = frame.Find("action");
   const json::Value* tiles_value = frame.Find("tiles");
-  if (action_value == nullptr || !action_value->IsString() || tiles_value == nullptr || !tiles_value->IsArray()) {
-    co_await ReplyError(seat, protocol::kCodeBadRequest, "action requires \"action\" and \"tiles\"");
+  if (action_value == nullptr || !action_value->IsInteger() || tiles_value == nullptr || !tiles_value->IsArray()) {
+    co_await ReplyError(seat, protocol::ErrorCode::kBadRequest, "action requires \"action\" and \"tiles\"");
     co_return;
   }
   std::vector<Tile> tiles;
   for (const json::Value& entry : tiles_value->AsArray()) {
     if (!entry.IsString()) {
-      co_await ReplyError(seat, protocol::kCodeBadRequest, "\"tiles\" must only contain strings");
+      co_await ReplyError(seat, protocol::ErrorCode::kBadRequest, "\"tiles\" must only contain strings");
       co_return;
     }
     std::optional<Tile> tile = ParseTile(entry.AsString());
     if (!tile.has_value()) {
-      co_await ReplyError(seat, protocol::kCodeUnknownTile, "invalid tile code: " + entry.AsString());
+      co_await ReplyError(seat, protocol::ErrorCode::kUnknownTile, "invalid tile code: " + entry.AsString());
       co_return;
     }
     tiles.push_back(*tile);
   }
-  const std::string action = action_value->AsString();
+  // frame_parser 已把未知动作拦成 BAD_REQUEST；这里再解析一次拿枚举，后续全部按枚举判定。
+  const std::optional<protocol::Action> parsed_action = protocol::ParseAction(action_value->AsInt());
+  if (!parsed_action.has_value()) {
+    co_await ReplyError(seat, protocol::ErrorCode::kBadRequest,
+                        "unknown action: " + std::to_string(action_value->AsInt()));
+    co_return;
+  }
+  const protocol::Action action = *parsed_action;
 
   if (phase_ == Phase::kDiscardWindow && discard_window_open_) {
     // H1 (v1.6): a discard window accepts `discard`, or an action **in the window's options**
     // (`win` / `ankan` / `kakan`); `pass` is still ILLEGAL_ACTION.
     if (seat != current_seat_) {
-      co_await ReplyError(seat, protocol::kCodeNoPendingAction, "the discard window belongs to another seat");
+      co_await ReplyError(seat, protocol::ErrorCode::kNoPendingAction, "the discard window belongs to another seat");
       co_return;
     }
-    if (action == "ankan" || action == "kakan") {
+    if (action == protocol::Action::kAnkan || action == protocol::Action::kKakan) {
       // v1.6 自理杠（PROTOCOL §4.6）：只在打牌窗口、tiles 恰 1 个牌面元素、以窗口 options 为准，
       // 且按规则库重算合法性（§871）。合法性由 DiscardOptions 已含 remaining ≥ 1 守卫。
       if (tiles.size() != 1) {
-        co_await ReplyError(seat, protocol::kCodeIllegalAction,
-                            action + " must carry exactly one tile face");
+        co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction,
+                            std::string(protocol::NameOf(action)) + " must carry exactly one tile face");
         co_return;
       }
       const std::vector<Tile>& hand = hands_[static_cast<size_t>(seat)];
@@ -2480,12 +2474,12 @@ stdexec::task<void> RoomActor::HandleAction(int seat, json::Value frame) {
       const std::vector<Option> options = DiscardOptionsFor(seat);
       const Option* option = FindOption(options, action);
       if (option == nullptr || !SameFaceMultiset(tiles, option->tiles)) {
-        co_await ReplyError(seat, protocol::kCodeIllegalAction,
-                            action + " is not available in this window");
+        co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction,
+                            std::string(protocol::NameOf(action)) + " is not available in this window");
         co_return;
       }
       discard_window_open_ = false;
-      if (mode_ == GameMode::kRiichi && action == "kakan") {
+      if (mode_ == GameMode::kRiichi && action == protocol::Action::kKakan) {
         // 日麻：加杠的那张牌先给三家一次抢杠机会（v1.15）。确认无人抢才真正落地，
         // 所以这里不能直接 ApplySelfKan —— 那样第 4 张已经进了杠、宝牌也翻了，追不回来。
         // 赤 5（v1.18）：`ApplyKakan` 优先拿普通 5，抢杠窗口里的「被抢牌」必须与真正离手的那张一致，
@@ -2504,18 +2498,18 @@ stdexec::task<void> RoomActor::HandleAction(int seat, json::Value frame) {
       co_await ApplySelfKan(seat, action, tiles);
       co_return;
     }
-    if (action == "riichi") {
+    if (action == protocol::Action::kRiichi) {
       // 日麻立直宣言：与打牌是同一条 action（tiles 恰 1 个牌面 = 宣言后打出的那张）。
       if (mode_ != GameMode::kRiichi) {
-        co_await ReplyError(seat, protocol::kCodeIllegalAction, "riichi is not enabled in this room");
+        co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction, "riichi is not enabled in this room");
         co_return;
       }
       if (tiles.size() != 1) {
-        co_await ReplyError(seat, protocol::kCodeIllegalAction, "riichi must carry exactly one discard tile");
+        co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction, "riichi must carry exactly one discard tile");
         co_return;
       }
       if (!CanDeclareRiichiNow(seat, tiles.front())) {
-        co_await ReplyError(seat, protocol::kCodeIllegalAction, "cannot declare riichi now");
+        co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction, "cannot declare riichi now");
         co_return;
       }
       discard_window_open_ = false;
@@ -2524,12 +2518,13 @@ stdexec::task<void> RoomActor::HandleAction(int seat, json::Value frame) {
       co_await Pump();
       co_return;
     }
-    if (action != "win") {
-      co_await ReplyError(seat, protocol::kCodeIllegalAction, "the discard window only accepts a discard or a win");
+    if (action != protocol::Action::kWin) {
+      co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction,
+                          "the discard window only accepts a discard or a win");
       co_return;
     }
     if (!tiles.empty()) {
-      co_await ReplyError(seat, protocol::kCodeIllegalAction, "win must not carry tiles");
+      co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction, "win must not carry tiles");
       co_return;
     }
     if (!discard_window_win_check_) {
@@ -2537,19 +2532,19 @@ stdexec::task<void> RoomActor::HandleAction(int seat, json::Value frame) {
       // here is outside its options → ILLEGAL_ACTION. Judged by what the window offered, never
       // by a recomputation: right after a pong/chow the concealed hand can already form a
       // complete hand, and recomputing would turn "pong" into a free self-draw win.
-      co_await ReplyError(seat, protocol::kCodeIllegalAction, "win is not available in this window");
+      co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction, "win is not available in this window");
       co_return;
     }
     const std::vector<Tile>& hand = hands_[static_cast<size_t>(seat)];
     const std::vector<Option> options = DiscardOptionsFor(seat);
-    if (FindOption(options, "win") == nullptr) {
-      co_await ReplyError(seat, protocol::kCodeIllegalAction, "win is not available in this window");
+    if (FindOption(options, protocol::Action::kWin) == nullptr) {
+      co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction, "win is not available in this window");
       co_return;
     }
     // H8: never trust the client — recompute with the rules library.
     const Tile winning = TsumoWinningTile(seat);
     if (!IsWinShape(hand, melds_[static_cast<size_t>(seat)], winning, /*is_tsumo=*/true)) {
-      co_await ReplyError(seat, protocol::kCodeIllegalAction, "the hand is not a winning hand");
+      co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction, "the hand is not a winning hand");
       co_return;
     }
     discard_window_open_ = false;
@@ -2558,56 +2553,57 @@ stdexec::task<void> RoomActor::HandleAction(int seat, json::Value frame) {
   }
 
   if (phase_ != Phase::kClaimWindow || !claim_open_ || !claim_recipient_[static_cast<size_t>(seat)]) {
-    co_await ReplyError(seat, protocol::kCodeNoPendingAction, "there is no action window for you");
+    co_await ReplyError(seat, protocol::ErrorCode::kNoPendingAction, "there is no action window for you");
     co_return;
   }
   if (claim_answers_[static_cast<size_t>(seat)].answered) {
-    co_await ReplyError(seat, protocol::kCodeIllegalAction, "this seat already answered the window");
+    co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction, "this seat already answered the window");
     co_return;
   }
   const std::vector<Option>& seat_options = claim_options_[static_cast<size_t>(seat)];
   if (FindOption(seat_options, action) == nullptr) {
-    co_await ReplyError(seat, protocol::kCodeIllegalAction, "action is not in this window's options: " + action);
+    co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction,
+                        "action is not in this window's options: " + std::string(protocol::NameOf(action)));
     co_return;
   }
   const std::vector<Tile>& hand = hands_[static_cast<size_t>(seat)];
   const std::vector<Meld>& melds = melds_[static_cast<size_t>(seat)];
-  if (action == "win") {
+  if (action == protocol::Action::kWin) {
     if (!tiles.empty()) {
-      co_await ReplyError(seat, protocol::kCodeIllegalAction, "win must not carry tiles");
+      co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction, "win must not carry tiles");
       co_return;
     }
     if (!IsWinShape(hand, melds, claim_tile_, /*is_tsumo=*/false)) {
-      co_await ReplyError(seat, protocol::kCodeIllegalAction, "the hand is not a winning hand");
+      co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction, "the hand is not a winning hand");
       co_return;
     }
-  } else if (action == "pong") {
+  } else if (action == protocol::Action::kPong) {
     if (!SameFaceMultiset(tiles, {claim_tile_}) || !CanPong(hand, claim_tile_)) {
-      co_await ReplyError(seat, protocol::kCodeIllegalAction, "pong is not legal for this tile");
+      co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction, "pong is not legal for this tile");
       co_return;
     }
-  } else if (action == "kong") {
+  } else if (action == protocol::Action::kKong) {
     if (!SameFaceMultiset(tiles, {claim_tile_}) || !CanKong(hand, claim_tile_, remaining_)) {
-      co_await ReplyError(seat, protocol::kCodeIllegalAction, "kong is not legal for this tile");
+      co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction, "kong is not legal for this tile");
       co_return;
     }
-  } else if (action == "chow") {
+  } else if (action == protocol::Action::kChow) {
     if (seat != (claim_from_seat_ + 1) % kSeatCount) {
-      co_await ReplyError(seat, protocol::kCodeIllegalAction, "only the next player may chow");
+      co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction, "only the next player may chow");
       co_return;
     }
     const std::vector<std::array<Tile, 2>> combinations = ChowCombinations(hand, claim_tile_);
     const bool matches =
-        std::any_of(combinations.begin(), combinations.end(), [&tiles](const std::array<Tile, 2>& pair) {
-          return SameFaceMultiset(tiles, {pair[0], pair[1]});
-        });
+        std::any_of(combinations.begin(), combinations.end(),
+                    [&tiles](const std::array<Tile, 2>& pair) { return SameFaceMultiset(tiles, {pair[0], pair[1]}); });
     if (!matches) {
-      co_await ReplyError(seat, protocol::kCodeIllegalAction, "chow tiles do not form a run with the discarded tile");
+      co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction,
+                          "chow tiles do not form a run with the discarded tile");
       co_return;
     }
-  } else if (action == "pass") {
+  } else if (action == protocol::Action::kPass) {
     if (!tiles.empty()) {
-      co_await ReplyError(seat, protocol::kCodeIllegalAction, "pass must not carry tiles");
+      co_await ReplyError(seat, protocol::ErrorCode::kIllegalAction, "pass must not carry tiles");
       co_return;
     }
   }
@@ -2621,37 +2617,6 @@ stdexec::task<void> RoomActor::HandleAction(int seat, json::Value frame) {
     --claim_pending_humans_;
   }
   co_await Pump();
-}
-
-std::optional<GameMode> ParseGameMode(std::string_view name) {
-  if (name.empty() || name == "classic") {
-    return GameMode::kClassic;
-  }
-  if (name == "riichi") {
-    return GameMode::kRiichi;
-  }
-  return std::nullopt;
-}
-
-std::string_view GameModeName(GameMode mode) {
-  return mode == GameMode::kRiichi ? "riichi" : "classic";
-}
-
-std::optional<GameLength> ParseGameLength(std::string_view name) {
-  if (name.empty()) {
-    return GameLength::kTonpu;  // 缺省东场：与「不传 length」的兼容承诺一致
-  }
-  if (name == "tonpu") {
-    return GameLength::kTonpu;
-  }
-  if (name == "hanchan") {
-    return GameLength::kHanchan;
-  }
-  return std::nullopt;
-}
-
-std::string_view GameLengthName(GameLength length) {
-  return length == GameLength::kHanchan ? "hanchan" : "tonpu";
 }
 
 int RoundCountOf(GameMode mode, GameLength length) {

@@ -302,18 +302,18 @@ ex_actor 的 `Send` 不可取消、mailbox 不可撤回、actor 执行不可抢�
 | 步 | 名称 | 触发方 | 服务端动作（权威） | 下发消息 / 可见信息 | 超时行为 |
 | --- | --- | --- | --- | --- | --- |
 | 1 | 发牌 | 服务端（`ready` 后 / 局间结束后） | 洗牌、发牌（`DealTiles(wall, dealer_)`）、置 `current_seat = dealer_`、`seq` **沿用上一局的值继续递增**（跨局单调不重置，`PROTOCOL.md` §6.2）、`window = DISCARD_WINDOW(dealer_)`；`hands_played_ += 1` | 对每个座位单独发 `game_start{hand,seat,dealer,round_index,round_count}`；本家手牌可见，他家手牌不可见 | 无（瞬时） |
-| 2 | 庄家第一打窗口 | 服务端开窗 → 庄家决策 | 校验庄家手牌 14 张；若 14 张已成和牌型，options 含 `win`（允许「天和」）；**v1.10 起 options 还可含 `ankan`/`kakan`** | 庄家收 `action_request{seq,deadline_ms,window:"discard",options}`；他家无消息 | 15000 ms 未 `discard` → 打出排序后最后一张（最大牌），见 5.6 |
+| 2 | 庄家第一打窗口 | 服务端开窗 → 庄家决策 | 校验庄家手牌 14 张；若 14 张已成和牌型，options 含 `win`（允许「天和」）；**v1.10 起 options 还可含 `ankan`/`kakan`** | 庄家收 `action_request{seq,deadline_ms,window:1,options}`；他家无消息 | 15000 ms 未 `discard` → 打出排序后最后一张（最大牌），见 5.6 |
 | 3 | 摸牌 | 服务端（回合开始） | `remaining--`；从牌山取 1 张加入 `S` 手牌；广播 `state_sync`；`seq++` 并开 `SELF_WINDOW` | `draw{tile,seat,seq}` **仅发给 `S` 本人**；其余三家只收 `state_sync`（含 `remaining` 与各家 `hand_count`） | 无（瞬时） |
 | 4 | 自摸判定 | 服务端 | `S` 手牌（含刚摸的牌）若成和牌型 → options 含 `win`；否则 options 不含 `win` | 同上（`action_request` 随步 5 一起下发） | — |
-| 5 | 打牌窗口 | 服务端 → `S` | 置 `window = SELF_WINDOW(seq)`，`deadline_ms = now + 15000` | `S` 收 `action_request{seq,deadline_ms,window:"discard",options}`；`options` 是**除打牌之外**的可选动作：`win`（成和牌型时）/ `ankan`（手中有 4 张同面且 `remaining ≥ 1`）/ `kakan`（已有碰组 + 手中有第 4 张且 `remaining ≥ 1`）；顺序固定 `win → ankan → kakan` | 15000 ms → 自动 pass 自摸/杠机会并打出**刚摸到的那张牌**（同牌面副本不可区分，等价） |
-| 5′ | 暗杠 / 加杠（**v1.10 新增**） | `S` 发 `action{seq,action:"ankan"\|"kakan",tiles}` | 校验：`seq` 匹配、`S == current_seat`、窗口为 `discard`、`remaining ≥ 1`、牌型合法（暗杠：手中有 4 张同面；加杠：存在该面的碰组且手中有 1 张）→ 扣手牌、新增/升级副露（`melds` 组数 +1（暗杠）/ 不变（加杠）、`kans` +1）、**立即从牌山头补摸 1 张**（`next_index_++`，`remaining_ = 136 − next_index_`）、`seq++`、**重新开打牌窗口**（可继续杠 / 杠上开花和 / 打牌）；补摸的牌记为 `kong_draw_tile_` | `action_event{seat,action,tiles,from_seat:null,seq}` 广播 4 家（**暗杠的 `tiles` 对他家为空数组**，见 §4.4）；`draw{...}` 仅发给 `S`；`state_sync` 广播 4 家 | 补牌时 `remaining == 0` **不可能**（选项已按 `remaining ≥ 1` 守卫）；若仍进入则立即荒庄（与明杠同一处理）。15000 ms 未打牌 → 打出排序后最后一张 |
+| 5 | 打牌窗口 | 服务端 → `S` | 置 `window = SELF_WINDOW(seq)`，`deadline_ms = now + 15000` | `S` 收 `action_request{seq,deadline_ms,window:1,options}`；`options` 是**除打牌之外**的可选动作：`win`（成和牌型时）/ `ankan`（手中有 4 张同面且 `remaining ≥ 1`）/ `kakan`（已有碰组 + 手中有第 4 张且 `remaining ≥ 1`）；顺序固定 `win → ankan → kakan` | 15000 ms → 自动 pass 自摸/杠机会并打出**刚摸到的那张牌**（同牌面副本不可区分，等价） |
+| 5′ | 暗杠 / 加杠（**v1.10 新增**） | `S` 发 `action{seq,action:5\|"kakan",tiles}` | 校验：`seq` 匹配、`S == current_seat`、窗口为 `discard`、`remaining ≥ 1`、牌型合法（暗杠：手中有 4 张同面；加杠：存在该面的碰组且手中有 1 张）→ 扣手牌、新增/升级副露（`melds` 组数 +1（暗杠）/ 不变（加杠）、`kans` +1）、**立即从牌山头补摸 1 张**（`next_index_++`，`remaining_ = 136 − next_index_`）、`seq++`、**重新开打牌窗口**（可继续杠 / 杠上开花和 / 打牌）；补摸的牌记为 `kong_draw_tile_` | `action_event{seat,action,tiles,from_seat:null,seq}` 广播 4 家（**暗杠的 `tiles` 对他家为空数组**，见 §4.4）；`draw{...}` 仅发给 `S`；`state_sync` 广播 4 家 | 补牌时 `remaining == 0` **不可能**（选项已按 `remaining ≥ 1` 守卫）；若仍进入则立即荒庄（与明杠同一处理）。15000 ms 未打牌 → 打出排序后最后一张 |
 | 6 | 打牌 | `S` 发 `discard{tile,seq}` | 校验：`seq` 匹配、`S == current_seat`、`tile` 在本家手牌、窗口类型为 `discard`；移除 1 张该牌加入 `S` 的牌河；关闭窗口；`seq++` | `discard_event{seat,tile}` **广播 4 家**（牌河为公开信息）；不再额外发 `state_sync` | — |
-| 7 | 鸣牌/和牌计算 | 服务端 | 对每个 `s ≠ S` 计算可选项（表 5.1）；若有任一 `s` 存在非 `pass` 选项 → 开 `CLAIM_WINDOW(seq)` | 仅向**有非 pass 选项**的座位发 `action_request{seq,deadline_ms,window:"claim",options}`；无选项的座位**不发消息** | 无选项 → 窗口立即关闭，直接进入步 3（下家摸牌），不等待 15000 ms |
+| 7 | 鸣牌/和牌计算 | 服务端 | 对每个 `s ≠ S` 计算可选项（表 5.1）；若有任一 `s` 存在非 `pass` 选项 → 开 `CLAIM_WINDOW(seq)` | 仅向**有非 pass 选项**的座位发 `action_request{seq,deadline_ms,window:2,options}`；无选项的座位**不发消息** | 无选项 → 窗口立即关闭，直接进入步 3（下家摸牌），不等待 15000 ms |
 | 8 | 动作窗口 | 服务端 → 窗内各座位 | 收集 `action{seq,action,tiles}` 或超时；`seq` 不匹配一律丢弃（5.6） | 窗内座位各自收 `action_request`；他家无消息 | 每个窗内座位独立 15000 ms；超时记 `pass` |
 | 9 | 窗口结算 | 服务端（收齐所有窗内座位答复或全部超时后） | 按优先级 5.5 选出一个动作执行 | 结果通过 `action_event{seat,action,tiles,from_seat,seq}` 广播 4 家（语义见 §11.2.1-B） | 全部超时 = 全部 `pass` → 步 3（`S+1` 摸牌） |
 | 10 | 副露生效 | 服务端（步 9 结果为碰/吃/杠） | 被鸣牌从 `S` 牌河移除（`S` = 打出该牌的人）；鸣牌者手牌扣料；新增副露；`current_seat = 鸣牌者`；碰/吃 → 开 `DISCARD_WINDOW`；杠 → 补摸 1 张（`remaining--`）后开 `DISCARD_WINDOW` | `action_event{seat,action,tiles,from_seat,seq}` 广播（`seat` = 鸣牌者；**客户端据 `from_seat` 从该座位的牌河移除其最后一张**）；`state_sync` 并行广播 4 家（含各家副露与牌河） | 杠补牌时 `remaining == 0` → 荒庄；鸣牌者 15000 ms 未打牌 → 自动打出手牌排序后最后一张（无摸牌记录） |
 | 11 | 和牌 | 服务端 | 荣和：在 `CLAIM_WINDOW` 结算时按 5.5 选出和牌者；自摸：在 `SELF_WINDOW` 收到 `action{win}` | `action_event{seat,"win",[和牌张],from_seat}` 广播（荣和 `from_seat` = 放炮者；自摸 `from_seat` = `null`）；随后 `game_end` 广播 | 窗内和牌座位 15000 ms 未回 → 记 `pass`（放弃和牌） |
-| 12 | 荒庄 | 服务端 | 需摸牌而 `remaining == 0` 时立即结束 | `game_end{reason:"draw_exhausted",results:[4 个 delta_score=0],win:null}` 广播 4 家 | — |
+| 12 | 荒庄 | 服务端 | 需摸牌而 `remaining == 0` 时立即结束 | `game_end{reason:3,results:[4 个 delta_score=0],win:null}` 广播 4 家 | — |
 | 13 | 结算 | 服务端 | 计算 `delta_score`（第 6 章） | `game_end` 广播 4 家 | — |
 
 ### 4.3 一轮完整交互示例（含一次碰）
@@ -359,22 +359,22 @@ current_seat=2 → 摸牌 draw{2,7m} 仅发 s2 → 开 SELF_WINDOW(seq=5) ...
 | 鸣牌窗口 | `"claim"` | 某座位打出牌 `T`，且至少有一个他家座位存在非 `pass` 可选项 | **仅存在非 `pass` 选项的座位**（可能是 1..3 个） | 至少含 `pass`，另含其可选动作 |
 
 > 「打牌」本身**不进入 `options`**：打牌由 `discard{tile,seq}` 消息表达；`options` 只承载「是否和牌」「是否鸣牌」这类附加决策。
-> `window:"discard"` 时客户端必须始终渲染倒计时与手牌点选；`options` 里的按钮叠加显示。
+> `window:1` 时客户端必须始终渲染倒计时与手牌点选；`options` 里的按钮叠加显示。
 
 ### 5.2 `action_request` 的精确形状（PROTOCOL.md 必须按此冻结）
 
 ```json
 {
-  "type": "action_request",
+  "type":18,
   "seq": 42,
   "deadline_ms": 1791174514000,
-  "window": "claim",
+  "window":2,
   "options": [
-    {"action": "win",   "tiles": []},
-    {"action": "kong",  "tiles": ["5p"]},
-    {"action": "pong",  "tiles": ["5p"]},
-    {"action": "chow",  "tiles": ["3p", "4p"]},
-    {"action": "pass",  "tiles": []}
+    {"action":7,   "tiles": []},
+    {"action":4,  "tiles": ["5p"]},
+    {"action":2,  "tiles": ["5p"]},
+    {"action":3,  "tiles": ["3p", "4p"]},
+    {"action":1,  "tiles": []}
   ]
 }
 ```
@@ -409,10 +409,10 @@ current_seat=2 → 摸牌 draw{2,7m} 仅发 s2 → 开 SELF_WINDOW(seq=5) ...
 
 | 情况 | `options`（顺序固定：`win → ankan → kakan`） |
 | --- | --- |
-| 摸牌后手牌（含刚摸的牌）成和牌型 | `[{"action":"win","tiles":[]}]`（可与 `ankan`/`kakan` 并列，见下） |
+| 摸牌后手牌（含刚摸的牌）成和牌型 | `[{"action":7,"tiles":[]}]`（可与 `ankan`/`kakan` 并列，见下） |
 | 庄家第一打时 14 张已成和牌型（天和） | 同上 |
-| 手牌中某牌面恰好 4 张 **且** `remaining ≥ 1`（**v1.10**） | 追加 `{"action":"ankan","tiles":[T,T,T,T]}` |
-| 已有 `pong` 组且手中有该面第 4 张 **且** `remaining ≥ 1`（**v1.10**） | 追加 `{"action":"kakan","tiles":[T]}`（`tiles` 只带**手中的那一张**，被升级的碰组由服务端定位） |
+| 手牌中某牌面恰好 4 张 **且** `remaining ≥ 1`（**v1.10**） | 追加 `{"action":5,"tiles":[T,T,T,T]}` |
+| 已有 `pong` 组且手中有该面第 4 张 **且** `remaining ≥ 1`（**v1.10**） | 追加 `{"action":6,"tiles":[T]}`（`tiles` 只带**手中的那一张**，被升级的碰组由服务端定位） |
 | 其他 | `[]`（仅能打牌） |
 
 > v1.9 的「暗杠不在范围内，打牌窗口不会出现 kong」**已作废**（v1.10）。注意：打牌窗口的 `ankan`/`kakan` 与鸣牌窗口的 `kong`（明杠）是**不同窗口里的不同动作**，不可混用；打牌窗口**永不**出现 `kong`。
@@ -459,8 +459,8 @@ current_seat=2 → 摸牌 draw{2,7m} 仅发 s2 → 开 SELF_WINDOW(seq=5) ...
 | 输入情形 | 处理 |
 | --- | --- |
 | `seq != room.seq`（窗口已结束 / 已被动作推进） | **静默丢弃**，不回 `error`，状态零变更（这就是 seq 作废本体） |
-| `seq == room.seq` 但该座位**不是**本窗口收件人（claim 窗口期间第三方发 `action`；或 `seq` 对但轮不到他发 `discard`） | 回 `error{code:"NO_PENDING_ACTION"}`（`action`）/ `error{code:"NOT_YOUR_TURN"}`（`discard`），状态零变更 |
-| `seq == room.seq` 且座位在窗口内，但动作不在其 `options` 中（如未提供 `win` 却回 `win`、`tiles` 不满足条件） | 回 `error{code:"ILLEGAL_ACTION"}`，状态零变更 |
+| `seq == room.seq` 但该座位**不是**本窗口收件人（claim 窗口期间第三方发 `action`；或 `seq` 对但轮不到他发 `discard`） | 回 `error{code:5}`（`action`）/ `error{code:4}`（`discard`），状态零变更 |
+| `seq == room.seq` 且座位在窗口内，但动作不在其 `options` 中（如未提供 `win` 却回 `win`、`tiles` 不满足条件） | 回 `error{code:6}`，状态零变更 |
 | `seq == room.seq` 且座位在窗口内，动作合法 | 接受，进入 5.5 的窗口结算 |
 
 理由：**迟到**（`seq` 过期）的合法回复是「seq 作废」方案的正常产物，必须静默丢弃，不能被当成错误；
@@ -620,8 +620,8 @@ R          = 2^han                                // R ∈ {1,2,4,8,16,32,64}
 
 ```json
 {
-  "type": "game_end",
-  "reason": "win_ron",
+  "type":21,
+  "reason":1,
   "round_index": 1,
   "dealer": 1,
   "renchan_count": 0,
@@ -662,7 +662,7 @@ R          = 2^han                                // R ∈ {1,2,4,8,16,32,64}
 | `results` | 长度恒为 4，`seat` 覆盖 `{0,1,2,3}` 无重复 | 顺序按 seat 升序（**未变**） |
 | `results[i].delta_score` | 整数，四家之和为 0 | 本局得失分，见 6.1（**未变**） |
 | `results[i].match_total` | 整数，四家之和为 0（**v1.10 新增**） | 本场累计分（**含本局**） |
-| `results[i].hand` | **v4.5：四家均下发全部牌张**（门前手牌 + 副露牌面，按 3.1 排序；和牌者含和牌张），长度 = 该家 `14/13 + 杠数` | 结算摊牌用，只在 `game_end` 出现；`state_sync` 仍不泄露他家手牌。副露分组仍由 `state_sync.seats[].melds` 还原，元素形状为 `{"type":"pong"\|"chow"\|"kong"\|"ankan"\|"kakan","tiles":[tile,…]}`（`ankan` 在局终揭示后为 4 张） |
+| `results[i].hand` | **v4.5：四家均下发全部牌张**（门前手牌 + 副露牌面，按 3.1 排序；和牌者含和牌张），长度 = 该家 `14/13 + 杠数` | 结算摊牌用，只在 `game_end` 出现；`state_sync` 仍不泄露他家手牌。副露分组仍由 `state_sync.seats[].melds` 还原，元素形状为 `{"type":1\|2\|3\|4\|5,"tiles":[tile,…]}`（`ankan` 在局终揭示后为 4 张） |
 | `results[i].win_type` | 和牌者：`tags` + `["ron"]` 或 `["tsumo"]`；其他人 `[]` | **形状未变**（仍只含 `seven_pairs`/`pure_one_suit`）。完整番种明细的唯一出口是 `win.yaku[]` |
 | `win` | 和牌时为对象；荒庄时为 `null` | **未变** |
 | `win.tile` / `win.from_seat` / `win.tsumo` | 同 v1.9 | **未变** |
@@ -678,7 +678,7 @@ R          = 2^han                                // R ∈ {1,2,4,8,16,32,64}
 **`match_end` 数据（场终，v1.10 新增帧）**
 
 ```json
-{"type":"match_end","hands_played":4,"renchan_count":2,
+{"type":25,"hands_played":4,"renchan_count":2,
  "rankings":[{"seat":0,"final_score":37,"rank":1},
              {"seat":2,"final_score":-10,"rank":2},
              {"seat":1,"final_score":-10,"rank":2},
@@ -811,10 +811,10 @@ cost(t) = -usefulness(t)
 
 | 情形 | 阈值（冻结值） | 期望系统行为 |
 | --- | --- | --- |
-| 单帧超过 64 KB | > 65536 字节 | **立即断开该连接**（先尝试回一次 `error{code:"FRAME_TOO_LARGE"}`，失败则直接 `close`） |
-| 入站帧速率超限 | 滑动 1 秒窗口内 > **100** 帧（`ping` 也计入） | 丢弃超出的帧；对同一次限速事件**最多回 1 帧** `error{code:"RATE_LIMITED"}`（避免错误放大）；之后继续按限速丢弃 |
+| 单帧超过 64 KB | > 65536 字节 | **立即断开该连接**（先尝试回一次 `error{code:9}`，失败则直接 `close`） |
+| 入站帧速率超限 | 滑动 1 秒窗口内 > **100** 帧（`ping` 也计入） | 丢弃超出的帧；对同一次限速事件**最多回 1 帧** `error{code:10}`（避免错误放大）；之后继续按限速丢弃 |
 | 持续风暴 | 1 秒内 > **500** 帧，或连续 **3 秒**每秒都触发限速 | **立即断开该连接** |
-| 坏帧（非法 JSON / UTF-8 非法 / 未知 `type` / 缺 `type`） | 累计 **10** 次 | 回 `error{code:"BAD_REQUEST"}` 并保持连接；第 10 次后断开连接 |
+| 坏帧（非法 JSON / UTF-8 非法 / 未知 `type` / 缺 `type`） | 累计 **10** 次 | 回 `error{code:8}` 并保持连接；第 10 次后断开连接 |
 | 超长无 `\n` 的流 | 缓冲区累积 > 64 KB 仍无换行 | 立即断开该连接 |
 | 心跳 | 客户端每 **5 秒** 发 `ping`（服务端回 `pong`）；服务端 **20 秒** 未收到该连接任何帧 | 大厅中：断开连接并释放座位；对局中：进入**托管**（8.3），不立即断开 |
 
@@ -868,7 +868,7 @@ cost(t) = -usefulness(t)
 
 | 扩展项 | 叠加位置（当前代码/协议中的锚点） | 叠加方式 |
 | --- | --- | --- |
-| 立直 | `action` 可选值 + `PlayerState.riichi` 标记；打牌窗口 `options` 增加 `{"action":"riichi"}` | 门前清且听牌时开放该选项；立直后限制副露（仅暗杠）；协议无需新帧，`seq` 窗口机制不变 |
+| 立直 | `action` 可选值 + `PlayerState.riichi` 标记；打牌窗口 `options` 增加 `{"action":8}` | 门前清且听牌时开放该选项；立直后限制副露（仅暗杠）；协议无需新帧，`seq` 窗口机制不变 |
 | 宝牌 | 牌山结构增加「王牌/岭上牌」与「宝牌指示牌」；`remaining` 仍是公开量 | 结算时按指示牌计算宝牌数量，作为**新番种**加入 §6.2 的表 |
 | 振听 | `PlayerState.furiten` 标记；`can_win` 前置检查 | 只影响 5.3 中 `win` 选项是否出现，流程/协议不变 |
 | 役种表 | **v1.10 已实现**：§6.2 的 14 番种 + 庄家加成，判定结果为 `win.yaku[]`（有序 `{id,han}` 数组） | 继续扩展方式：往 §6.2 表尾追加条目，并保持「序 = 判定序 = 协议数组序」的冻结约定 |
@@ -940,7 +940,7 @@ cost(t) = -usefulness(t)
    少发 `create_room` 或 `ready` 就永远等不到 `game_start`（服务端按 2.2 处理，不会报错提示）。
 2. **每次 `discard` / `action` 必须回带最近一次收到的 `action_request.seq`**（打牌窗口与鸣牌窗口都是如此）。
    `seq` 不匹配的帧会被服务端**静默丢弃**（5.6.1），脚本将表现为卡局，而不是收到 `error`。
-3. 脚本自身的打牌策略：收到 `window == "discard"` 且 `options` 含 `win` 时回 `action{win}`；
+3. 脚本自身的打牌策略：收到 `window == 1` 且 `options` 含 `win` 时回 `action{win}`；
    否则回 `discard{刚摸到的牌}`；庄家第一打（本家无摸牌记录）则打出手牌排序后的最后一张（与 5.6.2 的代打口径一致）。
 
 ---
@@ -963,11 +963,11 @@ cost(t) = -usefulness(t)
 | `stats_request` | — | v1.5 新增；查询本人累计战绩，回 `stats`。游客可发，回零值载荷 |
 
 > **窗口 × `action` 合法性（冻结，PROTOCOL.md 必须逐字采用）**：
-> - `window == "discard"`（自家打牌窗口，含庄家第一打 / 副露后待打牌 / 杠补牌后待打牌）的**合法回复只有两种**：
->   `discard{tile,seq}`，或（仅当 `options` 含 `win` 时）`action{action:"win",tiles:[],seq}`。
->   回 `action{action:"pass",seq}` 属 **`ILLEGAL_ACTION`**（`pass` 不在该窗口的 `options` 中，见 5.1/5.3 与 5.6.1 判定表第 3 行）。
+> - `window == 1`（自家打牌窗口，含庄家第一打 / 副露后待打牌 / 杠补牌后待打牌）的**合法回复只有两种**：
+>   `discard{tile,seq}`，或（仅当 `options` 含 `win` 时）`action{action:7,tiles:[],seq}`。
+>   回 `action{action:1,seq}` 属 **`ILLEGAL_ACTION`**（`pass` 不在该窗口的 `options` 中，见 5.1/5.3 与 5.6.1 判定表第 3 行）。
 >   「放弃自摸」的正确表达就是**直接打牌**（不回复 `win`），超时代打口径与此等价（5.6.2）。
-> - `window == "claim"` 的合法回复为 `options` 中列出的 `win` / `kong` / `pong` / `chow` / `pass` 之一。
+> - `window == 2` 的合法回复为 `options` 中列出的 `win` / `kong` / `pong` / `chow` / `pass` 之一。
 > - 动机：GD-C1 要求端到端**全程零 `error`**，客户端不得发送窗口外的动作（UI_UX_SPEC §5.3.1、附录 B 已据此冻结「打牌窗口永不出现『过』按钮」）。
 
 ### 11.2 服务端 → 客户端
@@ -993,11 +993,11 @@ cost(t) = -usefulness(t)
 **A. `melds[]` 元素形状**（本家 `state_sync.melds` 与他家 `state_sync.seats[].melds[]` **同形状**）：
 
 ```json
-{"type": "pong",  "tiles": ["5p", "5p", "5p"]}
-{"type": "chow",  "tiles": ["3p", "4p", "5p"]}
-{"type": "kong",  "tiles": ["9s", "9s", "9s", "9s"]}
-{"type": "ankan", "tiles": ["1z", "1z", "1z", "1z"]}
-{"type": "kakan", "tiles": ["9s", "9s", "9s", "9s"]}
+{"type":1,  "tiles": ["5p", "5p", "5p"]}
+{"type":2,  "tiles": ["3p", "4p", "5p"]}
+{"type":3,  "tiles": ["9s", "9s", "9s", "9s"]}
+{"type":4, "tiles": ["1z", "1z", "1z", "1z"]}
+{"type":5, "tiles": ["9s", "9s", "9s", "9s"]}
 ```
 
 | 项 | 冻结值 |

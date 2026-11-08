@@ -20,6 +20,16 @@ from ..view import UiView
 from . import art
 from . import widgets as W
 
+import sys
+from pathlib import Path
+
+_game_root = next(
+    p for p in Path(__file__).resolve().parents
+    if (p / "protocol" / "enums.json").is_file()
+)
+sys.path.insert(0, str(_game_root))
+from protocol.enums import MELD_TYPE
+
 log = logging.getLogger("mahjong.client.tenpai")
 
 # F-TP-04：项宽固定估算 74 px；`n × 74 > 784`（即 n > 10）⇒ 降级为一行摘要
@@ -104,7 +114,7 @@ def render(surface: pygame.Surface, ui: UiView, feel) -> None:
     suffix = ""
     if getattr(state, "tenpai_no_yaku", False):
         # 暗杠**不破门清**（riichi::IsClosedHand 同口径）：只有吃/碰/明杠/加杠才让这手牌彻底没救
-        open_hand = any(getattr(meld, "type", "") != "ankan" for meld in state.melds)
+        open_hand = any(getattr(meld, "type", "") != MELD_TYPE.ANKAN for meld in state.melds)
         suffix = "· 无役不能和" if open_hand else "· 无役（立直或自摸才可和）"
     elif dead:
         suffix = "· 灰牌无役"

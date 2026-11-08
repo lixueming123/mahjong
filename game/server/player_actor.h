@@ -70,7 +70,7 @@ class PlayerActor : public SeatEndpoint {
   //
   // Answers a frame the parser rejected, charging the §7.2 counter its kind names.
   void ReplyParseError(const frame_parser::Error& error);
-  void SendError(std::string_view code, std::string_view message);
+  void SendError(protocol::ErrorCode code, std::string_view message);
   // Queues one frame to this client.
   void SendFrame(std::string frame);
   // Answers BAD_REQUEST and charges the §7.2 bad-frame counter.
@@ -109,7 +109,7 @@ class PlayerActor : public SeatEndpoint {
   }
 
   // Sends an error and accounts the illegal-operation quota (§7.2).
-  void IllegalOperation(std::string_view code, std::string_view message);
+  void IllegalOperation(protocol::ErrorCode code, std::string_view message);
   PlayerInfo Player() const { return session_.Info(); }
 
   // Runs the final half of a successful register/login: claims the account for this

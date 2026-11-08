@@ -205,9 +205,9 @@ class NetClient:
             self.bad_frames += 1
             log.warning("收到非法 JSON 帧，已丢弃（坏帧 %d）：%s", self.bad_frames, exc)
             return
-        if not isinstance(frame, dict) or not isinstance(frame.get("type"), str):
+        if not isinstance(frame, dict) or not isinstance(frame.get("type"), int):
             self.bad_frames += 1
-            log.warning("收到缺少字符串 type 的帧，已丢弃（坏帧 %d）", self.bad_frames)
+            log.warning("收到缺少整数 type 的帧，已丢弃（坏帧 %d）", self.bad_frames)
             return
         self.recv_frames += 1
         self.last_inbound = time.monotonic()

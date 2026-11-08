@@ -160,7 +160,7 @@
 | `win_ron` | 和牌 | `type=="action_event"` 且 `action=="win"` 且 **帧内存在 `from_seat`**（`PROTOCOL` E8：荣和带 `from_seat`） | 1052 ms / ≤ 1200 ms | **P0** | **否：起播即让 ACTION/UI 静场** |
 | `win_tsumo` | 和牌 | 同上且 **帧内无 `from_seat`**（`PROTOCOL` E7：自摸无 `from_seat`） | 1256 ms / ≤ 1400 ms | **P0** | 同上 |
 | `draw_hand` | 收束 | `type=="game_end"` 且 `reason=="draw_exhausted"`，切页后 60 ms | 501 ms / ≤ 900 ms | P2 | 是 |
-| `turn_start` | 信息 | `type=="action_request"` 且 `window=="discard"` 且本局该窗口**首次**出现，操作栏显示后 80 ms | 73 ms / ≤ 220 ms | P1 | 是 |
+| `turn_start` | 信息 | `type=="action_request"` 且 `window==1` 且本局该窗口**首次**出现，操作栏显示后 80 ms | 73 ms / ≤ 220 ms | P1 | 是 |
 | `countdown_tick` | 信息 | `remaining_ms` 跨过 3000 / 2000 / 1000 各一次 | 12 ms / ≤ 60 ms | P2 | 是（UI 组，**默认关**） |
 | `tenpai_on` | 信息 | 帧 `type=="tenpai"` 且 `is_tenpai==true`，且本地**上一次状态为隐藏**（false→true 的跨越），与听牌条 `F-TP-06` 出现动画**同起**；`is_tenpai==false` 只清空听牌条、**不发声** | 278 ms / ≤ 300 ms | P2 | 是 |
 | `hand_end` | 收束 | `type=="game_end"` 且 `reason!="draw_exhausted"`，切到局终页后 100 ms | 333 ms / ≤ 400 ms | P2 | 是 |
@@ -255,7 +255,7 @@
 1. **`tile_discard` 不区分本家/他家**（`FEEL_SPEC`：任一 `discard_event`）。若试听认为他家过响，可对他家降 3 dB —— **需先改 FEEL_SPEC，不在 v1 私自加规则**。
 2. **`turn_start` 只在「本局该窗口首次出现」触发**：以 `(id, window_seq)` 记账，同一 `action_request.seq` 只响一次。
 3. **`countdown_tick` 用 `remaining_ms` 穿越判定**：记录上一帧 `remaining_ms`，当 `prev > 3000 >= now` / `prev > 2000 >= now` / `prev > 1000 >= now` 各触发一次；**不得**用「整数秒取整相等」判定（帧率抖动会漏触发）。
-4. **和牌判定用 `from_seat`**：`action_event{action:"win"}` **无 `from_seat` ⇒ `win_tsumo`**，**有 ⇒ `win_ron`**（`PROTOCOL` E7/E8）。**不要**等 `game_end.win.tsumo`（`game_end` 偏晚，`PROTOCOL` E7 明确要求音效在 `action_event` 触发）。
+4. **和牌判定用 `from_seat`**：`action_event{action:7}` **无 `from_seat` ⇒ `win_tsumo`**，**有 ⇒ `win_ron`**（`PROTOCOL` E7/E8）。**不要**等 `game_end.win.tsumo`（`game_end` 偏晚，`PROTOCOL` E7 明确要求音效在 `action_event` 触发）。
    → 附带建议（需主理人裁决）：`FEEL_SPEC` F-AU-09/10 的触发条件写作「`win.tsumo == false/true`」，该字段只存在于 `game_end`，建议在 FEEL_SPEC v1.4 改成上述 `from_seat` 口径。
 5. **`draw_hand` / `hand_end` 互斥**：以 `reason=="draw_exhausted"` 唯一分流，禁止两条都播。
 6. **`tenpai_on` 的触发口径（`PROTOCOL` v1.7 S16）**：`tenpai` 是**独立帧**，携带 `is_tenpai` / `waits[]` / **`tenpai_seq`**；`is_tenpai:false` 是**清空信号**（服务端必须照发、`waits:[]`），因此「隐藏→显示」只能靠**本地保存上一次 `is_tenpai`** 做跨越判定（false→true 才播），**不得**用「收到 tenpai 帧就播」。
@@ -484,7 +484,7 @@ def play(sid: str, group: str, p0: bool = False):
 | `game_state._apply_game_end()`，`reason=="draw_exhausted"` | `draw_hand`（切页 60 ms 后） |
 | `game_state._apply_game_end()`，`reason!="draw_exhausted"` | `hand_end`（切页 100 ms 后） |
 | `game_state._apply_match_end()` | `match_end`（切页 120 ms 后，**P0**） |
-| `game_state._apply_action_request()`，`window=="discard"` 首次 | `turn_start`（操作栏显示后 80 ms） |
+| `game_state._apply_action_request()`，`window==1` 首次 | `turn_start`（操作栏显示后 80 ms） |
 | 听牌条 隐藏→显示（`tenpai{is_tenpai:true}` 跨越，待实现） | `tenpai_on` |
 | `remaining_ms` 跨 3000/2000/1000 | `countdown_tick`（UI 组，默认关） |
 | 按钮/房间行/结算按钮 `MOUSEBUTTONDOWN` 命中 | `ui_click` → UI |

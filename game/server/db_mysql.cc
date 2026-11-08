@@ -27,8 +27,8 @@
 #include <spdlog/spdlog.h>
 
 #include "actor_scope.h"
-#include "player_actor.h"
 #include "db.h"
+#include "player_actor.h"
 #include "seat_endpoint.h"
 
 namespace mahjong {
@@ -115,24 +115,21 @@ void ReplyAuth(const ex_actor::ActorRef<PlayerActor>& reply, AuthOutcome outcome
   if (reply.IsEmpty()) {
     return;  // the connection went away while the query ran; nobody is left to answer
   }
-  ActorSendScope().spawn(
-      reply.Send<&PlayerActor::Dispatch>(PlayerEnvelope::OnLoginResult(std::move(outcome))));
+  ActorSendScope().spawn(reply.Send<&PlayerActor::Dispatch>(PlayerEnvelope::OnLoginResult(std::move(outcome))));
 }
 
 void ReplyRegister(const ex_actor::ActorRef<PlayerActor>& reply, AuthOutcome outcome) {
   if (reply.IsEmpty()) {
     return;
   }
-  ActorSendScope().spawn(
-      reply.Send<&PlayerActor::Dispatch>(PlayerEnvelope::OnRegisterResult(std::move(outcome))));
+  ActorSendScope().spawn(reply.Send<&PlayerActor::Dispatch>(PlayerEnvelope::OnRegisterResult(std::move(outcome))));
 }
 
 void ReplyStats(const ex_actor::ActorRef<PlayerActor>& reply, StatsOutcome outcome) {
   if (reply.IsEmpty()) {
     return;
   }
-  ActorSendScope().spawn(
-      reply.Send<&PlayerActor::Dispatch>(PlayerEnvelope::OnStatsResult(std::move(outcome))));
+  ActorSendScope().spawn(reply.Send<&PlayerActor::Dispatch>(PlayerEnvelope::OnStatsResult(std::move(outcome))));
 }
 
 }  // namespace
@@ -304,7 +301,7 @@ stdexec::task<void> DbActor::Login(std::string username, std::string password, e
 }
 
 stdexec::task<void> DbActor::Register(std::string username, std::string password, std::string nickname,
-                                   ex_actor::ActorRef<PlayerActor> reply) {
+                                      ex_actor::ActorRef<PlayerActor> reply) {
   ReplyRegister(reply, RegisterJob(username, password, nickname));
   co_return;
 }
@@ -448,8 +445,8 @@ StatsOutcome DbActor::StatsJob(uint64_t account_id) {
     // §3.4: the recent list is newest first and capped at kMaxRecentMatches.
     const std::string recent =
         "SELECT room_id, reason, mode, delta_score, win, UNIX_TIMESTAMP(ended_at) FROM matches"
-        " WHERE account_id = " + id + filter + " ORDER BY id DESC LIMIT " +
-        std::to_string(protocol::kMaxRecentMatches);
+        " WHERE account_id = " +
+        id + filter + " ORDER BY id DESC LIMIT " + std::to_string(protocol::kMaxRecentMatches);
     if (mysql_query(mysql, recent.c_str()) != 0) {
       spdlog::error("db: recent matches query failed: {}", mysql_error(mysql));
       Disconnect();
@@ -466,8 +463,11 @@ StatsOutcome DbActor::StatsJob(uint64_t account_id) {
       }
       protocol::StatsEntry item;
       item.room_id = entry[0];
-      item.reason = entry[1];
-      item.mode = entry[2] != nullptr ? entry[2] : "classic";
+      // DB 落库仍是字符串词表（v2.0 只改线格式），读出时在边界翻回线枚举。
+      item.reason = protocol::FromName<protocol::RoundEndReason>(entry[1] != nullptr ? entry[1] : "")
+                        .value_or(protocol::RoundEndReason::kInvalid);
+      item.mode = protocol::FromName<protocol::WireMode>(entry[2] != nullptr ? entry[2] : "classic")
+                      .value_or(protocol::WireMode::kClassic);
       item.delta_score = ParseInt(entry[3]);
       item.win = entry[4] != nullptr && std::strcmp(entry[4], "1") == 0;
       item.ended_at = static_cast<int64_t>(ParseUint(entry[5]));
@@ -477,8 +477,7 @@ StatsOutcome DbActor::StatsJob(uint64_t account_id) {
     return true;
   };
 
-  if (!load_mode("classic", &outcome.snapshot.classic) ||
-      !load_mode("riichi", &outcome.snapshot.riichi)) {
+  if (!load_mode("classic", &outcome.snapshot.classic) || !load_mode("riichi", &outcome.snapshot.riichi)) {
     return outcome;  // ok stays false
   }
   outcome.ok = true;
@@ -491,11 +490,10 @@ void DbActor::RecordJob(const MatchRecord& record) {
     return;
   }
   MYSQL* mysql = static_cast<MYSQL*>(mysql_);
-  const std::string sql =
-      "INSERT INTO matches (account_id, room_id, reason, mode, delta_score, win) VALUES (" +
-      std::to_string(record.account_id) + ", '" + Escape(record.room_id) + "', '" +
-      Escape(record.reason) + "', '" + Escape(record.mode) + "', " +
-      std::to_string(record.delta_score) + ", " + (record.win ? "1" : "0") + ")";
+  const std::string sql = "INSERT INTO matches (account_id, room_id, reason, mode, delta_score, win) VALUES (" +
+                          std::to_string(record.account_id) + ", '" + Escape(record.room_id) + "', '" +
+                          Escape(record.reason) + "', '" + Escape(record.mode) + "', " +
+                          std::to_string(record.delta_score) + ", " + (record.win ? "1" : "0") + ")";
   if (mysql_query(mysql, sql.c_str()) != 0) {
     spdlog::error("db: recording the match of room {} failed: {}", record.room_id, mysql_error(mysql));
     const unsigned int error = mysql_errno(mysql);
@@ -512,11 +510,11 @@ void DbActor::RecordMatchResultJob(const MatchResultRecord& record) {
   }
   MYSQL* mysql = static_cast<MYSQL*>(mysql_);
   const std::string sql =
-      "INSERT INTO match_results (account_id, room_id, mode, hands_played, dealer_hands, final_score, final_rank) VALUES (" +
-      std::to_string(record.account_id) + ", '" + Escape(record.room_id) + "', '" +
-      Escape(record.mode) + "', " + std::to_string(record.hands_played) + ", " +
-      std::to_string(record.dealer_hands) + ", " + std::to_string(record.final_score) + ", " +
-      std::to_string(record.final_rank) + ")";
+      "INSERT INTO match_results (account_id, room_id, mode, hands_played, dealer_hands, final_score, final_rank) "
+      "VALUES (" +
+      std::to_string(record.account_id) + ", '" + Escape(record.room_id) + "', '" + Escape(record.mode) + "', " +
+      std::to_string(record.hands_played) + ", " + std::to_string(record.dealer_hands) + ", " +
+      std::to_string(record.final_score) + ", " + std::to_string(record.final_rank) + ")";
   if (mysql_query(mysql, sql.c_str()) != 0) {
     const unsigned int error = mysql_errno(mysql);
     // v1.3 §4 第 1 条：重复写入（同 room_id + account_id 命中 UNIQUE 键）记 WARN 并忽略，绝不重试。

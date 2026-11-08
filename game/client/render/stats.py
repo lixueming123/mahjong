@@ -18,8 +18,22 @@ from ..view import UiView
 from . import art
 from . import widgets as W
 
-# game_end.reason 的三个取值（PROTOCOL §5.10）→ 界面文案
-REASON_TEXT = {"win_ron": "荣和", "win_tsumo": "自摸", "draw_exhausted": "荒庄"}
+import sys
+from pathlib import Path
+
+_game_root = next(
+    p for p in Path(__file__).resolve().parents
+    if (p / "protocol" / "enums.json").is_file()
+)
+sys.path.insert(0, str(_game_root))
+from protocol.enums import REASON
+
+# game_end.reason 的三个取值（PROTOCOL §5.10，reason 整数常量）→ 界面文案
+REASON_TEXT = {
+    REASON.WIN_RON: "荣和",
+    REASON.WIN_TSUMO: "自摸",
+    REASON.DRAW_EXHAUSTED: "荒庄",
+}
 
 EMPTY_TEXT = "暂无对局记录（本账号还没有打完一局）"
 
@@ -60,7 +74,7 @@ def render_row(surface: pygame.Surface, ui: UiView, entry: dict, rect, with_time
     """一行：房间号 · 结果 · 得失分（· 时间）。牌桌弹窗、结算页、大厅三处共用。"""
     fonts = ui.fonts
     room = str(entry.get("room_id", "—"))
-    reason = REASON_TEXT.get(str(entry.get("reason", "")), str(entry.get("reason", "—")))
+    reason = REASON_TEXT.get(entry.get("reason"), str(entry.get("reason", "—")))
     delta = entry.get("delta_score", 0)
     delta = delta if isinstance(delta, int) else 0
 

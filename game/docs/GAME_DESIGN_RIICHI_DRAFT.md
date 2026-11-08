@@ -303,7 +303,7 @@ M1 是纯重构，**必须独立提交**，不要和 M2 混在一个 PR 里—�
 | 玩法分派（`GameMode` + `ParseGameMode`） | ✅ | `game/server/room.h`、`room.cc` |
 | 王牌 14 张切分 / 可摸区 122 / `remaining` 派生 | ✅ | `RoomActor::StartRound`、`DrawReplacementTile` |
 | 宝牌指示牌（开局 1 张，每杠 +1）/ 里宝（仅立直和牌） | ✅ | `FlipDoraIndicator`、`BuildRiichiContext` |
-| 立直宣言（`action: "riichi"` + 打牌同一条消息） | ✅ | `HandleAction`、`DeclareRiichi` |
+| 立直宣言（`action:8` + 打牌同一条消息） | ✅ | `HandleAction`、`DeclareRiichi` |
 | 一发窗口（下一摸前有效，鸣牌即清） | ✅ | `ippatsu_` / `ippatsu_armed_` |
 | 振听（自家牌河 + 见逃，荣和过滤） | ✅ | `IsFuriten`、`ClaimOptionsFor` |
 | 持点 25000 / 供托 1000 / 本场 300 | ✅ | `points_`、`kyoutaku_`、`honba_` |
@@ -347,7 +347,7 @@ M1 是纯重构，**必须独立提交**，不要和 M2 混在一个 PR 里—�
 - **立直后的合法暗杠（v1.16）**：立直手只有在「暗杠不改变听牌」时才允许暗杠
   （`riichi::CanAnkanAfterRiichi`：14 张去掉刚摸牌 vs 暗杠后 10 张 + 暗杠组，两份 `WaitingTiles` 必须相同）。
   `kakan` 永不提供——立直手是门前清，结构上就没有碰组。此前一律拒绝，会误杀合法操作。
-- **抢杠（v1.15）**：日麻加杠不再直接落地，先开 `window:"chankan"` 的窗口（只有 `win`/`pass`，
+- **抢杠（v1.15）**：日麻加杠不再直接落地，先开 `window:3` 的窗口（只有 `win`/`pass`，
   且只发给真能和的家，附带被抢牌面 `tile`）；抢杠 1 番使「无役」手也能抢；和了则杠不成立
   （不补岭上牌、不翻宝牌），第 4 张从加杠者手牌转入和牌者手牌。国士抢暗杠仍不做。
 - **半庄（v1.14）**：`create_room.length` = `tonpu`（缺省，东场 4 局）/ `hanchan`（半庄 8 局）；
@@ -361,7 +361,7 @@ M1 是纯重构，**必须独立提交**，不要和 M2 混在一个 PR 里—�
   - 大厅新增玩法选择（经典麻将 / 日本麻将），classic 仍发不带 `mode` 的 `create_room`（帧字节不变）；
   - 操作栏新增「立直」按钮（需先选中宣言牌，与打牌同一条 action）；
   - 牌桌 HUD 显示持点与宝牌指示牌；结算行改为「合计 N 番 M 符（X 点）」，并渲染满贯分档；
-  - 立直可见：`action_event{action:"riichi"}` + `state_sync.seats[].riichi`，名牌右侧挂红色「立直」标记；
+  - 立直可见：`action_event{action:8}` + `state_sync.seats[].riichi`，名牌右侧挂红色「立直」标记；
   - 结算播报（阶段 A）六段在日麻下改为「番种 → 合计番 → 符 → 满贯分档 → 点数 → 收付（点）」：
     字幕念「N 番 M 符，X 点」，S3 显示符、S4 显示满贯分档、S5 显示点数，与阶段 B 明细行/结论句
     同口径（单位「点」），不再出现「倍 / 庄家加一番 / 自摸不加番 / 封顶 6 番」；语音只复用

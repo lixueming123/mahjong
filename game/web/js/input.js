@@ -1,5 +1,6 @@
 /** 交互：3D 拾取 + 键盘 + 音效开关。点选 -> 再点/Enter 打出的口径沿用第一版。 */
 import * as THREE from 'three';
+import { ACTION, FRAME_TYPE } from './protocol_enums.js';
 
 export class Input {
   constructor({ canvas, camera, app, hand, sfx, ui, client }) {
@@ -64,7 +65,7 @@ export class Input {
     if (k === ' ' || k === 'Spacebar') {
       // 参考端口径：空格 = 过（鸣牌窗口内）
       e.preventDefault();
-      this.client.action('pass', []);
+      this.client.action(ACTION.PASS, []);
       return;
     }
     if (k >= '1' && k <= '9') {
@@ -80,7 +81,7 @@ export class Input {
       this.confirm();
     } else if (k === 's' || k === 'S') {
       // 与服务端对齐（PROTOCOL §4.7 的 sync），沿用旧「摸牌」按钮的手感
-      this.client.send({ type: 'sync' });
+      this.client.send({ type: FRAME_TYPE.SYNC });
     }
   }
 

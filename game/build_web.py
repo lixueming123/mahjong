@@ -126,7 +126,10 @@ def _flat_cell(code: str) -> Image.Image:
         tint = np.array([230, 158, 46], np.float32)
         a[..., :3] = np.clip(a[..., :3] * .32 + tint * .78, 0, 255)
         ink = Image.fromarray(a.astype(np.uint8), "RGBA")
-    cell.alpha_composite(ink, (16, 22))
+    # 墨迹层要在格子里居中。过去按 (16, 22) 当「内边距」贴，是单边偏移：
+    # 176x234 的图案被推右 8px、推下 11px，牌河/副露/宝牌的躺牌看起来
+    # 集体向右歪，横放那张旋转 90° 后偏移换方向更明显。
+    cell.alpha_composite(ink, ((F_W - ink.width) // 2, (F_H - ink.height) // 2))
     return cell
 
 

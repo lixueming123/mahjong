@@ -58,8 +58,8 @@ class LobbyActor : public RoomOwner {
   stdexec::task<void> CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player);
   // 带玩法的建房（create_room 的 "mode" 字段）。保留 CreateRoom(conn, player) 的既有签名，
   // 因为单元测试与既有调用点都按两条消息参数写死；这里只多一个参数，行为完全一致。
-  stdexec::task<void> CreateRoomWithMode(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player,
-                                         GameMode mode, GameLength length = GameLength::kTonpu);
+  stdexec::task<void> CreateRoomWithMode(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player, GameMode mode,
+                                         GameLength length = GameLength::kTonpu);
   stdexec::task<void> JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player, std::string room_id);
   // Open (not yet started) rooms, so the lobby screen can offer them.
   stdexec::task<void> ListRooms(ex_actor::ActorRef<SeatEndpoint> conn);
@@ -91,8 +91,8 @@ class LobbyActor : public RoomOwner {
   // BAD_REQUEST is folded into the same message, so the frame is already queued before anything
   // can ask for a close.
   stdexec::task<void> ReplyFrame(const ex_actor::ActorRef<SeatEndpoint>& conn, std::string frame);
-  stdexec::task<void> ReplyError(const ex_actor::ActorRef<SeatEndpoint>& conn, std::string_view code,
-                              std::string_view message);
+  stdexec::task<void> ReplyError(const ex_actor::ActorRef<SeatEndpoint>& conn, protocol::ErrorCode code,
+                                 std::string_view message);
   // PROTOCOL.md §5.17: `room_joined` reaches one player only, so joins and pre-game
   // departures broadcast the whole roster to every human seat that is still wired.
   stdexec::task<void> BroadcastRoomUpdate(const std::string& room_id, const std::vector<RoomSeat>& seats);

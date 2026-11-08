@@ -28,7 +28,7 @@ binary = build/game/mahjong_server      （mtime 2026-10-23 22:00:46）
 source = game/server/room.cc            （mtime 2026-10-23 22:00:06）
 命中：strings build/game/mahjong_server | grep interlude_ms → 1 条
 
-{"type": "game_end", "reason": "win_tsumo", "round_index": 0, "dealer": 0,
+{"type":21, "reason":2, "round_index": 0, "dealer": 0,
  "renchan_count": 0, "match_will_continue": true,
  "interlude_ms": 12000,        ← 关键字段在，值为 12000
  "results": [...], "win": {...}}

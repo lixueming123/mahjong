@@ -45,19 +45,23 @@ inline constexpr int kSeatCount = 4;
 // 玩法（mode）。日麻接入见 game/docs/GAME_DESIGN_RIICHI_DRAFT.md：
 //   kClassic = 现行玩法（番数制、无立直/宝牌/振听），默认值，行为与之前逐字节一致；
 //   kRiichi  = 日麻（符+番、立直、振听、宝牌、点数制）。
+// v2.0：线值是整数（§1.3.1），入站解析在 player_lobby_agent.cc 用 protocol::ParseWireMode；
+// 内部逻辑永远比较本枚举，出站/落库用 ToWire 翻译。
 enum class GameMode : uint8_t { kClassic = 0, kRiichi = 1 };
 
-// 协议里的玩法名：create_room 的 "mode" 字段。未知值返回 nullopt（调用方回 BAD_REQUEST）。
-std::optional<GameMode> ParseGameMode(std::string_view name);
-std::string_view GameModeName(GameMode mode);
+inline protocol::WireMode ToWire(GameMode mode) {
+  return mode == GameMode::kRiichi ? protocol::WireMode::kRiichi : protocol::WireMode::kClassic;
+}
 
 // 局数（只对日麻有意义；classic 由 C15 冻结为 4 局，传什么都按 4 局走）：
 //   kTonpu   = 东场 4 局（默认，短局）
 //   kHanchan = 半庄 8 局（东场 4 + 南场 4，场风 0 → 1）
 enum class GameLength : uint8_t { kTonpu = 0, kHanchan = 1 };
 
-std::optional<GameLength> ParseGameLength(std::string_view name);
-std::string_view GameLengthName(GameLength length);
+inline protocol::WireLength ToWire(GameLength length) {
+  return length == GameLength::kHanchan ? protocol::WireLength::kHanchan : protocol::WireLength::kTonpu;
+}
+
 // 这个玩法下的一共几局：classic 恒 4（C15），日麻按 kTonpu/kHanchan 取 4/8。
 int RoundCountOf(GameMode mode, GameLength length);
 
@@ -81,10 +85,10 @@ struct SettledSeat {
 // does the owner start the §1.4.5 reclaim; the per-round match records are written every time.
 struct GameSettlement {
   std::string room_id;
-  std::string reason;              // win_ron / win_tsumo / draw_exhausted
-  std::string mode;                // classic / riichi（lobby 写战绩时落库）
-  std::vector<SettledSeat> seats;  // always kSeatCount entries, in seat order
-  bool match_over = false;         // true = the match_end has been/will be broadcast (§5.15)
+  protocol::RoundEndReason reason = protocol::RoundEndReason::kInvalid;  // 线枚举（§1.3.1）
+  protocol::WireMode mode = protocol::WireMode::kClassic;                // 线枚举（lobby 落库时在边界翻回词表）
+  std::vector<SettledSeat> seats;                                        // always kSeatCount entries, in seat order
+  bool match_over = false;  // true = the match_end has been/will be broadcast (§5.15)
   // ---- v1.3 场终快照（match_over 时有效；lobby 据此写 match_results，B3）----
   int hands_played = 0;                         // 实际计入局数（D2 口径）
   std::array<int, kSeatCount> dealer_hands {};  // 各座位坐庄手数（含连庄）
@@ -184,9 +188,7 @@ inline bool IsAiPacingToken(uint64_t token) { return (token & kAiPacingTokenBit)
 // the first criterion, the advance token passes it — the two never collide, and that is only
 // true because of the arm-after-transition ordering.
 constexpr uint64_t kRoundAdvanceTokenBit = 1ull << 62;
-inline uint64_t MakeRoundAdvanceToken(uint64_t window_seq) {
-  return window_seq | kRoundAdvanceTokenBit;
-}
+inline uint64_t MakeRoundAdvanceToken(uint64_t window_seq) { return window_seq | kRoundAdvanceTokenBit; }
 inline bool IsRoundAdvanceToken(uint64_t token) { return (token & kRoundAdvanceTokenBit) != 0; }
 
 // v1.8（SETTLEMENT_BROADCAST_RULINGS §2.1 / C8）: the **match-end** deadline carries its own bit.
@@ -261,8 +263,7 @@ struct RoomEnvelope {
   static RoomEnvelope PlayerDisconnected(PlayerInfo player) { return {PlayerDisconnectedMsg {std::move(player)}}; }
   static RoomEnvelope IdleTimeout(PlayerInfo player) { return {IdleTimeoutMsg {std::move(player)}}; }
 
-  std::variant<ReadyMsg, SyncMsg, GameFrameMsg, WindowTimeoutMsg, PlayerDisconnectedMsg, IdleTimeoutMsg>
-      msg;
+  std::variant<ReadyMsg, SyncMsg, GameFrameMsg, WindowTimeoutMsg, PlayerDisconnectedMsg, IdleTimeoutMsg> msg;
 };
 
 class RoomActor {
@@ -278,8 +279,7 @@ class RoomActor {
   RoomActor(std::string room_id, uint64_t seed, int action_timeout_ms, std::vector<RoomSeat> seats,
             std::shared_ptr<WindowTimer> timer, int ai_delay_ms = -1, int inter_hand_delay_ms = -1,
             ex_actor::ActorRef<RoomOwner> owner = {}, TimeoutScheduler timeout_scheduler = {},
-            RoomFinishedCallback finished_for_test = {},
-            GameMode mode = GameMode::kClassic,
+            RoomFinishedCallback finished_for_test = {}, GameMode mode = GameMode::kClassic,
             GameLength length = GameLength::kTonpu);
 
   // ex_actor hands every actor its own ref right after construction. The room needs it to post
@@ -335,10 +335,10 @@ class RoomActor {
   int dealer() const { return dealer_; }
   int next_wall_index() const { return next_index_; }
   // v1.6（C1 场次状态）
-  int round_index() const { return round_index_; }        // 0-based, 0..round_count-1（连庄不动）
-  int round_count() const { return round_count_; }        // classic 4 / 日麻 东场 4、半庄 8
-  int renchan_count() const { return renchan_count_; }    // 本场累计连庄次数
-  int hands_played() const { return hands_played_; }      // 已下发的 game_end 次数（含连庄）
+  int round_index() const { return round_index_; }      // 0-based, 0..round_count-1（连庄不动）
+  int round_count() const { return round_count_; }      // classic 4 / 日麻 东场 4、半庄 8
+  int renchan_count() const { return renchan_count_; }  // 本场累计连庄次数
+  int hands_played() const { return hands_played_; }    // 已下发的 game_end 次数（含连庄）
   int match_total_of(int seat) const { return match_totals_[static_cast<size_t>(seat)]; }
   // Test seam: 正常流程里持点只能由结算的 ApplyDeltaToPoints 改写，测试要构造「已被打穿」
   // 或「恰好 0 点」这两种终局判定边界时没有别的入口。生产代码不得调用。
@@ -347,11 +347,11 @@ class RoomActor {
   // 这种局面（末局荒庄得靠发牌运气）。**不扣持点**，所以调用方算守恒时要把它加回去。
   void SetKyoutakuForTest(int sticks) { kyoutaku_ = sticks; }
   int kyoutaku() const { return kyoutaku_; }
-  // "" when no window is open, otherwise "discard" or "claim" (PROTOCOL.md §5.7).
-  std::string CurrentWindow() const {
-    if (discard_window_open_) return "discard";
-    if (claim_open_) return claim_chankan_ ? "chankan" : "claim";
-    return "";
+  // kInvalid when no window is open, otherwise the window wire enum (PROTOCOL v2.0 §1.3.1).
+  protocol::Window CurrentWindow() const {
+    if (discard_window_open_) return protocol::Window::kDiscard;
+    if (claim_open_) return claim_chankan_ ? protocol::Window::kChankan : protocol::Window::kClaim;
+    return protocol::Window::kInvalid;
   }
   const std::vector<Tile>& hand_of(int seat) const { return hands_[static_cast<size_t>(seat)]; }
   // v1.6 局种子回归用：本局发牌后的牌山（含已发位置，next_index_ 之后才是未摸牌）。
@@ -388,13 +388,13 @@ class RoomActor {
 
   struct ClaimAnswer {
     bool answered = false;
-    std::string action = "pass";
+    protocol::Action action = protocol::Action::kPass;
     std::vector<Tile> tiles;
   };
 
   // Everything game_end needs (PROTOCOL.md §5.10, v1.6 fields included).
   struct Settlement {
-    std::string reason;
+    protocol::RoundEndReason reason = protocol::RoundEndReason::kInvalid;
     std::array<int, kSeatCount> delta {};
     int winner_seat = -1;  // -1: drawn round
     std::vector<Tile> winner_flat_hand;
@@ -409,51 +409,50 @@ class RoomActor {
     int per_payer = 0;
     int total = 0;
     // ---- v1.6（C8 场次扩展）----
-    int round_index = 0;                   // 本局序号（0 基）
-    int dealer = 0;                        // 本局庄家
-    int renchan_count = 0;                 // 截至本局结束的连庄次数（B2 决策：含本局触发的连庄）
+    int round_index = 0;    // 本局序号（0 基）
+    int dealer = 0;         // 本局庄家
+    int renchan_count = 0;  // 截至本局结束的连庄次数（B2 决策：含本局触发的连庄）
     bool match_will_continue = false;
     std::array<int, kSeatCount> totals {};  // match_totals（含本局）
-    std::vector<Yaku> yaku;                // 判番结果（B1 单一出口）
-    int han = 0;                           // 封顶后番数（= han_breakdown.total）
-    int dealer_bonus = 0;                  // 0/1
+    std::vector<Yaku> yaku;                 // 判番结果（B1 单一出口）
+    int han = 0;                            // 封顶后番数（= han_breakdown.total）
+    int dealer_bonus = 0;                   // 0/1
     bool rinshan = false;
     // ---- 日麻（mode == kRiichi）专用；classic 下全部保持默认值 ----
-    int fu = 0;                              // 符（classic 恒 0）
-    int points = 0;                          // 和牌点数（classic = multiplier）
-    std::string limit;                       // none/mangan/haneman/baiman/sanbaiman/yakuman
-    bool riichi = false;                     // 本局和牌者是否立直
+    int fu = 0;           // 符（classic 恒 0）
+    int points = 0;       // 和牌点数（classic = multiplier）
+    std::string limit;    // none/mangan/haneman/baiman/sanbaiman/yakuman
+    bool riichi = false;  // 本局和牌者是否立直
     int dora = 0;
     int ura_dora = 0;
-    int aka_dora = 0;                        // 赤宝牌张数（v1.18，classic 恒 0）
-    int kyoutaku = 0;                        // 结算后剩余供托（通常 0）
-    int kyoutaku_award = 0;                  // v1.20：场终归一位的供托棒数（0 = 无）
-    int kyoutaku_award_seat = -1;            // 收下这些棒的座位（无则 -1）
-    int honba = 0;                           // 本局本场数（支付已计入 delta）
+    int aka_dora = 0;              // 赤宝牌张数（v1.18，classic 恒 0）
+    int kyoutaku = 0;              // 结算后剩余供托（通常 0）
+    int kyoutaku_award = 0;        // v1.20：场终归一位的供托棒数（0 = 无）
+    int kyoutaku_award_seat = -1;  // 收下这些棒的座位（无则 -1）
+    int honba = 0;                 // 本局本场数（支付已计入 delta）
     std::vector<Tile> dora_indicators;
     std::array<int, kSeatCount> points_after {};  // 本局结束后的持点（日麻排名口径）
     std::array<bool, kSeatCount> tenpai {};       // 荒庄时的听牌家（日麻罚符与 UI 用）
     // ---- v1.3 场终快照（仅 match_over == true 时有意义；B3 落库用，与 match_end 同源）----
-    int hands_played = 0;                  // 实际计入局数（D2 口径：含截断）
+    int hands_played = 0;                         // 实际计入局数（D2 口径：含截断）
     std::array<int, kSeatCount> dealer_hands {};  // 各座位本场坐庄手数（含连庄）
     std::array<int, kSeatCount> final_rank {};    // 1..4，并列跳号（与 match_end.rankings 同源）
   };
 
   // ---- turn driving ----------------------------------------------------------------
-  stdexec::task<void> StartMatch();   // v1.6（C2）：ready 后一次；reset 场次状态
-  stdexec::task<void> StartRound();   // v1.6（C3）：每局一次；reset 全部局内状态
+  stdexec::task<void> StartMatch();  // v1.6（C2）：ready 后一次；reset 场次状态
+  stdexec::task<void> StartRound();  // v1.6（C3）：每局一次；reset 全部局内状态
   stdexec::task<void> Pump();
   stdexec::task<void> DrawForCurrentSeat();
   stdexec::task<void> OpenDiscardWindow(bool win_check, std::optional<Tile> drawn_tile);
   stdexec::task<void> ApplyDiscard(int seat, Tile tile);
   stdexec::task<void> OpenClaimWindow(int from_seat, Tile tile, const std::array<bool, kSeatCount>& recipients,
-                                   const std::array<std::vector<Option>, kSeatCount>& options,
-                                   bool chankan = false);
+                                      const std::array<std::vector<Option>, kSeatCount>& options, bool chankan = false);
   stdexec::task<void> ResolveClaimWindow();
-  stdexec::task<void> ApplyMeld(int seat, const std::string& action, const std::vector<Tile>& client_tiles, int from_seat,
-                             Tile claimed_tile);
+  stdexec::task<void> ApplyMeld(int seat, protocol::Action action, const std::vector<Tile>& client_tiles, int from_seat,
+                                Tile claimed_tile);
   // v1.6（自理杠）：ankan / kakan 只在本家打牌窗口；补摸 1 张后重开打牌窗口
-  stdexec::task<void> ApplySelfKan(int seat, const std::string& action, const std::vector<Tile>& client_tiles);
+  stdexec::task<void> ApplySelfKan(int seat, protocol::Action action, const std::vector<Tile>& client_tiles);
   // 抢杠窗口（v1.15）：加杠那张牌先给三家一次「和/过」，没人抢才真正把杠落地。
   stdexec::task<void> OpenChankanWindow(int kan_seat, Tile tile);
   stdexec::task<void> EndRoundWithWin(int winner_seat, int from_seat, Tile winning_tile, bool tsumo,
@@ -501,7 +500,7 @@ class RoomActor {
   // 天和 has no draw record, so the largest tile of the hand stands in for it.
   Tile TsumoWinningTile(int seat) const;
   void OpenWindowTimer();
-  stdexec::task<void> ReplyError(int seat, std::string_view code, std::string_view message);
+  stdexec::task<void> ReplyError(int seat, protocol::ErrorCode code, std::string_view message);
   // Tells the room's owner the game is over, exactly once (PROTOCOL.md §1.4.5).
   void NotifyFinished(const Settlement& settlement);
   stdexec::task<void> ReplyFrame(int seat, std::string frame);
@@ -544,11 +543,10 @@ class RoomActor {
   std::vector<Option> ClaimOptionsFor(int seat, Tile tile, bool is_next_player, int from_seat) const;
   // 日麻：没有役就不能和（宝牌不算役）。classic 恒 true。房间在这里用**完整上下文**判，
   // 这样立直/一发/海底/杠上开花这类「状态役」也能算进去。
-  bool HasYakuForWin(int seat, Tile winning_tile, bool tsumo, int from_seat,
-                     bool is_chankan = false) const;
+  bool HasYakuForWin(int seat, Tile winning_tile, bool tsumo, int from_seat, bool is_chankan = false) const;
   // 和牌形：日麻要额外认国士无双 —— 共享的 `IsWinningHand` 是番数制口径，没有这个役。
-  bool IsWinShape(const std::vector<Tile>& concealed, const std::vector<Meld>& melds,
-                  Tile winning_tile, bool tsumo) const;
+  bool IsWinShape(const std::vector<Tile>& concealed, const std::vector<Meld>& melds, Tile winning_tile,
+                  bool tsumo) const;
   bool IsFuriten(int seat) const;
   bool RiichiDeclared(int seat) const { return riichi_[static_cast<size_t>(seat)]; }
   // 立直宣言（与打牌同一条 action）：校验后扣 1000 供托、置位，再由调用方打出该牌。
@@ -557,8 +555,8 @@ class RoomActor {
   // 岭上补牌：日麻从王牌取、并用手牌山顶牌补满王牌；classic 仍从牌山取。
   Tile DrawReplacementTile();
   void FlipDoraIndicator();
-  riichi::WinContext BuildRiichiContext(int winner_seat, int from_seat, bool tsumo,
-                                        Tile winning_tile, bool is_chankan = false) const;
+  riichi::WinContext BuildRiichiContext(int winner_seat, int from_seat, bool tsumo, Tile winning_tile,
+                                        bool is_chankan = false) const;
   void ApplyDeltaToPoints(const std::array<int, kSeatCount>& delta);
   bool BotShouldRiichi(int seat) const;
 
@@ -581,16 +579,16 @@ class RoomActor {
   // 日麻王牌 14 张：0..3 岭上牌 / 4..8 宝牌指示牌 / 9..13 里宝指示牌。
   std::vector<Tile> dead_wall_;
   int dead_draw_index_ = 0;
-  std::vector<Tile> dora_indicators_;  // 已翻开的指示牌（classic 恒为空）
-  std::array<int, kSeatCount> points_ {};  // 日麻持点（classic 不使用）
-  int kyoutaku_ = 0;                       // 供托（立直棒总数 × 1000）
-  int honba_ = 0;                          // 本场数
-  int round_wind_ = 0;                     // 场风：0 东 / 1 南（每局开始时按 round_index_ 推导）
-  std::array<bool, kSeatCount> riichi_ {};       // 本局已宣言立直
-  std::array<bool, kSeatCount> ippatsu_ {};      // 一发仍然有效（鸣牌后清除）
+  std::vector<Tile> dora_indicators_;              // 已翻开的指示牌（classic 恒为空）
+  std::array<int, kSeatCount> points_ {};          // 日麻持点（classic 不使用）
+  int kyoutaku_ = 0;                               // 供托（立直棒总数 × 1000）
+  int honba_ = 0;                                  // 本场数
+  int round_wind_ = 0;                             // 场风：0 东 / 1 南（每局开始时按 round_index_ 推导）
+  std::array<bool, kSeatCount> riichi_ {};         // 本局已宣言立直
+  std::array<bool, kSeatCount> ippatsu_ {};        // 一发仍然有效（鸣牌后清除）
   std::array<bool, kSeatCount> ippatsu_armed_ {};  // 宣言后尚未跨过「下一摸」
-  std::array<bool, kSeatCount> furiten_ever_ {}; // 见逃振听（本局内持久）
-  bool draw_dealer_tenpai_ = false;              // 荒庄时庄家是否听牌（决定连庄/轮庄）
+  std::array<bool, kSeatCount> furiten_ever_ {};   // 见逃振听（本局内持久）
+  bool draw_dealer_tenpai_ = false;                // 荒庄时庄家是否听牌（决定连庄/轮庄）
   int dealer_ = 0;
   int current_seat_ = 0;
   uint64_t seq_ = 0;
@@ -598,10 +596,10 @@ class RoomActor {
   bool game_started_ = false;
 
   // v1.6（C1 场次状态）。跨局存活、绝不在 StartRound 里重置：room_id_/seats_/seq_/match_totals_。
-  int round_index_ = 0;   // 0-based；连庄不推进，轮庄 +1（GAME_DESIGN v1.10 §3.3）
-  int round_count_ = 4;   // classic 恒 4（C15）；日麻 4（东场）/ 8（半庄）
-  int hands_played_ = 0;  // 已下发的 game_end 次数（含连庄），上界 8
-  int renchan_count_ = 0; // 本场累计连庄次数；> kMaxRenchan 强制场终（C15）
+  int round_index_ = 0;    // 0-based；连庄不推进，轮庄 +1（GAME_DESIGN v1.10 §3.3）
+  int round_count_ = 4;    // classic 恒 4（C15）；日麻 4（东场）/ 8（半庄）
+  int hands_played_ = 0;   // 已下发的 game_end 次数（含连庄），上界 8
+  int renchan_count_ = 0;  // 本场累计连庄次数；> kMaxRenchan 强制场终（C15）
   std::array<int, kSeatCount> match_totals_ {};
   std::array<int, kSeatCount> dealer_hands_ {};  // B3：各座位本场坐庄手数（每局 +1，含连庄）
   // v1.7 §5.16：`tenpai_seq` 是**每座位一条的独立单调计数器**（从 1 起、跨局不重置；

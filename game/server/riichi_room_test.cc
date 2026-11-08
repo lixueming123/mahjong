@@ -3,18 +3,17 @@
 // 只验「房间有没有把玩法接对」：牌山切分（可摸区 122 / 剩 69）、持点起点、宝牌指示牌、
 // classic 帧字节不受影响、以及 classic 房间拒绝立直。算分正确性由 riichi_rules_test 负责。
 
-#include <gtest/gtest.h>
-
 #include <algorithm>
 #include <cmath>
 #include <map>
 #include <memory>
-#include <utility>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <gtest/gtest.h>
 
 #include "actor_scope.h"
 #include "json.h"
@@ -98,9 +97,15 @@ class CapturingSeat : public SeatEndpoint {
   std::shared_ptr<FrameSink> sink_;
 };
 
-std::string TypeOf(const json::Value& frame) {
+// The wire type is now an integer (PROTOCOL v2.0 §1.3.1); an unknown value parses back to
+// kInvalid, which no assertion below ever matches.
+protocol::FrameType TypeOf(const json::Value& frame) {
   const json::Value* type = frame.Find("type");
-  return type != nullptr && type->IsString() ? type->AsString() : std::string("<none>");
+  if (type == nullptr || !type->IsInteger()) {
+    return protocol::FrameType::kInvalid;
+  }
+  const std::optional<protocol::FrameType> parsed = protocol::ParseFrameType(type->AsInt());
+  return parsed.value_or(protocol::FrameType::kInvalid);
 }
 
 class RiichiRoomTest : public ::testing::Test {
@@ -114,8 +119,7 @@ class RiichiRoomTest : public ::testing::Test {
   // 起一个「座位 0 是真人、其余是 bot」的房间。ai_delay_ms = 0：bot 在同一个消息里同步决策。
   // |entrust| = true 时座位 0 挂空 endpoint：房间按「托管」把它的每一手都自己打完，
   // 于是整场可以在单元测试里无交互跑完（半庄要跑到第 5 局才能看见南场）。
-  void BuildRoom(GameMode mode, uint64_t seed, GameLength length = GameLength::kTonpu,
-                 bool entrust = false) {
+  void BuildRoom(GameMode mode, uint64_t seed, GameLength length = GameLength::kTonpu, bool entrust = false) {
     sink_ = std::make_shared<FrameSink>();
     std::vector<RoomSeat> seats;
     for (int seat = 0; seat < kSeatCount; ++seat) {
@@ -132,10 +136,9 @@ class RiichiRoomTest : public ::testing::Test {
           std::get<0>(stdexec::sync_wait(ex_actor::Spawn<CapturingSeat>(sink_)).value());
       seats.front().endpoint = endpoint;
     }
-    room_ = std::make_unique<RoomActor>("r-riichi", seed, protocol::kDefaultActionTimeoutMs, std::move(seats),
-                                        nullptr, /*ai_delay_ms=*/0, /*inter_hand_delay_ms=*/0,
-                                        ex_actor::ActorRef<RoomOwner> {}, TimeoutScheduler {},
-                                        RoomFinishedCallback {}, mode, length);
+    room_ = std::make_unique<RoomActor>("r-riichi", seed, protocol::kDefaultActionTimeoutMs, std::move(seats), nullptr,
+                                        /*ai_delay_ms=*/0, /*inter_hand_delay_ms=*/0, ex_actor::ActorRef<RoomOwner> {},
+                                        TimeoutScheduler {}, RoomFinishedCallback {}, mode, length);
   }
 
   void Send(RoomEnvelope envelope) { stdexec::sync_wait(room_->Dispatch(std::move(envelope))); }
@@ -145,7 +148,7 @@ class RiichiRoomTest : public ::testing::Test {
     Send(RoomEnvelope::Ready(human_));
     std::optional<json::Value> start;
     for (json::Value& frame : sink_->Drain()) {
-      if (TypeOf(frame) == "game_start" && !start.has_value()) {
+      if (TypeOf(frame) == protocol::FrameType::kGameStart && !start.has_value()) {
         start = std::move(frame);
       }
     }
@@ -162,7 +165,7 @@ TEST_F(RiichiRoomTest, DealsDeadWallAndStartsAt25000) {
   BuildRoom(GameMode::kRiichi, /*seed=*/20260101);
   const std::optional<json::Value> start = ReadyAndTakeGameStart();
   ASSERT_TRUE(start.has_value());
-  EXPECT_EQ(GameModeName(room_->mode()), std::string_view("riichi"));
+  EXPECT_EQ(room_->mode(), GameMode::kRiichi);
   EXPECT_EQ(room_->remaining(), 69);
 
   const json::Value* points = start->Find("points");
@@ -199,8 +202,8 @@ TEST_F(RiichiRoomTest, ClassicRoomRejectsRiichi) {
   ASSERT_FALSE(hand->AsArray().empty());
 
   json::Value action = json::Value::Obj(4);  // type, action, tiles, seq
-  action.Set("type", json::Value::Str("action"));
-  action.Set("action", json::Value::Str("riichi"));
+  action.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kAction)));
+  action.Set("action", json::Value::Int(protocol::WireOf(protocol::Action::kRiichi)));
   json::Value tiles = json::Value::Arr(1);
   tiles.Append(json::Value::Str(hand->AsArray().front().AsString()));
   action.Set("tiles", std::move(tiles));
@@ -209,13 +212,13 @@ TEST_F(RiichiRoomTest, ClassicRoomRejectsRiichi) {
 
   bool saw_error = false;
   for (json::Value& frame : sink_->Drain()) {
-    if (TypeOf(frame) != "error") {
+    if (TypeOf(frame) != protocol::FrameType::kError) {
       continue;
     }
     saw_error = true;
     const json::Value* code = frame.Find("code");
     ASSERT_NE(code, nullptr);
-    EXPECT_EQ(code->AsString(), protocol::kCodeIllegalAction);
+    EXPECT_EQ(code->AsInt(), protocol::WireOf(protocol::ErrorCode::kIllegalAction));
   }
   EXPECT_TRUE(saw_error);
 }
@@ -244,8 +247,8 @@ TEST_F(RiichiRoomTest, RiichiRejectsTileNotInHand) {
   ASSERT_TRUE(absent.has_value());
 
   json::Value action = json::Value::Obj(4);  // type, action, tiles, seq
-  action.Set("type", json::Value::Str("action"));
-  action.Set("action", json::Value::Str("riichi"));
+  action.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kAction)));
+  action.Set("action", json::Value::Int(protocol::WireOf(protocol::Action::kRiichi)));
   json::Value tiles = json::Value::Arr(1);
   tiles.Append(json::Value::Str(*absent));
   action.Set("tiles", std::move(tiles));
@@ -254,13 +257,13 @@ TEST_F(RiichiRoomTest, RiichiRejectsTileNotInHand) {
 
   bool saw_error = false;
   for (json::Value& frame : sink_->Drain()) {
-    if (TypeOf(frame) != "error") {
+    if (TypeOf(frame) != protocol::FrameType::kError) {
       continue;
     }
     saw_error = true;
     const json::Value* code = frame.Find("code");
     ASSERT_NE(code, nullptr);
-    EXPECT_EQ(code->AsString(), protocol::kCodeIllegalAction);
+    EXPECT_EQ(code->AsInt(), protocol::WireOf(protocol::ErrorCode::kIllegalAction));
   }
   EXPECT_TRUE(saw_error);
 }
@@ -275,15 +278,15 @@ TEST_F(RiichiRoomTest, RiichiTilesAccompanyRiichiOption) {
 
   auto send_discard = [this](std::string tile, uint64_t seq) {
     json::Value frame = json::Value::Obj(3);  // type, tile, seq
-    frame.Set("type", json::Value::Str("discard"));
+    frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kDiscard)));
     frame.Set("tile", json::Value::Str(std::move(tile)));
     frame.Set("seq", json::Value::Int(static_cast<int64_t>(seq)));
     Send(RoomEnvelope::GameFrame(human_, std::move(frame)));
   };
-  auto send_action = [this](std::string action, std::vector<std::string> tiles, uint64_t seq) {
+  auto send_action = [this](protocol::Action action, std::vector<std::string> tiles, uint64_t seq) {
     json::Value frame = json::Value::Obj(4);  // type, action, tiles, seq
-    frame.Set("type", json::Value::Str("action"));
-    frame.Set("action", json::Value::Str(std::move(action)));
+    frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kAction)));
+    frame.Set("action", json::Value::Int(protocol::WireOf(action)));
     json::Value list = json::Value::Arr(tiles.size());
     for (std::string& tile : tiles) {
       list.Append(json::Value::Str(std::move(tile)));
@@ -296,13 +299,13 @@ TEST_F(RiichiRoomTest, RiichiTilesAccompanyRiichiOption) {
   bool saw_riichi_window = false;
   bool need_answer = false;
   uint64_t pending_seq = 0;
-  std::string pending_window;
+  int pending_window = 0;
   int answered = 0;
   int step = 0;
   for (; step < 2000 && !saw_riichi_window && !room_->game_finished(); ++step) {
     need_answer = false;
     for (const json::Value& frame : sink_->Drain()) {
-      if (TypeOf(frame) != "action_request") {
+      if (TypeOf(frame) != protocol::FrameType::kActionRequest) {
         continue;
       }
       const json::Value* window = frame.Find("window");
@@ -313,11 +316,11 @@ TEST_F(RiichiRoomTest, RiichiTilesAccompanyRiichiOption) {
       }
       need_answer = true;
       pending_seq = static_cast<uint64_t>(seq_value->AsInt());
-      pending_window = window->AsString();
+      pending_window = static_cast<int>(window->AsInt());
       bool offers_riichi = false;
       for (const json::Value& option : options->AsArray()) {
         const json::Value* action = option.Find("action");
-        if (action != nullptr && action->AsString() == "riichi") {
+        if (action != nullptr && action->AsInt() == protocol::WireOf(protocol::Action::kRiichi)) {
           offers_riichi = true;
         }
       }
@@ -344,8 +347,8 @@ TEST_F(RiichiRoomTest, RiichiTilesAccompanyRiichiOption) {
       continue;
     }
     ++answered;
-    if (pending_window != "discard") {
-      send_action("pass", {}, pending_seq);  // 鸣牌窗口：过
+    if (pending_window != protocol::WireOf(protocol::Window::kDiscard)) {
+      send_action(protocol::Action::kPass, {}, pending_seq);  // 鸣牌窗口：过
       continue;
     }
     std::vector<std::string> hand_codes;
@@ -358,11 +361,10 @@ TEST_F(RiichiRoomTest, RiichiTilesAccompanyRiichiOption) {
     // 打一张最孤立的牌，把牌局往前推（玩家不会鸣牌，他的牌河只由这里写入）
     send_discard(MostIsolatedTile(hand_codes), pending_seq);
   }
-  EXPECT_TRUE(saw_riichi_window)
-      << "固定种子下应至少出现一次立直窗口（steps=" << step << ", answered=" << answered
-      << ", round_index=" << room_->round_index() << ", finished=" << room_->game_finished() << ")";
+  EXPECT_TRUE(saw_riichi_window) << "固定种子下应至少出现一次立直窗口（steps=" << step << ", answered=" << answered
+                                 << ", round_index=" << room_->round_index() << ", finished=" << room_->game_finished()
+                                 << ")";
 }
-
 
 // 半庄（v1.14）：8 局、东场入场；东场仍是 4 局且为缺省
 TEST_F(RiichiRoomTest, LengthSelectsRoundCount) {
@@ -425,14 +427,14 @@ TEST_F(RiichiRoomTest, WinFrameCarriesAkaDoraAndConsistentHan) {
   std::vector<std::string> my_hand;
   bool need_answer = false;
   uint64_t seq = 0;
-  std::string window;
+  int window = 0;
   std::optional<json::Value> win_frame;
   std::optional<json::Value> win_body;
 
   for (int guard = 0; guard < 4000 && !win_body.has_value() && !room_->game_finished(); ++guard) {
     for (json::Value& frame : sink_->Drain()) {
-      const std::string type = TypeOf(frame);
-      if (type == "game_start" || type == "state_sync") {
+      const protocol::FrameType type = TypeOf(frame);
+      if (type == protocol::FrameType::kGameStart || type == protocol::FrameType::kStateSync) {
         const json::Value* hand = frame.Find("hand");
         if (hand != nullptr && hand->IsArray()) {
           my_hand.clear();
@@ -442,17 +444,17 @@ TEST_F(RiichiRoomTest, WinFrameCarriesAkaDoraAndConsistentHan) {
         }
         continue;
       }
-      if (type == "action_request") {
+      if (type == protocol::FrameType::kActionRequest) {
         const json::Value* seq_value = frame.Find("seq");
         const json::Value* window_value = frame.Find("window");
         need_answer = seq_value != nullptr && window_value != nullptr;
         if (need_answer) {
           seq = static_cast<uint64_t>(seq_value->AsInt());
-          window = window_value->AsString();
+          window = static_cast<int>(window_value->AsInt());
         }
         continue;
       }
-      if (type == "game_end") {
+      if (type == protocol::FrameType::kGameEnd) {
         const json::Value* win = frame.Find("win");
         if (win != nullptr && win->IsObject()) {
           win_body = *win;  // json::Value 是可拷贝的轻量视图
@@ -467,12 +469,12 @@ TEST_F(RiichiRoomTest, WinFrameCarriesAkaDoraAndConsistentHan) {
 
     json::Value action = json::Value::Obj(5);
     action.Set("seq", json::Value::Int(static_cast<int64_t>(seq)));
-    if (window == "discard" && !my_hand.empty()) {
-      action.Set("type", json::Value::Str("discard"));
+    if (window == protocol::WireOf(protocol::Window::kDiscard) && !my_hand.empty()) {
+      action.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kDiscard)));
       action.Set("tile", json::Value::Str(MostIsolatedTile(my_hand)));
     } else {
-      action.Set("type", json::Value::Str("action"));
-      action.Set("action", json::Value::Str("pass"));
+      action.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kAction)));
+      action.Set("action", json::Value::Int(protocol::WireOf(protocol::Action::kPass)));
       action.Set("tiles", json::Value::Arr(0));
     }
     Send(RoomEnvelope::GameFrame(human_, std::move(action)));
@@ -505,12 +507,12 @@ TEST_F(RiichiRoomTest, HanchanPlaysThroughSouthRound) {
   std::vector<std::string> my_hand;
   bool need_answer = false;
   uint64_t seq = 0;
-  std::string window;
+  int window = 0;
 
   for (int guard = 0; guard < 20000 && !room_->game_finished(); ++guard) {
     for (json::Value& frame : sink_->Drain()) {
-      const std::string type = TypeOf(frame);
-      if (type == "game_start" || type == "state_sync") {
+      const protocol::FrameType type = TypeOf(frame);
+      if (type == protocol::FrameType::kGameStart || type == protocol::FrameType::kStateSync) {
         const json::Value* hand = frame.Find("hand");
         if (hand != nullptr && hand->IsArray()) {
           my_hand.clear();
@@ -520,13 +522,13 @@ TEST_F(RiichiRoomTest, HanchanPlaysThroughSouthRound) {
         }
         continue;
       }
-      if (type == "action_request") {
+      if (type == protocol::FrameType::kActionRequest) {
         const json::Value* seq_value = frame.Find("seq");
         const json::Value* window_value = frame.Find("window");
         need_answer = seq_value != nullptr && window_value != nullptr;
         if (need_answer) {
           seq = static_cast<uint64_t>(seq_value->AsInt());
-          window = window_value->AsString();
+          window = static_cast<int>(window_value->AsInt());
         }
       }
     }
@@ -540,12 +542,12 @@ TEST_F(RiichiRoomTest, HanchanPlaysThroughSouthRound) {
 
     json::Value action = json::Value::Obj(5);  // type, seq + (discard tile | action/tiles)
     action.Set("seq", json::Value::Int(static_cast<int64_t>(seq)));
-    if (window == "discard" && !my_hand.empty()) {
-      action.Set("type", json::Value::Str("discard"));
+    if (window == protocol::WireOf(protocol::Window::kDiscard) && !my_hand.empty()) {
+      action.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kDiscard)));
       action.Set("tile", json::Value::Str(MostIsolatedTile(my_hand)));
     } else {
-      action.Set("type", json::Value::Str("action"));
-      action.Set("action", json::Value::Str("pass"));
+      action.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kAction)));
+      action.Set("action", json::Value::Int(protocol::WireOf(protocol::Action::kPass)));
       action.Set("tiles", json::Value::Arr(0));
     }
     Send(RoomEnvelope::GameFrame(human_, std::move(action)));
@@ -557,8 +559,7 @@ TEST_F(RiichiRoomTest, HanchanPlaysThroughSouthRound) {
 
   // 每一局的场风都必须由局号唯一决定：0..3 东场、4..7 南场
   for (const auto& [key, count] : seen) {
-    EXPECT_EQ(key.second, key.first / riichi::kRoundsPerWind)
-        << "round_index=" << key.first << " 的场风算错了";
+    EXPECT_EQ(key.second, key.first / riichi::kRoundsPerWind) << "round_index=" << key.first << " 的场风算错了";
   }
   EXPECT_NE(seen.find({0, 0}), seen.end()) << "第 1 局必须是东场";
   EXPECT_NE(seen.find({4, 1}), seen.end()) << "第 5 局必须进南场（场风 1）";
@@ -586,7 +587,7 @@ TEST_F(RiichiRoomTest, BustEndsMatchImmediately) {
   std::vector<std::string> my_hand;
   bool need_answer = false;
   uint64_t seq = 0;
-  std::string window;
+  int window = 0;
   std::optional<json::Value> last_end;
   int game_ends = 0;
 
@@ -594,8 +595,8 @@ TEST_F(RiichiRoomTest, BustEndsMatchImmediately) {
   // 若把终局判定写进 for 条件，就会在 drain 之前跳出、拿不到那两份帧。
   for (int guard = 0; guard < 4000; ++guard) {
     for (json::Value& frame : sink_->Drain()) {
-      const std::string type = TypeOf(frame);
-      if (type == "game_start" || type == "state_sync") {
+      const protocol::FrameType type = TypeOf(frame);
+      if (type == protocol::FrameType::kGameStart || type == protocol::FrameType::kStateSync) {
         const json::Value* hand = frame.Find("hand");
         if (hand != nullptr && hand->IsArray()) {
           my_hand.clear();
@@ -605,17 +606,17 @@ TEST_F(RiichiRoomTest, BustEndsMatchImmediately) {
         }
         continue;
       }
-      if (type == "action_request") {
+      if (type == protocol::FrameType::kActionRequest) {
         const json::Value* seq_value = frame.Find("seq");
         const json::Value* window_value = frame.Find("window");
         need_answer = seq_value != nullptr && window_value != nullptr;
         if (need_answer) {
           seq = static_cast<uint64_t>(seq_value->AsInt());
-          window = window_value->AsString();
+          window = static_cast<int>(window_value->AsInt());
         }
         continue;
       }
-      if (type == "game_end") {
+      if (type == protocol::FrameType::kGameEnd) {
         ++game_ends;
         last_end = frame;
       }
@@ -631,12 +632,12 @@ TEST_F(RiichiRoomTest, BustEndsMatchImmediately) {
 
     json::Value action = json::Value::Obj(5);  // type, seq + (discard tile | action/tiles)
     action.Set("seq", json::Value::Int(static_cast<int64_t>(seq)));
-    if (window == "discard" && !my_hand.empty()) {
-      action.Set("type", json::Value::Str("discard"));
+    if (window == protocol::WireOf(protocol::Window::kDiscard) && !my_hand.empty()) {
+      action.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kDiscard)));
       action.Set("tile", json::Value::Str(MostIsolatedTile(my_hand)));
     } else {
-      action.Set("type", json::Value::Str("action"));
-      action.Set("action", json::Value::Str("pass"));
+      action.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kAction)));
+      action.Set("action", json::Value::Int(protocol::WireOf(protocol::Action::kPass)));
       action.Set("tiles", json::Value::Arr(0));
     }
     Send(RoomEnvelope::GameFrame(human_, std::move(action)));
@@ -672,15 +673,15 @@ TEST_F(RiichiRoomTest, LeftoverKyoutakuGoesToFirstPlace) {
   std::vector<std::string> my_hand;
   bool need_answer = false;
   uint64_t seq = 0;
-  std::string window;
+  int window = 0;
   bool injected = false;
   std::optional<json::Value> last_end;
   std::optional<json::Value> match_end;
 
   for (int guard = 0; guard < 4000; ++guard) {
     for (json::Value& frame : sink_->Drain()) {
-      const std::string type = TypeOf(frame);
-      if (type == "game_start" || type == "state_sync") {
+      const protocol::FrameType type = TypeOf(frame);
+      if (type == protocol::FrameType::kGameStart || type == protocol::FrameType::kStateSync) {
         const json::Value* hand = frame.Find("hand");
         if (hand != nullptr && hand->IsArray()) {
           my_hand.clear();
@@ -690,21 +691,21 @@ TEST_F(RiichiRoomTest, LeftoverKyoutakuGoesToFirstPlace) {
         }
         continue;
       }
-      if (type == "action_request") {
+      if (type == protocol::FrameType::kActionRequest) {
         const json::Value* seq_value = frame.Find("seq");
         const json::Value* window_value = frame.Find("window");
         need_answer = seq_value != nullptr && window_value != nullptr;
         if (need_answer) {
           seq = static_cast<uint64_t>(seq_value->AsInt());
-          window = window_value->AsString();
+          window = static_cast<int>(window_value->AsInt());
         }
         continue;
       }
-      if (type == "game_end") {
+      if (type == protocol::FrameType::kGameEnd) {
         last_end = std::move(frame);
         continue;
       }
-      if (type == "match_end") {
+      if (type == protocol::FrameType::kMatchEnd) {
         match_end = std::move(frame);
       }
     }
@@ -724,12 +725,12 @@ TEST_F(RiichiRoomTest, LeftoverKyoutakuGoesToFirstPlace) {
 
     json::Value action = json::Value::Obj(5);  // type, seq + (discard tile | action/tiles)
     action.Set("seq", json::Value::Int(static_cast<int64_t>(seq)));
-    if (window == "discard" && !my_hand.empty()) {
-      action.Set("type", json::Value::Str("discard"));
+    if (window == protocol::WireOf(protocol::Window::kDiscard) && !my_hand.empty()) {
+      action.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kDiscard)));
       action.Set("tile", json::Value::Str(MostIsolatedTile(my_hand)));
     } else {
-      action.Set("type", json::Value::Str("action"));
-      action.Set("action", json::Value::Str("pass"));
+      action.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kAction)));
+      action.Set("action", json::Value::Int(protocol::WireOf(protocol::Action::kPass)));
       action.Set("tiles", json::Value::Arr(0));
     }
     Send(RoomEnvelope::GameFrame(human_, std::move(action)));
@@ -742,8 +743,8 @@ TEST_F(RiichiRoomTest, LeftoverKyoutakuGoesToFirstPlace) {
   // 前提复核：只有当末局没人收供托时，才会有棒留给场终（这里断言的正是那句规则）。
   const json::Value* reason = last_end->Find("reason");
   ASSERT_NE(reason, nullptr);
-  ASSERT_EQ(reason->AsString(), std::string("draw_exhausted"))
-      << "种子 20260101 的东场末局本应荒庄，实际 " << reason->AsString();
+  ASSERT_EQ(reason->AsInt(), protocol::WireOf(protocol::RoundEndReason::kDrawExhausted))
+      << "种子 20260101 的东场末局本应荒庄，实际 reason=" << reason->AsInt();
 
   const json::Value* award = last_end->Find("kyoutaku_award");
   ASSERT_NE(award, nullptr) << "日麻的 game_end 必须带 kyoutaku_award（无则 null）";
@@ -769,8 +770,7 @@ TEST_F(RiichiRoomTest, LeftoverKyoutakuGoesToFirstPlace) {
   }
   // 起始 4 × 25000 = 100000；注入的 2 根棒没有从任何人身上扣过，所以验算要把它加回去。
   EXPECT_EQ(sum, 100000 + 2000) << "场供没有回到持点里（点数不守恒）";
-  EXPECT_EQ(points->AsArray()[static_cast<size_t>(award_seat)].AsInt(), top)
-      << "场供必须归持点最高的一家";
+  EXPECT_EQ(points->AsArray()[static_cast<size_t>(award_seat)].AsInt(), top) << "场供必须归持点最高的一家";
 
   // 最后一局的 delta 里要能看见这 2000（客户端按 delta_score 播报，不能只改总分）
   const json::Value* results = last_end->Find("results");
@@ -798,7 +798,6 @@ TEST_F(RiichiRoomTest, LeftoverKyoutakuGoesToFirstPlace) {
   EXPECT_EQ(first.Find("final_score")->AsInt(), points->AsArray()[static_cast<size_t>(award_seat)].AsInt());
   EXPECT_EQ(room_->kyoutaku(), 0) << "场终之后供托必须清零";
 }
-
 
 }  // namespace
 }  // namespace mahjong

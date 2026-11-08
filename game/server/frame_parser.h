@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "json.h"
+#include "protocol_enums.h"
 
 namespace mahjong::frame_parser {
 
@@ -34,20 +35,22 @@ enum class ErrorKind {
 
 struct Error {
   ErrorKind kind = ErrorKind::kBadRequest;
-  std::string code;
+  protocol::ErrorCode code = protocol::ErrorCode::kBadRequest;
   std::string message;
 };
 
-// One parsed NDJSON line: the document plus the already-validated "type". Handlers need the
-// whole frame (they forward `discard`/`action` to the room verbatim), so it travels with the
-// type instead of being re-parsed.
+// One parsed NDJSON line: the document plus the already-validated "type" (an integer wire
+// value, PROTOCOL v2.0 §1.3.1). Handlers need the whole frame (they forward
+// `discard`/`action` to the room verbatim), so it travels with the type instead of being
+// re-parsed.
 struct Envelope {
   json::Value frame;
-  std::string type;
+  protocol::FrameType type = protocol::FrameType::kInvalid;
 };
 
-// Parses one line and checks the envelope every frame shares (§4): a JSON object carrying a
-// string "type". Does not decide whether the type is known — that is dispatch, not parsing.
+// Parses one line and checks the envelope every frame shares (§4): a JSON object carrying an
+// integer "type" in 1..27. Does not decide whether the type is routable — that is dispatch,
+// not parsing.
 std::optional<Envelope> ParseEnvelope(std::string_view line, Error* error);
 
 // §4.1 guest form (`name`) and ACCOUNT_DESIGN §3.1 account form (`username` + `password`).

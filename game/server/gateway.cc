@@ -18,11 +18,10 @@
 
 #include "actor_scope.h"
 #include "clock.h"
+#include "ex_actor/internal/platform.h"
 #include "net.h"
 #include "protocol.h"
 #include "utf8.h"
-
-#include "ex_actor/internal/platform.h"
 
 namespace ex = stdexec;
 
@@ -324,8 +323,8 @@ void Gateway::ProcessInboundFrames(Client& client) {
 
     if (line.size() > protocol::kMaxFrameBytes) {
       CompactInbound(client);
-      client.conn->SendFrameThenClose(protocol::ErrorFrame(protocol::kCodeFrameTooLarge, "frame exceeds 65536 bytes"),
-                                      "frame too large");
+      client.conn->SendFrameThenClose(
+          protocol::ErrorFrame(protocol::ErrorCode::kFrameTooLarge, "frame exceeds 65536 bytes"), "frame too large");
       return;
     }
     switch (CheckRateLimit(client)) {
@@ -340,7 +339,7 @@ void Gateway::ProcessInboundFrames(Client& client) {
     if (!utf8::IsValid(line)) {
       // Read-side and parse-side failures share one bad-frame budget (§7.2), so the counter
       // lives on the shared Connection rather than in this loop.
-      client.conn->SendFrame(protocol::ErrorFrame(protocol::kCodeBadRequest, "frame is not valid UTF-8"));
+      client.conn->SendFrame(protocol::ErrorFrame(protocol::ErrorCode::kBadRequest, "frame is not valid UTF-8"));
       if (client.conn->RecordBadFrame() >= protocol::kMaxBadFrames) {
         CompactInbound(client);
         return;
@@ -354,7 +353,7 @@ void Gateway::ProcessInboundFrames(Client& client) {
   if (client.inbound.size() > protocol::kMaxUnframedBytes) {
     // §1.2.3: no terminator within 64 KB, never buffer without bound.
     client.conn->SendFrameThenClose(
-        protocol::ErrorFrame(protocol::kCodeFrameTooLarge, "no frame terminator within 65536 bytes"),
+        protocol::ErrorFrame(protocol::ErrorCode::kFrameTooLarge, "no frame terminator within 65536 bytes"),
         "unterminated frame too large");
   }
 }
@@ -419,7 +418,7 @@ RateLimitDecision Gateway::CheckRateLimit(Client& client) {
   // At most one RATE_LIMITED frame per limiting event (§1.7).
   if (client.rate_limit_reported_second != second) {
     client.rate_limit_reported_second = second;
-    client.conn->SendFrame(protocol::ErrorFrame(protocol::kCodeRateLimited, "inbound frame rate exceeds 100/s"));
+    client.conn->SendFrame(protocol::ErrorFrame(protocol::ErrorCode::kRateLimited, "inbound frame rate exceeds 100/s"));
   }
 
   if (frames_in_window > static_cast<size_t>(protocol::kRateLimitStormPerSecond) ||
@@ -432,8 +431,7 @@ RateLimitDecision Gateway::CheckRateLimit(Client& client) {
 
 void Gateway::DispatchFrame(Client& client, std::string frame) {
   try {
-    ActorSendScope().spawn(
-        client.actor.Send<&PlayerActor::Dispatch>(PlayerEnvelope::OnFrame(std::move(frame))));
+    ActorSendScope().spawn(client.actor.Send<&PlayerActor::Dispatch>(PlayerEnvelope::OnFrame(std::move(frame))));
     ++dispatched_frames_;
   } catch (const std::exception& e) {
     spdlog::error("gateway: failed to dispatch a frame to conn#{}: {}", client.conn->id(), e.what());

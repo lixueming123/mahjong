@@ -1,14 +1,19 @@
 // Unit tests for the gateway's JSON parser/serializer (game/server/json.h).
 
-#include <gtest/gtest.h>
-
 #include <string>
 
+#include <gtest/gtest.h>
+
 #include "json.h"
+#include "protocol_enums.h"
 
 namespace {
 
 using mahjong::json::Value;
+
+// The frame tests below build protocol-shaped frames, so their type/code/action values come
+// from the frozen wire enums (PROTOCOL v2.0 §1.3.1) instead of string literals.
+namespace protocol = mahjong::protocol;
 
 std::optional<Value> ParseOk(const std::string& text) {
   std::string error;
@@ -38,13 +43,15 @@ TEST(JsonTest, ParsesScalars) {
 }
 
 TEST(JsonTest, ParsesObjectAndKeepsFieldOrder) {
-  std::optional<Value> value = ParseOk(R"({"type":"login","name":"玩家_","seq":3})");
+  // The values here are arbitrary parser fixtures, not wire protocol values (the wire tests
+  // below build frames from protocol_enums.h); "type"/"name"/"seq" only mirror frame key order.
+  std::optional<Value> value = ParseOk(R"({"type":"client","name":"玩家_","seq":3})");
   ASSERT_TRUE(value->IsObject());
   ASSERT_EQ(value->AsObject().size(), 3u);
   EXPECT_EQ(value->AsObject()[0].first, "type");
   EXPECT_EQ(value->AsObject()[1].first, "name");
   EXPECT_EQ(value->AsObject()[2].first, "seq");
-  EXPECT_EQ(value->Find("type")->AsString(), "login");
+  EXPECT_EQ(value->Find("type")->AsString(), "client");
   EXPECT_EQ(value->Find("name")->AsString(), "玩家_");
   EXPECT_EQ(value->Find("seq")->AsInt(), 3);
   EXPECT_EQ(value->Find("missing"), nullptr);
@@ -94,13 +101,14 @@ TEST(JsonTest, RejectsMalformedDocuments) {
   ExpectParseFailure("\"raw\tcontrol\"");
   ExpectParseFailure("\"\\ud83d\"");
   ExpectParseFailure("\"\\udc00\"");
-  ExpectParseFailure("123456789012345678901234567890123456789012345678901234567890"
-                     "123456789012345678901234567890123456789012345678901234567890"
-                     "123456789012345678901234567890123456789012345678901234567890"
-                     "123456789012345678901234567890123456789012345678901234567890"
-                     "123456789012345678901234567890123456789012345678901234567890"
-                     "123456789012345678901234567890123456789012345678901234567890"
-                     "123456789012345678901234567890123456789012345678901234567890");
+  ExpectParseFailure(
+      "123456789012345678901234567890123456789012345678901234567890"
+      "123456789012345678901234567890123456789012345678901234567890"
+      "123456789012345678901234567890123456789012345678901234567890"
+      "123456789012345678901234567890123456789012345678901234567890"
+      "123456789012345678901234567890123456789012345678901234567890"
+      "123456789012345678901234567890123456789012345678901234567890"
+      "123456789012345678901234567890123456789012345678901234567890");
 }
 
 TEST(JsonTest, RejectsExcessiveNesting) {
@@ -116,12 +124,12 @@ TEST(JsonTest, RejectsExcessiveNesting) {
 
 TEST(JsonTest, DumpsFrames) {
   Value frame = Value::Obj();
-  frame.Set("type", Value::Str("error"));
-  frame.Set("code", Value::Str("BAD_REQUEST"));
+  frame.Set("type", Value::Int(protocol::WireOf(protocol::FrameType::kError)));
+  frame.Set("code", Value::Int(protocol::WireOf(protocol::ErrorCode::kBadRequest)));
   Value detail = Value::Obj();
   detail.Set("tile", Value::Str("4p"));
   frame.Set("detail", std::move(detail));
-  EXPECT_EQ(frame.Dump(), R"({"type":"error","code":"BAD_REQUEST","detail":{"tile":"4p"}})");
+  EXPECT_EQ(frame.Dump(), R"({"type":13,"code":8,"detail":{"tile":"4p"}})");
 
   Value array = Value::Arr();
   array.Append(Value::Int(1));
@@ -138,24 +146,24 @@ TEST(JsonTest, DumpEscapesControlCharactersAndKeepsUtf8) {
 
 TEST(JsonTest, RoundTripsGeneratedFrames) {
   Value frame = Value::Obj();
-  frame.Set("type", Value::Str("action_event"));
+  frame.Set("type", Value::Int(protocol::WireOf(protocol::FrameType::kActionEvent)));
   frame.Set("seat", Value::Int(1));
-  frame.Set("action", Value::Str("pong"));
+  frame.Set("action", Value::Int(protocol::WireOf(protocol::Action::kPong)));
   Value tiles = Value::Arr();
   tiles.Append(Value::Str("9s"));
   frame.Set("tiles", std::move(tiles));
   Value options = Value::Arr();
   Value option = Value::Obj();
-  option.Set("action", Value::Str("pass"));
+  option.Set("action", Value::Int(protocol::WireOf(protocol::Action::kPass)));
   option.Set("tiles", Value::Arr());
   options.Append(std::move(option));
   frame.Set("options", std::move(options));
 
   std::optional<Value> reparsed = ParseOk(frame.Dump());
   ASSERT_TRUE(reparsed.has_value());
-  EXPECT_EQ(reparsed->Find("type")->AsString(), "action_event");
+  EXPECT_EQ(reparsed->Find("type")->AsInt(), protocol::WireOf(protocol::FrameType::kActionEvent));
   EXPECT_EQ(reparsed->Find("tiles")->AsArray()[0].AsString(), "9s");
-  EXPECT_EQ(reparsed->Find("options")->AsArray()[0].Find("action")->AsString(), "pass");
+  EXPECT_EQ(reparsed->Find("options")->AsArray()[0].Find("action")->AsInt(), protocol::WireOf(protocol::Action::kPass));
 }
 
 // RawJson is the escape hatch that lets one rendered subtree be reused across frames (the room
@@ -170,9 +178,9 @@ TEST(JsonTest, RawJsonDumpsVerbatim) {
   const std::string rendered = seats.Dump();
 
   Value frame = Value::Obj(2);
-  frame.Set("type", Value::Str("state_sync"));
+  frame.Set("type", Value::Int(protocol::WireOf(protocol::FrameType::kStateSync)));
   frame.Set("seats", Value::RawJson(rendered));
-  EXPECT_EQ(frame.Dump(), "{\"type\":\"state_sync\",\"seats\":" + rendered + "}");
+  EXPECT_EQ(frame.Dump(), "{\"type\":20,\"seats\":" + rendered + "}");
 
   // It is neither a string nor a container: nothing reads through to the fragment's text.
   const Value& member = *frame.Find("seats");

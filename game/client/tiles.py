@@ -21,6 +21,15 @@
 from __future__ import annotations
 
 import re
+import sys
+from pathlib import Path
+
+_game_root = next(
+    p for p in Path(__file__).resolve().parents
+    if (p / "protocol" / "enums.json").is_file()
+)
+sys.path.insert(0, str(_game_root))
+from protocol.enums import ACTION
 
 NUMBER_SUITS = "mps"          # 数牌花色（排序序 m < p < s）；字牌见 HONOR_SUIT
 HONOR_SUIT = "z"
@@ -125,31 +134,33 @@ def tile_label(tile: str) -> str:
     return "?"
 
 
-def button_label(action: str, tiles: list[str] | None = None) -> str:
+def button_label(action: int, tiles: list[str] | None = None) -> str:
     """操作栏按钮与「已提交：<动作>」状态提示的**统一文案**（UI_UX_SPEC v1.4 §5.3）。
 
     单一真相源：`render/actionbar.py`（按钮）与 `app.py`（已提交提示）都调用本函数，
-    避免同一公式在两处各写一遍而漂移。
+    避免同一公式在两处各写一遍而漂移。`action` 为动作整数常量，返回中文显示文案。
 
     - `kong` → `"杠 <T>"`；`pong` → `"碰 <T>"`；
     - `chow` → `"吃 <a> <b>"`（**只列手中消耗的两张**，不含被鸣牌，见 §4.7）；
-    - `win`/`pass`/`discard` → 固定文案「胡」「过」「打牌」。
+    - `win`/`pass`/`riichi` → 固定文案「胡」「过」「立直」。
     """
     tiles = list(tiles or [])
-    if action == "kong":
+    if action == ACTION.KONG:
         return f"杠 {tile_label(tiles[0]) if tiles else '?'}"
-    if action == "ankan":
+    if action == ACTION.ANKAN:
         # v2.0（§5.3）：暗杠文案**不显示牌名**——4 张本就在本家手牌里，发牌名会泄露给旁观录屏
         return "暗杠"
-    if action == "kakan":
+    if action == ACTION.KAKAN:
         # v2.0（§5.3）：加杠显示「加杠 <牌名>」（T = 手中那一张）
         return f"加杠 {tile_label(tiles[0]) if tiles else '?'}"
-    if action == "pong":
+    if action == ACTION.PONG:
         return f"碰 {tile_label(tiles[0]) if tiles else '?'}"
-    if action == "chow":
+    if action == ACTION.CHOW:
         names = [tile_label(t) for t in tiles[:2]]
         return "吃 " + " ".join(names) if names else "吃"
-    return {"win": "胡", "pass": "过", "discard": "打牌", "riichi": "立直"}.get(action, str(action))
+    return {
+        ACTION.WIN: "胡", ACTION.PASS: "过", ACTION.RIICHI: "立直",
+    }.get(action, str(action))
 
 
 # 日麻（mode=riichi）专用番种中文表。放在 tiles.py 是为了让**逻辑层**（broadcast.py）

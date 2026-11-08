@@ -60,10 +60,10 @@ void HandleSync(const PlayerServices& services, json::Value frame);
 void HandleDiscard(const PlayerServices& services, json::Value frame);
 void HandleAction(const PlayerServices& services, json::Value frame);
 
-// One client frame type: what it is called on the wire, whether an identity is required
-// (PROTOCOL.md §4.1), and who handles it.
+// One client frame type: its wire enum value (PROTOCOL v2.0 §1.3.1), whether an identity is
+// required (PROTOCOL.md §4.1), and who handles it.
 struct FrameBinding {
-  std::string_view type;
+  protocol::FrameType type;
   bool requires_login;
   void (*handle)(const PlayerServices&, json::Value);
 };
@@ -72,23 +72,23 @@ struct FrameBinding {
 // unions the three tables (player_actor.cc) and asserts the total against
 // protocol::kClientFrameTypes, so a frame type without a binding does not build.
 inline constexpr FrameBinding kSessionFrameBindings[] = {
-    {.type = protocol::kFrameLogin, .requires_login = false, .handle = &HandleLogin},
-    {.type = protocol::kFrameRegister, .requires_login = false, .handle = &HandleRegister},
-    {.type = protocol::kFramePing, .requires_login = true, .handle = &HandlePing},
-    {.type = protocol::kFrameStatsRequest, .requires_login = true, .handle = &HandleStatsRequest},
+    {.type = protocol::FrameType::kLogin, .requires_login = false, .handle = &HandleLogin},
+    {.type = protocol::FrameType::kRegister, .requires_login = false, .handle = &HandleRegister},
+    {.type = protocol::FrameType::kPing, .requires_login = true, .handle = &HandlePing},
+    {.type = protocol::FrameType::kStatsRequest, .requires_login = true, .handle = &HandleStatsRequest},
 };
 
 inline constexpr FrameBinding kLobbyFrameBindings[] = {
-    {.type = protocol::kFrameListRooms, .requires_login = true, .handle = &HandleListRooms},
-    {.type = protocol::kFrameCreateRoom, .requires_login = true, .handle = &HandleCreateRoom},
-    {.type = protocol::kFrameJoinRoom, .requires_login = true, .handle = &HandleJoinRoom},
-    {.type = protocol::kFrameReady, .requires_login = true, .handle = &HandleReady},
-    {.type = protocol::kFrameSync, .requires_login = true, .handle = &HandleSync},
+    {.type = protocol::FrameType::kListRooms, .requires_login = true, .handle = &HandleListRooms},
+    {.type = protocol::FrameType::kCreateRoom, .requires_login = true, .handle = &HandleCreateRoom},
+    {.type = protocol::FrameType::kJoinRoom, .requires_login = true, .handle = &HandleJoinRoom},
+    {.type = protocol::FrameType::kReady, .requires_login = true, .handle = &HandleReady},
+    {.type = protocol::FrameType::kSync, .requires_login = true, .handle = &HandleSync},
 };
 
 inline constexpr FrameBinding kRoomFrameBindings[] = {
-    {.type = protocol::kFrameDiscard, .requires_login = true, .handle = &HandleDiscard},
-    {.type = protocol::kFrameAction, .requires_login = true, .handle = &HandleAction},
+    {.type = protocol::FrameType::kDiscard, .requires_login = true, .handle = &HandleDiscard},
+    {.type = protocol::FrameType::kAction, .requires_login = true, .handle = &HandleAction},
 };
 
 }  // namespace mahjong

@@ -25,6 +25,16 @@ from ..view import UiView
 from . import art
 from . import widgets as W
 
+import sys
+from pathlib import Path
+
+_game_root = next(
+    p for p in Path(__file__).resolve().parents
+    if (p / "protocol" / "enums.json").is_file()
+)
+sys.path.insert(0, str(_game_root))
+from protocol.enums import ACTION, FRAME_TYPE
+
 log = logging.getLogger("mahjong.client.actionbar")
 
 MAX_CHOW_BUTTONS = 3
@@ -39,7 +49,8 @@ ELLIPSIS = "…"
 
 @dataclass
 class ButtonSpec:
-    kind: str            # discard | win | riichi | kong | ankan | kakan | pong | chow | pass
+    # kind 为整数：打牌按钮用 FRAME_TYPE.DISCARD，其余用 ACTION.* 常量。
+    kind: int
     label: str
     rect: tuple[int, int, int, int]
     enabled: bool
@@ -72,32 +83,33 @@ def build_buttons(state: GameState, remaining_ms: float | None) -> list[ButtonSp
     window = state.window
     base = _base_enabled(state, remaining_ms)
 
-    specs: list[tuple[str, str, list[str], bool]] = []  # kind,label,tiles,win
+    specs: list[tuple[int, str, list[str], bool]] = []  # kind,label,tiles,win
     if window.window == WINDOW_DISCARD:
-        specs.append(("discard", button_label("discard"), [], False))
-    if window.has("win"):
-        specs.append(("win", button_label("win"), [], True))
+        # 打牌按钮发 FRAME_TYPE.DISCARD 帧；"打牌" 是中文显示文案，不走 button_label。
+        specs.append((FRAME_TYPE.DISCARD, "打牌", [], False))
+    if window.has(ACTION.WIN):
+        specs.append((ACTION.WIN, button_label(ACTION.WIN), [], True))
     # 日麻立直：与打牌同一条 action，需要先选中「宣言后打出的那张」。
-    if window.has("riichi"):
-        specs.append(("riichi", button_label("riichi"), [], False))
-    for tiles in window.option_list("kong")[:1]:
-        specs.append(("kong", button_label("kong", tiles), tiles, False))
+    if window.has(ACTION.RIICHI):
+        specs.append((ACTION.RIICHI, button_label(ACTION.RIICHI), [], False))
+    for tiles in window.option_list(ACTION.KONG)[:1]:
+        specs.append((ACTION.KONG, button_label(ACTION.KONG, tiles), tiles, False))
     # v2.0（§5.3）：暗杠 / 加杠 紧随明杠之后。暗杠可能有多条 option（每个可杠牌面一条，
     # §5.7），每条一个按钮、文案均「暗杠」（不显示牌名）；提交时带该 option 的 1 个牌面。
-    for tiles in window.option_list("ankan"):
-        specs.append(("ankan", button_label("ankan"), tiles, False))
-    for tiles in window.option_list("kakan"):
-        specs.append(("kakan", button_label("kakan", tiles), tiles, False))
-    for tiles in window.option_list("pong")[:1]:
-        specs.append(("pong", button_label("pong", tiles), tiles, False))
-    chow_options = window.option_list("chow")
+    for tiles in window.option_list(ACTION.ANKAN):
+        specs.append((ACTION.ANKAN, button_label(ACTION.ANKAN), tiles, False))
+    for tiles in window.option_list(ACTION.KAKAN):
+        specs.append((ACTION.KAKAN, button_label(ACTION.KAKAN, tiles), tiles, False))
+    for tiles in window.option_list(ACTION.PONG)[:1]:
+        specs.append((ACTION.PONG, button_label(ACTION.PONG, tiles), tiles, False))
+    chow_options = window.option_list(ACTION.CHOW)
     if len(chow_options) > MAX_CHOW_BUTTONS:
         log.warning("chow 选项超过 3 条（协议不该出现）：%d，只渲染前 3 条", len(chow_options))
         chow_options = chow_options[:MAX_CHOW_BUTTONS]
     for tiles in chow_options:
-        specs.append(("chow", button_label("chow", tiles), tiles, False))
+        specs.append((ACTION.CHOW, button_label(ACTION.CHOW, tiles), tiles, False))
     if window.window in (WINDOW_CLAIM, WINDOW_CHANKAN):
-        specs.append(("pass", button_label("pass"), [], False))
+        specs.append((ACTION.PASS, button_label(ACTION.PASS), [], False))
 
     if len(specs) > T.BAR_BUTTON_MAX:
         log.warning("按钮数超过 %d，已截断", T.BAR_BUTTON_MAX)
@@ -111,12 +123,12 @@ def build_buttons(state: GameState, remaining_ms: float | None) -> list[ButtonSp
     x = T.R_BAR_BUTTONS[0]
     for kind, label, tiles, is_win in specs:
         reason = ""
-        if kind == "discard":
+        if kind == FRAME_TYPE.DISCARD:
             # 打牌要先把那张牌选出来（点手牌 → 点按钮）
             enabled = base and state.selected_index is not None
             if base and state.selected_index is None:
                 reason = "先点选一张手牌再打牌"
-        elif kind == "riichi":
+        elif kind == ACTION.RIICHI:
             # v1.21 §5.3.2：立直按钮**不再要求先选牌** —— 点它进入「宣言模式」，
             # 手牌上会标出哪几张能作宣言牌（服务端 `riichi_tiles`），点其中一张即宣言。
             enabled = base
@@ -265,10 +277,10 @@ def _status_text(state: GameState, ui: UiView) -> tuple[str, str, tuple]:
     if state.window is None:
         return "", "", T.TEXT_DIM
     if state.window.window == WINDOW_DISCARD:
-        if state.window.has("win"):
+        if state.window.has(ACTION.WIN):
             # §5.3.1：打牌窗口不提供「过」按钮，用中性提示帮助理解
             return "也可直接点手牌打牌（本局不胡）", "也可直接点手牌打牌", T.TEXT_DIM
-        if state.window.has("riichi"):
+        if state.window.has(ACTION.RIICHI):
             # 立直 = 宣言牌 + 打牌 的合成动作（PROTOCOL §12.5）。v1.21 起按钮先可点、
             # 点开后在手牌上高亮「能作宣言牌」的那几张，所以提示改成「点立直 → 点高亮的牌」。
             if state.riichi_arming:

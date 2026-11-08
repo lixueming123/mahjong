@@ -6,8 +6,6 @@
 // seq invalidation scheme, illegal-operation protection, the AI seats and the settlement
 // are therefore fully deterministic and free of real time.
 
-#include <gtest/gtest.h>
-
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -22,6 +20,9 @@
 #include <variant>
 #include <vector>
 
+#include <gtest/gtest.h>
+#include <spdlog/spdlog.h>
+
 #include "actor_scope.h"
 #include "json.h"
 #include "mahjong_rules.h"
@@ -29,8 +30,6 @@
 #include "protocol.h"
 #include "room.h"
 #include "seat_endpoint.h"
-
-#include <spdlog/spdlog.h>
 
 namespace mahjong {
 namespace {
@@ -111,9 +110,15 @@ class CapturingSeatActor : public SeatEndpoint {
   std::shared_ptr<CapturingSink> sink_;
 };
 
-std::string TypeOf(const json::Value& frame) {
+// The wire type is now an integer (PROTOCOL v2.0 §1.3.1); an unknown value parses back to
+// kInvalid, which no assertion below ever matches.
+protocol::FrameType TypeOf(const json::Value& frame) {
   const json::Value* type = frame.Find("type");
-  return type != nullptr && type->IsString() ? type->AsString() : std::string("<none>");
+  if (type == nullptr || !type->IsInteger()) {
+    return protocol::FrameType::kInvalid;
+  }
+  const std::optional<protocol::FrameType> parsed = protocol::ParseFrameType(type->AsInt());
+  return parsed.value_or(protocol::FrameType::kInvalid);
 }
 
 int64_t IntOf(const json::Value& frame, const std::string& key) {
@@ -126,13 +131,13 @@ std::string StrOf(const json::Value& frame, const std::string& key) {
   return value != nullptr && value->IsString() ? value->AsString() : std::string();
 }
 
-const json::Value* OptionOf(const json::Value& request, const std::string& action) {
+const json::Value* OptionOf(const json::Value& request, protocol::Action action) {
   const json::Value* options = request.Find("options");
   if (options == nullptr || !options->IsArray()) {
     return nullptr;
   }
   for (const json::Value& option : options->AsArray()) {
-    if (StrOf(option, "action") == action) {
+    if (IntOf(option, "action") == protocol::WireOf(action)) {
       return &option;
     }
   }
@@ -191,8 +196,10 @@ bool SameFaces(const std::vector<Tile>& lhs, const std::vector<Tile>& rhs) {
 class RoomActorTest : public ::testing::Test {
  protected:
   void SetUp() override { ex_actor::Init(/*thread_pool_size=*/2); }
-  void TearDown() override { stdexec::sync_wait(ActorSendScope().on_empty());
-    ex_actor::Shutdown(); }
+  void TearDown() override {
+    stdexec::sync_wait(ActorSendScope().on_empty());
+    ex_actor::Shutdown();
+  }
 };
 
 class TestRoom {
@@ -234,9 +241,8 @@ class TestRoom {
     if (all_human) {
       for (int seat = 0; seat < kSeatCount; ++seat) {
         sinks_[static_cast<size_t>(seat)] = std::make_shared<CapturingSink>();
-        seats[static_cast<size_t>(seat)].endpoint =
-            std::get<0>(stdexec::sync_wait(ex_actor::Spawn<CapturingSeatActor>(sinks_[static_cast<size_t>(seat)]))
-                            .value());
+        seats[static_cast<size_t>(seat)].endpoint = std::get<0>(
+            stdexec::sync_wait(ex_actor::Spawn<CapturingSeatActor>(sinks_[static_cast<size_t>(seat)])).value());
       }
       human_sink_ = sinks_[kSeat0];
     } else {
@@ -252,9 +258,7 @@ class TestRoom {
     // to capture what the room scheduled.
     TimeoutScheduler scheduler;
     if (install_scheduler) {
-      scheduler = [this](int64_t delay_ms, uint64_t window_seq) {
-        scheduled_.emplace_back(delay_ms, window_seq);
-      };
+      scheduler = [this](int64_t delay_ms, uint64_t window_seq) { scheduled_.emplace_back(delay_ms, window_seq); };
     }
     room_ = std::make_unique<RoomActor>("r-0001", seed, action_timeout_ms, std::move(seats), nullptr, ai_delay_ms,
                                         inter_hand_delay_ms, ex_actor::ActorRef<RoomOwner> {}, std::move(scheduler));
@@ -377,7 +381,7 @@ class TestRoom {
   int DiscardsBy(int seat) const {
     int count = 0;
     for (const json::Value& frame : history_) {
-      if (TypeOf(frame) == "discard_event" && IntOf(frame, "seat") == seat) {
+      if (TypeOf(frame) == protocol::FrameType::kDiscardEvent && IntOf(frame, "seat") == seat) {
         ++count;
       }
     }
@@ -390,16 +394,16 @@ class TestRoom {
 
   void SendDiscard(Tile tile, uint64_t seq) {
     json::Value frame = json::Value::Obj();
-    frame.Set("type", json::Value::Str("discard"));
+    frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kDiscard)));
     frame.Set("tile", json::Value::Str(FormatTile(tile)));
     frame.Set("seq", json::Value::Int(static_cast<int64_t>(seq)));
     Send(RoomEnvelope::GameFrame(human_, std::move(frame)));
   }
 
-  void SendAction(const std::string& action, const std::vector<Tile>& tiles, uint64_t seq) {
+  void SendAction(protocol::Action action, const std::vector<Tile>& tiles, uint64_t seq) {
     json::Value frame = json::Value::Obj();
-    frame.Set("type", json::Value::Str("action"));
-    frame.Set("action", json::Value::Str(action));
+    frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kAction)));
+    frame.Set("action", json::Value::Int(protocol::WireOf(action)));
     json::Value tile_array = json::Value::Arr();
     for (Tile tile : tiles) {
       tile_array.Append(json::Value::Str(FormatTile(tile)));
@@ -415,11 +419,11 @@ class TestRoom {
     std::vector<json::Value> frames = human_sink_->Drain();
     std::optional<json::Value> pending;
     for (json::Value& frame : frames) {
-      const std::string type = TypeOf(frame);
-      if (type == "draw") {
+      const protocol::FrameType type = TypeOf(frame);
+      if (type == protocol::FrameType::kDraw) {
         drawn_ = ParseTile(StrOf(frame, "tile"));
       }
-      if (type == "action_request" && static_cast<uint64_t>(IntOf(frame, "seq")) == room_->seq()) {
+      if (type == protocol::FrameType::kActionRequest && static_cast<uint64_t>(IntOf(frame, "seq")) == room_->seq()) {
         pending = frame;
       }
       history_.push_back(std::move(frame));
@@ -433,11 +437,11 @@ class TestRoom {
   // it (draining twice used to make the fixture give up on a claim window).
   // Returns false when there is nothing the human may answer.
   bool AnswerWindow(const std::optional<json::Value>& request) {
-    const std::string window = room_->CurrentWindow();
+    const protocol::Window window = room_->CurrentWindow();
     const uint64_t seq = room_->seq();
-    if (window == "discard" && room_->current_seat() == kSeat0) {
-      if (request.has_value() && OptionOf(*request, "win") != nullptr) {
-        SendAction("win", {}, seq);
+    if (window == protocol::Window::kDiscard && room_->current_seat() == kSeat0) {
+      if (request.has_value() && OptionOf(*request, protocol::Action::kWin) != nullptr) {
+        SendAction(protocol::Action::kWin, {}, seq);
       } else {
         std::vector<Tile> hand = SortedTiles(room_->hand_of(kSeat0));
         Tile tile;
@@ -452,15 +456,15 @@ class TestRoom {
       }
       return true;
     }
-    if (!request.has_value() || StrOf(*request, "window") != "claim") {
+    if (!request.has_value() || IntOf(*request, "window") != protocol::WireOf(protocol::Window::kClaim)) {
       return false;
     }
-    if (OptionOf(*request, "win") != nullptr) {
-      SendAction("win", {}, seq);
-    } else if (const json::Value* pong = OptionOf(*request, "pong"); pong != nullptr) {
-      SendAction("pong", TilesOf(*pong, "tiles"), seq);
+    if (OptionOf(*request, protocol::Action::kWin) != nullptr) {
+      SendAction(protocol::Action::kWin, {}, seq);
+    } else if (const json::Value* pong = OptionOf(*request, protocol::Action::kPong); pong != nullptr) {
+      SendAction(protocol::Action::kPong, TilesOf(*pong, "tiles"), seq);
     } else {
-      SendAction("pass", {}, seq);
+      SendAction(protocol::Action::kPass, {}, seq);
     }
     return true;
   }
@@ -553,7 +557,7 @@ class TestRoom {
   std::vector<json::Value> history_;
 };
 
-std::vector<const json::Value*> FramesOfType(const std::vector<json::Value>& frames, const std::string& type) {
+std::vector<const json::Value*> FramesOfType(const std::vector<json::Value>& frames, protocol::FrameType type) {
   std::vector<const json::Value*> matches;
   for (const json::Value& frame : frames) {
     if (TypeOf(frame) == type) {
@@ -563,7 +567,7 @@ std::vector<const json::Value*> FramesOfType(const std::vector<json::Value>& fra
   return matches;
 }
 
-int CountOfType(const std::vector<json::Value>& frames, const std::string& type) {
+int CountOfType(const std::vector<json::Value>& frames, protocol::FrameType type) {
   return static_cast<int>(FramesOfType(frames, type).size());
 }
 
@@ -608,10 +612,10 @@ std::vector<Tile> HandOf(std::initializer_list<const char*> codes) {
 
 // The gate must refuse a pong that makes the hand worse, even though the pong is legal.
 TEST_F(RoomActorTest, AiClaimGateRejectsAPongThatWorsensTheHand) {
-  const std::vector<Tile> hand =
-      HandOf({"4m", "4m", "6m", "3p", "3p", "6p", "2s", "5s", "8s", "5z", "6z", "7z", "7z"});
+  const std::vector<Tile> hand = HandOf({"4m", "4m", "6m", "3p", "3p", "6p", "2s", "5s", "8s", "5z", "6z", "7z", "7z"});
   const Tile claimed = *ParseTile("4m");
-  const std::vector<Option> options = {Option {"pong", {claimed}}, Option {"pass", {}}};
+  const std::vector<Option> options = {Option {protocol::Action::kPong, {claimed}},
+                                       Option {protocol::Action::kPass, {}}};
 
   // Fixture precondition: the pong is legal, but the shanten after the meld (and its
   // mandatory discard) is worse than today's.
@@ -622,16 +626,16 @@ TEST_F(RoomActorTest, AiClaimGateRejectsAPongThatWorsensTheHand) {
   ASSERT_GT(*after, before) << "fixture must be harmful, got " << before << " -> " << *after;
 
   const Option answer = RoomActor::ChooseClaimAnswer(hand, {}, options, claimed);
-  EXPECT_EQ(answer.action, "pass") << "an AI must not break its hand for a pong";
+  EXPECT_EQ(answer.action, protocol::Action::kPass) << "an AI must not break its hand for a pong";
   EXPECT_TRUE(answer.tiles.empty());
 }
 
 // ... and accept one that improves it (the gate is not "never claim").
 TEST_F(RoomActorTest, AiClaimGateAcceptsAPongThatImprovesTheHand) {
-  const std::vector<Tile> hand =
-      HandOf({"2m", "6m", "7m", "1p", "3p", "4p", "5p", "9p", "9p", "3s", "3s", "4s", "5s"});
+  const std::vector<Tile> hand = HandOf({"2m", "6m", "7m", "1p", "3p", "4p", "5p", "9p", "9p", "3s", "3s", "4s", "5s"});
   const Tile claimed = *ParseTile("9p");
-  const std::vector<Option> options = {Option {"pong", {claimed}}, Option {"pass", {}}};
+  const std::vector<Option> options = {Option {protocol::Action::kPong, {claimed}},
+                                       Option {protocol::Action::kPass, {}}};
 
   const int before = Shanten(hand, {});
   const std::optional<int> after = ShantenAfterMeld(hand, {}, claimed, {claimed, claimed}, MeldType::kPong);
@@ -639,7 +643,7 @@ TEST_F(RoomActorTest, AiClaimGateAcceptsAPongThatImprovesTheHand) {
   ASSERT_LT(*after, before) << "fixture must be beneficial, got " << before << " -> " << *after;
 
   const Option answer = RoomActor::ChooseClaimAnswer(hand, {}, options, claimed);
-  EXPECT_EQ(answer.action, "pong");
+  EXPECT_EQ(answer.action, protocol::Action::kPong);
   ASSERT_EQ(answer.tiles.size(), 1u);
   EXPECT_EQ(FaceOf(answer.tiles[0]), FaceOf(claimed));
 }
@@ -652,16 +656,15 @@ TEST_F(RoomActorTest, AiClaimGateGatesEveryChowCombination) {
   const Tile claimed_six_m = *ParseTile("6m");
   const std::vector<Tile> harmful_pair = HandOf({"4m", "5m"});
   const int harmful_before = Shanten(harmful, {});
-  const std::optional<int> harmful_after =
-      ShantenAfterMeld(harmful, {}, claimed_six_m, harmful_pair, MeldType::kChow);
+  const std::optional<int> harmful_after = ShantenAfterMeld(harmful, {}, claimed_six_m, harmful_pair, MeldType::kChow);
   ASSERT_TRUE(harmful_after.has_value());
   ASSERT_GT(*harmful_after, harmful_before) << "fixture must be harmful";
-  const std::vector<Option> harmful_options = {Option {"chow", harmful_pair}, Option {"pass", {}}};
-  EXPECT_EQ(RoomActor::ChooseClaimAnswer(harmful, {}, harmful_options, claimed_six_m).action, "pass");
+  const std::vector<Option> harmful_options = {Option {protocol::Action::kChow, harmful_pair},
+                                               Option {protocol::Action::kPass, {}}};
+  EXPECT_EQ(RoomActor::ChooseClaimAnswer(harmful, {}, harmful_options, claimed_six_m).action, protocol::Action::kPass);
 
   // (b) two non-worsening combinations: the lowest shanten wins and ties keep the frozen order
-  const std::vector<Tile> tie =
-      HandOf({"3m", "4m", "4m", "6m", "1p", "1p", "2p", "2p", "3p", "8s", "6z", "6z", "7z"});
+  const std::vector<Tile> tie = HandOf({"3m", "4m", "4m", "6m", "1p", "1p", "2p", "2p", "3p", "8s", "6z", "6z", "7z"});
   const Tile claimed_five_m = *ParseTile("5m");
   const std::vector<Tile> pair_a = HandOf({"3m", "4m"});
   const std::vector<Tile> pair_b = HandOf({"4m", "6m"});
@@ -671,9 +674,11 @@ TEST_F(RoomActorTest, AiClaimGateGatesEveryChowCombination) {
   ASSERT_TRUE(after_a.has_value() && after_b.has_value());
   ASSERT_LE(*after_a, tie_before);
   ASSERT_LE(*after_b, tie_before);
-  const std::vector<Option> tie_options = {Option {"chow", pair_a}, Option {"chow", pair_b}, Option {"pass", {}}};
+  const std::vector<Option> tie_options = {Option {protocol::Action::kChow, pair_a},
+                                           Option {protocol::Action::kChow, pair_b},
+                                           Option {protocol::Action::kPass, {}}};
   const Option answer = RoomActor::ChooseClaimAnswer(tie, {}, tie_options, claimed_five_m);
-  EXPECT_EQ(answer.action, "chow");
+  EXPECT_EQ(answer.action, protocol::Action::kChow);
   ASSERT_EQ(answer.tiles.size(), pair_a.size());
   const Option& expected = (*after_a <= *after_b) ? tie_options[0] : tie_options[1];
   for (size_t i = 0; i < expected.tiles.size(); ++i) {
@@ -698,21 +703,22 @@ TEST_F(RoomActorTest, BotDeclaresTsumoWhenItsOwnDrawCompletesTheHand) {
     const std::vector<json::Value>& frames = test_room.history();
 
     // v1.6：一场 4..8 个 game_end（连庄各一次）；至少 4 个。
-    const std::vector<const json::Value*> ends = FramesOfType(frames, "game_end");
+    const std::vector<const json::Value*> ends = FramesOfType(frames, protocol::FrameType::kGameEnd);
     ASSERT_GE(ends.size(), 4u) << "seed " << seed;
     ASSERT_LE(ends.size(), 8u) << "seed " << seed << " (C15 双闸：4 局 + 4 连庄)";
 
     // 逐局检查；自摸局的 win 事件必须无 from_seat（PROTOCOL.md §5.8）。
-    // 帧序 = 时间序：每个 game_end 的 win 事件 = 它之前最后一个 action=="win" 的事件。
+    // 帧序 = 时间序：每个 game_end 的 win 事件 = 它之前最后一个 action==win 的事件。
     std::vector<size_t> end_positions;
     for (size_t i = 0; i < frames.size(); ++i) {
-      if (TypeOf(frames[i]) == "game_end") end_positions.push_back(i);
+      if (TypeOf(frames[i]) == protocol::FrameType::kGameEnd) end_positions.push_back(i);
     }
     ASSERT_EQ(end_positions.size(), ends.size());
     size_t win_cursor = 0;
     std::vector<size_t> win_positions;
     for (size_t i = 0; i < frames.size(); ++i) {
-      if (TypeOf(frames[i]) == "action_event" && StrOf(frames[i], "action") == "win") {
+      if (TypeOf(frames[i]) == protocol::FrameType::kActionEvent &&
+          IntOf(frames[i], "action") == protocol::WireOf(protocol::Action::kWin)) {
         win_positions.push_back(i);
       }
     }
@@ -721,18 +727,17 @@ TEST_F(RoomActorTest, BotDeclaresTsumoWhenItsOwnDrawCompletesTheHand) {
       while (win_cursor < win_positions.size() && win_positions[win_cursor] < end_positions[round]) {
         ++win_cursor;
       }
-      const json::Value* last_win_event =
-          win_cursor > 0 ? &frames[win_positions[win_cursor - 1]] : nullptr;
-      const std::string reason = StrOf(*end, "reason");
-      if (reason == "draw_exhausted") {
+      const json::Value* last_win_event = win_cursor > 0 ? &frames[win_positions[win_cursor - 1]] : nullptr;
+      const int64_t reason = IntOf(*end, "reason");
+      if (reason == protocol::WireOf(protocol::RoundEndReason::kDrawExhausted)) {
         ++draw_rounds;
         continue;
       }
-      if (reason == "win_ron") {
+      if (reason == protocol::WireOf(protocol::RoundEndReason::kWinRon)) {
         ++ron_rounds;
         continue;
       }
-      ASSERT_EQ(reason, "win_tsumo") << "seed " << seed;
+      ASSERT_EQ(reason, protocol::WireOf(protocol::RoundEndReason::kWinTsumo)) << "seed " << seed;
       ++tsumo_rounds;
 
       // The announced event must be a self-draw win: no from_seat (PROTOCOL.md §5.8).
@@ -774,8 +779,8 @@ TEST_F(RoomActorTest, BotDeclaresTsumoWhenItsOwnDrawCompletesTheHand) {
       }
     }
   }
-  std::printf("tsumo rounds: %d (bot-declared: %d), ron rounds: %d, drawn rounds: %d\n", tsumo_rounds,
-              bot_tsumo_rounds, ron_rounds, draw_rounds);
+  std::printf("tsumo rounds: %d (bot-declared: %d), ron rounds: %d, drawn rounds: %d\n", tsumo_rounds, bot_tsumo_rounds,
+              ron_rounds, draw_rounds);
   EXPECT_GT(tsumo_rounds, 0) << "a self-draw win must happen now that bots read their own `win` option";
   EXPECT_GT(bot_tsumo_rounds, 0) << "the repaired automated-seat branch must be the one declaring tsumo";
 }
@@ -834,8 +839,8 @@ TEST_F(RoomActorTest, RoomsOfOneServerDealDifferentHandsAndStayReproducible) {
       }
       // Seat 0 needs a real endpoint, or the room would treat it as an entrusted seat and play
       // its first discard for it — which is exactly what this test asserts does NOT happen.
-      ex_actor::ActorRef<CapturingSeatActor> seat0 =
-          std::get<0>(stdexec::sync_wait(ex_actor::Spawn<CapturingSeatActor>(std::make_shared<CapturingSink>())).value());
+      ex_actor::ActorRef<CapturingSeatActor> seat0 = std::get<0>(
+          stdexec::sync_wait(ex_actor::Spawn<CapturingSeatActor>(std::make_shared<CapturingSink>())).value());
       seats.front().endpoint = seat0;
       // Exactly what LobbyActor does: room index -> derived wall seed.
       // Deal-only fixture: keep the pre-t31 synchronous path (ai_delay 0).
@@ -870,7 +875,7 @@ TEST_F(RoomActorTest, AiDecisionIsPacedByAiDelayMs) {
   test_room.Ready();
   std::optional<json::Value> request = test_room.PendingRequest();
   ASSERT_TRUE(request.has_value());
-  ASSERT_EQ(StrOf(*request, "window"), "discard");
+  ASSERT_EQ(IntOf(*request, "window"), protocol::WireOf(protocol::Window::kDiscard));
   EXPECT_TRUE(test_room.AiPacingScheduled().empty()) << "the human's own window is never paced";
 
   ASSERT_TRUE(test_room.AnswerWindow(request));
@@ -933,8 +938,9 @@ TEST_F(RoomActorTest, HumanWinDuringTheAiDelayResolvesImmediately) {
     while (!test_room.room()->game_finished() && steps < 4000) {
       ++steps;
       std::optional<json::Value> request = test_room.PendingRequest();
-      const bool human_ron = request.has_value() && StrOf(*request, "window") == "claim" &&
-                             OptionOf(*request, "win") != nullptr && !test_room.AiPacingScheduled().empty();
+      const bool human_ron =
+          request.has_value() && IntOf(*request, "window") == protocol::WireOf(protocol::Window::kClaim) &&
+          OptionOf(*request, protocol::Action::kWin) != nullptr && !test_room.AiPacingScheduled().empty();
       if (human_ron) {
         const std::vector<std::pair<int64_t, uint64_t>> pacing = test_room.AiPacingScheduled();
         ASSERT_EQ(pacing.size(), 1u);
@@ -946,9 +952,9 @@ TEST_F(RoomActorTest, HumanWinDuringTheAiDelayResolvesImmediately) {
         // v1.6：荣和结算的是**局终**（game_end），不是场终。
         ASSERT_TRUE(test_room.room()->round_finished()) << "a human win must not wait for the AI pacing";
         test_room.PendingRequest();
-        const std::vector<const json::Value*> ends = FramesOfType(test_room.history(), "game_end");
+        const std::vector<const json::Value*> ends = FramesOfType(test_room.history(), protocol::FrameType::kGameEnd);
         ASSERT_EQ(ends.size(), 1u);
-        EXPECT_EQ(StrOf(*ends.front(), "reason"), "win_ron");
+        EXPECT_EQ(IntOf(*ends.front(), "reason"), protocol::WireOf(protocol::RoundEndReason::kWinRon));
         const json::Value* results = ends.front()->Find("results");
         ASSERT_NE(results, nullptr);
         int64_t delta_sum = 0;
@@ -1021,7 +1027,7 @@ TEST_F(RoomActorTest, PacedGamesAlwaysTerminateAndSettleCorrectly) {
     ++finished;
     // v1.6：一场 = 4..8 局；game_end 次数 = round_index 终值（计入局数）+ 连庄数
     // （C15 的连庄闸可能让本场不足 4 局即结束，故不能用恒 4）。
-    const std::vector<const json::Value*> ends = FramesOfType(test_room.history(), "game_end");
+    const std::vector<const json::Value*> ends = FramesOfType(test_room.history(), protocol::FrameType::kGameEnd);
     ASSERT_GE(ends.size(), 4u) << "seed " << seed;
     ASSERT_LE(ends.size(), 8u) << "seed " << seed;
     const int renchan = static_cast<int>(IntOf(*ends.back(), "renchan_count"));
@@ -1037,7 +1043,8 @@ TEST_F(RoomActorTest, PacedGamesAlwaysTerminateAndSettleCorrectly) {
       EXPECT_EQ(delta_sum, 0) << "seed " << seed << ": the settlement must conserve the score";
     }
     // 场终帧（§5.15）恰好一次；hands_played = game_end 下发手数（D2 终裁：平凡恒等，4..8）。
-    const std::vector<const json::Value*> match_ends = FramesOfType(test_room.history(), "match_end");
+    const std::vector<const json::Value*> match_ends =
+        FramesOfType(test_room.history(), protocol::FrameType::kMatchEnd);
     ASSERT_EQ(match_ends.size(), 1u) << "seed " << seed;
     EXPECT_EQ(IntOf(*match_ends.front(), "hands_played"), ends.size());
     EXPECT_GE(IntOf(*match_ends.front(), "hands_played"), 4);
@@ -1071,7 +1078,7 @@ TEST_F(RoomActorTest, GameStartOpensTheDealerDiscardWindow) {
 
   std::vector<json::Value> frames = test_room.sink()->Drain();
   ASSERT_EQ(frames.size(), 2u);
-  EXPECT_EQ(TypeOf(frames[0]), "game_start");
+  EXPECT_EQ(TypeOf(frames[0]), protocol::FrameType::kGameStart);
   EXPECT_EQ(IntOf(frames[0], "seat"), 0);
   EXPECT_EQ(IntOf(frames[0], "dealer"), 0);
   // v1.6（C9）：game_start 带场次进度
@@ -1081,9 +1088,9 @@ TEST_F(RoomActorTest, GameStartOpensTheDealerDiscardWindow) {
   ASSERT_NE(hand, nullptr);
   EXPECT_EQ(hand->AsArray().size(), 14u);  // the dealer starts with 14 tiles
 
-  EXPECT_EQ(TypeOf(frames[1]), "action_request");
+  EXPECT_EQ(TypeOf(frames[1]), protocol::FrameType::kActionRequest);
   EXPECT_EQ(IntOf(frames[1], "seq"), 1);  // the first window is seq 1 (GAME_DESIGN §4.2)
-  EXPECT_EQ(StrOf(frames[1], "window"), "discard");
+  EXPECT_EQ(IntOf(frames[1], "window"), protocol::WireOf(protocol::Window::kDiscard));
   EXPECT_GT(IntOf(frames[1], "deadline_ms"), 0);
 
   EXPECT_EQ(test_room.room()->seq(), 1u);
@@ -1091,8 +1098,9 @@ TEST_F(RoomActorTest, GameStartOpensTheDealerDiscardWindow) {
   EXPECT_EQ(test_room.room()->round_index(), 0);
   // Derived from the rules library, so it follows a tile-set change (108 -> 136) automatically.
   EXPECT_EQ(test_room.room()->remaining(), kWallSizeAfterDeal);
-  EXPECT_EQ(test_room.room()->CurrentWindow(), "discard");
-  EXPECT_EQ(CountOfType(frames, "state_sync"), 0) << "dealing is not a draw; no state_sync yet (§5.12)";
+  EXPECT_EQ(test_room.room()->CurrentWindow(), protocol::Window::kDiscard);
+  EXPECT_EQ(CountOfType(frames, protocol::FrameType::kStateSync), 0)
+      << "dealing is not a draw; no state_sync yet (§5.12)";
   ASSERT_EQ(test_room.scheduled().size(), 1u);
   EXPECT_EQ(test_room.scheduled()[0].first, kDefaultTimeoutMs);
   EXPECT_EQ(test_room.scheduled()[0].second, 1u);
@@ -1112,7 +1120,7 @@ TEST_F(RoomActorTest, DiscardEventCarriesTheClosedWindowSeq) {
   // therefore live in a newer window.)
   std::vector<json::Value> frames = test_room.sink()->Drain();
   ASSERT_FALSE(frames.empty());
-  EXPECT_EQ(TypeOf(frames[0]), "discard_event");
+  EXPECT_EQ(TypeOf(frames[0]), protocol::FrameType::kDiscardEvent);
   EXPECT_EQ(IntOf(frames[0], "seat"), 0);
   EXPECT_EQ(StrOf(frames[0], "tile"), FormatTile(discarded));
   EXPECT_EQ(IntOf(frames[0], "seq"), 1);
@@ -1135,16 +1143,16 @@ TEST_F(RoomActorTest, StaleSequencesAreDroppedSilently) {
 
   const std::vector<Tile> hand_before = test_room.room()->hand_of(kSeat0);
 
-  test_room.SendDiscard(SortedTiles(hand_before).back(), 0);    // seq 0: never valid
-  test_room.SendDiscard(SortedTiles(hand_before).back(), 99);   // seq far in the future
-  test_room.SendAction("pass", {}, 99);
+  test_room.SendDiscard(SortedTiles(hand_before).back(), 0);   // seq 0: never valid
+  test_room.SendDiscard(SortedTiles(hand_before).back(), 99);  // seq far in the future
+  test_room.SendAction(protocol::Action::kPass, {}, 99);
 
   std::vector<json::Value> frames = test_room.sink()->Drain();
   EXPECT_TRUE(frames.empty()) << "a stale seq must not produce any frame (PROTOCOL.md §6.3)";
   EXPECT_EQ(test_room.room()->seq(), 1u);
   EXPECT_EQ(test_room.room()->discards_of(kSeat0).size(), 0u);
   EXPECT_EQ(test_room.room()->hand_of(kSeat0).size(), 14u);
-  EXPECT_EQ(test_room.room()->CurrentWindow(), "discard");
+  EXPECT_EQ(test_room.room()->CurrentWindow(), protocol::Window::kDiscard);
 
   // The same reply with the current seq works, and a repeat of it is stale again.
   test_room.SendDiscard(SortedTiles(hand_before).back(), 1);
@@ -1162,25 +1170,25 @@ TEST_F(RoomActorTest, IllegalOperationsChangeNothing) {
   test_room.Ready();
   std::vector<json::Value> start_frames = test_room.sink()->Drain();
   const json::Value& request = start_frames[1];
-  ASSERT_EQ(StrOf(request, "window"), "discard");
-  if (OptionOf(request, "win") != nullptr) {
+  ASSERT_EQ(IntOf(request, "window"), protocol::WireOf(protocol::Window::kDiscard));
+  if (OptionOf(request, protocol::Action::kWin) != nullptr) {
     GTEST_SKIP() << "this seed deals the dealer a winning hand; pick another seed";
   }
 
   const std::vector<Tile> hand = test_room.room()->hand_of(kSeat0);
 
   // H1: `pass` is not a legal reply in a discard window.
-  test_room.SendAction("pass", {}, 1);
+  test_room.SendAction(protocol::Action::kPass, {}, 1);
   std::vector<json::Value> frames = test_room.sink()->Drain();
   ASSERT_EQ(frames.size(), 1u);
-  EXPECT_EQ(TypeOf(frames[0]), "error");
-  EXPECT_EQ(StrOf(frames[0], "code"), "ILLEGAL_ACTION");
+  EXPECT_EQ(TypeOf(frames[0]), protocol::FrameType::kError);
+  EXPECT_EQ(IntOf(frames[0], "code"), protocol::WireOf(protocol::ErrorCode::kIllegalAction));
 
   // A fake win request (the hand is not a winner) is rejected too (H8).
-  test_room.SendAction("win", {}, 1);
+  test_room.SendAction(protocol::Action::kWin, {}, 1);
   frames = test_room.sink()->Drain();
   ASSERT_EQ(frames.size(), 1u);
-  EXPECT_EQ(StrOf(frames[0], "code"), "ILLEGAL_ACTION");
+  EXPECT_EQ(IntOf(frames[0], "code"), protocol::WireOf(protocol::ErrorCode::kIllegalAction));
 
   // A tile that is not in hand.
   const FaceCounts counts = CountFaces(hand);
@@ -1194,12 +1202,12 @@ TEST_F(RoomActorTest, IllegalOperationsChangeNothing) {
   test_room.SendDiscard(MakeTileFromFace(absent), 1);
   frames = test_room.sink()->Drain();
   ASSERT_EQ(frames.size(), 1u);
-  EXPECT_EQ(StrOf(frames[0], "code"), "UNKNOWN_TILE");
+  EXPECT_EQ(IntOf(frames[0], "code"), protocol::WireOf(protocol::ErrorCode::kUnknownTile));
 
   // None of the rejected frames changed the state.
   EXPECT_EQ(test_room.room()->seq(), 1u);
   EXPECT_EQ(test_room.room()->current_seat(), 0);
-  EXPECT_EQ(test_room.room()->CurrentWindow(), "discard");
+  EXPECT_EQ(test_room.room()->CurrentWindow(), protocol::Window::kDiscard);
   EXPECT_EQ(test_room.room()->discards_of(kSeat0).size(), 0u);
   EXPECT_EQ(test_room.room()->hand_of(kSeat0), hand);
 }
@@ -1219,7 +1227,7 @@ void RunTimeoutScenario(uint64_t seed) {
 
   std::vector<json::Value> frames = test_room.sink()->Drain();
   ASSERT_FALSE(frames.empty());
-  EXPECT_EQ(TypeOf(frames[0]), "discard_event");
+  EXPECT_EQ(TypeOf(frames[0]), protocol::FrameType::kDiscardEvent);
   EXPECT_EQ(IntOf(frames[0], "seat"), 0);
   EXPECT_EQ(StrOf(frames[0], "tile"), FormatTile(expected_first));
 
@@ -1242,7 +1250,7 @@ void RunTimeoutScenario(uint64_t seed) {
   std::optional<Tile> drawn;
   for (int guard = 0; guard < 4000 && !test_room.room()->game_finished(); ++guard) {
     std::optional<json::Value> request = test_room.PendingRequest();
-    if (test_room.room()->CurrentWindow() == "discard" && test_room.room()->current_seat() == kSeat0 &&
+    if (test_room.room()->CurrentWindow() == protocol::Window::kDiscard && test_room.room()->current_seat() == kSeat0 &&
         test_room.drawn().has_value()) {
       drawn = test_room.drawn();
       break;
@@ -1259,7 +1267,7 @@ void RunTimeoutScenario(uint64_t seed) {
   test_room.Send(RoomEnvelope::WindowTimeout(window_seq));
   frames = test_room.sink()->Drain();
   ASSERT_FALSE(frames.empty());
-  EXPECT_EQ(TypeOf(frames[0]), "discard_event");
+  EXPECT_EQ(TypeOf(frames[0]), protocol::FrameType::kDiscardEvent);
   EXPECT_EQ(StrOf(frames[0], "tile"), FormatTile(*drawn));
 }
 
@@ -1304,10 +1312,10 @@ TEST_F(RoomActorTest, RoundAdvanceTokenIsTheOnlyWayAcrossRounds) {
   std::vector<json::Value> frames = test_room.sink()->Drain();
   EXPECT_EQ(test_room.room()->round_index(), 1) << "round_index 必须恰好 +1";
   EXPECT_GT(test_room.room()->seq(), end_seq) << "新局的窗口 seq 继续单调递增";
-  EXPECT_EQ(test_room.room()->CurrentWindow(), "discard");
+  EXPECT_EQ(test_room.room()->CurrentWindow(), protocol::Window::kDiscard);
   EXPECT_FALSE(test_room.room()->round_finished());
   // 新局的 game_start 帧带 round_index=1，且手牌 14 张的座位 = 新庄家
-  const std::vector<const json::Value*> starts = FramesOfType(frames, "game_start");
+  const std::vector<const json::Value*> starts = FramesOfType(frames, protocol::FrameType::kGameStart);
   ASSERT_EQ(starts.size(), 1u);
   EXPECT_EQ(IntOf(*starts.front(), "round_index"), 1);
   EXPECT_EQ(IntOf(*starts.front(), "round_count"), 4);
@@ -1337,12 +1345,12 @@ TEST_F(RoomActorTest, EntrustedSeatPlaysImmediately) {
 
   std::vector<json::Value> frames = test_room.sink()->Drain();
   ASSERT_FALSE(frames.empty());
-  EXPECT_EQ(TypeOf(frames[0]), "discard_event");
+  EXPECT_EQ(TypeOf(frames[0]), protocol::FrameType::kDiscardEvent);
   EXPECT_EQ(IntOf(frames[0], "seat"), 0);
   EXPECT_EQ(StrOf(frames[0], "tile"), FormatTile(hand.back()));
 
   // The entrusted seat is reported in the per-seat public view (PROTOCOL.md §8.5).
-  const std::vector<const json::Value*> syncs = FramesOfType(frames, "state_sync");
+  const std::vector<const json::Value*> syncs = FramesOfType(frames, protocol::FrameType::kStateSync);
   ASSERT_FALSE(syncs.empty());
   const json::Value* seats = syncs.front()->Find("seats");
   ASSERT_NE(seats, nullptr);
@@ -1364,14 +1372,13 @@ TEST_F(RoomActorTest, FullGamesSatisfyProtocolInvariants) {
     ++matches;
 
     const std::vector<json::Value>& frames = test_room.history();
-    std::vector<const json::Value*> errors = FramesOfType(frames, "error");
-    ASSERT_TRUE(errors.empty()) << "seed " << seed << " produced an error frame: "
-                                << errors.front()->Dump();
+    std::vector<const json::Value*> errors = FramesOfType(frames, protocol::FrameType::kError);
+    ASSERT_TRUE(errors.empty()) << "seed " << seed << " produced an error frame: " << errors.front()->Dump();
 
     // ---- 帧计数（§5.10 v1.6 / §5.15）：game_start 每局恰一次、game_end = 4 + 连庄、match_end 恰 1 次
-    const std::vector<const json::Value*> starts = FramesOfType(frames, "game_start");
-    const std::vector<const json::Value*> ends = FramesOfType(frames, "game_end");
-    const std::vector<const json::Value*> match_ends = FramesOfType(frames, "match_end");
+    const std::vector<const json::Value*> starts = FramesOfType(frames, protocol::FrameType::kGameStart);
+    const std::vector<const json::Value*> ends = FramesOfType(frames, protocol::FrameType::kGameEnd);
+    const std::vector<const json::Value*> match_ends = FramesOfType(frames, protocol::FrameType::kMatchEnd);
     ASSERT_EQ(starts.size(), ends.size()) << "seed " << seed << ": 每局必须恰有一个 game_start";
     ASSERT_GE(ends.size(), 4u) << "seed " << seed;
     ASSERT_LE(ends.size(), 8u) << "seed " << seed << "（C15 双闸）";
@@ -1386,18 +1393,17 @@ TEST_F(RoomActorTest, FullGamesSatisfyProtocolInvariants) {
     // ---- state_sync 不变量（H6 + 张数公式 + 他家暗杠打码），逐帧成立
     std::vector<size_t> end_positions;
     for (size_t i = 0; i < frames.size(); ++i) {
-      if (TypeOf(frames[i]) == "game_end") end_positions.push_back(i);
+      if (TypeOf(frames[i]) == protocol::FrameType::kGameEnd) end_positions.push_back(i);
     }
     size_t next_end = 0;
     for (size_t i = 0; i < frames.size(); ++i) {
       const json::Value& sync = frames[i];
-      if (TypeOf(sync) != "state_sync") continue;
+      if (TypeOf(sync) != protocol::FrameType::kStateSync) continue;
       while (next_end < end_positions.size() && end_positions[next_end] < i) ++next_end;
       const bool is_round_final =
-          next_end < end_positions.size() &&
-          [&] {  // 这份 state_sync 是 end_positions[next_end] 之前最后一份吗？
+          next_end < end_positions.size() && [&] {  // 这份 state_sync 是 end_positions[next_end] 之前最后一份吗？
             for (size_t j = i + 1; j < end_positions[next_end]; ++j) {
-              if (TypeOf(frames[j]) == "state_sync") return false;
+              if (TypeOf(frames[j]) == protocol::FrameType::kStateSync) return false;
             }
             return true;
           }();
@@ -1410,12 +1416,12 @@ TEST_F(RoomActorTest, FullGamesSatisfyProtocolInvariants) {
         const json::Value* melds = entry.Find("melds");
         ASSERT_NE(melds, nullptr);
         const int concealed = hand_count + 3 * static_cast<int>(melds->AsArray().size());
-        EXPECT_TRUE(concealed == 13 || concealed == 14) << "seed " << seed << ": hand_count=" << hand_count
-                                                        << " melds=" << melds->AsArray().size();
+        EXPECT_TRUE(concealed == 13 || concealed == 14)
+            << "seed " << seed << ": hand_count=" << hand_count << " melds=" << melds->AsArray().size();
         // §5.9 暗杠三态：非局终的 state_sync 里，他家 ankan.tiles 恒 []；局终揭示版为 4 张同面。
         const int seat = static_cast<int>(IntOf(entry, "seat"));
         for (const json::Value& meld : melds->AsArray()) {
-          if (StrOf(meld, "type") != "ankan") continue;
+          if (IntOf(meld, "type") != protocol::WireOf(protocol::WireMeldType::kAnkan)) continue;
           const json::Value* tiles = meld.Find("tiles");
           ASSERT_NE(tiles, nullptr);
           if (seat != kSeat0 && !is_round_final) {
@@ -1447,7 +1453,7 @@ TEST_F(RoomActorTest, FullGamesSatisfyProtocolInvariants) {
 
     // ---- seq 整场严格递增（C3：跨局单调不重置，§6.2）
     uint64_t previous_seq = 0;
-    for (const json::Value* request : FramesOfType(frames, "action_request")) {
+    for (const json::Value* request : FramesOfType(frames, protocol::FrameType::kActionRequest)) {
       const uint64_t seq = static_cast<uint64_t>(IntOf(*request, "seq"));
       EXPECT_GT(seq, previous_seq) << "seed " << seed;
       previous_seq = seq;
@@ -1474,13 +1480,15 @@ TEST_F(RoomActorTest, FullGamesSatisfyProtocolInvariants) {
       EXPECT_EQ(IntOf(end, "round_index"), expected_round_index);
       EXPECT_EQ(IntOf(end, "dealer"), expected_dealer);
 
-      const std::string reason = StrOf(end, "reason");
-      ASSERT_TRUE(reason == "win_ron" || reason == "win_tsumo" || reason == "draw_exhausted");
+      const int64_t reason = IntOf(end, "reason");
+      ASSERT_TRUE(reason == protocol::WireOf(protocol::RoundEndReason::kWinRon) ||
+                  reason == protocol::WireOf(protocol::RoundEndReason::kWinTsumo) ||
+                  reason == protocol::WireOf(protocol::RoundEndReason::kDrawExhausted));
       const int round_dealer = expected_dealer;  // 本局庄家（推进前捕获）
       // 连庄/轮庄（§3.3）：庄家和牌或荒庄 ⇒ 连庄；闲家和牌 ⇒ 轮庄。
-      const bool dealer_won =
-          reason != "draw_exhausted" && static_cast<int>(IntOf(*end.Find("win"), "seat")) == round_dealer;
-      if (reason != "draw_exhausted" && !dealer_won) {
+      const bool dealer_won = reason != protocol::WireOf(protocol::RoundEndReason::kDrawExhausted) &&
+                              static_cast<int>(IntOf(*end.Find("win"), "seat")) == round_dealer;
+      if (reason != protocol::WireOf(protocol::RoundEndReason::kDrawExhausted) && !dealer_won) {
         ++expected_round_index;
         expected_dealer = (expected_dealer + 1) % kSeatCount;
       }
@@ -1508,7 +1516,7 @@ TEST_F(RoomActorTest, FullGamesSatisfyProtocolInvariants) {
 
       const json::Value* win = end.Find("win");
       ASSERT_NE(win, nullptr);
-      if (reason == "draw_exhausted") {
+      if (reason == protocol::WireOf(protocol::RoundEndReason::kDrawExhausted)) {
         ++draws;
         EXPECT_TRUE(win->IsNull());
         for (const json::Value& entry : results->AsArray()) {
@@ -1520,7 +1528,7 @@ TEST_F(RoomActorTest, FullGamesSatisfyProtocolInvariants) {
       ASSERT_TRUE(win->IsObject()) << "seed " << seed;
       const int winner = static_cast<int>(IntOf(*win, "seat"));
       const bool tsumo = win->Find("tsumo") != nullptr && win->Find("tsumo")->AsBool();
-      EXPECT_EQ(tsumo, reason == "win_tsumo");
+      EXPECT_EQ(tsumo, reason == protocol::WireOf(protocol::RoundEndReason::kWinTsumo));
       const int multiplier = static_cast<int>(IntOf(*win, "multiplier"));
       const int per_payer = static_cast<int>(IntOf(*win, "per_payer"));
       const int total = static_cast<int>(IntOf(*win, "total"));
@@ -1598,8 +1606,7 @@ TEST_F(RoomActorTest, FullGamesSatisfyProtocolInvariants) {
     }
     // 一场必须走满 4 局 —— 除非 C15 连庄闸提前收场（renchan_count > 4）。
     const int last_renchan = static_cast<int>(IntOf(*ends.back(), "renchan_count"));
-    EXPECT_TRUE(expected_round_index == 4 || last_renchan > 4)
-        << "seed " << seed << ": 未走满 4 局也未触发连庄闸";
+    EXPECT_TRUE(expected_round_index == 4 || last_renchan > 4) << "seed " << seed << ": 未走满 4 局也未触发连庄闸";
     EXPECT_EQ(ends.size(), expected_round_index + last_renchan)
         << "seed " << seed << ": game_end 次数 = 计入局数 + 连庄数";
 
@@ -1624,14 +1631,14 @@ TEST_F(RoomActorTest, FullGamesSatisfyProtocolInvariants) {
     for (size_t i = 1; i < rankings->AsArray().size(); ++i) {
       const int64_t prev = IntOf(rankings->AsArray()[i - 1], "final_score");
       const int64_t cur = IntOf(rankings->AsArray()[i], "final_score");
-      ASSERT_TRUE(prev > cur || (prev == cur && IntOf(rankings->AsArray()[i - 1], "seat") <
-                                                      IntOf(rankings->AsArray()[i], "seat")))
+      ASSERT_TRUE(prev > cur ||
+                  (prev == cur && IntOf(rankings->AsArray()[i - 1], "seat") < IntOf(rankings->AsArray()[i], "seat")))
           << "rankings 必须按 final_score 降序、同分 seat 升序";
     }
   }
   EXPECT_EQ(matches, 40);
   EXPECT_GE(wins, 1) << "no seed produced a win; the settlement path was never exercised";
-  EXPECT_EQ(dealers_seen, (std::set<int>{0, 1, 2, 3})) << "C9：庄家必须走过 0/1/2/3（40 场足以覆盖）";
+  EXPECT_EQ(dealers_seen, (std::set<int> {0, 1, 2, 3})) << "C9：庄家必须走过 0/1/2/3（40 场足以覆盖）";
   std::printf("full matches: %d, rounds: %d, wins: %d, draws: %d\n", matches, rounds, wins, draws);
 }
 
@@ -1690,10 +1697,9 @@ TEST_F(RoomActorTest, ConsecutiveRoundsDealDifferentWallsAndHands) {
       test_room.sink()->Drain();
       const uint64_t wall_after = WallFingerprint(*test_room.room());
       const std::string hands_after = HandsSignature(*test_room.room());
-      EXPECT_NE(wall_before, wall_after)
-          << "seed " << seed << " round " << round << ": 相邻两局的牌山不得相同（局种子缺失）";
-      EXPECT_NE(hands_before, hands_after)
-          << "seed " << seed << " round " << round << ": 相邻两局的四家起手牌不得相同";
+      EXPECT_NE(wall_before, wall_after) << "seed " << seed << " round " << round
+                                         << ": 相邻两局的牌山不得相同（局种子缺失）";
+      EXPECT_NE(hands_before, hands_after) << "seed " << seed << " round " << round << ": 相邻两局的四家起手牌不得相同";
       if (test_room.room()->dealer() == dealer_before) {
         ++renchan_transitions;
       } else {
@@ -1733,7 +1739,6 @@ TEST(MahjongRules, RoundSeedIsPureAndPerHand) {
   }
 }
 
-
 // ---------------------------------------------------------------------------
 // M8 缺省值（A1_ACCEPTANCE §七 / SETTLEMENT_BROADCAST_RULINGS v1.2 §2.1）：局间隔冻结默认
 // **12000 ms** = 播报窗 9000 + 阅读窗 3000（`--inter-hand-delay-ms` 缺省口径）。
@@ -1758,13 +1763,13 @@ TEST_F(RoomActorTest, GameEndCarriesInterludeAndMatchEndWaitsForIt) {
     if (test_room.FireRoundAdvance()) {
       continue;  // 还有下一局
     }
-    break;       // 场终：match_end 必须等播报窗走完
+    break;  // 场终：match_end 必须等播报窗走完
   }
   ASSERT_TRUE(test_room.room()->round_finished());
   EXPECT_GE(rounds, 4) << "一场至少 4 局";
   // ② 场终尚未下发，且延迟令牌已武装、延迟值 = 本房间生效值
   EXPECT_FALSE(test_room.room()->game_finished()) << "match_end 不得抢在播报窗之前下发";
-  EXPECT_EQ(CountOfType(test_room.history(), "match_end"), 0);
+  EXPECT_EQ(CountOfType(test_room.history(), protocol::FrameType::kMatchEnd), 0);
   ASSERT_TRUE(test_room.MatchEndScheduled()) << "场终必须武装延迟令牌（走 scheduler，禁 sleep）";
   for (const std::pair<int64_t, uint64_t>& entry : test_room.scheduled()) {
     if (IsMatchEndToken(entry.second)) {
@@ -1775,7 +1780,7 @@ TEST_F(RoomActorTest, GameEndCarriesInterludeAndMatchEndWaitsForIt) {
     }
   }
   // ① 每份 game_end 都带 interlude_ms
-  const std::vector<const json::Value*> ends = FramesOfType(test_room.history(), "game_end");
+  const std::vector<const json::Value*> ends = FramesOfType(test_room.history(), protocol::FrameType::kGameEnd);
   ASSERT_EQ(static_cast<int>(ends.size()), rounds);
   for (const json::Value* end : ends) {
     ASSERT_NE(end->Find("interlude_ms"), nullptr) << "每份 game_end 都必须带 interlude_ms（含荒庄/场终局）";
@@ -1785,7 +1790,7 @@ TEST_F(RoomActorTest, GameEndCarriesInterludeAndMatchEndWaitsForIt) {
   ASSERT_TRUE(test_room.FireMatchEnd());
   EXPECT_TRUE(test_room.room()->game_finished());
   test_room.PendingRequest();
-  EXPECT_EQ(CountOfType(test_room.history(), "match_end"), 1);
+  EXPECT_EQ(CountOfType(test_room.history(), protocol::FrameType::kMatchEnd), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -1808,9 +1813,10 @@ TEST_F(RoomActorTest, NoKongOptionsWhenWallExhausted) {
       std::optional<json::Value> request = test_room.PendingRequest();
       if (test_room.room()->remaining() == 0 && request.has_value()) {
         ++windows_at_zero;
-        for (const std::string& action : {"kong", "ankan", "kakan"}) {
+        for (const protocol::Action action :
+             {protocol::Action::kKong, protocol::Action::kAnkan, protocol::Action::kKakan}) {
           EXPECT_EQ(OptionOf(*request, action), nullptr)
-              << "seed " << seed << ": remaining==0 的窗口不得出现 " << action << " 选项";
+              << "seed " << seed << ": remaining==0 的窗口不得出现 " << protocol::NameOf(action) << " 选项";
         }
       }
       if (test_room.AnswerWindow(request)) {
@@ -1844,15 +1850,15 @@ TEST_F(RoomActorTest, RoundEndRejectsEveryGameFrame) {
   const std::vector<json::Value>& history = test_room.history();
   int last_end_index = -1;
   for (size_t i = 0; i < history.size(); ++i) {
-    if (TypeOf(history[i]) == "game_end") last_end_index = static_cast<int>(i);
+    if (TypeOf(history[i]) == protocol::FrameType::kGameEnd) last_end_index = static_cast<int>(i);
   }
   ASSERT_GE(last_end_index, 0) << "局终帧必须已到达";
   for (size_t i = static_cast<size_t>(last_end_index) + 1; i < history.size(); ++i) {
-    ASSERT_NE(TypeOf(history[i]), "state_sync") << "局间不得下发 state_sync（帧 " << i << "）";
+    ASSERT_NE(TypeOf(history[i]), protocol::FrameType::kStateSync) << "局间不得下发 state_sync（帧 " << i << "）";
   }
   std::vector<json::Value> tail = test_room.sink()->Drain();
   for (const json::Value& frame : tail) {
-    ASSERT_NE(TypeOf(frame), "state_sync") << "局间不得下发 state_sync：" << frame.Dump();
+    ASSERT_NE(TypeOf(frame), protocol::FrameType::kStateSync) << "局间不得下发 state_sync：" << frame.Dump();
   }
 
   // 局间的一切对局帧（携带当前 seq 也一样）⇒ BAD_REQUEST，且状态零变更。
@@ -1860,12 +1866,12 @@ TEST_F(RoomActorTest, RoundEndRejectsEveryGameFrame) {
   test_room.SendDiscard(SortedTiles(test_room.room()->hand_of(kSeat0)).front(), seq);
   std::vector<json::Value> frames = test_room.sink()->Drain();
   ASSERT_EQ(frames.size(), 1u);
-  EXPECT_EQ(TypeOf(frames[0]), "error");
-  EXPECT_EQ(StrOf(frames[0], "code"), "BAD_REQUEST");
-  test_room.SendAction("win", {}, seq);
+  EXPECT_EQ(TypeOf(frames[0]), protocol::FrameType::kError);
+  EXPECT_EQ(IntOf(frames[0], "code"), protocol::WireOf(protocol::ErrorCode::kBadRequest));
+  test_room.SendAction(protocol::Action::kWin, {}, seq);
   frames = test_room.sink()->Drain();
   ASSERT_EQ(frames.size(), 1u);
-  EXPECT_EQ(StrOf(frames[0], "code"), "BAD_REQUEST");
+  EXPECT_EQ(IntOf(frames[0], "code"), protocol::WireOf(protocol::ErrorCode::kBadRequest));
   EXPECT_EQ(test_room.room()->seq(), seq);
   EXPECT_TRUE(test_room.room()->round_finished()) << "BAD_REQUEST 不得改变局间状态";
 
@@ -1876,16 +1882,24 @@ TEST_F(RoomActorTest, RoundEndRejectsEveryGameFrame) {
 
   // 推进令牌之后一切如常（下一局开局）。
   ASSERT_TRUE(test_room.FireRoundAdvance());
-  EXPECT_EQ(test_room.room()->CurrentWindow(), "discard");
+  EXPECT_EQ(test_room.room()->CurrentWindow(), protocol::Window::kDiscard);
 }
 
 namespace {
-MeldType MeldTypeFromName(const std::string& name) {
-  if (name == "pong") return MeldType::kPong;
-  if (name == "chow") return MeldType::kChow;
-  if (name == "kong") return MeldType::kKong;
-  if (name == "ankan") return MeldType::kAnkan;
-  return MeldType::kKakan;
+MeldType MeldTypeFromWire(int64_t wire) {
+  switch (wire) {
+    case protocol::WireOf(protocol::WireMeldType::kPong):
+      return MeldType::kPong;
+    case protocol::WireOf(protocol::WireMeldType::kChow):
+      return MeldType::kChow;
+    case protocol::WireOf(protocol::WireMeldType::kKong):
+      return MeldType::kKong;
+    case protocol::WireOf(protocol::WireMeldType::kAnkan):
+      return MeldType::kAnkan;
+    case protocol::WireOf(protocol::WireMeldType::kKakan):
+      return MeldType::kKakan;
+  }
+  return MeldType::kKakan;  // 与旧的 FromName 兜底一致（帧来自房间自身，正常不可达）
 }
 
 std::vector<Meld> MeldsFromJson(const json::Value& frame, const std::string& key) {
@@ -1894,7 +1908,7 @@ std::vector<Meld> MeldsFromJson(const json::Value& frame, const std::string& key
   if (melds == nullptr || !melds->IsArray()) return out;
   for (const json::Value& item : melds->AsArray()) {
     Meld meld;
-    meld.type = MeldTypeFromName(StrOf(item, "type"));
+    meld.type = MeldTypeFromWire(IntOf(item, "type"));
     meld.tiles = TilesOf(item, "tiles");
     out.push_back(std::move(meld));
   }
@@ -1917,8 +1931,8 @@ TEST_F(RoomActorTest, TenpaiFrameIsOwnPrivateAndConsistent) {
     ASSERT_TRUE(test_room.room()->game_finished()) << "seed " << seed;
     std::vector<const json::Value*> tenpai_frames_seen;
     for (const json::Value& frame : test_room.history()) {
-      const std::string type = TypeOf(frame);
-      if (type == "state_sync") {
+      const protocol::FrameType type = TypeOf(frame);
+      if (type == protocol::FrameType::kStateSync) {
         // state_sync 不带听牌字段；seats[] 任何项也不得出现（§8.1 隐私矩阵）
         EXPECT_EQ(frame.Find("waits"), nullptr) << "state_sync 不得携带 waits（v1.7 走独立 tenpai 帧）";
         const json::Value* seats = frame.Find("seats");
@@ -1929,7 +1943,7 @@ TEST_F(RoomActorTest, TenpaiFrameIsOwnPrivateAndConsistent) {
         }
         continue;
       }
-      if (type != "tenpai") continue;
+      if (type != protocol::FrameType::kTenpai) continue;
       tenpai_frames_seen.push_back(&frame);
       ++tenpai_frames;
       // tenpai 不参与 room.seq；不带 seq 字段（走 tenpai_seq）。
@@ -1939,8 +1953,7 @@ TEST_F(RoomActorTest, TenpaiFrameIsOwnPrivateAndConsistent) {
       const bool is_tenpai = frame.Find("is_tenpai")->AsBool();
       const json::Value* waits = frame.Find("waits");
       ASSERT_TRUE(waits->IsArray());
-      EXPECT_EQ(is_tenpai, !waits->AsArray().empty())
-          << "is_tenpai 与 waits 必须双向一致（false ⇒ []，[] ⇒ false）";
+      EXPECT_EQ(is_tenpai, !waits->AsArray().empty()) << "is_tenpai 与 waits 必须双向一致（false ⇒ []，[] ⇒ false）";
       if (!is_tenpai) continue;
       ++non_empty_frames;
       // 逐项：顺序 = §2.2（**按面**比较，不能用字符串——"9m" 字典序大于 "1p"，但牌序更小）、
@@ -1959,8 +1972,7 @@ TEST_F(RoomActorTest, TenpaiFrameIsOwnPrivateAndConsistent) {
         previous_face = face_index;
         const int remaining = static_cast<int>(IntOf(item, "remaining"));
         EXPECT_GE(remaining, 0) << tile << " 的 remaining 不得为负";
-        EXPECT_LE(remaining, kCopiesPerFace)
-            << tile << " 的 remaining 越界（>4）——多半是误把 wall_remaining_ 填了进来";
+        EXPECT_LE(remaining, kCopiesPerFace) << tile << " 的 remaining 越界（>4）——多半是误把 wall_remaining_ 填了进来";
       }
     }
     // tenpai_seq：每座位一条独立单调计数器，从 1 起、逐帧 +1（跨局不重置）。
@@ -1986,10 +1998,9 @@ TEST_F(RoomActorTest, TenpaiRemainingMatchesVisibleCountAtEmission) {
     test_room.sink()->Drain();
     for (int guard = 0; guard < 800 && !test_room.room()->round_finished(); ++guard) {
       std::optional<json::Value> request = test_room.PendingRequest();
-      const bool human_discard =
-          test_room.room()->CurrentWindow() == "discard" &&
-          test_room.room()->current_seat() == kSeat0 &&
-          !(request.has_value() && OptionOf(*request, "win") != nullptr);
+      const bool human_discard = test_room.room()->CurrentWindow() == protocol::Window::kDiscard &&
+                                 test_room.room()->current_seat() == kSeat0 &&
+                                 !(request.has_value() && OptionOf(*request, protocol::Action::kWin) != nullptr);
       // —— 发射前快照（四家）——
       std::array<std::vector<Tile>, kSeatCount> hand_snap {};
       std::array<std::vector<Meld>, kSeatCount> meld_snap {};
@@ -2008,17 +2019,17 @@ TEST_F(RoomActorTest, TenpaiRemainingMatchesVisibleCountAtEmission) {
       std::optional<Tile> discarded;
       const json::Value* tenpai_frame = nullptr;
       for (const json::Value& frame : frames) {
-        if (TypeOf(frame) == "discard_event" && IntOf(frame, "seat") == kSeat0) {
+        if (TypeOf(frame) == protocol::FrameType::kDiscardEvent && IntOf(frame, "seat") == kSeat0) {
           discarded = ParseTile(StrOf(frame, "tile"));
         }
-        if (TypeOf(frame) == "tenpai") tenpai_frame = &frame;
+        if (TypeOf(frame) == protocol::FrameType::kTenpai) tenpai_frame = &frame;
       }
       if (!discarded.has_value() || tenpai_frame == nullptr) continue;
       const json::Value* waits = tenpai_frame->Find("waits");
       ASSERT_NE(waits, nullptr);
       if (waits->AsArray().empty()) continue;
       // —— 还原发射态的可见枚数 ——
-      FaceCounts visible{};
+      FaceCounts visible {};
       visible.fill(0);
       bool removed = false;
       for (Tile tile : hand_snap[static_cast<size_t>(kSeat0)]) {
@@ -2063,13 +2074,12 @@ TEST_F(RoomActorTest, HandsStaySortedForEverySeat) {
       for (int seat = 0; seat < kSeatCount; ++seat) {
         const std::vector<Tile>& hand = test_room.room()->hand_of(seat);
         EXPECT_EQ(hand, SortedTiles(hand)) << "seed " << seed << " seat " << seat << " " << when;
-        const int logical = static_cast<int>(hand.size()) +
-                            3 * MeldCountOf(test_room.room()->melds_of(seat));
+        const int logical = static_cast<int>(hand.size()) + 3 * MeldCountOf(test_room.room()->melds_of(seat));
         EXPECT_TRUE(logical == 13 || logical == 14) << "seed " << seed << " seat " << seat << " " << when;
       }
       // 排序身份不变量在规则库层单独覆盖（SortPreservesTileIdentity）；房间层只断言
       // 「四家手牌恒有序 + 张数不变量」——全局物理牌 id 唯一性在本引擎属账外记账
-      //（鸣牌 tile 以面编码入组、荣和结算的 H4 双计数），与本批排序无关，不作断言。
+      // （鸣牌 tile 以面编码入组、荣和结算的 H4 双计数），与本批排序无关，不作断言。
     };
     check_state("发牌后（game_start 前）");
     int guard = 0;
@@ -2107,17 +2117,17 @@ TEST_F(RoomActorTest, SelfKanActionsRoundTripThroughTheDiscardWindow) {
     for (int guard = 0; guard < 600 && !test_room.room()->round_finished(); ++guard) {
       std::optional<json::Value> request = test_room.PendingRequest();
       const bool human_discard =
-          test_room.room()->CurrentWindow() == "discard" && test_room.room()->current_seat() == kSeat0;
+          test_room.room()->CurrentWindow() == protocol::Window::kDiscard && test_room.room()->current_seat() == kSeat0;
       if (human_discard && request.has_value()) {
-        const json::Value* ankan = OptionOf(*request, "ankan");
-        const json::Value* kakan = OptionOf(*request, "kakan");
+        const json::Value* ankan = OptionOf(*request, protocol::Action::kAnkan);
+        const json::Value* kakan = OptionOf(*request, protocol::Action::kKakan);
         const json::Value* chosen = ankan != nullptr ? ankan : kakan;
         if (chosen != nullptr) {
           const bool is_ankan = ankan != nullptr;
-          const std::string action = is_ankan ? "ankan" : "kakan";
+          const protocol::Action action = is_ankan ? protocol::Action::kAnkan : protocol::Action::kKakan;
           const std::vector<Tile> option_tiles = TilesOf(*chosen, "tiles");
           ASSERT_EQ(option_tiles.size(), 1u) << "选项 tiles 必须恰好 1 个牌面元素";
-          const std::vector<Tile> hand_before = test_room.room()->hand_of(kSeat0);      // 值拷贝：发送后房间状态会变
+          const std::vector<Tile> hand_before = test_room.room()->hand_of(kSeat0);    // 值拷贝：发送后房间状态会变
           const std::vector<Meld> melds_before = test_room.room()->melds_of(kSeat0);  // 同上（避免引用别名）
           const size_t logical_before = hand_before.size() + 3 * melds_before.size();
           ASSERT_EQ(logical_before, 14u) << "自理杠只在行动态";
@@ -2171,23 +2181,23 @@ TEST_F(RoomActorTest, SelfKanActionsRoundTripThroughTheDiscardWindow) {
           bool saw_draw = false;
           bool saw_sync_after = false;
           for (const json::Value& frame : frames) {
-            if (TypeOf(frame) == "action_event" && StrOf(frame, "action") == action) {
+            if (TypeOf(frame) == protocol::FrameType::kActionEvent &&
+                IntOf(frame, "action") == protocol::WireOf(action)) {
               saw_event = true;
               EXPECT_EQ(frame.Find("from_seat"), nullptr) << "自理杠不得携带 from_seat";
               // PROTOCOL v1.7 §11.5（P0 隐私修复）：**ankan 的 tiles 恒为 []**（广播帧，四家同帧，
               // 本家视角也不例外——牌面由随后 state_sync.melds[] 给出）；kakan 保持 [T]。
               if (is_ankan) {
-                EXPECT_EQ(TilesOf(frame, "tiles").size(), 0u)
-                    << "ankan 的 action_event 不得携带牌面（含本家视角）";
+                EXPECT_EQ(TilesOf(frame, "tiles").size(), 0u) << "ankan 的 action_event 不得携带牌面（含本家视角）";
               } else {
                 EXPECT_TRUE(SameFaces(TilesOf(frame, "tiles"), option_tiles))
                     << "kakan 的 action_event 必须携带 [T]（公开动作）";
               }
             }
-            if (TypeOf(frame) == "draw") {
+            if (TypeOf(frame) == protocol::FrameType::kDraw) {
               saw_draw = true;
             }
-            if (TypeOf(frame) == "state_sync") {
+            if (TypeOf(frame) == protocol::FrameType::kStateSync) {
               saw_sync_after = true;
               const json::Value* seats = frame.Find("seats");
               ASSERT_NE(seats, nullptr);
@@ -2197,7 +2207,7 @@ TEST_F(RoomActorTest, SelfKanActionsRoundTripThroughTheDiscardWindow) {
               ASSERT_NE(melds, nullptr);
               const json::Value* ankan = nullptr;
               for (const json::Value& meld : melds->AsArray()) {
-                if (StrOf(meld, "type") == "ankan") ankan = &meld;
+                if (IntOf(meld, "type") == protocol::WireOf(protocol::WireMeldType::kAnkan)) ankan = &meld;
               }
               if (is_ankan) {
                 // 本家视角的暗杠：4 张真实牌面（与 action_event 的 [] 互补——别修一处漏一处）。
@@ -2208,7 +2218,7 @@ TEST_F(RoomActorTest, SelfKanActionsRoundTripThroughTheDiscardWindow) {
                 EXPECT_EQ(ankan, nullptr) << "kakan 不得凭空产生 ankan 组";
                 const json::Value* kakan_group = nullptr;
                 for (const json::Value& meld : melds->AsArray()) {
-                  if (StrOf(meld, "type") == "kakan") kakan_group = &meld;
+                  if (IntOf(meld, "type") == protocol::WireOf(protocol::WireMeldType::kKakan)) kakan_group = &meld;
                 }
                 ASSERT_NE(kakan_group, nullptr) << "本家视角的 state_sync 必须含 kakan 组";
                 EXPECT_EQ(kakan_group->Find("tiles")->AsArray().size(), 4u) << "本家加杠必须 4 张牌面";
@@ -2217,7 +2227,7 @@ TEST_F(RoomActorTest, SelfKanActionsRoundTripThroughTheDiscardWindow) {
               for (const json::Value& entry : seats->AsArray()) {
                 if (static_cast<int>(IntOf(entry, "seat")) == kSeat0) continue;
                 for (const json::Value& meld : entry.Find("melds")->AsArray()) {
-                  if (StrOf(meld, "type") == "ankan") {
+                  if (IntOf(meld, "type") == protocol::WireOf(protocol::WireMeldType::kAnkan)) {
                     EXPECT_EQ(meld.Find("tiles")->AsArray().size(), 0u) << "他家暗杠必须脱敏";
                   }
                 }
@@ -2229,7 +2239,7 @@ TEST_F(RoomActorTest, SelfKanActionsRoundTripThroughTheDiscardWindow) {
           EXPECT_TRUE(saw_sync_after) << "自理杠之后必须下发 state_sync（权威覆盖 melds）";
           // 补牌后逻辑张数回到 14（公式逐字不变：concealed + 3×melds）
           EXPECT_EQ(test_room.room()->hand_of(kSeat0).size() + 3u * MeldCountOf(melds_after), 14u);
-          EXPECT_EQ(test_room.room()->CurrentWindow(), "discard") << "补牌后重开打牌窗口";
+          EXPECT_EQ(test_room.room()->CurrentWindow(), protocol::Window::kDiscard) << "补牌后重开打牌窗口";
           if (is_ankan) {
             ++ankan_hits;
           } else {
@@ -2285,34 +2295,34 @@ TEST_F(RoomActorTest, ClaimWindowRejectsDiscardAndUnknownAction) {
       // One drain per step; the request is handed to the answering policy instead of being
       // dropped on the floor (see RunTimeoutScenario for the full rationale).
       std::optional<json::Value> request = test_room.PendingRequest();
-      if (test_room.room()->CurrentWindow() == "claim" && request.has_value() &&
-          StrOf(*request, "window") == "claim") {
+      if (test_room.room()->CurrentWindow() == protocol::Window::kClaim && request.has_value() &&
+          IntOf(*request, "window") == protocol::WireOf(protocol::Window::kClaim)) {
         const uint64_t seq = test_room.room()->seq();
         const std::vector<Tile> hand_before = test_room.room()->hand_of(kSeat0);
         // A discard during a claim window: NOT_YOUR_TURN, state untouched.
         test_room.SendDiscard(SortedTiles(hand_before).front(), seq);
         std::vector<json::Value> frames = test_room.sink()->Drain();
         ASSERT_EQ(frames.size(), 1u);
-        EXPECT_EQ(TypeOf(frames[0]), "error");
-        EXPECT_EQ(StrOf(frames[0], "code"), "NOT_YOUR_TURN");
+        EXPECT_EQ(TypeOf(frames[0]), protocol::FrameType::kError);
+        EXPECT_EQ(IntOf(frames[0], "code"), protocol::WireOf(protocol::ErrorCode::kNotYourTurn));
 
         // An action outside the window's options: ILLEGAL_ACTION, state untouched.
-        if (OptionOf(*request, "chow") == nullptr) {
-          test_room.SendAction("chow", {}, seq);
+        if (OptionOf(*request, protocol::Action::kChow) == nullptr) {
+          test_room.SendAction(protocol::Action::kChow, {}, seq);
           frames = test_room.sink()->Drain();
           ASSERT_EQ(frames.size(), 1u);
-          EXPECT_EQ(StrOf(frames[0], "code"), "ILLEGAL_ACTION");
+          EXPECT_EQ(IntOf(frames[0], "code"), protocol::WireOf(protocol::ErrorCode::kIllegalAction));
         }
         EXPECT_EQ(test_room.room()->seq(), seq);
         EXPECT_EQ(test_room.room()->hand_of(kSeat0), hand_before);
-        EXPECT_EQ(test_room.room()->CurrentWindow(), "claim");
+        EXPECT_EQ(test_room.room()->CurrentWindow(), protocol::Window::kClaim);
 
         // An unanswered claim window counts as a pass when the timeout message arrives
         // (GAME_DESIGN §5.6.2) and the game moves on without any error frame.
         test_room.Send(RoomEnvelope::WindowTimeout(seq));
         std::vector<json::Value> after = test_room.sink()->Drain();
         for (const json::Value& frame : after) {
-          EXPECT_NE(TypeOf(frame), "error") << frame.Dump();
+          EXPECT_NE(TypeOf(frame), protocol::FrameType::kError) << frame.Dump();
         }
         EXPECT_NE(test_room.room()->seq(), seq);
         probed = true;
@@ -2351,43 +2361,46 @@ TEST_F(RoomActorTest, PostMeldDiscardWindowRejectsWinEvenWhenTheHandIsComplete) 
     for (int guard = 0; guard < 300 && !test_room.room()->game_finished(); ++guard) {
       std::optional<json::Value> request = test_room.PendingRequest();
 
-      const bool claimable_win_and_pong = test_room.room()->CurrentWindow() == "claim" && request.has_value() &&
-                                          StrOf(*request, "window") == "claim" &&
-                                          OptionOf(*request, "win") != nullptr && OptionOf(*request, "pong") != nullptr;
+      const bool claimable_win_and_pong = test_room.room()->CurrentWindow() == protocol::Window::kClaim &&
+                                          request.has_value() &&
+                                          IntOf(*request, "window") == protocol::WireOf(protocol::Window::kClaim) &&
+                                          OptionOf(*request, protocol::Action::kWin) != nullptr &&
+                                          OptionOf(*request, protocol::Action::kPong) != nullptr;
       if (claimable_win_and_pong) {
-        const json::Value* pong = OptionOf(*request, "pong");
+        const json::Value* pong = OptionOf(*request, protocol::Action::kPong);
         const size_t melds_before = test_room.room()->melds_of(kSeat0).size();
-        test_room.SendAction("pong", TilesOf(*pong, "tiles"), test_room.room()->seq());
+        test_room.SendAction(protocol::Action::kPong, TilesOf(*pong, "tiles"), test_room.room()->seq());
 
         // The melder now holds a discard window of its own, and ponging the wait left a
         // complete form behind: `DiscardOptions` reports a win the window never offered.
         ASSERT_FALSE(test_room.room()->game_finished());
-        ASSERT_EQ(test_room.room()->CurrentWindow(), "discard");
+        ASSERT_EQ(test_room.room()->CurrentWindow(), protocol::Window::kDiscard);
         ASSERT_EQ(test_room.room()->current_seat(), kSeat0);
         EXPECT_EQ(test_room.room()->melds_of(kSeat0).size(), melds_before + 1);
         const std::vector<Tile>& hand = test_room.room()->hand_of(kSeat0);
-        ASSERT_TRUE(FindOption(DiscardOptions(hand, test_room.room()->melds_of(kSeat0)), "win") != nullptr)
+        ASSERT_TRUE(FindOption(DiscardOptions(hand, test_room.room()->melds_of(kSeat0)), protocol::Action::kWin) !=
+                    nullptr)
             << "a pong on a winning wait must leave a complete concealed hand (seed " << seed << ")";
 
         for (const json::Value& frame : test_room.sink()->Drain()) {
-          if (TypeOf(frame) == "action_request") {
-            EXPECT_EQ(StrOf(frame, "window"), "discard");
-            EXPECT_EQ(OptionOf(frame, "win"), nullptr) << "a post-meld window must offer no options";
+          if (TypeOf(frame) == protocol::FrameType::kActionRequest) {
+            EXPECT_EQ(IntOf(frame, "window"), protocol::WireOf(protocol::Window::kDiscard));
+            EXPECT_EQ(OptionOf(frame, protocol::Action::kWin), nullptr) << "a post-meld window must offer no options";
           }
         }
 
         const uint64_t seq = test_room.room()->seq();
-        test_room.SendAction("win", {}, seq);
+        test_room.SendAction(protocol::Action::kWin, {}, seq);
         std::vector<json::Value> frames = test_room.sink()->Drain();
         ASSERT_EQ(frames.size(), 1u);
-        ASSERT_EQ(TypeOf(frames[0]), "error");
-        EXPECT_EQ(StrOf(frames[0], "code"), "ILLEGAL_ACTION");
+        ASSERT_EQ(TypeOf(frames[0]), protocol::FrameType::kError);
+        EXPECT_EQ(IntOf(frames[0], "code"), protocol::WireOf(protocol::ErrorCode::kIllegalAction));
 
         // §7.3 zero state change: no win, no settlement, the same window is still open.
         EXPECT_FALSE(test_room.room()->game_finished());
         EXPECT_EQ(test_room.room()->seq(), seq);
         EXPECT_EQ(test_room.room()->hand_of(kSeat0), hand);
-        EXPECT_EQ(test_room.room()->CurrentWindow(), "discard");
+        EXPECT_EQ(test_room.room()->CurrentWindow(), protocol::Window::kDiscard);
         probed = true;
         break;
       }
@@ -2409,13 +2422,12 @@ TEST_F(RoomActorTest, PostMeldDiscardWindowRejectsWinEvenWhenTheHandIsComplete) 
 TEST_F(RoomActorTest, FinishedCallbackFiresOncePerRoundAndFlagsTheMatchEnd) {
   TestRoom test_room(20251005);
   std::vector<GameSettlement> finished;
-  test_room.InstallFinishedCallback(
-      [&finished](const GameSettlement& settlement) { finished.push_back(settlement); });
+  test_room.InstallFinishedCallback([&finished](const GameSettlement& settlement) { finished.push_back(settlement); });
   test_room.Ready();
   test_room.PlayFullGame();
 
   ASSERT_TRUE(test_room.room()->game_finished());
-  const std::vector<const json::Value*> ends = FramesOfType(test_room.history(), "game_end");
+  const std::vector<const json::Value*> ends = FramesOfType(test_room.history(), protocol::FrameType::kGameEnd);
   ASSERT_GE(ends.size(), 4u);
   ASSERT_EQ(finished.size(), ends.size()) << "回调必须逐局各一次（C10）";
   EXPECT_EQ(finished.front().room_id, "r-0001");
@@ -2440,7 +2452,7 @@ TEST_F(RoomActorTest, FinishedCallbackFiresOncePerRoundAndFlagsTheMatchEnd) {
       running[seat] += settled.delta_score;
     }
     EXPECT_EQ(delta_sum, 0) << "the zero-sum rule of §6.4 must survive into the recorded payload";
-    if (settlement.reason == "draw_exhausted") {
+    if (settlement.reason == protocol::RoundEndReason::kDrawExhausted) {
       EXPECT_EQ(winners, 0);
     } else {
       EXPECT_EQ(winners, 1) << "a finished round is either drawn or won by exactly one seat";
@@ -2472,7 +2484,8 @@ TEST_F(RoomActorTest, FinishedCallbackFiresOncePerRoundAndFlagsTheMatchEnd) {
   }
   EXPECT_EQ(dealer_hands_sum, ends.size()) << "每局恰有一个庄家 ⇒ 坐庄手数之和 = game_end 次数";
   // final_rank 与 match_end.rankings 逐座位一致（同源，不得两算）
-  const json::Value* rankings = FramesOfType(test_room.history(), "match_end").front()->Find("rankings");
+  const json::Value* rankings =
+      FramesOfType(test_room.history(), protocol::FrameType::kMatchEnd).front()->Find("rankings");
   ASSERT_NE(rankings, nullptr);
   std::array<int, kSeatCount> ranking_by_seat {};
   for (const json::Value& entry : rankings->AsArray()) {
@@ -2485,7 +2498,7 @@ TEST_F(RoomActorTest, FinishedCallbackFiresOncePerRoundAndFlagsTheMatchEnd) {
 
   // Frames that arrive after the match end change nothing, so no further notification.
   const size_t notifications_before = finished.size();
-  test_room.SendAction("win", {}, 1);
+  test_room.SendAction(protocol::Action::kWin, {}, 1);
   test_room.sink()->Drain();
   EXPECT_EQ(finished.size(), notifications_before);
 }
@@ -2501,7 +2514,7 @@ TEST_F(RoomActorTest, RoomLevelErrorsCountTowardTheQuota) {
   ASSERT_EQ(test_room.sink()->bad_frames(), 0);
 
   // ILLEGAL_ACTION: `pass` is not a legal reply in a discard window (H1).
-  test_room.SendAction("pass", {}, 1);
+  test_room.SendAction(protocol::Action::kPass, {}, 1);
   test_room.sink()->Drain();
   EXPECT_EQ(test_room.sink()->illegal_ops(), 1);
 
@@ -2539,7 +2552,7 @@ TEST_F(RoomActorTest, MultiHumanBroadcastCarriesPrivateHandsAndOneSharedSeatsBlo
   for (int step = 0; step < 8; ++step) {
     bool every_seat_has_one = true;
     for (int seat = 0; seat < kSeatCount; ++seat) {
-      if (FramesOfType(received[static_cast<size_t>(seat)], "state_sync").empty()) {
+      if (FramesOfType(received[static_cast<size_t>(seat)], protocol::FrameType::kStateSync).empty()) {
         every_seat_has_one = false;
       }
     }
@@ -2560,7 +2573,7 @@ TEST_F(RoomActorTest, MultiHumanBroadcastCarriesPrivateHandsAndOneSharedSeatsBlo
     json::Value array = json::Value::Arr(melds.size());
     for (const Meld& meld : melds) {
       json::Value entry = json::Value::Obj(2);
-      entry.Set("type", json::Value::Str(MeldTypeName(meld.type)));
+      entry.Set("type", json::Value::Int(protocol::WireOf(protocol::ToWire(meld.type))));
       json::Value tiles = json::Value::Arr(meld.tiles.size());
       for (Tile tile : meld.tiles) {
         tiles.Append(json::Value::Str(FormatTile(tile)));
@@ -2574,7 +2587,8 @@ TEST_F(RoomActorTest, MultiHumanBroadcastCarriesPrivateHandsAndOneSharedSeatsBlo
   std::string shared_seats;
   int64_t broadcast_seq = -1;
   for (int seat = 0; seat < kSeatCount; ++seat) {
-    const std::vector<const json::Value*> syncs = FramesOfType(received[static_cast<size_t>(seat)], "state_sync");
+    const std::vector<const json::Value*> syncs =
+        FramesOfType(received[static_cast<size_t>(seat)], protocol::FrameType::kStateSync);
     ASSERT_FALSE(syncs.empty()) << "seat " << seat << " never received a state_sync";
     const json::Value& sync = *syncs.back();
 
@@ -2610,10 +2624,11 @@ TEST_F(RoomActorTest, MultiHumanBroadcastCarriesPrivateHandsAndOneSharedSeatsBlo
 
   // The discard_event broadcast (§5.6) is one frame for the whole table too: same content at
   // every seat, delivered exactly once per seat.
-  const std::vector<const json::Value*> reference = FramesOfType(received[0], "discard_event");
+  const std::vector<const json::Value*> reference = FramesOfType(received[0], protocol::FrameType::kDiscardEvent);
   ASSERT_FALSE(reference.empty());
   for (int seat = 0; seat < kSeatCount; ++seat) {
-    const std::vector<const json::Value*> events = FramesOfType(received[static_cast<size_t>(seat)], "discard_event");
+    const std::vector<const json::Value*> events =
+        FramesOfType(received[static_cast<size_t>(seat)], protocol::FrameType::kDiscardEvent);
     ASSERT_EQ(events.size(), reference.size()) << "seat " << seat;
     for (size_t i = 0; i < events.size(); ++i) {
       EXPECT_EQ(events[i]->Dump(), reference[i]->Dump()) << "seat " << seat << " frame " << i;

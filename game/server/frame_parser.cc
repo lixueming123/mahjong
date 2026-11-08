@@ -20,21 +20,21 @@ constexpr char kNicknameRules[] = "name must be 1..16 UTF-8 characters without c
 // rejection, and no way to report an error but keep going.
 bool RejectBadRequest(Error* error, std::string message) {
   error->kind = ErrorKind::kBadRequest;
-  error->code = protocol::kCodeBadRequest;
+  error->code = protocol::ErrorCode::kBadRequest;
   error->message = std::move(message);
   return false;
 }
 
 bool RejectUnknownTile(Error* error, const std::string& tile) {
   error->kind = ErrorKind::kIllegalOp;
-  error->code = protocol::kCodeUnknownTile;
+  error->code = protocol::ErrorCode::kUnknownTile;
   error->message = "invalid tile code: " + tile;
   return false;
 }
 
 bool RejectInvalidName(Error* error) {
   error->kind = ErrorKind::kInvalidName;
-  error->code = protocol::kCodeInvalidName;
+  error->code = protocol::ErrorCode::kInvalidName;
   error->message = kNicknameRules;
   return false;
 }
@@ -56,13 +56,19 @@ std::optional<Envelope> ParseEnvelope(std::string_view line, Error* error) {
     return std::nullopt;
   }
   const json::Value* type = parsed->Find("type");
-  if (type == nullptr || !type->IsString()) {
-    RejectBadRequest(error, "frame must carry a string \"type\"");
+  // PROTOCOL v2.0 §1.3: "type" is an integer wire value (1..27, §1.3.1); 3.0 and strings are
+  // field-type errors. Whether the value is a routable client frame is dispatch, not parsing.
+  if (type == nullptr || !type->IsInteger()) {
+    RejectBadRequest(error, "frame must carry an integer \"type\"");
     return std::nullopt;
   }
-  // Copied out first: |type| points into |*parsed|, which the return below moves away.
-  std::string type_name = type->AsString();
-  return Envelope {.frame = std::move(*parsed), .type = std::move(type_name)};
+  const std::optional<protocol::FrameType> frame_type = protocol::ParseFrameType(type->AsInt());
+  if (!frame_type.has_value()) {
+    RejectBadRequest(error, "unknown frame type: " + std::to_string(type->AsInt()));
+    return std::nullopt;
+  }
+  // Copied out first: |parsed| is moved away by the return below.
+  return Envelope {.frame = std::move(*parsed), .type = *frame_type};
 }
 
 std::optional<Login> ParseLogin(const json::Value& frame, Error* error) {
@@ -152,13 +158,14 @@ bool ValidateAction(const json::Value& frame, Error* error) {
   const json::Value* action = frame.Find("action");
   const json::Value* tiles = frame.Find("tiles");
   const json::Value* seq = frame.Find("seq");
-  if (action == nullptr || !action->IsString() || tiles == nullptr || !tiles->IsArray() || !IsValidSeq(seq)) {
-    return RejectBadRequest(error, "action requires a string \"action\", an array \"tiles\" and an integer \"seq\" >= 1");
+  if (action == nullptr || !action->IsInteger() || tiles == nullptr || !tiles->IsArray() || !IsValidSeq(seq)) {
+    return RejectBadRequest(error,
+                            "action requires an integer \"action\", an array \"tiles\" and an integer \"seq\" >= 1");
   }
-  if (!protocol::IsKnownActionName(action->AsString())) {
-    // §4.6 freezes the five action names; an unknown one is a malformed frame. Whether the
-    // action is legal *in the current window* is ILLEGAL_ACTION and belongs to the room.
-    return RejectBadRequest(error, "unknown action: " + action->AsString());
+  if (!protocol::ParseAction(action->AsInt()).has_value()) {
+    // §4.6 freezes the eight action wire values; an unknown one is a malformed frame. Whether
+    // the action is legal *in the current window* is ILLEGAL_ACTION and belongs to the room.
+    return RejectBadRequest(error, "unknown action: " + std::to_string(action->AsInt()));
   }
   for (const json::Value& tile : tiles->AsArray()) {
     if (!tile.IsString()) {

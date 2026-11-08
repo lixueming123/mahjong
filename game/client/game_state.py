@@ -17,6 +17,16 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import sys
+from pathlib import Path
+
+_game_root = next(
+    p for p in Path(__file__).resolve().parents
+    if (p / "protocol" / "enums.json").is_file()
+)
+sys.path.insert(0, str(_game_root))
+from protocol.enums import ACTION, FRAME_TYPE, MELD_TYPE, WINDOW
+
 from .tiles import is_valid_tile, remove_leftmost, sort_tiles, tile_face
 
 log = logging.getLogger("mahjong.client.state")
@@ -30,33 +40,35 @@ SCREEN_RESULT = "SCREEN_RESULT"
 
 REL_LABELS = ("自家", "下家", "对家", "上家")
 
-WINDOW_DISCARD = "discard"
-WINDOW_CLAIM = "claim"
+WINDOW_DISCARD = WINDOW.DISCARD
+WINDOW_CLAIM = WINDOW.CLAIM
 # 日麻抢杠窗口（v1.15）：与 claim 同为「只能和/过」，但被抢的那张牌不在牌河里，
 # 所以帧里额外带 `tile`，客户端据此显示「抢杠 5m」。
-WINDOW_CHANKAN = "chankan"
+WINDOW_CHANKAN = WINDOW.CHANKAN
 
-MELD_TYPES = ("pong", "chow", "kong", "ankan", "kakan")  # v2.0：3 → 5 值（PROTOCOL v1.6 §5.9）
+MELD_TYPES = (MELD_TYPE.PONG, MELD_TYPE.CHOW, MELD_TYPE.KONG, MELD_TYPE.ANKAN,
+              MELD_TYPE.KAKAN)  # v2.0：3 → 5 值（PROTOCOL v1.6 §5.9）
 
-KAN_TYPES = ("kong", "ankan", "kakan")  # 张数第二道校验用：kans = 杠组数（§4.5 v2.0）
+KAN_TYPES = (MELD_TYPE.KONG, MELD_TYPE.ANKAN, MELD_TYPE.KAKAN)  # 张数第二道校验用：kans = 杠组数（§4.5 v2.0）
 
 
 @dataclass
 class Meld:
-    type: str
+    type: int
     tiles: list[str] = field(default_factory=list)
 
     @property
     def label(self) -> str:
-        # §4.8：组框右上角小字标注，v2.0 扩五种
-        return {"pong": "碰", "chow": "吃", "kong": "杠", "ankan": "暗杠", "kakan": "加杠"}.get(
-            self.type, str(self.type)
-        )
+        # §4.8：组框右上角小字标注，v2.0 扩五种；键是副露类型整数常量，值是中文文案
+        return {
+            MELD_TYPE.PONG: "碰", MELD_TYPE.CHOW: "吃", MELD_TYPE.KONG: "杠",
+            MELD_TYPE.ANKAN: "暗杠", MELD_TYPE.KAKAN: "加杠",
+        }.get(self.type, str(self.type))
 
     @property
     def is_concealed_kan(self) -> bool:
         """§4.8 暗杠两形态：本家恒 4 张牌面；他家揭示前 tiles == []（渲染 4 张牌背）。"""
-        return self.type == "ankan"
+        return self.type == MELD_TYPE.ANKAN
 
 
 def parse_meld(obj: Any) -> Meld | None:
@@ -92,7 +104,7 @@ class SeatView:
 class ActionWindow:
     seq: int
     deadline_ms: int
-    window: str
+    window: int
     options: list[dict]
     recv_monotonic: float
     recv_epoch_ms: float
@@ -103,7 +115,7 @@ class ActionWindow:
     # 服务端按「打出后仍在听牌、且不落振听」算好再下发；空 = 不能立直。
     riichi_tiles: list[str] = field(default_factory=list)
 
-    def has(self, action: str, tiles: list[str] | None = None) -> bool:
+    def has(self, action: int, tiles: list[str] | None = None) -> bool:
         for opt in self.options:
             if opt.get("action") != action:
                 continue
@@ -113,7 +125,7 @@ class ActionWindow:
                 return True
         return False
 
-    def option_list(self, action: str) -> list[list[str]]:
+    def option_list(self, action: int) -> list[list[str]]:
         out: list[list[str]] = []
         for opt in self.options:
             if opt.get("action") == action:
@@ -187,7 +199,7 @@ class GameState:
         self.game_started: bool = False
         self.error_count: int = 0
         self.last_error: dict | None = None
-        self.recv_ms: dict[str, float] = {}
+        self.recv_ms: dict[int, float] = {}
         # B 批（PROTOCOL v1.7 §5.16）：听牌条——**仅本家**、独立 `tenpai_seq`（不掺 room.seq）。
         self.tenpai_seq: int | None = None
         self.tenpai_waits: list[dict] = []
@@ -260,15 +272,15 @@ class GameState:
     def apply(self, frame: dict) -> None:
         ftype = frame.get("type")
         handler = {
-            "game_start": self._apply_game_start,
-            "draw": self._apply_draw,
-            "discard_event": self._apply_discard_event,
-            "action_request": self._apply_action_request,
-            "action_event": self._apply_action_event,
-            "state_sync": self._apply_state_sync,
-            "tenpai": self._apply_tenpai,          # v1.7 §5.16（B 批）
-            "game_end": self._apply_game_end,
-            "match_end": self._apply_match_end,  # v2.0：场终帧（§9.6）
+            FRAME_TYPE.GAME_START: self._apply_game_start,
+            FRAME_TYPE.DRAW: self._apply_draw,
+            FRAME_TYPE.DISCARD_EVENT: self._apply_discard_event,
+            FRAME_TYPE.ACTION_REQUEST: self._apply_action_request,
+            FRAME_TYPE.ACTION_EVENT: self._apply_action_event,
+            FRAME_TYPE.STATE_SYNC: self._apply_state_sync,
+            FRAME_TYPE.TENPAI: self._apply_tenpai,          # v1.7 §5.16（B 批）
+            FRAME_TYPE.GAME_END: self._apply_game_end,
+            FRAME_TYPE.MATCH_END: self._apply_match_end,  # v2.0：场终帧（§9.6）
         }.get(ftype)
         if handler is None:
             log.debug("忽略未消费的帧类型：%r", ftype)
@@ -397,7 +409,7 @@ class GameState:
                 continue
             action = opt.get("action")
             tiles = opt.get("tiles")
-            if not isinstance(action, str):
+            if not isinstance(action, int):
                 continue
             clean_options.append({"action": action, "tiles": list(tiles) if isinstance(tiles, list) else []})
 
@@ -454,7 +466,7 @@ class GameState:
         self._note_seq(frame)
         if not isinstance(tiles, list):
             tiles = []
-        if action in ("pong", "chow", "kong"):
+        if action in (ACTION.PONG, ACTION.CHOW, ACTION.KONG):
             # §4.7/§5.8：被鸣牌恒为 from_seat 座位最近一次打出的那张 → 从 from_seat 的牌河移除最后一张
             if isinstance(from_seat, int):
                 river = self.seat_view(from_seat).discards
@@ -464,16 +476,18 @@ class GameState:
                     log.warning("action_event 的 from_seat 牌河为空：%s", from_seat)
             else:
                 log.warning("action_event 缺少 from_seat（协议异常）")
-        elif action == "win":
+        elif action == ACTION.WIN:
             self.frozen = True
             if isinstance(seat, int):
                 self.win_seat = seat
-        elif action == "riichi":
+        elif action == ACTION.RIICHI:
             # 日麻：公开事件，供立直棒/横置动画。权威状态随后由 state_sync.seats[].riichi 覆盖。
             if isinstance(seat, int) and 0 <= seat <= 3:
                 self.seat_view(seat).riichi = True
         # F-TP-11 ①⑤：本家和牌 / 本家副露生效 ⇒ 立刻清空听牌（牌形已变，旧 waits 是脏数据）
-        if action == "win" or action in ("pong", "chow", "kong", "ankan", "kakan"):
+        if action == ACTION.WIN or action in (
+            ACTION.PONG, ACTION.CHOW, ACTION.KONG, ACTION.ANKAN, ACTION.KAKAN,
+        ):
             self.clear_tenpai()
         # §5.1 兜底规则：任一 action_event → 本窗口已结算 → 立即清除 PENDING
         self.clear_pending()
