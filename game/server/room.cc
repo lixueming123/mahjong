@@ -773,7 +773,7 @@ std::string RoomActor::BuildMatchEnd() const {
     // 日麻按终局持点排名（25000 起），classic 按累计得失分
     const int score =
         mode_ == GameMode::kRiichi ? points_[static_cast<size_t>(seat)] : match_totals_[static_cast<size_t>(seat)];
-    standings[static_cast<size_t>(seat)] = Ranked {seat, score, 1};
+    standings[static_cast<size_t>(seat)] = Ranked {.seat = seat, .score = score, .rank = 1};
   }
   std::sort(standings.begin(), standings.end(), [](const Ranked& a, const Ranked& b) {
     if (a.score != b.score) return a.score > b.score;  // final_score 降序
@@ -1961,7 +1961,7 @@ stdexec::task<void> RoomActor::EndRoundWithWin(int winner_seat, int from_seat, T
                                                     [](const riichi::Yaku& item) { return item.id == "rinshan"; });
     settlement.yaku.clear();
     for (const riichi::Yaku& item : riichi_score.yaku) {
-      settlement.yaku.push_back(Yaku {item.id, item.han});
+      settlement.yaku.push_back(Yaku {.id = item.id, .han = item.han});
     }
     settlement.multiplier = riichi_score.points;  // 客户端旧字段：日麻下用点数填充
     settlement.per_payer = riichi_score.per_payer;
