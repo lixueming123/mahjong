@@ -1,4 +1,4 @@
-// Frozen wire enum values for PROTOCOL v2.0 (game/docs/PROTOCOL.md §1.3.1).
+// Frozen wire enum values for PROTOCOL v2.1 (game/docs/PROTOCOL.md §1.3.1).
 //
 // The single source of truth is game/protocol/enums.json. This header keeps a checked-in
 // typed copy; game/tests/protocol_enums_consistency_test.py verifies both the member values
@@ -6,9 +6,9 @@
 // reserves 0 = kInvalid; real values are contiguous 1..N. NEVER renumber a value: append at
 // the end of a domain and bump the protocol version instead.
 //
-// Deliberately dependency-free: mahjong_rules.h needs Action, so including any project
-// header here would create a cycle. Conversions to/from the internal MeldType/GameMode/
-// GameLength enums live in protocol.h, which may include both sides.
+// Deliberately dependency-free: mahjong_rules.h needs Action/YakuId, so including any
+// project header here would create a cycle. Conversions to/from the internal MeldType/
+// GameMode/GameLength/Limit enums live in protocol.h or room.h, which may include both sides.
 
 #pragma once
 
@@ -172,6 +172,88 @@ inline constexpr std::array<std::string_view, kErrorCodeMax + 1> kErrorCodeNames
     "AUTH_FAILED",     "USERNAME_TAKEN", "ALREADY_ONLINE",
 };
 
+// ---- win.yaku[].id / win.tags[] / results[].win_type[] (v2.1) ---------------------------
+// 1..45 are real yaku ids. 46/47 are the win method appended by `results[].win_type[]`
+// only; they never appear in `win.yaku[]` or `win.tags[]`. `win_tsumo` deliberately does
+// not reuse `tsumo` (17 = menzen tsumo) because a domain cannot contain duplicate names.
+enum class YakuId : uint8_t {
+  kInvalid = 0,
+  kMenzen = 1,
+  kTanyao = 2,
+  kPinfu = 3,
+  kIipeikou = 4,
+  kYakuhai = 5,
+  kRinshan = 6,
+  kSanshokuDoujun = 7,
+  kIttsuu = 8,
+  kToitoi = 9,
+  kSanankou = 10,
+  kHonitsu = 11,
+  kShousangen = 12,
+  kSevenPairs = 13,
+  kPureOneSuit = 14,
+  kRiichi = 15,
+  kIppatsu = 16,
+  kTsumo = 17,
+  kChankan = 18,
+  kHaitei = 19,
+  kHoutei = 20,
+  kRyanpeikou = 21,
+  kJunchan = 22,
+  kChanta = 23,
+  kSankantsu = 24,
+  kHonroutou = 25,
+  kChinitsu = 26,
+  kChiitoitsu = 27,
+  kDora = 28,
+  kUraDora = 29,
+  kAkaDora = 30,
+  kTenhou = 31,
+  kChiihou = 32,
+  kKokushi = 33,
+  kKokushi13 = 34,
+  kSuuankou = 35,
+  kSuuankouTanki = 36,
+  kDaisangen = 37,
+  kTsuuiisou = 38,
+  kRyuuiisou = 39,
+  kChinroutou = 40,
+  kChuuren = 41,
+  kChuurenJunsei = 42,
+  kSuukantsu = 43,
+  kShousuushii = 44,
+  kDaisuushii = 45,
+  kWinRon = 46,
+  kWinTsumo = 47,
+};
+inline constexpr int kYakuMax = 47;
+inline constexpr std::array<std::string_view, kYakuMax + 1> kYakuNames = {
+    "INVALID",        "menzen",          "tanyao",        "pinfu",      "iipeikou",   "yakuhai",
+    "rinshan",        "sanshoku_doujun", "ittsuu",        "toitoi",     "sanankou",   "honitsu",
+    "shousangen",     "seven_pairs",     "pure_one_suit", "riichi",     "ippatsu",    "tsumo",
+    "chankan",        "haitei",          "houtei",        "ryanpeikou", "junchan",    "chanta",
+    "sankantsu",      "honroutou",       "chinitsu",      "chiitoitsu", "dora",       "ura_dora",
+    "aka_dora",       "tenhou",          "chiihou",       "kokushi",    "kokushi_13", "suuankou",
+    "suuankou_tanki", "daisangen",       "tsuuiisou",     "ryuuiisou",  "chinroutou", "chuuren",
+    "chuuren_junsei", "suukantsu",       "shousuushii",   "daisuushii", "win_ron",    "win_tsumo",
+};
+
+// ---- win.limit (v2.1, riichi only) ------------------------------------------------------
+// `none` is a real value (below mangan), not the reserved INVALID.
+enum class WireLimit : uint8_t {
+  kInvalid = 0,
+  kNone = 1,
+  kMangan = 2,
+  kHaneman = 3,
+  kBaiman = 4,
+  kSanbaiman = 5,
+  kYakuman = 6,
+};
+inline constexpr int kLimitMax = 6;
+inline constexpr std::array<std::string_view, kLimitMax + 1> kLimitNames = {
+    "INVALID", "none", "mangan", "haneman", "baiman", "sanbaiman", "yakuman",
+};
+
 // ---- generic helpers --------------------------------------------------------------------
 // One trait per domain keeps NameOf/ParseWire/FromName to a single implementation; the
 // consistency test still parses each enum class block and each kXNames array separately.
@@ -217,6 +299,16 @@ template <>
 struct WireTable<ErrorCode> {
   static constexpr int kMax = kErrorCodeMax;
   static constexpr const std::array<std::string_view, kErrorCodeMax + 1>* kNames = &kErrorCodeNames;
+};
+template <>
+struct WireTable<YakuId> {
+  static constexpr int kMax = kYakuMax;
+  static constexpr const std::array<std::string_view, kYakuMax + 1>* kNames = &kYakuNames;
+};
+template <>
+struct WireTable<WireLimit> {
+  static constexpr int kMax = kLimitMax;
+  static constexpr const std::array<std::string_view, kLimitMax + 1>* kNames = &kLimitNames;
 };
 
 template <typename E>
@@ -279,6 +371,8 @@ constexpr std::optional<RoundEndReason> ParseReason(int64_t value) {
 constexpr std::optional<ErrorCode> ParseErrorCode(int64_t value) {
   return ParseWire<ErrorCode>(value);
 }
+constexpr std::optional<YakuId> ParseYakuId(int64_t value) { return ParseWire<YakuId>(value); }
+constexpr std::optional<WireLimit> ParseWireLimit(int64_t value) { return ParseWire<WireLimit>(value); }
 
 constexpr bool IsClientFrameType(FrameType type) {
   const int value = WireOf(type);
@@ -299,6 +393,8 @@ static_assert(std::is_same_v<std::underlying_type_t<WireLength>, uint8_t>);
 static_assert(std::is_same_v<std::underlying_type_t<WireMeldType>, uint8_t>);
 static_assert(std::is_same_v<std::underlying_type_t<RoundEndReason>, uint8_t>);
 static_assert(std::is_same_v<std::underlying_type_t<ErrorCode>, uint8_t>);
+static_assert(std::is_same_v<std::underlying_type_t<YakuId>, uint8_t>);
+static_assert(std::is_same_v<std::underlying_type_t<WireLimit>, uint8_t>);
 
 static_assert(WireOf(FrameType::kRoomUpdate) == kFrameTypeMax);
 static_assert(WireOf(Action::kRiichi) == kActionMax);
@@ -308,6 +404,10 @@ static_assert(WireOf(WireLength::kHanchan) == kLengthMax);
 static_assert(WireOf(WireMeldType::kKakan) == kMeldTypeMax);
 static_assert(WireOf(RoundEndReason::kDrawExhausted) == kReasonMax);
 static_assert(WireOf(ErrorCode::kAlreadyOnline) == kErrorCodeMax);
+static_assert(WireOf(YakuId::kWinTsumo) == kYakuMax);
+static_assert(WireOf(YakuId::kMenzen) == 1);
+static_assert(WireOf(WireLimit::kYakuman) == kLimitMax);
+static_assert(WireOf(WireLimit::kNone) == 1);
 
 static_assert(kFrameTypeNames.size() == static_cast<size_t>(kFrameTypeMax + 1));
 static_assert(kActionNames.size() == static_cast<size_t>(kActionMax + 1));
@@ -317,6 +417,8 @@ static_assert(kLengthNames.size() == static_cast<size_t>(kLengthMax + 1));
 static_assert(kMeldTypeNames.size() == static_cast<size_t>(kMeldTypeMax + 1));
 static_assert(kReasonNames.size() == static_cast<size_t>(kReasonMax + 1));
 static_assert(kErrorCodeNames.size() == static_cast<size_t>(kErrorCodeMax + 1));
+static_assert(kYakuNames.size() == static_cast<size_t>(kYakuMax + 1));
+static_assert(kLimitNames.size() == static_cast<size_t>(kLimitMax + 1));
 static_assert(kClientFrameTypes.size() == static_cast<size_t>(kClientFrameTypeMax));
 
 }  // namespace mahjong::protocol

@@ -38,6 +38,8 @@ DOMAIN_LAYOUT = {
     "meld_type": (5, "WireMeldType", "kMeldTypeNames"),
     "reason": (3, "RoundEndReason", "kReasonNames"),
     "error_code": (14, "ErrorCode", "kErrorCodeNames"),
+    "yaku": (47, "YakuId", "kYakuNames"),
+    "limit": (6, "WireLimit", "kLimitNames"),
 }
 
 errors: list[str] = []
@@ -54,7 +56,7 @@ def check(condition: bool, message: str) -> None:
 
 def canonical() -> dict[str, dict[str, int]]:
     definition = json.loads(ENUMS_JSON.read_text(encoding="utf-8"))
-    check(definition.get("version") == "2.0", "enums.json version must be 2.0")
+    check(definition.get("version") == "2.1", "enums.json version must be 2.1")
     domains = definition.get("domains", {})
     check(
         set(domains) == set(DOMAIN_LAYOUT),
@@ -92,6 +94,13 @@ def camel_to_snake(member: str) -> str:
     out: list[str] = []
     for index, char in enumerate(body):
         if char.isupper() and index > 0:
+            out.append("_")
+        elif (
+            char.isdigit()
+            and index > 0
+            and not body[index - 1].isdigit()
+            and body[index - 1] != "_"
+        ):
             out.append("_")
         out.append(char.lower())
     return "".join(out)
@@ -144,7 +153,7 @@ def check_python(domains: dict[str, dict[str, int]]) -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     check(module.domains() == domains, "Python: domains() differs from enums.json")
-    check(module.VERSION == "2.0", "Python: VERSION must be 2.0")
+    check(module.VERSION == "2.1", "Python: VERSION must be 2.1")
     check(
         module.FRAME_TYPE.DISCARD == domains["frame_type"]["discard"],
         "Python: FRAME_TYPE.DISCARD mismatch",
@@ -156,6 +165,22 @@ def check_python(domains: dict[str, dict[str, int]]) -> None:
     check(
         module.value_of("reason", "win_tsumo") == domains["reason"]["win_tsumo"],
         "Python: value_of(reason, win_tsumo) mismatch",
+    )
+    check(
+        module.YAKU.MENZEN == domains["yaku"]["menzen"],
+        "Python: YAKU.MENZEN mismatch",
+    )
+    check(
+        module.YAKU.WIN_TSUMO == domains["yaku"]["win_tsumo"],
+        "Python: YAKU.WIN_TSUMO mismatch",
+    )
+    check(
+        module.LIMIT.MANGAN == domains["limit"]["mangan"],
+        "Python: LIMIT.MANGAN mismatch",
+    )
+    check(
+        module.value_of("yaku", "seven_pairs") == domains["yaku"]["seven_pairs"],
+        "Python: value_of(yaku, seven_pairs) mismatch",
     )
 
 
@@ -187,7 +212,7 @@ def check_js(domains: dict[str, dict[str, int]]) -> None:
 
 def check_docs(domains: dict[str, dict[str, int]]) -> None:
     text = PROTOCOL_MD.read_text(encoding="utf-8")
-    check("v2.0" in text, "docs: PROTOCOL.md is not marked v2.0")
+    check("v2.1" in text, "docs: PROTOCOL.md is not marked v2.1")
     check(
         '"type"（string）' not in text and '"type"`（string）' not in text,
         "docs: §1.3 still says type is a string",
@@ -231,7 +256,7 @@ def main() -> int:
             print(f"  - {error}", file=sys.stderr)
         return 1
     total = sum(count for count, _, _ in DOMAIN_LAYOUT.values())
-    print(f"protocol enum consistency OK: 8 domains, {total} frozen wire values, "
+    print(f"protocol enum consistency OK: {len(DOMAIN_LAYOUT)} domains, {total} frozen wire values, "
           "C++/Python/JS/docs/serve.py agree")
     return 0
 

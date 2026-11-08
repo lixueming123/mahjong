@@ -1,4 +1,4 @@
-// Behaviour test for the frozen PROTOCOL v2.0 wire enums. The numeric values themselves
+// Behaviour test for the frozen PROTOCOL v2.1 wire enums. The numeric values themselves
 // are guarded against game/protocol/enums.json (and the Python/JS/doc tables) by
 // tests/protocol_enums_consistency_test.py; this test covers parsing, names and boundaries.
 
@@ -42,6 +42,27 @@ TEST(ProtocolEnumsTest, EveryDomainRoundTrips) {
   CheckDomain<WireMeldType>(ParseWireMeldType);
   CheckDomain<RoundEndReason>(ParseReason);
   CheckDomain<ErrorCode>(ParseErrorCode);
+  CheckDomain<YakuId>(ParseYakuId);
+  CheckDomain<WireLimit>(ParseWireLimit);
+}
+
+TEST(ProtocolEnumsTest, YakuDomainCoversWinMethodsAndYaku) {
+  EXPECT_EQ(WireOf(YakuId::kMenzen), 1);
+  EXPECT_EQ(WireOf(YakuId::kDaisuushii), 45);
+  EXPECT_EQ(WireOf(YakuId::kWinRon), 46);
+  EXPECT_EQ(WireOf(YakuId::kWinTsumo), 47);
+  EXPECT_EQ(NameOf(YakuId::kWinTsumo), "win_tsumo");
+  EXPECT_EQ(NameOf(YakuId::kTsumo), "tsumo");
+  EXPECT_EQ(FromName<YakuId>("win_ron"), std::optional<YakuId>(YakuId::kWinRon));
+  EXPECT_EQ(FromName<YakuId>("tsumo"), std::optional<YakuId>(YakuId::kTsumo));
+}
+
+TEST(ProtocolEnumsTest, LimitNoneIsARealValue) {
+  EXPECT_EQ(WireOf(WireLimit::kNone), 1);
+  EXPECT_EQ(WireOf(WireLimit::kYakuman), 6);
+  EXPECT_EQ(NameOf(WireLimit::kNone), "none");
+  EXPECT_FALSE(ParseWireLimit(0).has_value());
+  EXPECT_EQ(ParseWireLimit(1), std::optional<WireLimit>(WireLimit::kNone));
 }
 
 TEST(ProtocolEnumsTest, ClientFrameTypesCoverOneToEleven) {

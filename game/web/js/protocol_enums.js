@@ -1,4 +1,4 @@
-// Frozen wire enum values for PROTOCOL v2.0 (game/docs/PROTOCOL.md §1.3.1).
+// Frozen wire enum values for PROTOCOL v2.1 (game/docs/PROTOCOL.md §1.3.1).
 //
 // The single source of truth is game/protocol/enums.json. This module keeps a checked-in
 // typed copy because a browser cannot read a local JSON file without an async fetch; it is
@@ -82,6 +82,65 @@ export const DOMAINS = Object.freeze({
     USERNAME_TAKEN: 13,
     ALREADY_ONLINE: 14,
   }),
+  yaku: Object.freeze({
+    INVALID: 0,
+    menzen: 1,
+    tanyao: 2,
+    pinfu: 3,
+    iipeikou: 4,
+    yakuhai: 5,
+    rinshan: 6,
+    sanshoku_doujun: 7,
+    ittsuu: 8,
+    toitoi: 9,
+    sanankou: 10,
+    honitsu: 11,
+    shousangen: 12,
+    seven_pairs: 13,
+    pure_one_suit: 14,
+    riichi: 15,
+    ippatsu: 16,
+    tsumo: 17,
+    chankan: 18,
+    haitei: 19,
+    houtei: 20,
+    ryanpeikou: 21,
+    junchan: 22,
+    chanta: 23,
+    sankantsu: 24,
+    honroutou: 25,
+    chinitsu: 26,
+    chiitoitsu: 27,
+    dora: 28,
+    ura_dora: 29,
+    aka_dora: 30,
+    tenhou: 31,
+    chiihou: 32,
+    kokushi: 33,
+    kokushi_13: 34,
+    suuankou: 35,
+    suuankou_tanki: 36,
+    daisangen: 37,
+    tsuuiisou: 38,
+    ryuuiisou: 39,
+    chinroutou: 40,
+    chuuren: 41,
+    chuuren_junsei: 42,
+    suukantsu: 43,
+    shousuushii: 44,
+    daisuushii: 45,
+    win_ron: 46,
+    win_tsumo: 47,
+  }),
+  limit: Object.freeze({
+    INVALID: 0,
+    none: 1,
+    mangan: 2,
+    haneman: 3,
+    baiman: 4,
+    sanbaiman: 5,
+    yakuman: 6,
+  }),
 });
 
 function constants(domain) {
@@ -100,6 +159,8 @@ export const LENGTH = constants('length');
 export const MELD_TYPE = constants('meld_type');
 export const REASON = constants('reason');
 export const ERROR_CODE = constants('error_code');
+export const YAKU = constants('yaku');
+export const LIMIT = constants('limit');
 
 export const MAXS = Object.freeze(
   Object.fromEntries(
@@ -113,4 +174,18 @@ export const MAXS = Object.freeze(
 export function nameOf(domain, value) {
   const hit = Object.entries(DOMAINS[domain]).find(([, number]) => number === value);
   return hit ? hit[0] : 'INVALID';
+}
+
+/** Wire yaku id (int, or a legacy string) -> canonical name; unknown values stay numeric. */
+export function yakuName(value) {
+  if (typeof value === 'string') return value;
+  const name = nameOf('yaku', value);
+  return name === 'INVALID' ? String(value) : name;
+}
+
+/** Wire limit (int, or a legacy string) -> canonical name; unknown values stay numeric. */
+export function limitName(value) {
+  if (typeof value === 'string') return value;
+  const name = nameOf('limit', value);
+  return name === 'INVALID' ? String(value) : name;
 }

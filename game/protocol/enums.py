@@ -1,4 +1,4 @@
-"""Python view of the frozen wire enums (PROTOCOL v2.0).
+"""Python view of the frozen wire enums (PROTOCOL v2.1).
 
 The single source of truth is ``enums.json`` next to this file: Python reads it at
 import time, so this side can never drift. C++ (``server/protocol_enums.h``) and JS
@@ -43,6 +43,8 @@ LENGTH = _constants("length")
 MELD_TYPE = _constants("meld_type")
 REASON = _constants("reason")
 ERROR_CODE = _constants("error_code")
+YAKU = _constants("yaku")
+LIMIT = _constants("limit")
 
 MAXS = {domain: max(values.values()) for domain, values in DOMAINS.items()}
 
@@ -72,6 +74,8 @@ __all__ = [
     "MELD_TYPE",
     "REASON",
     "ERROR_CODE",
+    "YAKU",
+    "LIMIT",
     "domains",
     "name_of",
     "value_of",
