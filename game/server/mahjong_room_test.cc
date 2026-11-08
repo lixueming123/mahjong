@@ -614,8 +614,8 @@ std::vector<Tile> HandOf(std::initializer_list<const char*> codes) {
 TEST_F(RoomActorTest, AiClaimGateRejectsAPongThatWorsensTheHand) {
   const std::vector<Tile> hand = HandOf({"4m", "4m", "6m", "3p", "3p", "6p", "2s", "5s", "8s", "5z", "6z", "7z", "7z"});
   const Tile claimed = *ParseTile("4m");
-  const std::vector<Option> options = {Option {protocol::Action::kPong, {claimed}},
-                                       Option {protocol::Action::kPass, {}}};
+  const std::vector<Option> options = {Option {.action = protocol::Action::kPong, .tiles = {claimed}},
+                                       Option {.action = protocol::Action::kPass, .tiles = {}}};
 
   // Fixture precondition: the pong is legal, but the shanten after the meld (and its
   // mandatory discard) is worse than today's.
@@ -634,8 +634,8 @@ TEST_F(RoomActorTest, AiClaimGateRejectsAPongThatWorsensTheHand) {
 TEST_F(RoomActorTest, AiClaimGateAcceptsAPongThatImprovesTheHand) {
   const std::vector<Tile> hand = HandOf({"2m", "6m", "7m", "1p", "3p", "4p", "5p", "9p", "9p", "3s", "3s", "4s", "5s"});
   const Tile claimed = *ParseTile("9p");
-  const std::vector<Option> options = {Option {protocol::Action::kPong, {claimed}},
-                                       Option {protocol::Action::kPass, {}}};
+  const std::vector<Option> options = {Option {.action = protocol::Action::kPong, .tiles = {claimed}},
+                                       Option {.action = protocol::Action::kPass, .tiles = {}}};
 
   const int before = Shanten(hand, {});
   const std::optional<int> after = ShantenAfterMeld(hand, {}, claimed, {claimed, claimed}, MeldType::kPong);
@@ -659,8 +659,8 @@ TEST_F(RoomActorTest, AiClaimGateGatesEveryChowCombination) {
   const std::optional<int> harmful_after = ShantenAfterMeld(harmful, {}, claimed_six_m, harmful_pair, MeldType::kChow);
   ASSERT_TRUE(harmful_after.has_value());
   ASSERT_GT(*harmful_after, harmful_before) << "fixture must be harmful";
-  const std::vector<Option> harmful_options = {Option {protocol::Action::kChow, harmful_pair},
-                                               Option {protocol::Action::kPass, {}}};
+  const std::vector<Option> harmful_options = {Option {.action = protocol::Action::kChow, .tiles = harmful_pair},
+                                               Option {.action = protocol::Action::kPass, .tiles = {}}};
   EXPECT_EQ(RoomActor::ChooseClaimAnswer(harmful, {}, harmful_options, claimed_six_m).action, protocol::Action::kPass);
 
   // (b) two non-worsening combinations: the lowest shanten wins and ties keep the frozen order
@@ -674,9 +674,9 @@ TEST_F(RoomActorTest, AiClaimGateGatesEveryChowCombination) {
   ASSERT_TRUE(after_a.has_value() && after_b.has_value());
   ASSERT_LE(*after_a, tie_before);
   ASSERT_LE(*after_b, tie_before);
-  const std::vector<Option> tie_options = {Option {protocol::Action::kChow, pair_a},
-                                           Option {protocol::Action::kChow, pair_b},
-                                           Option {protocol::Action::kPass, {}}};
+  const std::vector<Option> tie_options = {Option {.action = protocol::Action::kChow, .tiles = pair_a},
+                                           Option {.action = protocol::Action::kChow, .tiles = pair_b},
+                                           Option {.action = protocol::Action::kPass, .tiles = {}}};
   const Option answer = RoomActor::ChooseClaimAnswer(tie, {}, tie_options, claimed_five_m);
   EXPECT_EQ(answer.action, protocol::Action::kChow);
   ASSERT_EQ(answer.tiles.size(), pair_a.size());

@@ -835,18 +835,36 @@ TEST(MahjongRules, ShantenKnownHands) {  // 27
     int expect;
   };
   std::vector<Case> cases = {
-      {H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "5s", "5s"}), {}, -1},  // 和牌形
-      {H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "5s"}), {}, 0},         // 听牌
-      {H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "3s", "4s", "1z", "5z"}), {}, 1},         // 一向听
-      {H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "3s", "4s", "1z", "5z", "9m"}), {}, 2},         // 两向听
-      {H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "3s", "1z", "5z", "9m", "2p", "4p"}), {}, 3},         // 三向听
-      {H({"1m", "1m", "2m", "2m", "3m", "3m", "4p", "4p", "5p", "5p", "6p", "6p", "7s"}), {}, 0},         // 七对子听牌
-      {H({"1m", "1m", "2m", "2m", "3m", "3m", "4p", "4p", "5p", "5p", "1z", "3z", "5z"}), {}, 1},        // 七对子一向听
-      {H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9s", "9s"}), {Pong({"5z", "5z", "5z"})}, 0},  // 副露听牌
-      {H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9s"}),
-       {Pong({"5z", "5z", "5z"})},
-       1},  // 副露一向听（面子计入）
-      {H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "3s", "1z", "5z"}), {Pong({"9s", "9s", "9s"})}, 2},
+      {.hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "5s", "5s"}),
+       .melds = {},
+       .expect = -1},  // 和牌形
+      {.hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "5s"}),
+       .melds = {},
+       .expect = 0},  // 听牌
+      {.hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "3s", "4s", "1z", "5z"}),
+       .melds = {},
+       .expect = 1},  // 一向听
+      {.hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "3s", "4s", "1z", "5z", "9m"}),
+       .melds = {},
+       .expect = 2},  // 两向听
+      {.hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "3s", "1z", "5z", "9m", "2p", "4p"}),
+       .melds = {},
+       .expect = 3},  // 三向听
+      {.hand = H({"1m", "1m", "2m", "2m", "3m", "3m", "4p", "4p", "5p", "5p", "6p", "6p", "7s"}),
+       .melds = {},
+       .expect = 0},  // 七对子听牌
+      {.hand = H({"1m", "1m", "2m", "2m", "3m", "3m", "4p", "4p", "5p", "5p", "1z", "3z", "5z"}),
+       .melds = {},
+       .expect = 1},  // 七对子一向听
+      {.hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9s", "9s"}),
+       .melds = {Pong({"5z", "5z", "5z"})},
+       .expect = 0},  // 副露听牌
+      {.hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9s"}),
+       .melds = {Pong({"5z", "5z", "5z"})},
+       .expect = 1},  // 副露一向听（面子计入）
+      {.hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "3s", "1z", "5z"}),
+       .melds = {Pong({"9s", "9s", "9s"})},
+       .expect = 2},
   };
   for (const Case& c : cases) {
     EXPECT_EQ(Shanten(c.hand, c.melds), c.expect) << "hand size=" << c.hand.size() << " melds=" << c.melds.size();
@@ -1294,54 +1312,54 @@ TEST(MahjongRules, ScoreHandCoversEveryHanRow) {
   };
   const std::vector<Row> rows = {
       // 0 番：副露垃圾手（有碰、含幺九、跨三门 ⇒ 无任何番种）
-      {H({"1m", "2m", "3m", "4p", "5p", "6p", "7p", "8p", "9p", "2m", "2m"}),
-       {Pong({"9s", "9s", "9s"})},
-       "2m",
-       0,
-       1,
-       "0 番 副露垃圾手"},
+      {.hand = H({"1m", "2m", "3m", "4p", "5p", "6p", "7p", "8p", "9p", "2m", "2m"}),
+       .melds = {Pong({"9s", "9s", "9s"})},
+       .winning = "2m",
+       .han = 0,
+       .multiplier = 1,
+       .label = "0 番 副露垃圾手"},
       // 1 番：只有门清（将牌是字牌 ⇒ 平和不成立）
-      {H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "1z", "1z"}),
-       {},
-       "1z",
-       1,
-       2,
-       "1 番 门清"},
+      {.hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "1z", "1z"}),
+       .melds = {},
+       .winning = "1z",
+       .han = 1,
+       .multiplier = 2,
+       .label = "1 番 门清"},
       // 2 番：menzen + tanyao（有刻子 ⇒ 无平和不成立）
-      {H({"2m", "2m", "2m", "3p", "4p", "5p", "6s", "7s", "8s", "5m", "6m", "7m", "5s", "5s"}),
-       {},
-       "5s",
-       2,
-       4,
-       "2 番 门清+断幺九"},
+      {.hand = H({"2m", "2m", "2m", "3p", "4p", "5p", "6s", "7s", "8s", "5m", "6m", "7m", "5s", "5s"}),
+       .melds = {},
+       .winning = "5s",
+       .han = 2,
+       .multiplier = 4,
+       .label = "2 番 门清+断幺九"},
       // 3 番：menzen + pinfu + tanyao
-      {H({"2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "6p", "7p", "8p", "5s", "5s"}),
-       {},
-       "5s",
-       3,
-       8,
-       "3 番 门清+平和+断幺九"},
+      {.hand = H({"2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "6p", "7p", "8p", "5s", "5s"}),
+       .melds = {},
+       .winning = "5s",
+       .han = 3,
+       .multiplier = 8,
+       .label = "3 番 门清+平和+断幺九"},
       // 4 番：menzen + sanshoku_doujun + yakuhai(中)
-      {H({"2m", "3m", "4m", "2p", "3p", "4p", "2s", "3s", "4s", "7z", "7z", "7z", "9m", "9m"}),
-       {},
-       "9m",
-       4,
-       16,
-       "4 番 三色同顺+箭刻"},
+      {.hand = H({"2m", "3m", "4m", "2p", "3p", "4p", "2s", "3s", "4s", "7z", "7z", "7z", "9m", "9m"}),
+       .melds = {},
+       .winning = "9m",
+       .han = 4,
+       .multiplier = 16,
+       .label = "4 番 三色同顺+箭刻"},
       // 5 番：menzen + ittsuu + honitsu
-      {H({"1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "2m", "2m", "2m", "1z", "1z"}),
-       {},
-       "1z",
-       5,
-       32,
-       "5 番 一气通贯+混一色"},
+      {.hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "2m", "2m", "2m", "1z", "1z"}),
+       .melds = {},
+       .winning = "1z",
+       .han = 5,
+       .multiplier = 32,
+       .label = "5 番 一气通贯+混一色"},
       // 6 番（封顶）：menzen + sanankou + pure_one_suit 本为 8 番 ⇒ 封顶 6
-      {H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4m", "5m", "6m", "7m", "7m"}),
-       {},
-       "7m",
-       6,
-       64,
-       "6 番 清一色（封顶）"},
+      {.hand = H({"1m", "1m", "1m", "2m", "2m", "2m", "3m", "3m", "3m", "4m", "5m", "6m", "7m", "7m"}),
+       .melds = {},
+       .winning = "7m",
+       .han = 6,
+       .multiplier = 64,
+       .label = "6 番 清一色（封顶）"},
   };
   for (const Row& row : rows) {
     ASSERT_TRUE(CanWinExact(row.hand, row.melds)) << row.label;
@@ -1715,13 +1733,21 @@ TEST(MahjongRules, YakuDetectionIsDeterministicUnderShuffles) {
     std::vector<const char*> tiles;
     std::vector<Meld> melds;
   } cases[] = {
-      {"门清平和断幺九", {"2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "6p", "7p", "8p", "5s", "5s"}, {}},
-      {"七对子清一色", {"1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2m", "2m", "4m", "4m", "6m", "6m"}, {}},
-      {"对对和三暗刻箭刻", {"1m", "1m", "1m", "5p", "5p", "5p", "9s", "9s", "9s", "2z", "2z", "2z", "4z", "4z"}, {}},
-      {"副露三色", {"2m", "3m", "4m", "2p", "3p", "4p", "2s", "3s", "4s", "7z", "7z", "7z", "9m", "9m"}, {}},
-      {"暗杠混一色",
-       {"1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "2m", "2m"},
-       {Ankan({"1z", "1z", "1z", "1z"})}},
+      {.label = "门清平和断幺九",
+       .tiles = {"2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "6p", "7p", "8p", "5s", "5s"},
+       .melds = {}},
+      {.label = "七对子清一色",
+       .tiles = {"1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2m", "2m", "4m", "4m", "6m", "6m"},
+       .melds = {}},
+      {.label = "对对和三暗刻箭刻",
+       .tiles = {"1m", "1m", "1m", "5p", "5p", "5p", "9s", "9s", "9s", "2z", "2z", "2z", "4z", "4z"},
+       .melds = {}},
+      {.label = "副露三色",
+       .tiles = {"2m", "3m", "4m", "2p", "3p", "4p", "2s", "3s", "4s", "7z", "7z", "7z", "9m", "9m"},
+       .melds = {}},
+      {.label = "暗杠混一色",
+       .tiles = {"1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "2m", "2m"},
+       .melds = {Ankan({"1z", "1z", "1z", "1z"})}},
   };
   std::mt19937 rng(20261118);
   for (const Case& item : cases) {
@@ -1765,39 +1791,42 @@ TEST(MahjongRules, WaitingTilesUnitShapes) {
   const Meld pong_1p = Pong({"1p", "1p", "1p"});
   const std::vector<Meld> none;
   const Case cases[] = {
-      {"两面 23m → 1m/4m",
-       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "2m", "3m"}),
-       none,
-       {"1m", "4m"}},
-      {"嵌张 13m → 2m",
-       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "1m", "3m"}),
-       none,
-       {"2m"}},
-      {"边张 12m → 仅 3m（不可 0m）",
-       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "1m", "2m"}),
-       none,
-       {"3m"}},
-      {"单骑字牌 5z → 5z",
-       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "9s", "9s", "9s", "5z"}),
-       none,
-       {"5z"}},
-      {"多面 34567m → 2m/5m/8m",
-       H({"3m", "4m", "5m", "6m", "7m", "1p", "1p", "1p", "9p", "9p", "9p", "5z", "5z"}),
-       none,
-       {"2m", "5m", "8m"}},
-      {"七对子 13 张 → 6p",
-       H({"1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2p", "2p", "4p", "4p", "6p"}),
-       none,
-       {"6p"}},
-      {"未听牌 → 空", H({"1m", "3m", "5m", "7m", "9m", "1p", "3p", "5p", "1s", "3s", "5s", "2z", "4z"}), none, {}},
-      {"带副露（碰 111p + 10 张）→ 1m/4m",
-       H({"2m", "3m", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z"}),
-       {pong_1p},
-       {"1m", "4m"}},
-      {"行动态 14 张 → 空（未听牌口径）",
-       H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "2m", "3m", "6z"}),
-       none,
-       {}},
+      {.label = "两面 23m → 1m/4m",
+       .concealed = H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "2m", "3m"}),
+       .melds = none,
+       .expected = {"1m", "4m"}},
+      {.label = "嵌张 13m → 2m",
+       .concealed = H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "1m", "3m"}),
+       .melds = none,
+       .expected = {"2m"}},
+      {.label = "边张 12m → 仅 3m（不可 0m）",
+       .concealed = H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "1m", "2m"}),
+       .melds = none,
+       .expected = {"3m"}},
+      {.label = "单骑字牌 5z → 5z",
+       .concealed = H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "9s", "9s", "9s", "5z"}),
+       .melds = none,
+       .expected = {"5z"}},
+      {.label = "多面 34567m → 2m/5m/8m",
+       .concealed = H({"3m", "4m", "5m", "6m", "7m", "1p", "1p", "1p", "9p", "9p", "9p", "5z", "5z"}),
+       .melds = none,
+       .expected = {"2m", "5m", "8m"}},
+      {.label = "七对子 13 张 → 6p",
+       .concealed = H({"1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2p", "2p", "4p", "4p", "6p"}),
+       .melds = none,
+       .expected = {"6p"}},
+      {.label = "未听牌 → 空",
+       .concealed = H({"1m", "3m", "5m", "7m", "9m", "1p", "3p", "5p", "1s", "3s", "5s", "2z", "4z"}),
+       .melds = none,
+       .expected = {}},
+      {.label = "带副露（碰 111p + 10 张）→ 1m/4m",
+       .concealed = H({"2m", "3m", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z"}),
+       .melds = {pong_1p},
+       .expected = {"1m", "4m"}},
+      {.label = "行动态 14 张 → 空（未听牌口径）",
+       .concealed = H({"1p", "1p", "1p", "9p", "9p", "9p", "1s", "1s", "1s", "5z", "5z", "2m", "3m", "6z"}),
+       .melds = none,
+       .expected = {}},
   };
   for (const Case& item : cases) {
     EXPECT_EQ(FaceSet(WaitingTiles(item.concealed, item.melds)), item.expected) << item.label;

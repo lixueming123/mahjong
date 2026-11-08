@@ -474,7 +474,7 @@ TEST(AsyncGateTest, GateIsTouchedFromDifferentThreadsByHandlersOfOneActor) {
 
     auto first_control = std::make_shared<BlockerControl>();
     auto second_control = std::make_shared<BlockerControl>();
-    BlockersReleaseOnExit release_on_exit {first_control.get(), second_control.get()};
+    BlockersReleaseOnExit release_on_exit {.first = first_control.get(), .second = second_control.get()};
     // Deliberately SendLocal: a BlockerControl is atomics and shared memory, i.e. process-local
     // test scaffolding that could never be serialized. Every game message uses Send.
     exec::start_detached(first_blocker.SendLocal<&BlockerActor::Block>(first_control));

@@ -98,7 +98,11 @@ TEST(StatsFrameTest, CarriesTheFrozenFields) {
   summary.wins = 5;
   summary.draws = 3;
   summary.net_score = -14;
-  summary.recent.push_back(protocol::StatsEntry {"r-0007", protocol::RoundEndReason::kWinRon, 12, true, 1759900000});
+  summary.recent.push_back(protocol::StatsEntry {.room_id = "r-0007",
+                                                 .reason = protocol::RoundEndReason::kWinRon,
+                                                 .delta_score = 12,
+                                                 .win = true,
+                                                 .ended_at = 1759900000});
 
   const std::string text = protocol::StatsFrame(summary);
   std::string error;
@@ -141,9 +145,16 @@ TEST(StatsFrameTest, UnaffectedByMatchResultsPersistence) {
   summary.wins = 1;
   summary.draws = 1;
   summary.net_score = 6;
-  summary.recent.push_back(protocol::StatsEntry {"r-0001", protocol::RoundEndReason::kWinTsumo, 24, true, 1759900100});
-  summary.recent.push_back(
-      protocol::StatsEntry {"r-0001", protocol::RoundEndReason::kDrawExhausted, 0, false, 1759900200});
+  summary.recent.push_back(protocol::StatsEntry {.room_id = "r-0001",
+                                                 .reason = protocol::RoundEndReason::kWinTsumo,
+                                                 .delta_score = 24,
+                                                 .win = true,
+                                                 .ended_at = 1759900100});
+  summary.recent.push_back(protocol::StatsEntry {.room_id = "r-0001",
+                                                 .reason = protocol::RoundEndReason::kDrawExhausted,
+                                                 .delta_score = 0,
+                                                 .win = false,
+                                                 .ended_at = 1759900200});
 
   const std::string text = protocol::StatsFrame(summary);
   std::string error;
