@@ -46,7 +46,7 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from protocol.enums import ACTION, ERROR_CODE, FRAME_TYPE, MELD_TYPE, REASON, WINDOW
+from protocol.enums import ACTION, ERROR_CODE, FRAME_TYPE, MELD_TYPE, REASON, WINDOW, YAKU
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_BIN_CANDIDATES = (
@@ -437,6 +437,9 @@ def verify_game_end(end: dict, stats: dict, model: TableModel) -> str:
           f"han_breakdown.total must be min(base+dealer,6)={expected_total}: {win['han_breakdown']}")
     check(multiplier == (1 << expected_total), "multiplier must equal 2^total")
     ids = [item["id"] for item in win["yaku"]]
+    check(all(isinstance(item, int) and not isinstance(item, bool) for item in ids),
+          f"yaku[].id must be an integer wire value (v2.1): {ids}")
+    check(all(1 <= item <= 45 for item in ids), f"yaku[].id must be 1..45: {ids}")
     check(len(ids) == len(set(ids)), f"yaku id must not repeat: {ids}")
     check(set(win["tags"]) <= set(ids), f"tags must be a subset of yaku ids: {win['tags']} vs {ids}")
     check(win["dealer_bonus"] == (win["han_breakdown"]["dealer"] == 1), "dealer_bonus mismatch")
@@ -464,7 +467,8 @@ def verify_game_end(end: dict, stats: dict, model: TableModel) -> str:
     check(is_grouped_and_sorted(flat), f"the flat hand must be sorted (§2.2): {flat}")
 
     win_type = winner_entry["win_type"]
-    check(win_type and win_type[-1] == ("tsumo" if tsumo else "ron"), f"win_type must end with the mode: {win_type}")
+    check(win_type and win_type[-1] == (YAKU.WIN_TSUMO if tsumo else YAKU.WIN_RON),
+          f"win_type must end with the win method: {win_type}")
     for seat in range(SEAT_COUNT):
         if seat != winner:
             check(results[seat]["win_type"] == [], "only the winner reports win_type")

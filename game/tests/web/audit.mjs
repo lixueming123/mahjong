@@ -1,5 +1,5 @@
 // 针对「对照 game/client 补齐的逻辑」做合成帧断言：不连服务端、不开浏览器。
-import { FRAME_TYPE, REASON, ERROR_CODE } from '../../web/js/protocol_enums.js';
+import { FRAME_TYPE, REASON, ERROR_CODE, YAKU } from '../../web/js/protocol_enums.js';
 
 const mk = () => ({
   textContent: '', disabled: false, hidden: false, dataset: {}, style: {},
@@ -69,7 +69,7 @@ function makeClient(options = {}) {
       { seat: 2, delta_score: 0, match_total: 0, hand: [] },
       { seat: 3, delta_score: 0, match_total: 0, hand: [] },
     ],
-    win: { seat: 1, tile: '3p', tsumo: false, yaku: [{ id: 'tanyao', han: 1 }], han: 1 },
+    win: { seat: 1, tile: '3p', tsumo: false, yaku: [{ id: YAKU.TANYAO, han: 1 }], han: 1 },
   });
   check('game_end 原始载荷留档', app.state.result?.reason, REASON.WIN_RON);
   check('和牌者座位', app.state.winSeat, 1);

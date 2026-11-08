@@ -271,6 +271,8 @@ def main() -> int:
                 raise TestFailure(f"riichi game_end.win is missing {key!r}: {win!r}")
         if not isinstance(win.get("points"), int) or win["points"] <= 0:
             raise TestFailure(f"riichi game_end.win.points must be positive: {win!r}")
+        if not isinstance(win.get("limit"), int) or not 1 <= win["limit"] <= 6:
+            raise TestFailure(f"riichi game_end.win.limit must be a 1..6 integer (v2.1): {win!r}")
         detail = f"win fu={win['fu']} han={win['han']} points={win['points']} limit={win['limit']}"
     else:
         detail = "draw (no win this round)"

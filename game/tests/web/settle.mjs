@@ -1,6 +1,6 @@
 // 结算期验收：v4.5 摊牌（results[].hand 扣副露 → revealHands）+ 日麻语音 cue 口径
 // + 摊牌渲染冒烟（真 three.js 驱动 OpponentHandsView，不开浏览器）
-import { FRAME_TYPE, MELD_TYPE } from '../../web/js/protocol_enums.js';
+import { FRAME_TYPE, MELD_TYPE, YAKU } from '../../web/js/protocol_enums.js';
 
 // DOM/canvas stub：tile3d 的牌背纹理要 2d canvas；本测试不做 GL 渲染，够用
 globalThis.document = {
@@ -97,47 +97,47 @@ check('复位：新一局不再摊牌', s.revealHands, null);
 // ---------------------------------------------------------------- 语音 cue
 // ① 荣和：立直 + 一发 + 断幺九 → 方式 + 三役 + 合计
 check('语音：立直一发断幺', buildVoiceCues({ win: { tsumo: false, han: 3,
-  yaku: [{ id: 'riichi', han: 1 }, { id: 'ippatsu', han: 1 }, { id: 'tanyao', han: 1 }] } }).cues,
+  yaku: [{ id: YAKU.RIICHI, han: 1 }, { id: YAKU.IPPATSU, han: 1 }, { id: YAKU.TANYAO, han: 1 }] } }).cues,
   ['vo_mode_ron', 'vo_yaku_riichi_1', 'vo_yaku_ippatsu_1', 'vo_yaku_tanyao', 'vo_han_3']);
 
 // ② 自摸 + 门前自摸役 + 平和：mode_tsumo 与役 tsumo 是两条不同资产
 check('语音：自摸含门前自摸役', buildVoiceCues({ win: { tsumo: true, han: 2,
-  yaku: [{ id: 'tsumo', han: 1 }, { id: 'pinfu', han: 1 }] } }).cues,
+  yaku: [{ id: YAKU.TSUMO, han: 1 }, { id: YAKU.PINFU, han: 1 }] } }).cues,
   ['vo_mode_tsumo', 'vo_yaku_tsumo_1', 'vo_yaku_pinfu', 'vo_han_2']);
 
 // ③ 箭刻按组数分三条；役满整手只念一句役满、不念合计番数
 check('语音：箭刻两组', buildVoiceCues({ win: { tsumo: false, han: 2,
-  yaku: [{ id: 'yakuhai', han: 2 }] } }).cues,
+  yaku: [{ id: YAKU.YAKUHAI, han: 2 }] } }).cues,
   ['vo_mode_ron', 'vo_yaku_yakuhai_2', 'vo_han_2']);
 check('语音：役满不念番数', buildVoiceCues({ win: { tsumo: false, han: 13,
-  yaku: [{ id: 'kokushi_13', han: 13 }] } }).cues,
+  yaku: [{ id: YAKU.KOKUSHI_13, han: 13 }] } }).cues,
   ['vo_mode_ron', 'vo_yakuman']);
 
 // ④ 开/闭番差：副露三色同顺（1 番）念 _1 资产；门清（2 番）复用 classic
 check('语音：三色同顺一番（副露）', buildVoiceCues({ win: { tsumo: false, han: 1,
-  yaku: [{ id: 'sanshoku_doujun', han: 1 }] } }).cues,
+  yaku: [{ id: YAKU.SANSHOKU_DOUJUN, han: 1 }] } }).cues,
   ['vo_mode_ron', 'vo_yaku_sanshoku_doujun_1', 'vo_han_1']);
 check('语音：三色同顺两番（门清）', buildVoiceCues({ win: { tsumo: false, han: 2,
-  yaku: [{ id: 'sanshoku_doujun', han: 2 }] } }).cues,
+  yaku: [{ id: YAKU.SANSHOKU_DOUJUN, han: 2 }] } }).cues,
   ['vo_mode_ron', 'vo_yaku_sanshoku_doujun', 'vo_han_2']);
 
 // ⑤ 番值对不上不念（classic 混一色两番 ≠ 日麻门清三番之外的情况兜底）
 check('语音：混一色三番用日麻资产', buildVoiceCues({ win: { tsumo: false, han: 3,
-  yaku: [{ id: 'honitsu', han: 3 }] } }).cues,
+  yaku: [{ id: YAKU.HONITSU, han: 3 }] } }).cues,
   ['vo_mode_ron', 'vo_yaku_honitsu_3', 'vo_han_3']);
 check('语音：七对子复用 seven_pairs', buildVoiceCues({ win: { tsumo: false, han: 2,
-  yaku: [{ id: 'chiitoitsu', han: 2 }] } }).cues,
+  yaku: [{ id: YAKU.CHIITOITSU, han: 2 }] } }).cues,
   ['vo_mode_ron', 'vo_yaku_seven_pairs', 'vo_han_2']);
 
 // ⑥ 宝牌不是役，不念
 check('语音：宝牌静默', buildVoiceCues({ win: { tsumo: false, han: 4,
-  yaku: [{ id: 'riichi', han: 1 }, { id: 'dora', han: 3 }] } }).cues,
+  yaku: [{ id: YAKU.RIICHI, han: 1 }, { id: YAKU.DORA, han: 3 }] } }).cues,
   ['vo_mode_ron', 'vo_yaku_riichi_1', 'vo_han_4']);
 
 // ⑦ 荒庄 / 清一色六番 / 时长表完整
 check('语音：荒庄', buildVoiceCues({}).cues, ['vo_mode_draw']);
 check('语音：清一色六番', buildVoiceCues({ win: { tsumo: false, han: 6,
-  yaku: [{ id: 'chinitsu', han: 6 }] } }).cues,
+  yaku: [{ id: YAKU.CHINITSU, han: 6 }] } }).cues,
   ['vo_mode_ron', 'vo_yaku_chinitsu_6', 'vo_han_6']);
 check('语音：时长表覆盖全部新句', ['vo_yaku_riichi_1', 'vo_yakuman', 'vo_yaku_honitsu_3']
   .every((id) => VOICE_MS[id] > 0), true);
@@ -185,7 +185,7 @@ ui.el = { rsHand: makeStubEl() };
 
 const winFrame = {
   win: { seat: 2, tsumo: false, tile: '3s', han: 3,
-    yaku: [{ id: 'riichi', han: 1 }, { id: 'tanyao', han: 1 }, { id: 'dora', han: 1 }] },
+    yaku: [{ id: YAKU.RIICHI, han: 1 }, { id: YAKU.TANYAO, han: 1 }, { id: YAKU.DORA, han: 1 }] },
   results: [{ seat: 2, delta_score: 0, hand: Array(13).fill('3s') }],
 };
 app2.applyGameEnd(winFrame);   // 上一步 startRound 清了摊牌，重放一次局终

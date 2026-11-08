@@ -45,7 +45,17 @@ from client.game_state import SCREEN_LOBBY, SCREEN_LOGIN, SCREEN_RESULT, SCREEN_
 from client.render import actionbar, result as result_view, table as table_view  # noqa: E402
 from client.render import widgets as widgets_view  # noqa: E402
 from client.tiles import button_label, honor_glyph, is_valid_tile, sort_tiles, tile_label  # noqa: E402
-from protocol.enums import ACTION, ERROR_CODE, FRAME_TYPE, MELD_TYPE, REASON, WINDOW  # noqa: E402
+from protocol.enums import (  # noqa: E402
+    ACTION,
+    ERROR_CODE,
+    FRAME_TYPE,
+    LIMIT,
+    MELD_TYPE,
+    REASON,
+    WINDOW,
+    YAKU,
+    value_of,
+)
 
 FAILURES: list[str] = []
 
@@ -148,13 +158,13 @@ GAME_END = {
         {"seat": 0, "delta_score": -4, "match_total": -4, "hand": [], "win_type": []},
         {"seat": 1, "delta_score": 4, "match_total": 4,
          "hand": ["1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2p", "2p", "6p", "6p", "8p", "8p"],
-         "win_type": ["seven_pairs", "ron"]},
+         "win_type": [YAKU.SEVEN_PAIRS, YAKU.WIN_RON]},
         {"seat": 2, "delta_score": 0, "match_total": 0, "hand": [], "win_type": []},
         {"seat": 3, "delta_score": 0, "match_total": 0, "hand": [], "win_type": []},
     ],
     "win": {"seat": 1, "tile": "8p", "from_seat": 0, "tsumo": False,
-            "tags": ["seven_pairs"], "multiplier": 8, "per_payer": 8, "total": 8,
-            "yaku": [{"id": "menzen", "han": 1}, {"id": "seven_pairs", "han": 2}],
+            "tags": [YAKU.SEVEN_PAIRS], "multiplier": 8, "per_payer": 8, "total": 8,
+            "yaku": [{"id": YAKU.MENZEN, "han": 1}, {"id": YAKU.SEVEN_PAIRS, "han": 2}],
             "han": 3,
             "han_breakdown": {"base": 3, "tsumo": 0, "dealer": 0, "total": 3},
             "dealer_bonus": False, "rinshan": False},
@@ -233,7 +243,7 @@ HONOR_GAME_END = {
     "reason": REASON.WIN_RON,
     "results": [
         {"seat": 0, "delta_score": -16, "hand": [], "win_type": []},
-        {"seat": 1, "delta_score": 16, "hand": HONOR_WIN_HAND, "win_type": ["ron"]},
+        {"seat": 1, "delta_score": 16, "hand": HONOR_WIN_HAND, "win_type": [YAKU.WIN_RON]},
         {"seat": 2, "delta_score": 0, "hand": [], "win_type": []},
         {"seat": 3, "delta_score": 0, "hand": [], "win_type": []},
     ],
@@ -2215,7 +2225,7 @@ def main() -> int:
             "win": {"seat": 1, "tile": "1m", "from_seat": None if tsumo else 0, "tsumo": tsumo,
                     "tags": [], "multiplier": mult, "per_payer": per,
                     "total": per * 3 if tsumo else per,
-                    "yaku": [{"id": yid, "han": h} for yid, h in yaku], "han": total,
+                    "yaku": [{"id": value_of("yaku", yid), "han": h} for yid, h in yaku], "han": total,
                     "han_breakdown": {"base": base, "tsumo": 0, "dealer": dealer, "total": total},
                     "dealer_bonus": dealer == 1},
         }
@@ -2274,7 +2284,7 @@ def main() -> int:
     worst_end = dict(GAME_END, interlude_ms=12000)
     worst_end["win"] = dict(GAME_END["win"])
     worst_end["win"]["yaku"] = [
-        {"id": yid, "han": 1} for yid in
+        {"id": value_of("yaku", yid), "han": 1} for yid in
         ("menzen", "tanyao", "pinfu", "iipeikou", "yakuhai", "rinshan", "sanshoku_doujun", "ittsuu")
     ]
     worst_end["win"]["han_breakdown"] = {"base": 8, "tsumo": 0, "dealer": 1, "total": 6}
@@ -2368,7 +2378,7 @@ def main() -> int:
         win = {
             "seat": 0, "tile": "5m", "from_seat": None if tsumo else 2, "tsumo": tsumo,
             "multiplier": points, "per_payer": per, "total": points,
-            "yaku": [{"id": yid, "han": h} for yid, h in yaku], "han": han,
+            "yaku": [{"id": value_of("yaku", yid), "han": h} for yid, h in yaku], "han": han,
             "han_breakdown": {"base": sum(h for _, h in yaku), "tsumo": 0, "dealer": 1,
                               "total": han},
             "dealer_bonus": True, "fu": fu, "points": points, "limit": limit,
@@ -2382,11 +2392,11 @@ def main() -> int:
 
     riichi_cases = [
         ("荣和 2番30符", _riichi_end(tsumo=False, yaku=[("riichi", 1), ("tanyao", 1)],
-                                    han=2, fu=30, points=2000, limit="none", per=2000)),
+                                    han=2, fu=30, points=2000, limit=LIMIT.NONE, per=2000)),
         ("自摸 满贯", _riichi_end(tsumo=True, yaku=[("riichi", 1), ("honitsu", 3)],
-                                 han=4, fu=30, points=8000, limit="mangan", per=2000)),
+                                 han=4, fu=30, points=8000, limit=LIMIT.MANGAN, per=2000)),
         ("役满 fu=0", _riichi_end(tsumo=False, yaku=[("kokushi", 13)],
-                                  han=13, fu=0, points=32000, limit="yakuman", per=32000)),
+                                  han=13, fu=0, points=32000, limit=LIMIT.YAKUMAN, per=32000)),
     ]
     for label, frame in riichi_cases:
         rplan = bc_mod.plan_for(frame)

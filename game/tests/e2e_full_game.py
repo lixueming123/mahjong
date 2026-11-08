@@ -63,7 +63,7 @@ import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from protocol.enums import ACTION, ERROR_CODE, FRAME_TYPE, MELD_TYPE, REASON, WINDOW
+from protocol.enums import ACTION, ERROR_CODE, FRAME_TYPE, MELD_TYPE, REASON, WINDOW, value_of
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_BINARY = os.path.join(REPO_ROOT, "build-release", "game", "mahjong_server")
@@ -72,7 +72,7 @@ DEFAULT_PORT = 19527  # PROTOCOL.md §1.1 reserved e2e port; only used if you pa
 # Fixed seed (PROTOCOL.md §1.8: the e2e script MUST pass one so the run is reproducible). t17:
 # the 136-tile ruleset changed the shuffle, so seed 199 (the 108-tile choice, a human tsumo) now
 # ends in an exhaustive draw. The default is therefore the smallest seed in the standard comparison
-# range 17..216 whose round ends in a *scored* settlement (seat 1 ron, M=1, win_type ["ron"]) so
+# range 17..216 whose round ends in a *scored* settlement (seat 1 ron, R=1, win_type [46]) so
 # that assertion B stays non-trivial. This choice cannot bias the statistics: `--games N` always
 # uses the explicit `--seed` range (the baseline comparison uses `--seed 17` = seeds 17..216).
 DEFAULT_SEED = 86
@@ -91,9 +91,11 @@ DEALT_TILES = SEAT_COUNT * 13 + 1  # three 13-tile hands + the dealer's 14th til
 # P11/P3（PROTOCOL §10.4 ③）：番种 id 冻结判定序（= RULESET §6.4 / GAME_DESIGN §6.4 表序）。
 # e2e 用它断言 win.yaku[] 严格按此序、无重复；tags ⊆ yaku id 且同为该序的子序列。
 YAKU_FROZEN_ORDER = [
-    "menzen", "tanyao", "pinfu", "iipeikou", "yakuhai", "rinshan",
-    "sanshoku_doujun", "ittsuu", "toitoi", "sanankou", "honitsu", "shousangen",
-    "seven_pairs", "pure_one_suit",
+    value_of("yaku", name) for name in (
+        "menzen", "tanyao", "pinfu", "iipeikou", "yakuhai", "rinshan",
+        "sanshoku_doujun", "ittsuu", "toitoi", "sanankou", "honitsu", "shousangen",
+        "seven_pairs", "pure_one_suit",
+    )
 ]
 
 # First milestone baseline (t6, 200 games, seeds 17..216) — the number the second milestone has to
@@ -1000,6 +1002,7 @@ def run_determinism(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------------------------
 # single game (t6)
 # ---------------------------------------------------------------------------------------------
+def run_single(args: argparse.Namespace) -> int:
     binary = find_binary(args.server_bin)
     port = resolve_port(args.port)
     print(f"[e2e] binary={binary} port={port} seed={args.seed} log={args.log}"

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""PROTOCOL v2.0 golden 日志一次性机械转换脚本。
+"""PROTOCOL v2.1 golden 日志一次性机械转换脚本。
 
 线协议控制字段由字符串硬切换为整数。golden 帧日志是历史录制证据，不能重录、不能删除，
 因此就地按「字段上下文」递归转换。映射唯一来源是 game/protocol/enums.json（不手写第二份表）。
 
-只转换控制字段的「值」，不碰对象键、不碰展示型字段（win_type / yaku[].id / tags / limit /
-牌码）与元数据（ts / dir / event / binary / seed / sha256 / port / server_bin / server_mtime /
+v2.1 起额外转换 `win.yaku[].id` / `win.tags[]` / `results[].win_type[]` / `win.limit`
+（`yaku` / `limit` 域）。只转换控制字段的「值」，不碰对象键、牌码与元数据
+（ts / dir / event / binary / seed / sha256 / port / server_bin / server_mtime /
 hand / error_count / reached_table / before_login_ok 等）。server_sha256 保留原值，不重录。
 
 用法（可在任意 cwd 运行）:
@@ -32,6 +33,7 @@ ARTIFACTS = SCRIPT.parents[1] / "artifacts"
 EXPECTED_DOMAINS = {
     "frame_type", "action", "window", "mode",
     "length", "meld_type", "reason", "error_code",
+    "yaku", "limit",
 }
 
 # 字段上下文：控制字段「键」-> 所属域。type 特殊：按是否位于 melds 内二选一，见 walk()。
@@ -42,7 +44,13 @@ KEY_DOMAIN = {
     "length": "length",
     "reason": "reason",
     "code": "error_code",
+    "limit": "limit",
 }
+
+# v1.x 的 win_type 末位是 "ron" / "tsumo"（和牌方式），不是番种 id。
+# v2.1 分别改为 win_ron / win_tsumo；只在 win_type 上下文套用，避免把番种 tsumo(17)
+# 误读成和牌方式。
+WIN_TYPE_ALIASES = {"ron": "win_ron", "tsumo": "win_tsumo"}
 
 
 class ConvertError(Exception):
@@ -140,6 +148,33 @@ class Converter:
                     else:
                         node[key] = [
                             self.cv(item, "frame_type", f"{child_where}[{i}]")
+                            for i, item in enumerate(value)
+                        ]
+                elif key == "yaku" and isinstance(value, list):
+                    # win.yaku[] 是对象数组，只有 id 走 yaku 域；han 等其余键原样递归。
+                    for i, item in enumerate(value):
+                        item_where = f"{child_where}[{i}].id"
+                        if isinstance(item, dict) and "id" in item:
+                            if validate:
+                                self.validate_int(item["id"], "yaku", item_where)
+                            else:
+                                item["id"] = self.cv(item["id"], "yaku", item_where)
+                        self.walk(item, type_domain, f"{child_where}[{i}]", validate)
+                elif key in ("tags", "win_type") and isinstance(value, list):
+                    # tags / win_type 是整数数组（win_type 末位为 46/47）。
+                    # 旧 win_type 的 "ron"/"tsumo" 走别名，不能直接查 yaku 表。
+                    if validate:
+                        for i, item in enumerate(value):
+                            self.validate_int(item, "yaku", f"{child_where}[{i}]")
+                    else:
+                        node[key] = [
+                            self.cv(
+                                WIN_TYPE_ALIASES.get(item, item)
+                                if key == "win_type" and isinstance(item, str)
+                                else item,
+                                "yaku",
+                                f"{child_where}[{i}]",
+                            )
                             for i, item in enumerate(value)
                         ]
                 else:
