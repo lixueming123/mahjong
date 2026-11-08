@@ -4,7 +4,7 @@
   "rate": 175,
   "sample_rate": 22050,
   "channels": 1,
-  "generated_at": "2026-10-23T22:34:10+08:00",
+  "generated_at": "2026-11-08T15:24:17+08:00",
   "items": {
     "vo_mode_tsumo": {
       "file": "vo_mode_tsumo.wav",
@@ -404,6 +404,132 @@
       "ms": 1054.6,
       "peak_dbfs": -6.33,
       "rms_dbfs": -20.02
+    },
+    "vo_yaku_riichi_1": {
+      "file": "vo_yaku_riichi_1.wav",
+      "chars": 4,
+      "ms": 945.4,
+      "peak_dbfs": -4.82,
+      "rms_dbfs": -17.63
+    },
+    "vo_yaku_ippatsu_1": {
+      "file": "vo_yaku_ippatsu_1.wav",
+      "chars": 4,
+      "ms": 908.9,
+      "peak_dbfs": -3.93,
+      "rms_dbfs": -17.51
+    },
+    "vo_yaku_tsumo_1": {
+      "file": "vo_yaku_tsumo_1.wav",
+      "chars": 7,
+      "ms": 1768.7,
+      "peak_dbfs": -4.06,
+      "rms_dbfs": -17.28
+    },
+    "vo_yaku_chankan_1": {
+      "file": "vo_yaku_chankan_1.wav",
+      "chars": 4,
+      "ms": 1050.1,
+      "peak_dbfs": -3.64,
+      "rms_dbfs": -17.55
+    },
+    "vo_yaku_haitei_1": {
+      "file": "vo_yaku_haitei_1.wav",
+      "chars": 6,
+      "ms": 1330.8,
+      "peak_dbfs": -4.21,
+      "rms_dbfs": -17.24
+    },
+    "vo_yaku_houtei_1": {
+      "file": "vo_yaku_houtei_1.wav",
+      "chars": 6,
+      "ms": 1388.9,
+      "peak_dbfs": -3.77,
+      "rms_dbfs": -17.43
+    },
+    "vo_yaku_sanshoku_doujun_1": {
+      "file": "vo_yaku_sanshoku_doujun_1.wav",
+      "chars": 6,
+      "ms": 1557.6,
+      "peak_dbfs": -4.75,
+      "rms_dbfs": -17.97
+    },
+    "vo_yaku_ittsuu_1": {
+      "file": "vo_yaku_ittsuu_1.wav",
+      "chars": 6,
+      "ms": 1455.0,
+      "peak_dbfs": -3.98,
+      "rms_dbfs": -17.68
+    },
+    "vo_yaku_chanta_1": {
+      "file": "vo_yaku_chanta_1.wav",
+      "chars": 7,
+      "ms": 1787.4,
+      "peak_dbfs": -4.57,
+      "rms_dbfs": -17.38
+    },
+    "vo_yaku_chanta_2": {
+      "file": "vo_yaku_chanta_2.wav",
+      "chars": 7,
+      "ms": 1880.3,
+      "peak_dbfs": -4.62,
+      "rms_dbfs": -17.4
+    },
+    "vo_yaku_junchan_2": {
+      "file": "vo_yaku_junchan_2.wav",
+      "chars": 7,
+      "ms": 1912.1,
+      "peak_dbfs": -4.6,
+      "rms_dbfs": -17.48
+    },
+    "vo_yaku_junchan_3": {
+      "file": "vo_yaku_junchan_3.wav",
+      "chars": 7,
+      "ms": 1935.3,
+      "peak_dbfs": -4.55,
+      "rms_dbfs": -17.71
+    },
+    "vo_yaku_honitsu_3": {
+      "file": "vo_yaku_honitsu_3.wav",
+      "chars": 5,
+      "ms": 1265.0,
+      "peak_dbfs": -5.22,
+      "rms_dbfs": -17.8
+    },
+    "vo_yaku_chinitsu_6": {
+      "file": "vo_yaku_chinitsu_6.wav",
+      "chars": 5,
+      "ms": 1259.0,
+      "peak_dbfs": -4.8,
+      "rms_dbfs": -17.33
+    },
+    "vo_yaku_ryanpeikou_3": {
+      "file": "vo_yaku_ryanpeikou_3.wav",
+      "chars": 5,
+      "ms": 1340.4,
+      "peak_dbfs": -4.63,
+      "rms_dbfs": -18.23
+    },
+    "vo_yaku_honroutou_2": {
+      "file": "vo_yaku_honroutou_2.wav",
+      "chars": 5,
+      "ms": 1288.2,
+      "peak_dbfs": -4.04,
+      "rms_dbfs": -17.83
+    },
+    "vo_yaku_sankantsu_2": {
+      "file": "vo_yaku_sankantsu_2.wav",
+      "chars": 5,
+      "ms": 1337.0,
+      "peak_dbfs": -3.69,
+      "rms_dbfs": -17.88
+    },
+    "vo_yakuman": {
+      "file": "vo_yakuman.wav",
+      "chars": 2,
+      "ms": 456.3,
+      "peak_dbfs": -3.24,
+      "rms_dbfs": -17.67
     }
   }
 }

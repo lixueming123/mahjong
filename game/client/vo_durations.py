@@ -93,6 +93,25 @@ VOICE_MS: dict[str, int] = {
     # ---- 段 6：荒庄（2）
     "vo_draw_no_score": 1149,
     "vo_draw_renchan": 1055,
+    # ---- 日麻补录（game/tools/gen_riichi_vo.py 生成，2026-11-08）
+    "vo_yaku_riichi_1": 945,
+    "vo_yaku_ippatsu_1": 909,
+    "vo_yaku_tsumo_1": 1769,
+    "vo_yaku_chankan_1": 1050,
+    "vo_yaku_haitei_1": 1331,
+    "vo_yaku_houtei_1": 1389,
+    "vo_yaku_sanshoku_doujun_1": 1558,
+    "vo_yaku_ittsuu_1": 1455,
+    "vo_yaku_chanta_1": 1787,
+    "vo_yaku_chanta_2": 1880,
+    "vo_yaku_junchan_2": 1912,
+    "vo_yaku_junchan_3": 1935,
+    "vo_yaku_honitsu_3": 1265,
+    "vo_yaku_chinitsu_6": 1259,
+    "vo_yaku_ryanpeikou_3": 1340,
+    "vo_yaku_honroutou_2": 1288,
+    "vo_yaku_sankantsu_2": 1337,
+    "vo_yakuman": 456,
 }
 
 #: 合法倍率（`vo_mult_*` 的 id 集合 = 协议 `multiplier` 的 8 值闭集去掉 128）
