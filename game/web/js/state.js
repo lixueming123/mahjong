@@ -111,6 +111,11 @@ export function createState() {
     result: null,                     // §5.10 game_end 原始载荷（局终）
     resultAt: 0,                      // 收到局终的时刻（performance.now，供局间倒计时）
     winSeat: null,                    // 和牌者（协议 seat；荒庄为 null）
+    // v4.5 摊牌（用户口径：只亮和牌者）：game_end.results[].hand（扁平手牌，
+    // 含副露）扣掉副露后的门前牌，按屏幕视角索引；仅结算期有值，game_start 复位。
+    // 渲染层据此把和牌者的牌背换成牌面，其余三家不动（pygame 摊牌口径的收窄版）。
+    revealHands: null,                // [view0..3] -> 门前牌码数组 | null（仅和牌者席位非空）
+    revealWinner: null,               // 和牌者的屏幕视角（渲染层高亮；荒庄为 null）
     matchWillContinue: false,         // §5.10：本场是否还有下一局
     rankings: [],                     // §5.15 场终名次
     handsPlayed: 0,                   // §5.15 本场已打局数
@@ -190,6 +195,8 @@ export function createState() {
     state.result = null;
     state.resultAt = 0;
     state.winSeat = null;
+    state.revealHands = null;
+    state.revealWinner = null;
     state.matchWillContinue = false;
     state.rankings = [];
     state.handsPlayed = 0;
@@ -442,6 +449,32 @@ export function createState() {
     state.claimTarget = null;
     state.tenpai = { isTenpai: false, waits: [], noYaku: false };
 
+    // v4.5 摊牌（用户口径修订）：**只有和牌者**亮门前牌，其余三家保持牌背。
+    // results[].hand 是四家扁平手牌（门前 + 副露，game_end 专属），扣掉该家
+    // 副露（多重集减法）得到门前牌；荒庄没人和牌 ⇒ 不摊牌。
+    // 他家暗杠此时已被 §5.9 的最后一份 state_sync 补全为真实牌面；万一仍是
+    // 'back' 占位，indexOf 找不到合法牌码，天然跳过，不会误删门前牌。
+    state.revealHands = null;
+    state.revealWinner = null;
+    if (state.winSeat != null) {
+      const winnerSeat = state.winSeat;
+      const entry = results.find((r) => r && r.seat === winnerSeat && Array.isArray(r.hand));
+      if (entry) {
+        const view = viewSeat(winnerSeat);
+        const concealed = entry.hand.filter(isValidTile);
+        for (const meld of state.melds) {
+          if (meld.seat !== view) continue;
+          for (const tile of meld.tiles || []) {
+            const at = concealed.indexOf(tile);
+            if (at >= 0) concealed.splice(at, 1);
+          }
+        }
+        state.revealHands = [null, null, null, null];
+        state.revealHands[view] = concealed;
+        state.revealWinner = view;
+      }
+    }
+
     const win = frame.win;
     let text = reasonLabel(frame.reason);
     if (win) {
@@ -532,6 +565,8 @@ export function createState() {
     state.result = null;
     state.resultAt = 0;
     state.winSeat = null;
+    state.revealHands = null;
+    state.revealWinner = null;
     state.matchWillContinue = false;
     state.matchEnd = null;
     state.rankings = [];

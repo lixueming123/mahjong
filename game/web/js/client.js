@@ -19,6 +19,7 @@
  */
 import { Net } from './net.js';
 import { normTile, isValidTile, drawnIndex } from './state.js';
+import { buildVoiceCues, voiceDuration } from './voice.js';
 
 const FALLBACK_NAMES = ['自', '右', '对', '左'];
 
@@ -36,12 +37,17 @@ const ILLEGAL_LIMIT = 10;           // §7.2 服务端第 10 次非法操作断�
 const NAME_MAX = 16;
 
 const YAKU_NAMES = {
-  menzen: '门前清', tanyao: '断幺九', pinfu: '平和', iipeikou: '一杯口', yakuhai: '箭刻',
-  rinshan: '岭上开花', sanshoku_doujun: '三色同顺', ittsuu: '一气通贯', toitoi: '对对和',
-  sanankou: '三暗刻', honitsu: '混一色', shousangen: '小三元', seven_pairs: '七对子',
-  pure_one_suit: '清一色', riichi: '立直', ippatsu: '一发', chankan: '抢杠',
-  tenhou: '天和', chiihou: '地和', kokushi_13: '国士十三面', suuankou_tanki: '四暗刻单骑',
-  chuuren_junsei: '纯正九莲宝灯', daisuushii: '大四喜', aka_dora: '赤宝牌',
+  menzen: '门前清', tsumo: '门前清自摸', tanyao: '断幺九', pinfu: '平和', iipeikou: '一杯口',
+  yakuhai: '箭刻', rinshan: '岭上开花', sanshoku_doujun: '三色同顺', ittsuu: '一气通贯',
+  toitoi: '对对和', sanankou: '三暗刻', sankantsu: '三杠子', honitsu: '混一色',
+  shousangen: '小三元', seven_pairs: '七对子', chiitoitsu: '七对子',
+  pure_one_suit: '清一色', chinitsu: '清一色', chanta: '混全带幺九', junchan: '纯全带幺九',
+  ryanpeikou: '二杯口', honroutou: '混老头', riichi: '立直', ippatsu: '一发', chankan: '抢杠',
+  haitei: '海底捞月', houtei: '河底捞鱼', dora: '宝牌', ura_dora: '里宝牌', aka_dora: '赤宝牌',
+  tenhou: '天和', chiihou: '地和', kokushi: '国士无双', kokushi_13: '国士十三面',
+  suuankou: '四暗刻', suuankou_tanki: '四暗刻单骑', daisangen: '大三元', tsuuiisou: '字一色',
+  ryuuiisou: '绿一色', chinroutou: '清老头', chuuren: '九莲宝灯', chuuren_junsei: '纯正九莲宝灯',
+  suukantsu: '四杠子', shousuushii: '小四喜', daisuushii: '大四喜',
 };
 
 /** 操作栏按钮只能按文案取：index.html 保持原样，不为联机改 id */
@@ -524,7 +530,9 @@ export class MahjongClient {
         // 入座即确定视角：join_room 拿到 1/2/3 号位时，名牌与 viewSeat 都要立刻正确
         if (Number.isInteger(frame.seat)) this.state.mySeat = frame.seat;
         this.state.roomId = typeof frame.room_id === 'string' ? frame.room_id : null;
-        this.stage = 'start';
+        // 大厅路径要停在等待页等人，不能进入「等 game_start」的 10 s 超时：
+        // 超时后 stage 掉到 idle，listRooms() 的门禁会连兜底轮询一起掐掉。
+        this.stage = this.autoReady ? 'start' : 'waiting';
         this.stageSince = performance.now();
         this.applySeatNames();
         this.app.emit('room_joined', this.room);
@@ -535,6 +543,17 @@ export class MahjongClient {
         } else {
           this.hint(`已进入房间 ${frame.room_id}，等玩家加入或直接开始`);
         }
+        break;
+
+      case 'room_update':
+        // PROTOCOL §5.17：未开局房间的座位快照，服务端广播给房内所有真人。
+        // `room_list` 只有人数没有名单，等待页必须靠这一帧同步他人入座/离开。
+        if (typeof frame.room_id !== 'string') break;
+        if (this.room && this.room.roomId && this.room.roomId !== frame.room_id) break;
+        this.room = this.room || {};
+        this.room.roomId = frame.room_id;
+        this.room.seats = Array.isArray(frame.seats) ? frame.seats : [];
+        this.app.emit('room_update', this.room);
         break;
 
       case 'game_start':
@@ -606,6 +625,7 @@ export class MahjongClient {
         this.stage = 'idle';
         this.app.applyGameEnd(frame);
         this.logGameEnd(frame);
+        this.playEndVoice(frame);
         this.app.emit('game_end', frame);
         // 先让「和 / 流局」播报落地，再弹结算；期间若已开下一局则不再弹（守 phase）
         setTimeout(() => {
@@ -763,8 +783,8 @@ export class MahjongClient {
   /** 大厅可主动刷新房间列表（§4.11）；结果落在 client.rooms / state.rooms */
   listRooms() {
     if (!this.net.connected) return false;
-    // 大厅与「已入座但未开局」都要刷：房间等待页靠它更新人数
-    if (!['lobby', 'start', 'ready'].includes(this.stage)) return false;
+    // 大厅、等待页（waiting）、已点开始（start）都要刷：等待页靠它兜底人数
+    if (!['lobby', 'waiting', 'start', 'ready'].includes(this.stage)) return false;
     return this.send({ type: 'list_rooms' });
   }
 
@@ -777,6 +797,9 @@ export class MahjongClient {
   ready() {
     if (this.readySent) return false;
     this.readySent = true;
+    // 只有发出 ready 之后才开始计「等 game_start」的 10 s 超时（§8.6）
+    this.stage = 'start';
+    this.stageSince = performance.now();
     return this.send({ type: 'ready' });
   }
 
@@ -1099,6 +1122,33 @@ export class MahjongClient {
         + (win.han != null ? ` ${win.han}番` : '')
       : '荒庄';
     this.hint(`[局终] ${detail} ｜ ${rows.join(' / ')}`);
+  }
+
+  /**
+   * 局终语音播报（voice.js 口径 = pygame broadcast.py 日麻侧）：
+   * 顺序念「和牌方式 → 番种 → 合计番数」，横幅同步展示结论，时长随语音。
+   */
+  playEndVoice(frame) {
+    const win = frame && typeof frame === 'object' ? frame.win : null;
+    const { cues } = buildVoiceCues(frame);
+    let caption;
+    if (win) {
+      const name = this.state.seatNames[this.app.viewSeat(win.seat)] || '';
+      const yaku = (win.yaku || [])
+        .map((item) => YAKU_NAMES[item.id] || item.id)
+        .join('·');
+      const parts = [
+        `${name} ${win.tsumo ? '自摸' : '荣和'}${win.tile ? ` ${win.tile}` : ''}`,
+        yaku,
+        Number.isInteger(win.han) ? `合计 ${win.han} 番` : '',
+      ].filter(Boolean);
+      caption = parts.join(' · ');
+    } else {
+      caption = '荒庄流局';
+    }
+    this.sfx?.speak?.(cues);
+    // 横幅窗口 = 语音总时长 + 余量，至少 2.4s；「和/流」大字沿用副露播报样式
+    this.ui?.broadcast?.(win ? '和' : '流局', caption, Math.max(2400, voiceDuration(cues) + 800));
   }
 
   describeRankings(frame) {

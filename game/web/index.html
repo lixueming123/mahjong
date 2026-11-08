@@ -139,6 +139,7 @@
         <div class="rs-title" id="rs-title"></div>
       </div>
       <div class="rs-winner" id="rs-winner" hidden></div>
+      <div class="rs-hand" id="rs-hand" hidden></div>
       <div class="rs-rows" id="rs-rows"></div>
       <div class="rs-foot">
         <span class="rs-next" id="rs-next"></span>
@@ -217,6 +218,16 @@
           <span class="hall-tip" id="hall-tip">空位由 AI 自动补齐</span>
         </div>
 
+        <!-- 好友发来的房间号 / 邀请链接，粘贴即入座（join_room，PROTOCOL §4.3） -->
+        <div class="hall-join">
+          <label class="field join-field">
+            <span>房间号</span>
+            <input id="in-room" maxlength="120" placeholder="粘贴房间号或邀请链接" autocomplete="off" spellcheck="false">
+          </label>
+          <button class="lobby-btn ghost" id="btn-join-room">加入房间</button>
+          <span class="hall-tip">好友发来的房间号，粘贴后即可入座</span>
+        </div>
+
         <div class="hall-cols">
           <div class="hall-col">
             <div class="col-head">房间列表
@@ -235,18 +246,19 @@
       <section class="lobby-view" id="view-room" hidden>
         <header class="hall-head">
           <div class="hall-user">
-            <b>房间已创建</b>
+            <b id="room-title">房间已创建</b>
             <span class="hall-kind" id="room-mode">经典麻将</span>
           </div>
           <div class="hall-actions">
             <button class="lobby-btn ghost small" id="btn-copy-room">复制房间号</button>
+            <button class="lobby-btn ghost small" id="btn-copy-invite">复制邀请链接</button>
             <button class="lobby-btn ghost small" id="btn-leave-room">返回大厅</button>
           </div>
         </header>
         <div class="room-code">
           <span class="room-code-label">房间号</span>
           <code id="room-code">—</code>
-          <span class="room-code-tip">把房间号发给好友，或直接开始（空位由 AI 补齐）</span>
+          <span class="room-code-tip">把房间号或邀请链接发给好友，或直接开始（空位由 AI 补齐）</span>
         </div>
         <div class="room-seats" id="room-seats"></div>
         <div class="hall-start">
@@ -255,6 +267,8 @@
         </div>
       </section>
 
+      <!-- 弹层内的反馈条：#toast(z25) 会被 .modal-layer(z60) 盖住，这里单独放一条 -->
+      <div class="lobby-toast" id="lobby-toast" hidden></div>
     </div>
   </div>
 

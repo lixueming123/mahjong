@@ -298,10 +298,25 @@ def copy_sfx() -> list[str]:
     return copied
 
 
+def copy_vo() -> list[str]:
+    """结算播报语音（client/assets/vo/*.wav，含日麻补录句）→ web/assets/vo。"""
+    src_dir = ROOT / "client" / "assets" / "vo"
+    out_dir = OUT / "vo"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    copied = []
+    for wav in sorted(src_dir.glob("*.wav")):
+        shutil.copy2(wav, out_dir / wav.name)
+        copied.append(wav.name)
+    return copied
+
+
 if __name__ == "__main__":
     for p in (build_atlas(), build_flat_atlas(), build_hand_atlas(), build_ink_atlas()):
         print(f"atlas  {p.relative_to(ROOT)}  {p.stat().st_size:,} B")
     for n in copy_sfx():
         f = OUT / "sfx" / n
         print(f"sfx    {f.relative_to(ROOT)}  {f.stat().st_size:,} B")
+    vo = copy_vo()
+    print(f"vo     {len(vo)} files -> { (OUT / 'vo').relative_to(ROOT) }  "
+          f"{sum((OUT / 'vo' / n).stat().st_size for n in vo):,} B")
     print("done -> game/web/assets/")

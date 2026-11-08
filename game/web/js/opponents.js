@@ -109,7 +109,7 @@ export class OpponentHandsView {
       if (!entry) {
         const group = new THREE.Group();
         this.scene.add(group);
-        entry = { group, tiles: [], k: 1 };
+        entry = { group, tiles: [], k: 1, strip: null };
         this.seats.set(seat, entry);
       }
       this.placeGroup(entry.group, L);
@@ -266,23 +266,63 @@ export class OpponentHandsView {
         entry.group.remove(t.holder);
         t.mesh.geometry.dispose();
       }
-      while (entry.tiles.length < n) {
-        const mesh = makeTile3D({ code: 'back', faceUp: false, w: L.w * k, h: L.h * k, d: L.d * k });
-        const holder = new THREE.Group();
-        holder.add(mesh);
-        entry.group.add(holder);
-        entry.tiles.push({ holder, mesh });
+
+      // v4.5 摊牌：结算期把牌背换成牌面（state.revealHands[view] = 门前牌码）。
+      // faceUp 的 +z 面贴图集、牌背纹理也在 +z —— 局部朝向不变，直接换材质即可。
+      const faces = state.revealHands?.[seat] ?? null;
+
+      // 和牌者手牌带下的金条（摊牌期高亮，荒庄无）
+      const wantStrip = state.revealWinner === seat;
+      if (wantStrip && !entry.strip) {
+        entry.strip = new THREE.Mesh(
+          new THREE.PlaneGeometry(1, 1),
+          new THREE.MeshBasicMaterial({ color: 0xffc95e, transparent: true, opacity: .45 }),
+        );
+        entry.strip.rotation.x = -Math.PI / 2;   // 平躺桌面（法线朝世界 +z）
+        entry.group.add(entry.strip);
+      } else if (!wantStrip && entry.strip) {
+        entry.group.remove(entry.strip);
+        entry.strip.geometry.dispose();
+        entry.strip.material.dispose();
+        entry.strip = null;
       }
 
       for (let i = 0; i < n; i++) {
-        const { holder } = entry.tiles[i];
         const t = tNear == null
           ? (i - 6) * L.step * k * towardMeld
           : tNear + signAway * (n - 1 - i) * L.step * k;
         const isDrawn = n > 13 && i === n - 1;
+        const want = faces ? (faces[i] ?? 'back') : 'back';
+        let tile = entry.tiles[i];
+        if (!tile || tile.code !== want) {
+          // 牌码变了（摊牌开/关、或 faceUp 材质不同）→ 就地重建这一张
+          if (tile) {
+            entry.group.remove(tile.holder);
+            tile.mesh.geometry.dispose();
+          }
+          const faceUp = want !== 'back';
+          const mesh = makeTile3D({ code: want, faceUp, w: L.w * k, h: L.h * k, d: L.d * k });
+          const holder = new THREE.Group();
+          holder.add(mesh);
+          entry.group.add(holder);
+          tile = { holder, mesh, code: want };
+          entry.tiles[i] = tile;
+        }
         // 局部 y 就是世界竖直方向：牌底贴桌面、牌背朝玩家，真正的立牌
-        holder.position.set(t, L.h * k / 2 + (isDrawn ? 7 * k : 0), isDrawn ? 5 * k : 0);
-        holder.userData = { kind: 'opponentHand', seat, index: i, t };
+        tile.holder.position.set(t, L.h * k / 2 + (isDrawn ? 7 * k : 0), isDrawn ? 5 * k : 0);
+        tile.holder.userData = { kind: 'opponentHand', seat, index: i, t };
+      }
+
+      // 金条尺寸/位置跟随牌列实际跨度（含摸牌抬升的那张）
+      if (entry.strip) {
+        const t0 = tNear == null
+          ? (0 - 6) * L.step * k * towardMeld
+          : Math.min(tNear, tNear + signAway * (n - 1) * L.step * k);
+        const t1 = tNear == null
+          ? (n - 1 - 6) * L.step * k * towardMeld
+          : Math.max(tNear, tNear + signAway * (n - 1) * L.step * k);
+        entry.strip.scale.set(t1 - t0 + L.w * k * 1.3, L.d * k * 3, 1);
+        entry.strip.position.set((t0 + t1) / 2, .6, 0);
       }
       entry.group.visible = false;    // 由 renderOverlay 逐家点亮
     }

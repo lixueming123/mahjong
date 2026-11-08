@@ -30,16 +30,54 @@ function ago(unixSeconds) {
   return `${Math.floor(diff / 86400)} 天前`;
 }
 
+/** 房间号格式（PROTOCOL §4.2）：`r-` + 13 位小写 36 进制 */
+export const ROOM_CODE_RE = /^r-[0-9a-z]{13}$/;
+
+/** 纯房间号 / 带空白 / 大写 / 完整邀请链接 / `?room=` 片段 → room_id；非法返回 null */
+export function parseRoomCode(input) {
+  let text = String(input ?? '').trim();
+  if (!text) return null;
+  const query = text.match(/[?&]room=([^&#\s]*)/i);
+  if (query) {
+    try { text = decodeURIComponent(query[1]); } catch { text = query[1]; }
+  } else if (/^https?:\/\//i.test(text)) {
+    // 是链接却没有 room 参数：不是邀请链接，别把域名当成房间号
+    return null;
+  }
+  text = text.trim().toLowerCase();
+  return ROOM_CODE_RE.test(text) ? text : null;
+}
+
+/**
+ * 邀请链接只带房间号与玩法：绝不把昵称/账号/密码带出去。
+ * mode/length 必须保留——客户端的 config.mode 决定牌桌按经典还是日麻渲染，
+ * 而 join_room 响应里没有玩法字段（PROTOCOL §4.3）。
+ */
+export function buildInviteUrl(roomId, href, mode = 'classic', length = 'tonpu') {
+  const url = new URL(href);
+  url.hash = '';
+  for (const key of [...url.searchParams.keys()]) url.searchParams.delete(key);
+  url.searchParams.set('room', roomId);
+  const riichi = mode === 'riichi';
+  url.searchParams.set('mode', riichi ? 'riichi' : 'classic');
+  if (riichi) url.searchParams.set('length', length === 'hanchan' ? 'hanchan' : 'tonpu');
+  return url.toString();
+}
+
 export class Lobby {
   constructor({ app, client, auto = false }) {
     this.app = app;
     this.client = client;
     this.auto = auto;               // URL 带昵称/账号：跳过大厅直接进桌
-    this.mode = 'classic';
-    this.length = 'tonpu';
+    // 玩法与 client.config 对齐：邀请链接带 mode/length，好友端不能按 classic 渲染日麻房
+    const params = new URLSearchParams(globalThis.location?.search || '');
+    this.mode = params.get('mode') === 'riichi' ? 'riichi' : 'classic';
+    this.length = this.mode === 'riichi' && params.get('length') === 'hanchan' ? 'hanchan' : 'tonpu';
     this.visible = false;
     this.busy = false;
     this._poll = 0;
+    // 邀请链接落地：URL 带 room 时，登录成功后一次性自动走加入流程
+    this.inviteRoom = params.get('room') || '';
 
     this.el = {
       root: $('lobby'),
@@ -55,6 +93,7 @@ export class Lobby {
       login: $('btn-login'),
       register: $('btn-register'),
       msg: $('lobby-msg'),
+      lobbyToast: $('lobby-toast'),
 
       hallName: $('hall-name'),
       hallKind: $('hall-kind'),
@@ -67,19 +106,23 @@ export class Lobby {
       roomList: $('room-list'),
       stats: $('stats'),
       statsKind: $('stats-kind'),
+      joinInput: $('in-room'),
+      joinButton: $('btn-join-room'),
 
       roomCode: $('room-code'),
+      roomTitle: $('room-title'),
       roomMode: $('room-mode'),
       roomSeats: $('room-seats'),
       roomTip: $('room-tip'),
       ready: $('btn-ready'),
       copyRoom: $('btn-copy-room'),
+      copyInvite: $('btn-copy-invite'),
       leaveRoom: $('btn-leave-room'),
     };
 
     this.bind();
     this.bindClient();
-    this.selectMode('classic');
+    this.selectMode(this.mode, this.length);
   }
 
   // ---------------------------------------------------------------- 事件
@@ -101,10 +144,15 @@ export class Lobby {
     });
 
     this.el.create?.addEventListener('click', () => this.createRoom());
+    this.el.joinButton?.addEventListener('click', () => this.joinByCode());
+    this.el.joinInput?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') this.joinByCode();
+    });
     this.el.refresh?.addEventListener('click', () => this.client.listRooms());
     this.el.logout?.addEventListener('click', () => this.logout());
     this.el.ready?.addEventListener('click', () => this.startGame());
     this.el.copyRoom?.addEventListener('click', () => this.copyRoomCode());
+    this.el.copyInvite?.addEventListener('click', () => this.copyInviteLink());
     this.el.leaveRoom?.addEventListener('click', () => this.leaveRoom());
 
     this.el.roomList?.addEventListener('click', (e) => {
@@ -125,6 +173,7 @@ export class Lobby {
       if (this.auto && !this.client.lobbyDriven) return;
       this.showHall();
       this.client.listRooms();
+      this.consumeInvite();
     });
     this.app.on('rooms', (rooms) => {
       this.renderRooms(rooms);
@@ -137,6 +186,12 @@ export class Lobby {
       if (!this.visible || this.auto) return;
       this.showRoom(room);
     });
+    this.app.on('room_update', (room) => {
+      // PROTOCOL §5.17：他人入座/离开的权威座位快照，服务端广播给房内所有真人
+      if (!this.visible || !this.el.viewRoom || this.el.viewRoom.hidden) return;
+      if (this.roomId && room.roomId !== this.roomId) return;
+      this.renderRoomSeats(room.seats || []);
+    });
     this.app.on('game_start', () => this.hide());
     this.app.on('session', ({ stage }) => {
       this.setConnected(stage !== 'closed' && stage !== 'idle');
@@ -144,12 +199,12 @@ export class Lobby {
     this.app.on('error', ({ text }) => {
       this.busy = false;
       this.setButtonsEnabled(true);
-      if (this.visible) this.setMessage(text);
+      if (this.visible) this.notify(text);
       else this.ui?.toast?.(text, 'error');
     });
     this.app.on('close', () => {
       this.setConnected(false);
-      if (this.visible) this.setMessage('连接已断开，请重新登录');
+      if (this.visible) this.notify('连接已断开，请重新登录');
     });
   }
 
@@ -166,6 +221,7 @@ export class Lobby {
     this.el.viewHall.hidden = true;
     if (this.el.viewRoom) this.el.viewRoom.hidden = true;
     this.setMessage(message);
+    this.hideLobbyToast();
     this.stopPolling();
     this.setButtonsEnabled(true);
     this.el.name?.focus();
@@ -191,20 +247,25 @@ export class Lobby {
     this.stopPolling();
 
     const mode = this.mode === 'riichi' ? '日麻' : '经典';
+    if (this.el.roomTitle) {
+      this.el.roomTitle.textContent = (room?.seat ?? 0) === 0 ? '房间已创建' : '已加入房间';
+    }
     if (this.el.roomMode) {
       this.el.roomMode.textContent = `${mode} · ${this.length === 'hanchan' ? '半庄' : '東風'}`;
     }
     if (this.el.roomCode) this.el.roomCode.textContent = room?.roomId || '—';
     this.roomId = room?.roomId || null;
+    this.mySeat = room?.seat ?? 0;
     this.roomReady = false;
-    if (this.el.roomTip) {
-      const humans = (room?.seats || []).filter((seat) => !seat.is_bot).length;
-      this.el.roomTip.textContent = humans >= 2 ? `${humans} 人已入座，可以开始了` : '等待其他玩家加入…';
-    }
+    this.renderRoomSeats(room?.seats || []);
+    this.setButtonsEnabled(true);
+    this.startRoomPolling();
+  }
 
-    const seats = room?.seats || [];
-    const mySeat = room?.seat ?? 0;
-    const bySeat = new Map(seats.map((seat) => [seat.seat, seat]));
+  /** 等待页四席位：room_joined 与 room_update（PROTOCOL §5.17）共用同一份渲染 */
+  renderRoomSeats(seats = [], mySeat = this.mySeat ?? 0) {
+    const roster = Array.isArray(seats) ? seats : [];
+    const bySeat = new Map(roster.map((seat) => [seat.seat, seat]));
     const winds = ['東', '南', '西', '北'];
     if (this.el.roomSeats) {
       this.el.roomSeats.innerHTML = [0, 1, 2, 3].map((seat) => {
@@ -221,26 +282,59 @@ export class Lobby {
           + '</div>';
       }).join('');
     }
-    this.setButtonsEnabled(true);
-    this.startRoomPolling();
+    if (this.el.roomTip && !this.roomReady) {
+      const humans = roster.filter((seat) => !seat.is_bot).length;
+      this.el.roomTip.textContent = humans >= 2 ? `${humans} 人已入座，可以开始了` : '等待其他玩家加入…';
+    }
   }
 
   startGame() {
     if (this.busy) return;
     this.busy = true;
+    this.roomReady = true;       // 别让迟到的 room_update 覆盖「发牌中…」
     if (this.el.ready) this.el.ready.disabled = true;
     if (this.el.roomTip) this.el.roomTip.textContent = '发牌中…';
     this.client.ready();
   }
 
   copyRoomCode() {
-    const code = this.el.roomCode?.textContent || '';
-    if (!code || code === '—') return;
-    const done = () => this.setMessage(`房间号已复制：${code}`, true);
-    if (navigator.clipboard?.writeText) {
-      navigator.clipboard.writeText(code).then(done).catch(() => this.fallbackCopy(code, done));
+    const code = this.roomCode();
+    if (!code) return;
+    this.copyText(code, `房间号已复制：${code}`);
+  }
+
+  /** 邀请链接：好友打开后只需填昵称，登录成功即自动入座 */
+  copyInviteLink() {
+    const code = this.roomCode();
+    if (!code) return;
+    const href = globalThis.location?.href || '';
+    if (!/^https?:\/\//i.test(href)) {
+      // file:// 或本地预览：生成的链接好友打不开，别给无效地址
+      this.notify(`当前不是 http 页面，请直接复制房间号：${code}`);
+      return;
+    }
+    let link;
+    try {
+      link = buildInviteUrl(code, href, this.mode, this.length);
+    } catch {
+      this.notify(`无法生成邀请链接，请手动复制房间号：${code}`);
+      return;
+    }
+    this.copyText(link, `邀请链接已复制：好友打开后填昵称即可加入 ${code}`);
+  }
+
+  roomCode() {
+    const code = this.el.roomCode?.textContent?.trim() || '';
+    return code && code !== '—' ? code : '';
+  }
+
+  /** 复制反馈统一走 toast：#lobby-msg 在登录面板里，房间页根本看不到 */
+  copyText(text, message) {
+    const done = () => this.notify(message, true);
+    if (globalThis.navigator?.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(() => this.fallbackCopy(text, done));
     } else {
-      this.fallbackCopy(code, done);
+      this.fallbackCopy(text, done);
     }
   }
 
@@ -251,8 +345,73 @@ export class Lobby {
     input.style.opacity = '0';
     document.body.appendChild(input);
     input.select();
-    try { document.execCommand('copy'); done(); } catch { this.setMessage(`房间号：${text}`); }
+    try { document.execCommand('copy'); done(); }
+    catch { this.notify(`复制失败，请手动复制：${text}`); }
     input.remove();
+  }
+
+  /**
+   * 登录页写 #lobby-msg；大厅/房间页写卡片内的 #lobby-toast。
+   * 过去这些反馈都写进隐藏的登录面板，用户以为按钮没反应；
+   * 全局 #toast(z25) 又会被 .modal-layer(z60) 盖住，所以不能直接用。
+   */
+  notify(text, ok = false) {
+    if (!text) { this.setMessage(''); this.hideLobbyToast(); return; }
+    const inLogin = this.el.viewLogin && !this.el.viewLogin.hidden;
+    if (inLogin) {
+      this.hideLobbyToast();
+      this.setMessage(text, ok);
+      return;
+    }
+    const bar = this.el.lobbyToast;
+    if (bar) {
+      clearTimeout(this._lobbyToastTimer);
+      bar.hidden = false;
+      bar.className = `lobby-toast ${ok ? 'good' : 'error'}`.trim();
+      bar.textContent = text;
+      this._lobbyToastTimer = setTimeout(() => { bar.hidden = true; }, 2600);
+    } else if (this.ui?.toast) {
+      this.ui.toast(text, ok ? 'good' : 'error');
+    } else {
+      this.setMessage(text, ok);
+    }
+  }
+
+  hideLobbyToast() {
+    clearTimeout(this._lobbyToastTimer);
+    if (this.el.lobbyToast) this.el.lobbyToast.hidden = true;
+  }
+
+  /** 邀请链接落地：只在手动登录（非 auto）时由 login_ok 触发一次 */
+  consumeInvite() {
+    const roomId = this.inviteRoom;
+    this.inviteRoom = '';
+    if (!roomId) return;
+    // 手动登录时 config.room 还在，会让「创建房间」误发 join_room；统一由大厅接管
+    if (this.client.config) this.client.config.room = '';
+    if (this.el.joinInput) this.el.joinInput.value = roomId;
+    this.joinByCode(roomId);
+  }
+
+  /** 大厅按房间号加入：也接受粘贴的邀请链接 / ?room= 片段 */
+  joinByCode(raw) {
+    if (this.busy) return;
+    const text = raw ?? this.el.joinInput?.value ?? '';
+    const roomId = parseRoomCode(text);
+    if (!roomId) {
+      this.notify('房间号格式不对，应形如 r-0fs9tx1ayb3ep（也可粘贴邀请链接）');
+      this.el.joinInput?.focus();
+      return;
+    }
+    if (this.el.joinInput) this.el.joinInput.value = roomId;
+    this.busyOn();
+    this.notify(`正在加入 ${roomId}…`, true);
+    if (!this.client.joinRoom(roomId)) {
+      // roomRequested 已置位 / 未连接 / 限流都会返回 false，别把按钮锁死
+      this.busy = false;
+      this.setButtonsEnabled(true);
+      this.notify('加入请求未发出：请检查连接，或先「返回大厅」换新连接再试');
+    }
   }
 
   /** 协议没有 leave_room：换一条连接回大厅（旧房间未开局时由服务端回收） */
@@ -265,6 +424,7 @@ export class Lobby {
     this.visible = false;
     this.busy = false;
     this.el.root.hidden = true;
+    this.hideLobbyToast();
     this.stopPolling();
   }
 
@@ -304,10 +464,12 @@ export class Lobby {
   }
 
   setButtonsEnabled(enabled) {
-    [this.el.guest, this.el.login, this.el.register, this.el.create, this.el.ready, this.el.leaveRoom]
+    [this.el.guest, this.el.login, this.el.register, this.el.create, this.el.joinButton,
+      this.el.ready, this.el.leaveRoom, this.el.copyRoom, this.el.copyInvite]
       .forEach((button) => {
         if (button) button.disabled = !enabled;
       });
+    if (this.el.joinInput) this.el.joinInput.disabled = !enabled;
     this.el.roomList?.querySelectorAll('button').forEach((button) => { button.disabled = !enabled; });
   }
 
@@ -335,7 +497,7 @@ export class Lobby {
     this.client.connect({ name }).catch((err) => {
       this.busy = false;
       this.setButtonsEnabled(true);
-      this.setMessage(`无法连接服务器：${err.message}`);
+      this.notify(`无法连接服务器：${err.message}`);
     });
   }
 
@@ -358,21 +520,21 @@ export class Lobby {
     }).catch((err) => {
       this.busy = false;
       this.setButtonsEnabled(true);
-      this.setMessage(`无法连接服务器：${err.message}`);
+      this.notify(`无法连接服务器：${err.message}`);
     });
   }
 
   createRoom() {
     if (this.busy) return;
     this.busyOn();
-    this.setMessage(`正在创建${MODE_NAMES[this.mode] || ''}房间…`, true);
+    this.notify(`正在创建${MODE_NAMES[this.mode] || ''}房间…`, true);
     this.client.createRoom({ mode: this.mode, length: this.length });
   }
 
   joinRoom(roomId) {
     if (this.busy) return;
     this.busyOn();
-    this.setMessage(`正在加入 ${roomId}…`, true);
+    this.notify(`正在加入 ${roomId}…`, true);
     this.client.joinRoom(roomId);
   }
 

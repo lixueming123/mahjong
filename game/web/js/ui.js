@@ -7,6 +7,7 @@
  * 坐标按 1920x1080 设计像素写在 CSS 里，这里只改文案与显隐。
  */
 import { ALL_CODES } from './config.js';
+import { normTile } from './state.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -22,12 +23,17 @@ const ACTION_LABELS = {
   riichi: '立直', win: '和', pass: '过',
 };
 const YAKU_LABELS = {
-  menzen: '门前清', tanyao: '断幺九', pinfu: '平和', iipeikou: '一杯口', yakuhai: '箭刻',
-  rinshan: '岭上开花', sanshoku_doujun: '三色同顺', ittsuu: '一气通贯', toitoi: '对对和',
-  sanankou: '三暗刻', honitsu: '混一色', shousangen: '小三元', seven_pairs: '七对子',
-  pure_one_suit: '清一色', riichi: '立直', ippatsu: '一发', chankan: '抢杠',
-  tenhou: '天和', chiihou: '地和', kokushi_13: '国士十三面', suuankou_tanki: '四暗刻单骑',
-  chuuren_junsei: '纯正九莲宝灯', daisuushii: '大四喜', aka_dora: '赤宝牌',
+  menzen: '门前清', tsumo: '门前清自摸', tanyao: '断幺九', pinfu: '平和', iipeikou: '一杯口',
+  yakuhai: '箭刻', rinshan: '岭上开花', sanshoku_doujun: '三色同顺', ittsuu: '一气通贯',
+  toitoi: '对对和', sanankou: '三暗刻', sankantsu: '三杠子', honitsu: '混一色',
+  shousangen: '小三元', seven_pairs: '七对子', chiitoitsu: '七对子',
+  pure_one_suit: '清一色', chinitsu: '清一色', chanta: '混全带幺九', junchan: '纯全带幺九',
+  ryanpeikou: '二杯口', honroutou: '混老头', riichi: '立直', ippatsu: '一发', chankan: '抢杠',
+  haitei: '海底捞月', houtei: '河底捞鱼', dora: '宝牌', ura_dora: '里宝牌', aka_dora: '赤宝牌',
+  tenhou: '天和', chiihou: '地和', kokushi: '国士无双', kokushi_13: '国士十三面',
+  suuankou: '四暗刻', suuankou_tanki: '四暗刻单骑', daisangen: '大三元', tsuuiisou: '字一色',
+  ryuuiisou: '绿一色', chinroutou: '清老头', chuuren: '九莲宝灯', chuuren_junsei: '纯正九莲宝灯',
+  suukantsu: '四杠子', shousuushii: '小四喜', daisuushii: '大四喜',
 };
 
 /** §2.1 牌码 → 中文面（用于听牌条 / 立直候选这类小标签） */
@@ -91,6 +97,7 @@ export class UI {
       rsKind: $('rs-kind'),
       rsTitle: $('rs-title'),
       rsWinner: $('rs-winner'),
+      rsHand: $('rs-hand'),
       rsRows: $('rs-rows'),
       rsNext: $('rs-next'),
       rsClose: $('rs-close'),
@@ -355,6 +362,7 @@ export class UI {
         + (win.from_seat != null ? `（放铳：${esc(state.seatNames[this.viewOf(win.from_seat, state)])}）` : '')
         + (parts.length ? `<br>${esc(parts.join(' ｜ '))}` : '');
     }
+    this.renderWinHand(frame, state);
 
     const results = Array.isArray(frame.results) ? [...frame.results] : [];
     results.sort((a, b) => (a.seat | 0) - (b.seat | 0));
@@ -393,6 +401,70 @@ export class UI {
     el.result.hidden = false;
   }
 
+  /**
+   * 结算面板 · 和牌详情：把和牌者的牌**用大牌面排出来**——
+   * 副露分组（被鸣张横置）+ 门前牌 + 和牌张单列高亮 + 役种逐条列番数。
+   * 3D 侧家的摊牌立牌又小又远，看不清「怎么和的」；这里是权威展示位。
+   * 数据：state.revealHands（和牌者门前牌，服务端 results[].hand 扣副露）
+   * + state.melds（副露分组）+ win.tile / win.yaku。
+   */
+  renderWinHand(frame, state) {
+    const el = this.el;
+    if (!el.rsHand) return;
+    const win = frame && typeof frame === 'object' ? frame.win : null;
+    if (!win) {
+      el.rsHand.hidden = true;
+      el.rsHand.innerHTML = '';
+      return;
+    }
+    const view = this.viewOf(win.seat, state);
+    const face = (code, cls = '') => {
+      const idx = DORA_INDEX.has(code) ? DORA_INDEX.get(code) : DORA_INDEX.get('back');
+      const col = idx % 8;
+      const row = Math.floor(idx / 8);
+      return `<i class="rstile${cls ? ` ${cls}` : ''}" style="background-image:url(${DORA_ATLAS_URL});`
+        + `background-size:800% 500%;background-position:${col / 7 * 100}% ${row / 4 * 100}%"></i>`;
+    };
+
+    // 副露分组：被鸣的那张横置（meld.rotated 是 action_event 反查的下标）；
+    // 他家暗杠的 'back' 占位（服务端异常时）退化为背面格
+    const melds = (state.melds || []).filter((meld) => meld.seat === view);
+    const meldHtml = melds.map((meld) => {
+      const tiles = (meld.tiles || []).map((t) => (typeof t === 'string' ? t : 'back'));
+      if (!tiles.length) return '';
+      const inner = tiles.map((t, i) => {
+        const rotated = meld.kind !== 'ankan' && i === meld.rotated;
+        return face(normTile(t) || t, rotated ? 'claim' : '');
+      }).join('');
+      return `<div class="rsmeld">${inner}</div>`;
+    }).join('');
+
+    // 门前牌：和牌张抽出来单列（雀魂口径：右侧独立格 + 金框高亮）
+    const hand = (state.revealHands?.[view] || []).map(normTile).filter(Boolean);
+    const agari = normTile(win.tile);
+    const at = agari ? hand.indexOf(agari) : -1;
+    if (at >= 0) hand.splice(at, 1);
+    const handHtml = hand.map((t) => face(t)).join('');
+    const agariHtml = agari ? face(agari, 'agari') : '';
+
+    const yakuHtml = (Array.isArray(win.yaku) ? win.yaku : [])
+      .filter((item) => item && typeof item.id === 'string')
+      .map((item) => `<b>${esc(YAKU_LABELS[item.id] || item.id)}</b>`
+        + `${Number.isInteger(item.han) ? ` ${item.han}番` : ''}`)
+      .join('<span class="sep"> · </span>');
+
+    const row = meldHtml || hand.length || agariHtml
+      ? `<div class="rshand-row">`
+        + (meldHtml ? `<div class="rshand-melds">${meldHtml}</div>` : '')
+        + `<div class="rshand-concealed">${handHtml}</div>`
+        + (agariHtml ? `<div class="rshand-agari">${agariHtml}</div>` : '')
+        + `</div>`
+      : `<div class="rshand-empty">手牌数据缺失</div>`;
+    el.rsHand.innerHTML = row
+      + (yakuHtml ? `<div class="rshand-yaku">${yakuHtml}</div>` : '');
+    el.rsHand.hidden = false;
+  }
+
   /** 场终（match_end）：名次表 */
   showFinal(state) {
     const frame = state.matchEnd;
@@ -401,6 +473,7 @@ export class UI {
     el.rsKind.textContent = '场终';
     el.rsTitle.textContent = `共 ${frame.hands_played ?? state.handsPlayed ?? 0} 手 ｜ 连庄 ${frame.renchan_count ?? 0} 次`;
     el.rsWinner.hidden = true;
+    if (el.rsHand) { el.rsHand.hidden = true; el.rsHand.innerHTML = ''; }
 
     const rows = Array.isArray(frame.rankings) ? frame.rankings : [];
     el.rsRows.innerHTML = rows.map((row) => {

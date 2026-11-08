@@ -177,12 +177,12 @@ export const HAND = {
 export const MELD = {
   seat: {
     // 本家：手牌右端外侧，沿 +x 排开（起点按手牌末端实时算）。
-    // 尺寸取「牌盒与手牌视觉等大」：牌盒 = (w+side)x(h+thick) = 92x149，
-    // 手牌 94x150 —— 之前 94x150+side7+thick13 的大盒子比手牌大一圈，
-    // 列距也散（105 vs 95），用户看着「又大又糊」。
+    // 尺寸在「牌盒与手牌视觉等大」（92x149）之后又按用户反馈再缩一档：
+    // 牌盒 = (w+side)x(h+thick) = 81x134 ≈ 手牌 94x150 的 86%，
+    // 副露只是信息展示，不该和手牌抢视觉重量。
     0: {
-      far: null, right: 1760, y: 997, angle: 0, w: 86, h: 138, rot: 0, d: 18, thick: 11, side: 6,
-      tilt: 0, gap: 7, seam: 1, swap: true,
+      far: null, right: 1760, y: 997, angle: 0, w: 76, h: 124, rot: 0, d: 16, thick: 10, side: 5,
+      tilt: 0, gap: 6, seam: 1, swap: true,
     },
     // 右家：手牌上端往右上角摊开（沿自己牌列的同一条斜线，和上家镜像）
     1: {
