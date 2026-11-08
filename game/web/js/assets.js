@@ -29,7 +29,7 @@ function load(url, key) {
         tex.magFilter = THREE.LinearFilter;
         tex.minFilter = THREE.LinearMipmapLinearFilter;
         tex.generateMipmaps = true;
-        tex.anisotropy = 4;
+        tex.anisotropy = 8;
         tex.needsUpdate = true;
         textures[key] = tex;
         resolve(tex);

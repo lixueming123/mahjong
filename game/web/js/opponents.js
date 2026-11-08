@@ -15,7 +15,7 @@
 import * as THREE from 'three';
 import { SEAT_LAYOUT, MELD, DESIGN } from './config.js';
 import { makeTile3D } from './tile3d.js';
-import { meldNearPoint } from './melds.js';
+import { meldNearPoint, seatMeldLayout } from './meldLayout.js';
 
 export class OpponentHandsView {
   constructor() {
@@ -109,23 +109,10 @@ export class OpponentHandsView {
       if (!entry) {
         const group = new THREE.Group();
         this.scene.add(group);
-        entry = { group, tiles: [] };
+        entry = { group, tiles: [], k: 1 };
         this.seats.set(seat, entry);
       }
       this.placeGroup(entry.group, L);
-
-      while (entry.tiles.length > hand.length) {
-        const t = entry.tiles.pop();
-        entry.group.remove(t.holder);
-        t.mesh.geometry.dispose();
-      }
-      while (entry.tiles.length < hand.length) {
-        const mesh = makeTile3D({ code: 'back', faceUp: false, w: L.w, h: L.h, d: L.d });
-        const holder = new THREE.Group();
-        holder.add(mesh);
-        entry.group.add(holder);
-        entry.tiles.push({ holder, mesh });
-      }
 
       const n = hand.length;
       // 手牌**靠近副露那一端固定**：张数变化只动远端，
@@ -138,6 +125,7 @@ export class OpponentHandsView {
       const pin = meldNearPoint(seat, state);
       let tNear = null;
       let signAway = 1;
+      let k = 1;   // 远端出屏时整列的等比压缩（牌身 + 间距一起缩）
       if (pin) {
         entry.group.updateMatrixWorld(true);
         // 牌列在屏幕上的走向要从**实际投影**里取：这个 Group 有缩放、方向也可能
@@ -153,34 +141,147 @@ export class OpponentHandsView {
         const awayX = -Math.cos(L.angle) * towardMeld;
         const awayY = -Math.sin(L.angle) * towardMeld;
         signAway = dx * awayX + dy * awayY >= 0 ? 1 : -1;
-        const gap = MELD.seat[seat].pinGap ?? 8;
-        const tx = pin.x + awayX * gap;
-        const ty = pin.y + awayY * gap;
-        // 透视下沿牌列不是等比的，用割线法解「哪一槽正好落在目标点上」
-        const residual = (tt) => {
-          const p = this.basePoint(entry.group, tt);
-          return ((p.x - tx) * dx + (p.y - ty) * dy) / len;
+        const baseGap = MELD.seat[seat].pinGap ?? 8;
+        // 透视近大远小：钉点定的是牌底**中心**，而牌身沿牌列占一整张牌宽；
+        // 屏幕左下/右下角的立牌还会被放大一倍以上，固定 pinGap 会被
+        // 半张放大的牌宽整个吃掉，直接压上副露带（实测最多 ~24px）。
+        // 所以从 pinGap 起解，再按多边形间距缺口补足（见下方 clearance）。
+        const solve = (gap) => {
+          const tx = pin.x + awayX * gap;
+          const ty = pin.y + awayY * gap;
+          const residual = (tt) => {
+            const p = this.basePoint(entry.group, tt);
+            return ((p.x - tx) * dx + (p.y - ty) * dy) / len;
+          };
+          let t0 = 0;
+          let f0 = residual(t0);
+          let tn = 240;
+          let f1 = residual(tn);
+          for (let it = 0; it < 8 && Math.abs(f1) > .5; it++) {
+            const t2 = tn - f1 * (tn - t0) / ((f1 - f0) || 1);
+            t0 = tn;
+            f0 = f1;
+            tn = t2;
+            f1 = residual(tn);
+          }
+          return tn;
         };
-        let t0 = 0;
-        let f0 = residual(t0);
-        tNear = 240;
-        let f1 = residual(tNear);
-        for (let k = 0; k < 8 && Math.abs(f1) > .5; k++) {
-          const t2 = tNear - f1 * (tNear - t0) / ((f1 - f0) || 1);
-          t0 = tNear;
-          f0 = f1;
-          tNear = t2;
-          f1 = residual(tNear);
+        // 多边形级间距：只对「钉点」量间距挡不住副露牌自己的角 ——
+        // 被鸣横放牌经 tilt 旋转 + drop 侧移后，角点沿朝手牌方向比
+        // 钉点凸出 10~20px（用户截图实锤）。改成单轴 SAT：
+        // 手牌末端 8 角沿 away 轴的最小投影，必须比副露**全部牌**
+        // 角点的最大投影还远 6px —— 沿一条轴分开，多边形必然不相交。
+        let meldEdge = -Infinity;
+        const meldLayout = seatMeldLayout(seat, state);
+        if (meldLayout) {
+          for (const t of meldLayout.tiles) {
+            for (const c of t.corners) {
+              const d = c.x * awayX + c.y * awayY;
+              if (d > meldEdge) meldEdge = d;
+            }
+          }
+        }
+        /** 末端立牌 8 角沿 away 轴的最小投影 − 副露最大投影（负 = 侵入） */
+        const clearance = (tn) => {
+          let handMin = Infinity;
+          for (const sx of [-1, 1]) {
+            for (const sy of [-1, 1]) {
+              for (const sz of [-1, 1]) {
+                const c = this.pointAt(entry.group,
+                  tn + sx * L.w / 2, L.h / 2 + sy * L.h / 2, sz * L.d / 2);
+                handMin = Math.min(handMin, c.x * awayX + c.y * awayY);
+              }
+            }
+          }
+          return handMin - meldEdge;
+        };
+        // 间距往远挪 1px，手牌末端投影就远 1px：缺口多少补多少，迭代收敛
+        let gap = baseGap;
+        for (let it = 0; it < 4; it++) {
+          tNear = solve(gap);
+          const want = gap + (6 - clearance(tNear));
+          if (Math.abs(want - gap) < .5) break;
+          gap = want;
+        }
+        tNear = solve(gap);
+      }
+
+      // 远端出屏压缩：手牌带被钉在副露旁，副露一多远端就会被推出屏幕
+      // （右家最狠：副露带 + 手牌沿同一条斜线挤右下角）。与副露带 maxLen
+      // 同一哲学 —— 放不下就整列等比缩小，绝不出屏。透视保线型，牌列
+      // 屏幕走向单调，越界只会发生在两端，量两端牌 8 角即可；压缩比对
+      // 出屏量单调，线性反解收敛太慢，直接二分求「不越界的最大 k」。
+      // 无副露（pin=null，居中布局）也要查：摸牌抬高 7px 会顶到上缘。
+      entry.group.updateMatrixWorld(true);
+      const LIMITS = { x0: 12, x1: 1908, y0: 12, y1: 1068 };
+      const overflowOf = (kk) => {
+        let worst = 0;
+        for (const i of [0, n - 1]) {
+          const t = tNear == null
+            ? (i - 6) * L.step * kk * towardMeld
+            : tNear + signAway * (n - 1 - i) * L.step * kk;
+          const isDrawn = n > 13 && i === n - 1;   // 摸牌：抬高 7、前伸 5
+          const fy = L.h * kk / 2 + (isDrawn ? 7 * kk : 0);
+          const fz = isDrawn ? 5 * kk : 0;
+          for (const sx of [-1, 1]) {
+            for (const sy of [-1, 1]) {
+              for (const sz of [-1, 1]) {
+                const c = this.pointAt(entry.group,
+                  t + sx * L.w * kk / 2, fy + sy * L.h * kk / 2, fz + sz * L.d * kk / 2);
+                const ox = Math.max(LIMITS.x0 - c.x, c.x - LIMITS.x1, 0);
+                const oy = Math.max(LIMITS.y0 - c.y, c.y - LIMITS.y1, 0);
+                worst = Math.max(worst, ox, oy);
+              }
+            }
+          }
+        }
+        return worst;
+      };
+      if (overflowOf(1) > 0) {
+        const K_MIN = .55;
+        if (overflowOf(K_MIN) <= 0) {
+          let lo = K_MIN;
+          let hi = 1;
+          for (let it = 0; it < 12; it++) {
+            const mid = (lo + hi) / 2;
+            if (overflowOf(mid) > 0) hi = mid; else lo = mid;
+          }
+          k = lo;
+        } else {
+          k = K_MIN;   // 极端窗口比例压到下限仍放不下：兜底不再缩
         }
       }
+
+      // 尺寸/张数管理：压缩比变了要按新尺寸重建（几何尺寸在创建时定格）
+      if (entry.k !== k) {
+        while (entry.tiles.length) {
+          const t = entry.tiles.pop();
+          entry.group.remove(t.holder);
+          t.mesh.geometry.dispose();
+        }
+        entry.k = k;
+      }
+      while (entry.tiles.length > n) {
+        const t = entry.tiles.pop();
+        entry.group.remove(t.holder);
+        t.mesh.geometry.dispose();
+      }
+      while (entry.tiles.length < n) {
+        const mesh = makeTile3D({ code: 'back', faceUp: false, w: L.w * k, h: L.h * k, d: L.d * k });
+        const holder = new THREE.Group();
+        holder.add(mesh);
+        entry.group.add(holder);
+        entry.tiles.push({ holder, mesh });
+      }
+
       for (let i = 0; i < n; i++) {
         const { holder } = entry.tiles[i];
         const t = tNear == null
-          ? (i - 6) * L.step * towardMeld
-          : tNear + signAway * (n - 1 - i) * L.step;
+          ? (i - 6) * L.step * k * towardMeld
+          : tNear + signAway * (n - 1 - i) * L.step * k;
         const isDrawn = n > 13 && i === n - 1;
         // 局部 y 就是世界竖直方向：牌底贴桌面、牌背朝玩家，真正的立牌
-        holder.position.set(t, L.h / 2 + (isDrawn ? 7 : 0), isDrawn ? 5 : 0);
+        holder.position.set(t, L.h * k / 2 + (isDrawn ? 7 * k : 0), isDrawn ? 5 * k : 0);
         holder.userData = { kind: 'opponentHand', seat, index: i, t };
       }
       entry.group.visible = false;    // 由 renderOverlay 逐家点亮
@@ -189,10 +290,23 @@ export class OpponentHandsView {
 
   /** 牌列底座上局部 (t,0,0) 这一点投影回设计坐标（x 右、y 下） */
   basePoint(group, t) {
-    const p = new THREE.Vector3(t, 0, 0);
+    return this.pointAt(group, t, 0, 0);
+  }
+
+  /** 牌列局部 (x,y,z) 投影回设计坐标：x 沿牌列、y 竖直、z 法向 */
+  pointAt(group, x, y, z) {
+    const p = new THREE.Vector3(x, y, z);
     group.localToWorld(p);
     p.project(this.camera);
-    return { x: p.x * DESIGN.CX + DESIGN.CX, y: DESIGN.CY - p.y * DESIGN.CY };
+    // NDC -> 设计坐标必须用**当前可见设计区域**（viewW/viewH，resize 时随
+    // 窗口宽高比更新），不能写死 1920x1080：窗口比 16:9 宽时主相机 frustum
+    // 是 vw=scale 换算出来的宽设计区（如 2062x1080），写死会把投影 x 向
+    // 画面中心压缩 ~7%，钉牌解算据此把整条手牌链沿带方向放错位 ——
+    // 左家手牌压进副露、右家整条被推出屏幕，全是这一个根因。
+    return {
+      x: DESIGN.CX + p.x * this.viewW / 2,
+      y: DESIGN.CY - p.y * this.viewH / 2,
+    };
   }
 
   setTurn(seat) {

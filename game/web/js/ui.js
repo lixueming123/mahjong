@@ -6,8 +6,13 @@
  *
  * 坐标按 1920x1080 设计像素写在 CSS 里，这里只改文案与显隐。
  */
+import { ALL_CODES } from './config.js';
 
 const $ = (id) => document.getElementById(id);
+
+/** 宝牌槽位贴图：手牌图集 8x5，格位与 assets.js 的 UV 同源（每格 120x200） */
+const DORA_ATLAS_URL = './assets/tile-atlas-hand.png';
+const DORA_INDEX = new Map(ALL_CODES.map((code, i) => [code, i]));
 
 const WIND_CHARS = ['東', '南', '西', '北'];
 const HONOR_LABELS = { 1: '东', 2: '南', 3: '西', 4: '北', 5: '白', 6: '发', 7: '中' };
@@ -49,6 +54,7 @@ export class UI {
     this.el = {
       roundName: $('round-name'),
       roundMark: $('round-mark'),
+      roundBars: [...($('round-bars')?.children ?? [])],
       roundTitle: $('round-title'),
       remaining: $('remaining'),
       remainingTop: $('remaining-top'),
@@ -117,7 +123,7 @@ export class UI {
   update(state) {
     const el = this.el;
     if (el.roundName) el.roundName.textContent = state.round;
-    if (el.roundMark) el.roundMark.textContent = (state.round || '東')[0];
+    this.renderDoraRow(state);
     if (el.roundTitle) {
       const lengthText = this.client?.config?.length === 'hanchan' ? '半庄' : '東風';
       el.roundTitle.textContent = state.mode === 'riichi'
@@ -148,6 +154,45 @@ export class UI {
     }
 
     this.renderTenpai(state);
+  }
+
+  /**
+   * 场况卡第一行 = 宝牌指示牌（用户指定位置，参考截图：明牌 + 背面槽位）。
+   * state.dora 来自 game_start / state_sync 的 dora_indicators[]：
+   * 有指示牌的槽位翻开后牌面，其余保持橙金背面；一局开始时至少翻 1 张，
+   * 杠后最多补到 5 张。还没有对局数据时第一格显示场风字。
+   */
+  renderDoraRow(state) {
+    const el = this.el;
+    if (!el.roundMark) return;
+    const dora = Array.isArray(state.dora) ? state.dora : [];
+    const slots = [el.roundMark, ...el.roundBars];
+    slots.forEach((slot, i) => {
+      if (!slot) return;
+      const code = dora[i];
+      if (typeof code === 'string' && code.length === 2) {
+        // 牌面用图集贴图（用户：不要「3筒」这种文字标签）。整格铺满槽位：
+        // background-size 800%x500%（8 列 5 行），百分比位移取格 ——
+        // bg-position 百分比的语义是「图的 p% 对齐槽的 p%」，所以
+        // x = col/(cols-1)、y = row/(rows-1)，与槽位实际尺寸无关。
+        // 红五/红中图集里本来就是红的，不再需要字色类。
+        const idx = DORA_INDEX.has(code) ? DORA_INDEX.get(code) : DORA_INDEX.get('back');
+        const col = idx % 8;
+        const row = Math.floor(idx / 8);
+        slot.classList.add('face');
+        slot.classList.remove('red', 'sm');
+        slot.textContent = '';
+        slot.style.backgroundImage = `url(${DORA_ATLAS_URL})`;
+        slot.style.backgroundSize = '800% 500%';
+        slot.style.backgroundPosition = `${col / 7 * 100}% ${row / 4 * 100}%`;
+      } else {
+        slot.classList.remove('face', 'red', 'sm');
+        slot.textContent = i === 0 && !dora.length ? (state.round || '東')[0] : '';
+        slot.style.backgroundImage = '';
+        slot.style.backgroundSize = '';
+        slot.style.backgroundPosition = '';
+      }
+    });
   }
 
   renderTenpai(state) {

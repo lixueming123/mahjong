@@ -28,11 +28,11 @@
 
 <div id="overlay">
 
-  <!-- 左上：场况卡 -->
+  <!-- 左上：场况卡（第一行 = 宝牌指示牌：明牌 + 背面槽位，见 ui.js update） -->
   <div class="round-card" style="left:20px;top:22px">
     <div class="round-row">
       <div class="round-mark" id="round-mark">東</div>
-      <div class="round-bars"><i></i><i></i><i></i><i></i></div>
+      <div class="round-bars" id="round-bars"><i></i><i></i><i></i><i></i></div>
     </div>
     <div class="round-sub"><b>连庄 ✕ <span id="honba">0</span></b><b>余 <span id="remaining-top">0</span></b></div>
     <div class="round-title" id="round-title">銅之間 <span>·</span> 四人麻将</div>
@@ -44,8 +44,9 @@
     <button class="icon-btn" id="btn-sound" title="音效开关">♪</button>
   </div>
 
-  <!-- 四家名牌 -->
-  <div class="seat" id="seat-2" style="left:1345px;top:28px">
+  <!-- 四家名牌（对家面板放牌河左侧空档：左移会压宝牌指示、原地会罩住
+       手牌行 y14~90 和副露带 y121~179；下家面板右移避开副露带右缘） -->
+  <div class="seat" id="seat-2" style="left:620px;top:24px">
     <div class="avatar" style="color:#5b2b45"><svg viewBox="0 0 100 100"><use href="#avatar"/></svg></div>
     <div class="seat-name">对家</div>
     <div class="seat-meta"><span class="seat-wind" id="seat-wind-2"></span><span class="seat-score" id="seat-score-2"></span></div>
@@ -57,7 +58,7 @@
     <div class="seat-meta"><span class="seat-wind" id="seat-wind-3"></span><span class="seat-score" id="seat-score-3"></span></div>
     <div class="seat-tags" id="seat-tags-3"></div>
   </div>
-  <div class="seat" id="seat-1" style="left:1706px;top:268px">
+  <div class="seat" id="seat-1" style="left:1722px;top:268px">
     <div class="avatar" style="color:#6a3242"><svg viewBox="0 0 100 100"><use href="#avatar"/></svg></div>
     <div class="seat-name">下家</div>
     <div class="seat-meta"><span class="seat-wind" id="seat-wind-1"></span><span class="seat-score" id="seat-score-1"></span></div>

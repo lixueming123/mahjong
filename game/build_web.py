@@ -86,8 +86,10 @@ def build_atlas() -> Path:
 
 
 # ---- 平躺牌面图集：和立牌同一套白牌面，厚度交给 flat3d 的斜切盒侧面 ----
-F_W, F_H = 96, 128
-F_CORNER = 11
+# 2x 超采样：本家副露顶面画到 ~94x150 还要吃透视放大，96x128 的格子被
+# 拉大采样会糊（手牌 120x200 有余量所以清晰）；192x256 后全程缩小采样。
+F_W, F_H = 192, 256
+F_CORNER = 22
 
 
 def _face_plate(w: int, h: int, corner: int) -> Image.Image:
@@ -124,7 +126,7 @@ def _flat_cell(code: str) -> Image.Image:
         tint = np.array([230, 158, 46], np.float32)
         a[..., :3] = np.clip(a[..., :3] * .32 + tint * .78, 0, 255)
         ink = Image.fromarray(a.astype(np.uint8), "RGBA")
-    cell.alpha_composite(ink, (8, 11))
+    cell.alpha_composite(ink, (16, 22))
     return cell
 
 
