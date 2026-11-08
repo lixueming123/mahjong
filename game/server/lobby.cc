@@ -69,13 +69,10 @@ std::vector<RoomSeat> BuildInitialSeats(const PlayerInfo& player, const ex_actor
   return seats;
 }
 
-}  // namespace
-
-std::string BuildRoomJoinedFrame(const std::string& room_id, int seat, const std::vector<RoomSeat>& seats) {
-  json::Value frame = json::Value::Obj();
-  frame.Set("type", json::Value::Str("room_joined"));
-  frame.Set("room_id", json::Value::Str(room_id));
-  frame.Set("seat", json::Value::Int(seat));
+// The public seat roster of a room that has not started (PROTOCOL.md §5.3 / §5.17).
+// Both the addressed `room_joined` and the broadcast `room_update` carry exactly this shape,
+// so a client can render either with the same code path.
+json::Value BuildSeatArray(const std::vector<RoomSeat>& seats) {
   json::Value seat_array = json::Value::Arr();
   for (const RoomSeat& room_seat : seats) {
     json::Value entry = json::Value::Obj();
@@ -84,7 +81,17 @@ std::string BuildRoomJoinedFrame(const std::string& room_id, int seat, const std
     entry.Set("is_bot", json::Value::Bool(room_seat.is_bot));
     seat_array.Append(std::move(entry));
   }
-  frame.Set("seats", std::move(seat_array));
+  return seat_array;
+}
+
+}  // namespace
+
+std::string BuildRoomJoinedFrame(const std::string& room_id, int seat, const std::vector<RoomSeat>& seats) {
+  json::Value frame = json::Value::Obj();
+  frame.Set("type", json::Value::Str("room_joined"));
+  frame.Set("room_id", json::Value::Str(room_id));
+  frame.Set("seat", json::Value::Int(seat));
+  frame.Set("seats", BuildSeatArray(seats));
   return frame.Dump();
 }
 
@@ -121,6 +128,24 @@ stdexec::task<void> LobbyActor::ReplyError(const ex_actor::ActorRef<SeatEndpoint
   const QuotaKind quota = code == protocol::kCodeBadRequest ? QuotaKind::kBadFrame : QuotaKind::kNone;
   co_await conn.Send<&SeatEndpoint::Dispatch>(
       PlayerEnvelope::SeatError(protocol::ErrorFrame(code, message), quota));
+}
+
+// PROTOCOL.md §5.17 (v1.10): `room_joined` is addressed to the player who just sat down,
+// so the other humans in a waiting room would never learn about it. Broadcast the roster
+// on every pre-game change; the frame has no per-recipient fields, so one payload serves all.
+stdexec::task<void> LobbyActor::BroadcastRoomUpdate(const std::string& room_id,
+                                                   const std::vector<RoomSeat>& seats) {
+  json::Value frame = json::Value::Obj();
+  frame.Set("type", json::Value::Str(protocol::kFrameRoomUpdate));
+  frame.Set("room_id", json::Value::Str(room_id));
+  frame.Set("seats", BuildSeatArray(seats));
+  const std::string payload = frame.Dump();
+  for (const RoomSeat& room_seat : seats) {
+    if (room_seat.is_bot || room_seat.endpoint.IsEmpty()) {
+      continue;
+    }
+    co_await ReplyFrame(room_seat.endpoint, payload);
+  }
 }
 
 void LobbyActor::SetSelfRef(ex_actor::ActorRef<LobbyActor> self) { self_ref_ = std::move(self); }
@@ -397,6 +422,9 @@ stdexec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, 
   }
   co_await conn.Send<&SeatEndpoint::Dispatch>(PlayerEnvelope::SetRoom(room));
   co_await ReplyFrame(conn, BuildRoomJoinedFrame(room_id, claimed.seat, snapshot));
+  // Everyone already seated must see the newcomer; the newcomer gets the same snapshot twice
+  // (room_joined + room_update), which the client renders idempotently.
+  co_await BroadcastRoomUpdate(room_id, snapshot);
 }
 
 stdexec::task<void> LobbyActor::Ready(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player) {
@@ -486,6 +514,8 @@ stdexec::task<void> LobbyActor::OnConnectionClosed(PlayerInfo player) {
     if (!room.IsEmpty()) {
       ActorSendScope().spawn(room.Send<&RoomActor::TakeSeat>(bot) | ex_actor::DiscardResult());
     }
+    // The departing seat is a bot again: tell the remaining humans before they hit "ready".
+    co_await BroadcastRoomUpdate(room_id, roster->second);
     spdlog::info("lobby: player {} left room {} before it started", player.player_id, room_id);
     co_return;
   }

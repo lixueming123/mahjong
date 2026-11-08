@@ -93,6 +93,9 @@ class LobbyActor : public RoomOwner {
   stdexec::task<void> ReplyFrame(const ex_actor::ActorRef<SeatEndpoint>& conn, std::string frame);
   stdexec::task<void> ReplyError(const ex_actor::ActorRef<SeatEndpoint>& conn, std::string_view code,
                               std::string_view message);
+  // PROTOCOL.md §5.17: `room_joined` reaches one player only, so joins and pre-game
+  // departures broadcast the whole roster to every human seat that is still wired.
+  stdexec::task<void> BroadcastRoomUpdate(const std::string& room_id, const std::vector<RoomSeat>& seats);
 
   // Deliberately no `name`: the lobby never reads it. The nickname a client sees comes from
   // RoomSeat::player (the room's copy) and from PlayerInfo on the wire, both owned elsewhere.

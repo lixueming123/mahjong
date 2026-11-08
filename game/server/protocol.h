@@ -73,6 +73,12 @@ inline constexpr std::string_view kClientFrameTypes[] = {
     kFrameJoinRoom, kFrameReady,    kFrameSync,   kFrameDiscard,      kFrameAction,
 };
 
+// ---- §3.2 server frame types ----------------------------------------------------------
+// Copied from PROTOCOL.md §3.2 / §5.17 (v1.10). Deliberately NOT in kClientFrameTypes:
+// the lobby broadcasts it, no client may send it. The older server frames still spell
+// their type inline next to their builder; this one is named because two call sites emit it.
+inline constexpr char kFrameRoomUpdate[] = "room_update";
+
 // ---- §7.1 error codes (exactly these 14; STALE_SEQ is deliberately absent) -------------
 // The last three come from ACCOUNT_DESIGN.md §3.5 (PROTOCOL.md §7.1 was amended from 11 to
 // 14 codes); the semantics and thresholds of the original 11 are unchanged.
