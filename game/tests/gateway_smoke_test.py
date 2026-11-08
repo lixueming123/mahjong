@@ -421,6 +421,18 @@ def test_room_not_found(port: int) -> None:
         if joined.get("room_id") != room_id or not isinstance(seat, int) or seat < 1:
             raise TestFailure(f"join before ready must return room_joined seat>=1: {joined!r}")
 
+        # PROTOCOL §5.17 (v1.23): a pre-game join broadcasts one room_update to every
+        # human in the room. Both connections must consume it before the game_start frames.
+        owner_update = owner.expect_type("room_update")
+        client_update = client.expect_type("room_update")
+        if owner_update.get("room_id") != room_id or client_update.get("room_id") != room_id:
+            raise TestFailure(f"room_update.room_id mismatch: {owner_update!r} / {client_update!r}")
+        if owner_update.get("seats") != client_update.get("seats"):
+            raise TestFailure(f"room_update rosters must match: {owner_update!r} / {client_update!r}")
+        if not any(s.get("name") == "找房间" and s.get("is_bot") is False
+                   for s in owner_update.get("seats", [])):
+            raise TestFailure(f"owner must see the newcomer in room_update: {owner_update!r}")
+
         owner.send({"type": "ready"})
         owner.expect_type("game_start")
         client.expect_type("game_start")
