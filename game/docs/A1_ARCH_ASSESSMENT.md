@@ -214,7 +214,7 @@ std::vector<std::string> WinTags(concealed, melds);                          // 
 ### 5.2 建议的目标形状（架构，不含番种内容）
 
 ```cpp
-struct Yaku { std::string id; int han; };            // id 与 win_type/tags 同一词汇表
+struct Yaku { protocol::YakuId id; int han; };       // v2.1：id 为线枚举，与 win_type/tags 同一词汇表
 struct ScoreContext {                                 // 显式入参，杜绝全局状态（RULESET §8）
   bool tsumo = false;
   int  winner_seat = 0;

@@ -949,6 +949,8 @@ vo_<seg>_<key>.wav
 - 本表用途：**卡回归**（重跑 TTS 或改文本后逐条比对）；**节拍排布以 `vo_manifest.json` 的实测值为唯一来源**（`D_item = max(1200, 该句实测时长 + 150)`，见 §8.5）。
 - 回填结论：**57 条全部落盘，0 失败**；实测总长 **66.4 s**（按旧外推式合计 69.7 s ⇒ **实测整体低 4.7%**；逐条 −26.8% … +5.9%，方向与预估一致）；单条最长 `vo_pay_tsumo_128` = **2192 ms < 2800 ms 上限**（唯一 10 字例外，合规）；无一条触发峰值钳位或 RMS 偏离 WARN。
 
+> **v2.1 线值**：表中 `yaku[]` 的触发条件均指客户端用 `yaku_name(y["id"])` 解码后的**规范名**；线上 `win.yaku[].id` 是整数（见 `PROTOCOL.md` §1.3.1），语音表仍按名字查。
+
 | # | id | 文本 | 字 | 时长(ms) | 上界(ms) | 触发条件（可执行） |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | `vo_mode_tsumo` | 自摸 | 2 | 488 ✓ | 570 | `win.tsumo == true` |
@@ -1256,13 +1258,14 @@ DROP_ORDER = [  # (vo_id, han, 判定序) —— 与 RULESET §6.4 的判定序�
 
 **陷阱 ①：`vo_yaku_*` 前缀不能当「番种」判定。** `vo_yaku_sum_2..6` 也是这个前缀，但它们是派生摘要句（表 C），**不在删除集内**。删除集与「是否番种」都必须用**16 条白名单**（或 `DROP_ORDER` 的 id 集合）判断。
 
-**陷阱 ②：`yakuhai` 的语音 id 需要 `han` 后缀。** `yaku.id == "yakuhai"` 时 `han` = 组数（1/2/3），语音 id 是 `vo_yaku_yakuhai_<han>`；**直接 `f"vo_yaku_{yid}"` 会拼出不存在的 `vo_yaku_yakuhai`**（磁盘上没有这个文件 ⇒ 静默失败）。正确：
+**陷阱 ②：`yakuhai` 的语音 id 需要 `han` 后缀。** `yaku_name(y["id"]) == "yakuhai"` 时 `han` = 组数（1/2/3），语音 id 是 `vo_yaku_yakuhai_<han>`；**直接 `f"vo_yaku_{yid}"` 会拼出不存在的 `vo_yaku_yakuhai`**（磁盘上没有这个文件 ⇒ 静默失败）。正确：
 
 ```python
 def vo_id_of(y):                       # y = win.yaku[] 的一项
-    if y["id"] == "yakuhai":
+    yid = yaku_name(y["id"])           # v2.1：整数 id → 规范名；旧日志字符串原样返回
+    if yid == "yakuhai":
         return f"vo_yaku_yakuhai_{y['han']}"     # han ∈ {1,2,3}
-    return f"vo_yaku_{y['id']}"
+    return f"vo_yaku_{yid}"
 ```
 
 **陷阱 ③：`voice_cues()` 现有 6 处与磁盘资产不符**（2026-10-23 核对 `client/broadcast.py` L1165–1196）。此刻 `VOICE_ENABLED` 仍是 `False`，所以没暴露；一旦打开会大面积静默：

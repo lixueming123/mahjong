@@ -71,7 +71,7 @@ EnumerateDecompositions(concealed_with_winning_tile, melds) -> vector<Decomposit
 
 ### 1.2 番种表（**序 = 判定顺序 = `win.yaku[]` 的数组顺序 = 结算页渲染顺序**）
 
-**本表的「序」号是冻结的**（架构确定性要求，`RULESET.md` §8）：判番结果数组必须逐元素可比，不得依赖哈希遍历或容器顺序。`id` 一律为 **ASCII 小写下划线**（沿用 `seven_pairs` / `pure_one_suit` 风格），直接作为 `game_end.win.yaku[].id` 与 `win_type` 的元素。
+**本表的「序」号是冻结的**（架构确定性要求，`RULESET.md` §8）：判番结果数组必须逐元素可比，不得依赖哈希遍历或容器顺序。`id` 的规范名一律为 **ASCII 小写下划线**（沿用 `seven_pairs` / `pure_one_suit` 风格）；**v2.1 起线上 `game_end.win.yaku[].id` 与 `win_type` 的元素改传整数**（取值见 `PROTOCOL.md` §1.3.1 的 `yaku` 表），规范名只用于文档/日志。
 
 记号：`门清` = `melds` 中不存在 `pong`/`chow`/`kong`(明杠)/`kakan`；**`ankan`（暗杠）不破门清**。
 
@@ -98,7 +98,7 @@ EnumerateDecompositions(concealed_with_winning_tile, melds) -> vector<Decomposit
 
 | 加成 | 番数 | 判定 | 协议字段 |
 | --- | --- | --- | --- |
-| 自摸（`tsumo`） | +1 | `is_tsumo == true` | `win.yaku[]` **不含**；由 `win.tsumo` 派生 ⇒ `han_breakdown.tsumo = 1`。**`results[].win_type` 保持旧形状**（`tags` + `["ron"\|"tsumo"]`），不进 yaku ids |
+| 自摸（`tsumo`） | +1 | `is_tsumo == true` | `win.yaku[]` **不含**；由 `win.tsumo` 派生 ⇒ `han_breakdown.tsumo = 1`。**`results[].win_type` 保持旧形状**（`tags` + `win_ron`(46) / `win_tsumo`(47)），不进 yaku ids |
 | 庄家（`dealer_bonus`） | +1 | `winner_is_dealer == true` | `han_breakdown.dealer = 1` |
 
 > 为什么自摸/庄家不进 `win.yaku[]`：① 自摸在旧协议里已经是 `win.tsumo` 与 `win_type` 的末位元素，再进 `yaku[]` 会让同一事实出现两个出口；② 庄家不是一个「牌型」，是身份加成，客户端要单独渲染成「庄家 +1 番」而不是番种行。
@@ -470,6 +470,8 @@ CREATE TABLE IF NOT EXISTS match_results (
 
 ### 5.1 `GAME_DESIGN.md` 必解冻点（逐条：原文 → 新规则）
 
+> **v2.1 后注**：下表描述的是 v1.10 设计期的线形状；`win.tags[]` / `results[].win_type[]` / `win.yaku[].id` / `win.limit` 已全部改整数（`PROTOCOL.md` §1.3.1），表中「保持旧形状」等表述仅作历史对照。
+
 | # | 位置 | 原文（逐字） | 新规则 | 影响面 |
 | --- | --- | --- | --- | --- |
 | 1 | §1.1 定位 | 「形态：1 名真人玩家 + 3 个服务端 AI 的四人牌桌，**一局定胜负（无场次、无连庄）**。」 | 「形态：1 真人 + 3 AI 的四人牌桌，**一场 4 局、四家轮流坐庄、场终比累计总分**（连庄不占局数）」 | 房间生命周期、大厅回收、结算界面 |
@@ -484,7 +486,7 @@ CREATE TABLE IF NOT EXISTS match_results (
 | 10 | §6.1 算分公式 | 底分 1；`M = base × 4^[七对子] × 4^[清一色]`，`M ∈ {1,4,16}`；荣和 ±M；自摸 −2M/+6M | 整节重写为 §2.1 的番数制（`R = 2^min(番种合计+庄家,6)`） | 算分全部重写 |
 | 11 | §6.2 牌型判定表 | 「清一色：花色相同」/「平和（普通和牌）：非七对子、非清一色，也照常和牌，M=1」 | 换为 §1.2 的 **14 番种 + 2 加成**表；「平和」一词的**语义变更**（旧=没有番的普通和牌，新=门清全顺子 1 番） | ⚠️ **术语冲突，必须处理**：旧 §0.2 术语表把「平和」当作「普通和牌」用，新表把它当作番种 |
 | 12 | §6.3 算分示例表 | 9 行（M ∈ {1,4,16}，最大 +96/−32） | 换为 §2.2 的 7 行（`han` 0..6，最大 +384/−128） | 单测全部重写 |
-| 13 | §6.4 `game_end` 数据 | `win.multiplier` = `M ∈ {1,4,16}`；`win.tags ∈ {[], [seven_pairs], [pure_one_suit], 两者}` | **只增字段、不改既有字段形状**：`win.multiplier` 改为 `R ∈ {1,2,4,8,16,32,64}`；**`win.tags` 保留不动**（取值仍只有 `seven_pairs`/`pure_one_suit`，供旧客户端渲染中文标签；恒为 `win.yaku[].id` 的子集）；**新增** `win.yaku[] = [{"id":<string>,"han":<int>}]`（**顺序 = §1.2 的序**；每个 id 至多一条；箭刻合并为一条）；**新增** `win.han_breakdown = {"base":Σ番种,"tsumo":0\|1,"dealer":0\|1,"total":min(base+tsumo+dealer,6)}`；`results[]` 新增 `match_total`；顶层新增 `hand_no`、`dealer`、`renchan_count`、`match_will_continue`。`results[].win_type` **保持旧形状**（tags + `["ron"\|"tsumo"]`），番种明细的唯一出口是 `win.yaku[]` | 协议 + 客户端（**旧字段零改动 ⇒ 旧客户端不崩**） |
+| 13 | §6.4 `game_end` 数据 | `win.multiplier` = `M ∈ {1,4,16}`；`win.tags ∈ {[], [seven_pairs], [pure_one_suit], 两者}` | **只增字段、不改既有字段形状**：`win.multiplier` 改为 `R ∈ {1,2,4,8,16,32,64}`；**`win.tags` 保留不动**（取值仍只有 `seven_pairs`/`pure_one_suit`，供旧客户端渲染中文标签；恒为 `win.yaku[].id` 的子集）；**新增** `win.yaku[] = [{"id":<string>,"han":<int>}]`（**顺序 = §1.2 的序**；每个 id 至多一条；箭刻合并为一条；v2.1 起 `id` 已改传整数，见 `PROTOCOL.md` §1.3.1）；**新增** `win.han_breakdown = {"base":Σ番种,"tsumo":0\|1,"dealer":0\|1,"total":min(base+tsumo+dealer,6)}`；`results[]` 新增 `match_total`；顶层新增 `hand_no`、`dealer`、`renchan_count`、`match_will_continue`。`results[].win_type` **保持旧形状**（tags + `["ron"\|"tsumo"]`），番种明细的唯一出口是 `win.yaku[]` | 协议 + 客户端（**旧字段零改动 ⇒ 旧客户端不崩**） |
 | 14 | §6.5 结算界面内容 | 9 行展示项 | 新增：番种明细行（逐个番种名 + 番数）、合计番数、庄家番、本局累计总分、局号「东 N 局」；场终页新增排名表 | UI |
 | 15 | §12 不做项（第 3 行） | 「役种表（含起和番 / 无役不可和）：不实现；任何完成形都可和」 | 改为「**已实现番种表**（14 番种 + 2 加成）；**仍无起和番**（0 番可和，得 1 分）」 | 文档口径 |
 | 16 | §12 不做项（第 6 行） | 「多人多局 / 连庄 / 场次分：不实现；一进程一房间、一房间一局」 | 改为「**已实现**：一场 4 局、连庄、场次累计分；仍为一连接一房间」 | 文档口径 |

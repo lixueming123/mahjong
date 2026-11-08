@@ -631,7 +631,7 @@ R          = 2^han                                // R ∈ {1,2,4,8,16,32,64}
      "hand": ["1p","2p","3p","4s","5s","6s","7z","7z","1z","2z","3z","4z","6m"], "win_type": []},
     {"seat": 1, "delta_score":  16, "match_total":  12,
      "hand": ["1m","1m","3m","3m","5m","5m","7m","7m","2p","2p","6p","6p","8p","8p"],
-     "win_type": ["seven_pairs","ron"]},
+     "win_type": [13,46]},
     {"seat": 2, "delta_score":   0, "match_total":   0,
      "hand": ["9m","9m","9m","5z","5z","6z","6z","7z","7z","1s","2s","3s","4s"], "win_type": []},
     {"seat": 3, "delta_score":   0, "match_total":   0,
@@ -642,8 +642,8 @@ R          = 2^han                                // R ∈ {1,2,4,8,16,32,64}
     "tile": "8p",
     "from_seat": 0,
     "tsumo": false,
-    "tags": ["seven_pairs"],
-    "yaku": [{"id": "menzen", "han": 1}, {"id": "seven_pairs", "han": 2}],
+    "tags": [13],
+    "yaku": [{"id": 1, "han": 1}, {"id": 13, "han": 2}],
     "han_breakdown": {"base": 3, "tsumo": 0, "dealer": 1, "total": 4},
     "multiplier": 16,
     "per_payer": 16,
@@ -663,11 +663,11 @@ R          = 2^han                                // R ∈ {1,2,4,8,16,32,64}
 | `results[i].delta_score` | 整数，四家之和为 0 | 本局得失分，见 6.1（**未变**） |
 | `results[i].match_total` | 整数，四家之和为 0（**v1.10 新增**） | 本场累计分（**含本局**） |
 | `results[i].hand` | **v4.5：四家均下发全部牌张**（门前手牌 + 副露牌面，按 3.1 排序；和牌者含和牌张），长度 = 该家 `14/13 + 杠数` | 结算摊牌用，只在 `game_end` 出现；`state_sync` 仍不泄露他家手牌。副露分组仍由 `state_sync.seats[].melds` 还原，元素形状为 `{"type":1\|2\|3\|4\|5,"tiles":[tile,…]}`（`ankan` 在局终揭示后为 4 张） |
-| `results[i].win_type` | 和牌者：`tags` + `["ron"]` 或 `["tsumo"]`；其他人 `[]` | **形状未变**（仍只含 `seven_pairs`/`pure_one_suit`）。完整番种明细的唯一出口是 `win.yaku[]` |
+| `results[i].win_type` | 和牌者：`tags` + `46`（`win_ron`）或 `47`（`win_tsumo`）；其他人 `[]` | **v2.1 起为整数数组**（`yaku` 域）。完整番种明细的唯一出口是 `win.yaku[]` |
 | `win` | 和牌时为对象；荒庄时为 `null` | **未变** |
 | `win.tile` / `win.from_seat` / `win.tsumo` | 同 v1.9 | **未变** |
-| `win.tags` | `[]` / `["seven_pairs"]` / `["pure_one_suit"]` / 两者 | **保持旧形状**，供旧客户端渲染中文标签；恒为 `win.yaku[].id` 的**子集**（**v1.10 起不再与分数一一对应**，分数看 `han_breakdown`/`multiplier`） |
-| `win.yaku` | `[{"id": <string>, "han": <int>}]`（**v1.10 新增**） | 顺序**严格等于 §6.2 的序**；每个 id **至多一条**；箭刻合并为一条 `han=组数`；**不含** `tsumo`/`dealer_bonus` |
+| `win.tags` | 整数数组，元素 ∈ `1..45`（`yaku` 域）；荒庄 / 他家为 `[]` | **v2.1 起为整数数组**；恒为 `win.yaku[].id` 的**子集**且顺序同 `win.yaku[]`（**v1.10 起不再与分数一一对应**，分数看 `han_breakdown`/`multiplier`） |
+| `win.yaku` | `[{"id": <int>, "han": <int>}]`（**v1.10 新增；v2.1 起 id 为整数**） | 顺序**严格等于 §6.2 的序**；每个 id **至多一条**；箭刻合并为一条 `han=组数`；**不含** `tsumo`/`dealer_bonus` |
 | `win.han_breakdown` | `{"base","tsumo","dealer","total"}`（**v1.10 新增**） | `total = min(base + tsumo + dealer, 6)`（**番数合计**）；`R = 2^win.han_breakdown.total`。⚠️ **命名警示**：`win.total` 是**分数**（和牌者实得，v1.0 起冻结），`han_breakdown.total` 是**番数** —— 两者含义不同且不得混用；派生字段（`win.han == han_breakdown.total` 等）必须与源字段恒等，不得各算一次。**`tsumo` 恒为 0（v1.10 内修正）**：自摸不加番（×2 已内建于 2R/6R 支付公式），字段仅为协议形状稳定而保留，**不得**写入非 0 值 |
 | `win.multiplier` | `R ∈ {1,2,4,8,16,32,64}`（**语义变更**） | v1.9 为 `M ∈ {1,4,16}`；字段名与类型不变 |
 | `win.per_payer` | 荣和 = `R`；自摸 = `2R` | 单个付款方支付额（**口径未变**） |
@@ -908,7 +908,7 @@ cost(t) = -usefulness(t)
 | GD-B4 | 若 `reason == "win_ron"`：存在唯一 `win.seat`，`win.multiplier ∈ {1,2,4,8,16,32,64}`（且 `== 2^win.han_breakdown.total`），`win.from_seat ∈ {0,1,2,3}` 且 `from_seat != win.seat`，放炮者 `delta_score == -win.multiplier`，和牌者 `delta_score == +win.multiplier`，其余两家为 0 |
 | GD-B5 | 若 `reason == "win_tsumo"`：`win.tsumo == true`，`win.from_seat == null`，其余三家 `delta_score` 均 == `-2×win.multiplier`，和牌者 `delta_score == +6×win.multiplier`，`win.total == 6×win.multiplier` |
 | GD-B6 | **v4.5 摊牌**：四家 `results[].hand` 均为非空扁平数组并按 §3.1 排序；和牌者长度 ≥ 14 且 `长度 − 14` 等于该家杠数；其余三家长度 = `13 + 杠数`。`state_sync.seats[]` 仍不得出现 `hand` |
-| GD-B7 | `win.tags` 中每个取值 ∈ `{"seven_pairs","pure_one_suit"}` 且 `win.tags ⊆ {y.id for y in win.yaku}`；`win.yaku[]` 的 id 序列**严格按 §6.2 的序**升序出现、每个 id 至多一条；`win.han_breakdown.total == min(base+tsumo+dealer, 6)`（**番数合计，不是分数 `win.total`**；`tsumo` 恒 0）；`win.multiplier == 2^win.han_breakdown.total` |
+| GD-B7 | `win.tags` 中每个取值 ∈ `1..45`（`yaku` 域）且 `win.tags ⊆ {y.id for y in win.yaku}`，顺序同 `win.yaku[]`；`win.yaku[]` 的 id 序列**严格按 §6.2 的序**升序出现、每个 id 至多一条；`win.han_breakdown.total == min(base+tsumo+dealer, 6)`（**番数合计，不是分数 `win.total`**；`tsumo` 恒 0）；`win.multiplier == 2^win.han_breakdown.total` |
 | GD-B8 | **v1.10 场次**：`round_index ∈ 0..3`（0 基，连庄时与上一局相同）；`results[].match_total` 四家之和为 0；`match_will_continue == false` 时**紧随其后必须收到 `match_end`**，且 `match_end.hands_played == 4`、`rankings` 长度 4、`rank = 1 + 严格大于本座位的人数`（competition ranking）、`final_score` 与最后一次 `match_total` 逐座位相等 |
 
 ### 10.3 健壮性断言（C 组，全部必须满足）

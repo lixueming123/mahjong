@@ -225,20 +225,17 @@ is_pure_one_suit(concealed, melds, winning_tile):
 
 - 统计范围为**和牌的全部物理牌张**（门前手牌 + 副露牌面 + 和牌张），共 `14 + kans` 张。
 - 清一色是**倍率标签**，不是独立牌型：它可以与标准型或七对子叠加（`M` 见 §6.1）。
-- **字牌不计入清一色**：`pure_one_suit` 只指数牌单一花色（`m`/`p`/`s`）；含任何字牌即判定为假。本里程碑**无「字一色」**这一役（全字牌和牌 `tags` 为空，`M = 1`）。
+- **字牌不计入清一色**：`pure_one_suit` 只指数牌单一花色（`m`/`p`/`s`）；含任何字牌即判定为假。本里程碑**无「字一色」**这一役（全字牌和牌不会产生 `pure_one_suit`，v1.3+ 仍可能有其他番种）。
 
 ### 3.5 判定结果与标签组装
 
 ```
 if not can_win(...):            -> 不和
-tags = []
-if is_seven_pairs(...):                       tags.push("seven_pairs")
-if is_pure_one_suit(...):                     tags.push("pure_one_suit")
-win_type = tags + [ (tsumo ? "tsumo" : "ron") ]     # 牌型 tags 在前，和牌方式在最后
+tags = [y.id for y in score_hand(...).yaku]   # v1.3+：全部命中番种，顺序同 yaku[]
+win_type = tags + [ (tsumo ? 47 : 46) ]           # 牌型 tags 在前，和牌方式在最后（46=win_ron / 47=win_tsumo）
 ```
 
-- `tags` 取值域：`{}`、`{seven_pairs}`、`{pure_one_suit}`、`{seven_pairs, pure_one_suit}`（顺序固定 `seven_pairs` 在前）。
-- **v1.3 说明**：`tags` 只是**向后兼容的子集**（协议 `win.tags` 与 `results[].win_type` 沿用此形状）；完整的番种判定与番数在 §6.4，出口是 `win.yaku[]`。**`tags` 不再与分数一一对应**（分数看 `han`/`multiplier`）。
+- `tags` 取值域：`{}`（0 番）或 §6.4 命中番种的 id 序列（顺序 = §6.4 判定序）；**v1.0 旧口径只含 `seven_pairs` / `pure_one_suit`，v1.3+ 已扩展为全部命中番种**。**`tags` 不再与分数一一对应**（分数看 `han`/`multiplier`）。**v2.1**：线上 `yaku[].id` / `tags[]` / `win_type[]` 一律为整数，取值见 `PROTOCOL.md` §1.3.1 的 `yaku` 表。
 - **本里程碑没有「必须满足某役才能和牌」的限制**：`tags` 为空也照常和牌（0 番和牌，得 1 分）。
 
 ### 3.6 实现约定与边界（避免误判）
@@ -529,11 +526,11 @@ struct Meld { MeldType type; std::vector<Tile> tiles; };
 bool is_winning_hand(const std::vector<Tile>& concealed,           // 门前手牌（见 §3.6）
                      const std::vector<Meld>& melds,
                      Tile winning_tile, bool is_tsumo);
-std::vector<std::string> win_tags(const std::vector<Tile>& concealed,   // 旧接口保留：只返回 seven_pairs / pure_one_suit
-                                  const std::vector<Meld>& melds, Tile winning_tile);
+std::vector<protocol::YakuId> win_tags(const std::vector<Tile>& concealed,   // v2.1：全部命中番种 id（与 score_hand 同源）
+                                       const std::vector<Meld>& melds, Tile winning_tile);
 
 // v1.3 新增：判番（唯一算分入口的前半段）
-struct Yaku { std::string id; int han; };                          // id = §6.4 的 ASCII 小写下划线
+struct Yaku { protocol::YakuId id; int han; };                     // id = §6.4 的番种；线上经 WireOf 转整数
 struct HanBreakdown { int base; int tsumo; int dealer; int total; };
 struct HandScore { std::vector<Yaku> yaku;      // 有序，顺序 = §6.4 的序；每 id 至多一条
                    HanBreakdown han; };
@@ -578,7 +575,7 @@ ScoreResult score_draw();                                          // 全 0
 
 - **`ScoreWin → ScoreHand`**：语义上「先 `score_hand` 判番，再按 §6.2 生成 `ScoreResult`」。实现可保留 `ScoreWin` 作为便利封装，但**判番逻辑必须只有一个实现**。
 - **`multiplier` 语义变更**：v1.2 = `M ∈ {1,4,16}`；v1.3 = `R ∈ {1,2,4,8,16,32,64}`。字段名与类型不变（协议形状不变）。
-- 判番**只允许一个出口**：`score_hand`；`win_tags` 保留仅为协议 `win.tags` 的向后兼容子集。
+- 判番**只允许一个出口**：`score_hand`；`win_tags` 与 `score_hand().yaku` 同源，协议 `win.tags` 取全部命中番种 id（v2.1 起为整数）。
 
 **返回值/异常约定**：`parse_tile` 非法输入必须可判定失败（`optional`/异常均可，但不得 UB）；所有判定函数对任意输入都不得崩溃。
 
@@ -592,6 +589,7 @@ ScoreResult score_draw();                                          // 全 0
 ### 10.1 正例 ≥ 4（必须判和）
 
 > 记号：`门前 13 张 + 和牌张` = 荣和调用形态（§3.6 第 2 条）；`14 张` = 自摸形态（§3.6 第 1 条）。
+> **v1.0 回归锚点**：下表 `tags` / `M` 是旧口径（只记七对子/清一色）；v1.3+ 线上 `tags` 为全部命中番种 id，分数按 §6.1 的 `R`，`M` 仅作历史对照。
 
 | # | 输入 | 期望 |
 | --- | --- | --- |

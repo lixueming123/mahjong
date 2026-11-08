@@ -92,7 +92,7 @@
 | P8 | `draw` 仅发给摸牌者本人；他家手牌永不下发（`seats[].hand` 不存在） | PROTOCOL §5.5/§8.2 | 已覆盖：room `MultiHumanBroadcastCarriesPrivateHandsAndOneSharedSeatsBlock` | 自动化测试 |
 | P9 | `game_start` 每局恰一次，含 `round_index`/`round_count==4`；`dealer` 不再恒 0 | PROTOCOL §5.4/§10.4 | 已覆盖：room 帧计数；e2e 随 E2 补 | 自动化测试 |
 | P10 | `game_end`/`match_end` 不携带 `seq`、不参与 seq 比较 | PROTOCOL 附录 A | 已覆盖：room invariants（字段存在性断言） | 自动化测试 |
-| P11 | `win.tags` 保持旧形状（⊆ {seven_pairs, pure_one_suit}）且 `tags ⊆ yaku[].id`；每 id 至多一条、序严格按 §6.2 | PROTOCOL §10.4 ①、GAME_DESIGN GD-B7 | 已覆盖：gtest `RegressionAnchorLegacyTags` + `ExpectScoreConsistent`；协议层随 E2 补 | 自动化测试 |
+| P11 | `win.tags` 元素 ∈ `1..45`（`yaku` 域）且 `tags ⊆ yaku[].id`，顺序同 `yaku[]`；每 id 至多一条、序严格按 §6.2 | PROTOCOL §10.4 ①、GAME_DESIGN GD-B7 | 已覆盖：gtest `RegressionAnchorLegacyTags` + `ExpectScoreConsistent`；协议层随 E2 补 | 自动化测试 |
 | P12 | 每局物理守恒：`remaining + 各家手牌 + 副露牌面 + 牌河 == 136`，杠补牌后仍成立 | PROTOCOL §10.4 暗杠行 | 已覆盖：room invariants + e2e statistics 模式物理守恒；整场 e2e 随 E2 补 | 自动化测试 |
 
 ### G5 端到端类（10 条）

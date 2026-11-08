@@ -1,7 +1,8 @@
 # 麻将里程碑协议（PROTOCOL）
 
 - 文档 ID：PROTOCOL
-- 版本：**v2.0（冻结）**
+- 版本：**v2.1（冻结）**
+  v2.1 **番种 / 满贯分档整数化（破坏性变更，硬切换，不兼容 v2.0）**：`win.yaku[].id`、`win.tags[]`、`results[].win_type[]`、`win.limit` 四类字段由字符串改传**整数**；新增 §1.3.1 的 `yaku`（47 值）与 `limit`（6 值）两张冻结表。`win_type` 末位的和牌方式规范名为 `win_ron` / `win_tsumo`（46/47），不与番种 `tsumo`（17）混用。牌码、昵称、id、自由文本仍保持字符串。**无双读兼容层、无版本协商**：服务端、Python 客户端、Web 客户端、全部测试与录制帧日志同批改完；v2.0 客户端无法连接 v2.1 服务端。
   v2.0 **控制字段整数化（破坏性变更，硬切换，不兼容 v1.x）**：`type`、`action`、`window`、`mode`、`length`、`melds[].type`、`reason`、`code` 八类控制字段在线上一律改传**整数**；字段名不变，其余字段（牌码、`yaku[].id`、`tags`、`win_type`、`limit`、昵称、id、自由文本）保持字符串。取值表见新增 §1.3.1，机器可读真值 `game/protocol/enums.json`，由 `protocol_enums_consistency_test.py` 守护 C++ / Python / JS / 文档四方一致。**无双读兼容层、无版本协商**：服务端只接受整数，服务端、Python 客户端、Web 客户端、全部测试与录制帧日志必须同批改完；v1.x 客户端无法连接 v2.0 服务端。
   v1.23 **等待页座位同步**：新增服务端帧 **`room_update`**（S→C 15 → **16 条**，§5.17）——`join_room` 成功、以及未开局时非房主真人断开，都向房间内**全部真人**广播当前四席位快照；`room_joined` 仍只回本人。修复「好友已入座、房主等待页仍显示 3 个 AI」的缺陷，客户端 **MUST** 用本帧刷新等待页。**零新增错误码、零既有帧字段变化**；不读新帧的旧客户端行为不变（未知帧忽略，§1.3）。见 §3.2、§4.3、§5.17
   v1.22 **玩法徽标（纯客户端，零帧变化）**：`game_start` **不新增** `mode` 字段（classic 帧逐字节冻结、仍是 6 键），客户端按「帧里有没有 `points[4]`」判定玩法——日麻恒带、classic 恒不带——并在场况卡右上角画徽标（`日麻` 金色 / `经典` 灰色）。这条只为回答一个反复出现的问题：**「这里怎么不能立直」多数时候答案是「这是经典房」**。服务端一字节未改。见 §5.4
@@ -19,7 +20,8 @@
   v1.6 **A 批增补**（番型表 + 番数结算 + 一场四局/连庄/场次总分 + 暗杠/加杠）：① `action` 动作词表 5 → **7**（+`ankan`、+`kakan`），**不新增窗口类型**（两者是 `discard` 窗口的附加 `options`）；② `melds[].type` 3 → **5**（+`ankan`、+`kakan`），暗杠对他家的 `tiles` 为**空数组**并在局终揭示（§5.9、§8.1）；③ `game_end` **只增字段**（`win.yaku[]` / `win.han_breakdown{base,tsumo,dealer,total}` / `win.han` / `win.dealer_bonus` / `win.rinshan` / `results[].match_total` / 顶层 `round_index` / `dealer` / `renchan_count` / `match_will_continue`），既有字段形状一律不动（**`win.tags` 保持旧语义**，仍是 `yaku[].id` 的子集）；④ 新增服务端帧 **`match_end`**（场终，§5.15）；⑤ **零新增错误码**（仍 14 条，§7.1）；⑥ 明确 `seq` **跨局单调不重置**（§6.2）。见附录 C v1.6 行。
   v1.5 大厅选房：新增 `list_rooms` / `room_list`；`join_room` 在开局前替换一个 AI 座位并回 `room_joined`；`create_room` 不自动开局；`ready` 仍是开局信号。错误码不新增。见 §3、§4.2–§4.4、§4.11、§5.14。
 - 状态：**已冻结**（t3 网关、t4 房间状态机、t5 客户端、t6 端到端脚本必须严格按本文实现；变更须走新的需求评审）
-- 修订：v2.0 **控制字段整数化（破坏性、硬切换）**：`type` / `action` / `window` / `mode` / `length` / `melds[].type` / `reason` / `code` 八域一律改传整数（取值见新增 §1.3.1），全文示例帧与字段值表同步改整数并加名称注释，派生文档只改示例代码块；与服务端 / 三端 / 测试 / golden 日志同批切换
+- 修订：v2.1 **番种 / 分档整数化（破坏性、硬切换）**：`yaku[].id` / `tags[]` / `win_type[]` / `limit` 改传整数（新增 §1.3.1 `yaku` / `limit` 两域），全文示例帧与字段值表同步，客户端解析边界改回规范名；与服务端 / 三端 / 测试 / golden 日志同批切换
+  v2.0 **控制字段整数化（破坏性、硬切换）**：`type` / `action` / `window` / `mode` / `length` / `melds[].type` / `reason` / `code` 八域一律改传整数（取值见新增 §1.3.1），全文示例帧与字段值表同步改整数并加名称注释，派生文档只改示例代码块；与服务端 / 三端 / 测试 / golden 日志同批切换
   v1.22 增补 §5.4 的「玩法判定口径」（`game_start` 无 `mode` 键，客户端按 `points` 反推）
   v1.21 增补 §5.7 的 `action_request.riichi_tiles`（立直宣言牌候选）与 §12.5 的客户端标记口径
   v1.20 增补 §12.13（场终剩棒归一位）与 §5.10 的 `game_end.kyoutaku_award`
@@ -134,9 +136,9 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | 字段类型错误（如 `seq` 非整数、`{"type":3.0}`） | `error{code:8}`，状态零变更 |
 | 数值范围 | `seq`/`deadline_ms`/`remaining` 为非负整数（`seq ≥ 1`） |
 
-### 1.3.1 控制字段枚举表（v2.0，冻结线值）
+### 1.3.1 控制字段枚举表（v2.1，冻结线值）
 
-> 本节八张表是线值的**唯一冻结清单**，机器可读真值为 `game/protocol/enums.json`；
+> 本节十张表是线值的**唯一冻结清单**，机器可读真值为 `game/protocol/enums.json`；
 > C++（`game/server/protocol_enums.h`）、Python（`game/protocol/enums.py`）、
 > Web（`game/web/js/protocol_enums.js`）各持一份类型化常量，由
 > `game/tests/protocol_enums_consistency_test.py` 逐域比对名称与数值。
@@ -277,6 +279,75 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | 12 | `AUTH_FAILED` | 见 §7.1 |
 | 13 | `USERNAME_TAKEN` | 见 §7.1 |
 | 14 | `ALREADY_ONLINE` | 见 §7.1 |
+<!-- /wire-enum -->
+
+#### `win.yaku[].id` / `win.tags[]` / `results[].win_type[]`（47 值，§5.10 / §12.5）
+
+<!-- wire-enum: yaku -->
+| 值 | 名称 | 说明 |
+| --- | --- | --- |
+| 0 | `INVALID` | 保留，永不下发 |
+| 1 | `menzen` | classic 番种 |
+| 2 | `tanyao` | classic 番种 |
+| 3 | `pinfu` | classic 番种 |
+| 4 | `iipeikou` | classic 番种 |
+| 5 | `yakuhai` | classic 番种（`han` = 组数） |
+| 6 | `rinshan` | classic 番种 |
+| 7 | `sanshoku_doujun` | classic 番种 |
+| 8 | `ittsuu` | classic 番种 |
+| 9 | `toitoi` | classic 番种 |
+| 10 | `sanankou` | classic 番种 |
+| 11 | `honitsu` | classic / riichi 番种 |
+| 12 | `shousangen` | classic 番种 |
+| 13 | `seven_pairs` | classic 番种 |
+| 14 | `pure_one_suit` | classic 番种 |
+| 15 | `riichi` | riichi 番种 |
+| 16 | `ippatsu` | riichi 番种 |
+| 17 | `tsumo` | riichi 番种（门前清自摸和；**不是**和牌方式） |
+| 18 | `chankan` | riichi 番种 |
+| 19 | `haitei` | riichi 番种 |
+| 20 | `houtei` | riichi 番种 |
+| 21 | `ryanpeikou` | riichi 番种 |
+| 22 | `junchan` | riichi 番种 |
+| 23 | `chanta` | riichi 番种 |
+| 24 | `sankantsu` | riichi 番种 |
+| 25 | `honroutou` | riichi 番种 |
+| 26 | `chinitsu` | riichi 番种 |
+| 27 | `chiitoitsu` | riichi 番种 |
+| 28 | `dora` | riichi 宝牌 |
+| 29 | `ura_dora` | riichi 里宝牌 |
+| 30 | `aka_dora` | riichi 赤宝牌 |
+| 31 | `tenhou` | riichi 役满 |
+| 32 | `chiihou` | riichi 役满 |
+| 33 | `kokushi` | riichi 役满 |
+| 34 | `kokushi_13` | riichi 双倍役满 |
+| 35 | `suuankou` | riichi 役满 |
+| 36 | `suuankou_tanki` | riichi 双倍役满 |
+| 37 | `daisangen` | riichi 役满 |
+| 38 | `tsuuiisou` | riichi 役满 |
+| 39 | `ryuuiisou` | riichi 役满 |
+| 40 | `chinroutou` | riichi 役满 |
+| 41 | `chuuren` | riichi 役满 |
+| 42 | `chuuren_junsei` | riichi 双倍役满 |
+| 43 | `suukantsu` | riichi 役满 |
+| 44 | `shousuushii` | riichi 役满 |
+| 45 | `daisuushii` | riichi 双倍役满 |
+| 46 | `win_ron` | **仅** `results[].win_type` 末位（荣和） |
+| 47 | `win_tsumo` | **仅** `results[].win_type` 末位（自摸） |
+<!-- /wire-enum -->
+
+#### `win.limit`（6 值，§12.5）
+
+<!-- wire-enum: limit -->
+| 值 | 名称 | 说明 |
+| --- | --- | --- |
+| 0 | `INVALID` | 保留，永不下发 |
+| 1 | `none` | 未满贯（合法真实值） |
+| 2 | `mangan` | 满贯 |
+| 3 | `haneman` | 跳满 |
+| 4 | `baiman` | 倍满 |
+| 5 | `sanbaiman` | 三倍满 |
+| 6 | `yakuman` | 役满 |
 <!-- /wire-enum -->
 
 ### 1.4 连接生命周期
@@ -796,13 +867,13 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
              "hand":["1p","2p","3p","4s","5s","6s","7z","7z","1z","2z","3z","4z","6m"],"win_type":[]},
             {"seat":1,"delta_score":4,
              "hand":["1m","1m","3m","3m","5m","5m","7m","7m","2p","2p","6p","6p","8p","8p"],
-             "win_type":["seven_pairs","ron"]},
+             "win_type":[13,46]},
             {"seat":2,"delta_score":0,
              "hand":["9m","9m","9m","5z","5z","6z","6z","7z","7z","1s","2s","3s","4s"],"win_type":[]},
             {"seat":3,"delta_score":0,
              "hand":["2m","3m","4m","4p","5p","6p","7s","8s","9s","2z","2z","6z","6z"],"win_type":[]}],
  "win":{"seat":1,"tile":"8p","from_seat":0,"tsumo":false,
-        "tags":["seven_pairs"],"multiplier":4,"per_payer":4,"total":4}}
+        "tags":[13],"multiplier":4,"per_payer":4,"total":4}}
 ```
 > 数值对照：`21`=game_end（帧）、`1`=win_ron（reason）；完整表见 §1.3.1。
 > 上面这份是 **v1.5 形状（保留作为"既有字段不动"的对照）**；v1.6 追加的字段见本节末的完整示例。
@@ -813,12 +884,12 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | `results` | 恒 4 项，按 `seat` 升序，`seat` 覆盖 `{0,1,2,3}` 无重复 |
 | `results[].delta_score` | 整数；四家之和 **MUST 为 0**（`RULESET.md` §6） |
 | `results[].hand` | **v4.5：四家均下发扁平数组**（门前手牌 + 副露牌面，按 §2.2 排序；和牌者含和牌张，长度 = `14/13 + 杠数`）。**不替代** `melds[]`，两者并存（H4）；仅存在于 `game_end`，不得提前泄露 |
-| `results[].win_type` | 和牌者 = `tags` + `["ron"]` 或 `["tsumo"]`（牌型 tags 在前，和牌方式在最后）；其他人 `[]` |
+| `results[].win_type` | 和牌者 = `tags` + `46`（`win_ron`）或 `47`（`win_tsumo`）（牌型 tags 在前，和牌方式在最后）；其他人 `[]`。**v2.1 起为整数数组**，见 §1.3.1 |
 | `win` | 和牌时为对象，荒庄时为 `null` |
 | `win.seat` / `win.tile` | 和牌者座位 / 和牌张（荣和 = 被和的那张；自摸 = 摸到的牌） |
 | `win.from_seat` | 荣和 = 放炮者座位；**自摸 = `null`（字段必须存在）** |
 | `win.tsumo` | 布尔 |
-| `win.tags` | **旧语义原样保留**：只含 `seven_pairs` / `pure_one_suit` 两个旧 id（顺序 `seven_pairs` 在前），供旧客户端渲染中文标签；恒为 `win.yaku[].id` 的**子集**。荒庄/他家为 `[]`（v1.6：**不**把全部番种塞进 `tags`，番种明细的唯一出口是 `win.yaku[]`） |
+| `win.tags` | **v2.1 起为整数数组**，元素取自 §1.3.1 的 `yaku` 域（1..45），恒为 `win.yaku[].id` 的**子集**，顺序同 `yaku[]`。当前实现为全部命中番种 id；荒庄/他家为 `[]`，番种明细的唯一出口是 `win.yaku[]` |
 | `win.multiplier` | **保留字段名，语义不变（支付倍率）**：荣和 = `per_payer`；自摸 = `per_payer / 2`。v1.6 起 = `R`（由番数合计推导），**不再限制为 `{1,4,16}`** |
 | `win.per_payer` | 荣和 = 放炮者实付；自摸 = 每家实付（`RULESET.md` §6 A 批修订版） |
 | `win.total` | 和牌者实得**分数**（= 三家实付之和）。**注意：此字段不是番数**；番数合计见 `win.han_breakdown.total`，两者名字不同、含义不同，实现方不得混用 |
@@ -833,19 +904,19 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | `match_will_continue` | bool | `true` = 本场还有下一局（服务端稍后会下发新的 `game_start`）；`false` = 本场结束，随后下发 **`match_end`**（§5.15） |
 | `results[].match_total` | int | 该座位在**本场**的累计得失分（含本局）：`Σ 本场各局 delta_score`，四家之和恒为 0 |
 | `interlude_ms` | int | **v1.8**：本房间生效的**局间窗口**（毫秒），缺省 `12000`（= 播报窗上限 `10500` + 预算扣减 `1500`）。**每一份 `game_end` 都带**（荒庄与场终那一局也不例外）。客户端用它算结算播报预算（`clamp(interlude_ms − 1500, 4200, 10500)`；`1500` 只是预算扣减额，**不是**固定阅读窗——真实阅读时间 = `interlude_ms − 实际播报总长`）与「下一局即将开始（N 秒）」的剩余秒数；`0` 是合法值（服务端立即推进 ⇒ 不播报）。场终的 `match_end` 也被延迟同样的时长（服务端延迟，客户端**不得**缓存 `match_end`） |
-| `win.yaku` | array | 番种明细：`[{"id":<string>,"han":<int>}, …]`。**顺序 = `RULESET.md` 番种表的冻结判定序**（即结算页渲染序）；**每个 `id` 至多出现一条**（`yakuhai` 命中 n 组也合并为一条、`han = n`）。`Σ yaku[].han == win.han_breakdown.base`。荒庄/他家无此字段 |
+| `win.yaku` | array | 番种明细：`[{"id":<int>,"han":<int>}, …]`（`id` 取自 §1.3.1 的 `yaku` 域，v2.1 起为整数）。**顺序 = `RULESET.md` 番种表的冻结判定序**（即结算页渲染序）；**每个 `id` 至多出现一条**（`yakuhai` 命中 n 组也合并为一条、`han = n`）。`Σ yaku[].han == win.han_breakdown.base`。荒庄/他家无此字段 |
 | `win.han_breakdown` | object | 番数四段式：`{"base":<int>,"tsumo":<int>,"dealer":<int>,"total":<int>}`。`base` = 牌型番合计（= Σ `yaku[].han`）；`dealer` = 庄家加成（0/1）；`total` = `min(base + dealer, 6)`（**封顶 6 番**）。**`tsumo` 恒 0，仅作兼容占位，客户端 MUST NOT 渲染**（自摸不是番种，`RULESET.md` §6 B1.1 裁决）。荒庄/他家无此字段 |
 | `win.han` | int | **= `win.han_breakdown.total`**（合计番数，含加成、封顶 6）。保留作单值便利字段，与 `han_breakdown.total` 恒等。荒庄/他家无此字段 |
 | `win.dealer_bonus` | bool | **派生便利字段**：等价于 `win.han_breakdown.dealer == 1`。荒庄/他家无此字段 |
-| `win.rinshan` | bool | **派生便利字段**：等价于 `win.yaku[]` 含 `id == "rinshan"`。荒庄/他家无此字段 |
+| `win.rinshan` | bool | **派生便利字段**：等价于 `win.yaku[]` 含 `id == 6`（`rinshan`）。荒庄/他家无此字段 |
 
-**`win.yaku[].id` 的冻结词表（v1.6，14 个，顺序即判定序）**
+**`win.yaku[].id` 的冻结词表（v2.1，整数；名称仅作文档/日志的规范名）**
 
-`menzen`（门前清）→ `tanyao`（断幺九）→ `pinfu`（平和）→ `iipeikou`（一杯口）→ `yakuhai`（箭刻）→ `rinshan`（杠上开花）→ `sanshoku_doujun`（三色同顺）→ `ittsuu`（一气通贯）→ `toitoi`（对对和）→ `sanankou`（三暗刻）→ `honitsu`（混一色）→ `shousangen`（小三元）→ `seven_pairs`（七对子）→ `pure_one_suit`（清一色）。
+`1  menzen`（门前清）→ `2  tanyao`（断幺九）→ `3  pinfu`（平和）→ `4  iipeikou`（一杯口）→ `5  yakuhai`（箭刻）→ `6  rinshan`（杠上开花）→ `7  sanshoku_doujun`（三色同顺）→ `8  ittsuu`（一气通贯）→ `9  toitoi`（对对和）→ `10 sanankou`（三暗刻）→ `11 honitsu`（混一色）→ `12 shousangen`（小三元）→ `13 seven_pairs`（七对子）→ `14 pure_one_suit`（清一色）。完整 47 值见 §1.3.1。
 
-- 这 14 个 id 是**线协议词汇**（客户端按 id 渲染中文标签），因此在此冻结；**每个 id 的番值与判定条件以 `RULESET.md` 番种表为唯一权威**，本文不重复其数值，避免两处漂移。
+- 这些整数 id 是**线协议词汇**（客户端按 id 查 §1.3.1 表再渲染中文标签），因此在此冻结；**每个 id 的番值与判定条件以 `RULESET.md` 番种表为唯一权威**，本文不重复其数值，避免两处漂移。
 - **自摸不加番**（`SETTLEMENT_BROADCAST_RULINGS` C9 定稿）：`han_breakdown.tsumo` **恒 0**，是兼容占位而非番值；客户端的加和式只有两项 —— 「牌型番 + 庄家加成 = 合计」，**屏上不得出现任何自摸加成项**。庄家加成是身份加成不是牌型，两者都只出现在 `win.han_breakdown` 的对应字段里，不进 `yaku[]`。
-- 旧 id `seven_pairs` / `pure_one_suit` 的**字符串与语义均不变**（七对子仍是七对子；清一色仍是"零字牌"），因此旧客户端的标签映射继续可用。
+- `seven_pairs`（13）/ `pure_one_suit`（14）的**语义不变**（七对子仍是七对子；清一色仍是"零字牌"），只是线值由字符串改为整数。
 
 - **`game_end` 不携带 `seq`**，不参与 `seq` 比较（H5）。
 - 收件人：广播 4 家（含托管座位；`results` 仍包含它）。
@@ -854,12 +925,12 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 ```json
 {"type":21,"reason":1,"round_index":1,"dealer":1,"renchan_count":0,"match_will_continue":true,
  "results":[{"seat":0,"delta_score":-M,"hand":[],"win_type":[],"match_total":-M},
-            {"seat":1,"delta_score":M,"hand":["…14+杠数 张…"],"win_type":["seven_pairs","ron"],"match_total":M},
+            {"seat":1,"delta_score":M,"hand":["…14+杠数 张…"],"win_type":[13,46],"match_total":M},
             {"seat":2,"delta_score":0,"hand":[],"win_type":[],"match_total":0},
             {"seat":3,"delta_score":0,"hand":[],"win_type":[],"match_total":0}],
  "win":{"seat":1,"tile":"8p","from_seat":0,"tsumo":false,
-        "tags":["seven_pairs"],
-        "yaku":[{"id":"menzen","han":1},{"id":"seven_pairs","han":2}],
+        "tags":[13],
+        "yaku":[{"id":1,"han":1},{"id":13,"han":2}],
         "han_breakdown":{"base":3,"tsumo":0,"dealer":0,"total":3},
         "han":3,"dealer_bonus":false,"rinshan":false,
         "multiplier":R,"per_payer":R,"total":R}}
@@ -1591,8 +1662,8 @@ remaining(tile) = 4
   - **`kakan` 永不提供** —— 立直手是门前清，不可能有碰组，这条在结构上就不会出现。
   - **`ankan` 只在「不改变听牌」时提供**（v1.16）：把 4 张杠掉之后的等待张集合必须与杠前**完全相同**。
     客户端不需要自己判断，照 `options` 渲染即可；被拒绝时不会出现该按钮。
-- **天和 / 地和**（v1.17）：第一巡自摸的役满，会作为 `yaku[].id = "tenhou"` / `"chiihou"` 出现在
-  `game_end.win.yaku[]` 里（`limit = "yakuman"`）。天和＝庄家配牌即和；地和＝闲家在自己第一次摸牌时和，
+- **天和 / 地和**（v1.17）：第一巡自摸的役满，会作为 `yaku[].id = 31` / `32`（`tenhou` / `chiihou`）出现在
+  `game_end.win.yaku[]` 里（`limit = 6`，即 `yakuman`）。天和＝庄家配牌即和；地和＝闲家在自己第一次摸牌时和，
   两者都要求本局此前**无鸣牌**。
 - **无役不能和**：日麻窗口只在「至少一个役」时提供 `win`（宝牌不算役）。因此 `game_end.reason`
   在日麻下只会是 `win_ron` / `win_tsumo`（有役）或 `draw_exhausted`。
@@ -1613,7 +1684,7 @@ remaining(tile) = 4
 | --- | --- | --- |
 | `fu` | int | 符（七对子固定 25；平和自摸 20） |
 | `points` | int | 和牌点数（荣和 = 放炮者付出；自摸 = 三家之和） |
-| `limit` | string | `none` / `mangan` / `haneman` / `baiman` / `sanbaiman` / `yakuman` |
+| `limit` | int | `1`=none / `2`=mangan / `3`=haneman / `4`=baiman / `5`=sanbaiman / `6`=yakuman（v2.1 起为整数，见 §1.3.1） |
 | `dora` | int | 宝牌张数 |
 | `ura_dora` | int | 里宝张数（非立直和牌恒 0） |
 | `aka_dora` | int | **赤宝牌张数**（v1.18；役满恒 0，见 §12.11） |
@@ -1714,7 +1785,7 @@ remaining(tile) = 4
 | --- | --- |
 | 物理身份 | 5m / 5p / 5s 各自的**第 4 张**（`copy == 3`）；一副牌仍是 34 面 × 4 张 = 136 张，**不新增牌面** |
 | 牌码 | `0m` / `0p` / `0s`（见 §2.1）。牌面 = 5：吃/碰/杠/听牌/和牌一律按 5 判定，排序排在同面最后 |
-| 番数 | 每张 **+1 番**，`win.yaku[]` 里合并成**一条** `{"id":"aka_dora","han":N}`（与 `dora` / `ura_dora` 同形） |
+| 番数 | 每张 **+1 番**，`win.yaku[]` 里合并成**一条** `{"id":30,"han":N}`（`aka_dora`，与 `dora` / `ura_dora` 同形） |
 | 字段 | `win.aka_dora`（int，张数）；`aka_dora` 已计入 `win.han`，**不要**再加一遍 |
 | 役满 | **不加算**（役满按倍数封顶，`win.aka_dora` 恒 0） |
 | 役？ | **不是役**。只有赤牌没有役仍然**不能和**（窗口不给 `win`，与宝牌同口径） |
@@ -1748,7 +1819,7 @@ remaining(tile) = 4
 - **恒等式仍成立**：`win.han = Σ win.yaku[].han`，因此 `han_breakdown.base` 与 `han` 不会打架
   （`win.han` 的绝对值在日麻下没有番数含义，只有倍满以上才需要看 `limit` / `points`）。
 - **不新增 id 的情况**：普通「国士无双 / 四暗刻 / 九莲宝灯」仍用旧 id（1 倍），
-  客户端按 id 查表即可，**不需要**判断倍数。
+  客户端按整数 id 查 §1.3.1 表即可，**不需要**判断倍数。
 - **`kokushi` 与 `kokushi_13` 互斥**：十三面和牌只报 `kokushi_13`，不会两条都出现。
 
 ### 12.12 击飞终局（**v1.19 增补**）
@@ -1825,7 +1896,7 @@ remaining(tile) = 4
 | `action_event` | S→C | `seat`, `action`, `tiles[]`（**`ankan` 恒 `[]`**，v1.7 §11.5）, `from_seat?`（`ankan`/`kakan`/自摸 不带） | ✅ |
 | `state_sync` | S→C | `hand`, `melds[]`（5 种 type）, `seats[]`（他家 `ankan.tiles` 为 `[]`）, `remaining`, `current_seat` | ✅ |
 | `tenpai` | S→C | **仅本家（v1.7）**：`tenpai_seq`, `is_tenpai`, `waits[]{tile,remaining}` | ❌（走 `tenpai_seq`） |
-| `game_end` | S→C | **局终**：`reason`, `results[4]`（+`match_total`）, `win`（+`yaku[]`/`han_breakdown{base,tsumo,dealer,total}`/`han`/`dealer_bonus`/`rinshan`；`tags` 保持旧语义）, `round_index`, `dealer`, `renchan_count`, `match_will_continue`（后四个 v1.6）, `interlude_ms`（v1.8） | ❌ |
+| `game_end` | S→C | **局终**：`reason`, `results[4]`（+`match_total`）, `win`（+`yaku[]`/`han_breakdown{base,tsumo,dealer,total}`/`han`/`dealer_bonus`/`rinshan`；`tags` 为 `yaku` 域整数数组）, `round_index`, `dealer`, `renchan_count`, `match_will_continue`（后四个 v1.6）, `interlude_ms`（v1.8） | ❌ |
 | `match_end` | S→C | **场终（v1.6）**：`hands_played`, `renchan_count`, `rankings[]{seat,final_score,rank}` | ❌ |
 | `stats` | S→C | `games`, `wins`, `draws`, `net_score`, `recent[]` | ❌ |
 | `pong` | S→C | — | — |
@@ -1848,6 +1919,7 @@ remaining(tile) = 4
 
 | 版本 | 内容 | 来源 |
 | --- | --- | --- |
+| **v2.1** | **番种 / 满贯分档整数化（破坏性变更、硬切换，不兼容 v2.0）**：`win.yaku[].id`、`win.tags[]`、`results[].win_type[]`、`win.limit` 四类字段由字符串改为整数；新增 §1.3.1 的 `yaku`（47 值）与 `limit`（6 值）两张冻结表，总计 **10 域 117 值**。`results[].win_type[]` 末位用 `win_ron`（46）/ `win_tsumo`（47），与番种 `tsumo`（17）区分。牌码、昵称、id、自由文本、错误 `message` 保持不变；服务端、Python 客户端、Web、全部测试与 golden 日志同批切换，**无双读兼容层、无版本协商** | 线协议 v2.1 补齐 v2.0 漏掉的展示型枚举（10 域 117 值，见 §1.3.1） |
 | **v2.0** | **控制字段整数化（破坏性变更、硬切换，不兼容 v1.x）**：`type`、`action`、`window`、`mode`、`length`、`melds[].type`、`reason`、`code` 八域共 **64 个线值**由字符串改为整数（各域 `0` 保留、真实值 `1..N` 连续），字段名不变；新增 §1.3.1 八张冻结枚举表与 `game/protocol/enums.json` 单一真值，由一致性测试守护 C++/Python/JS/文档四方；服务端、Python 客户端、Web、全部测试、golden 日志与文档同批切换，**无双读兼容层、无版本协商**。牌码、`yaku[].id`、`tags`、`win_type`、`limit`、错误 `message` 等展示型字符串保持不变 | 线协议 v2.0 重构（8 域 64 值，见 §1.3.1） |
 | **v1.23** | **等待页座位同步**：新增 S→C 帧 `room_update`（S17，§5.17，15 → 16 条），`join_room` 成功 / 未开局非房主断开后广播房间内全部真人的四席位快照；`room_joined` 仍只回本人，`room_list` 仍只有人数。客户端据此刷新等待页席位与人数提示，不得靠 `players` 反推座位。**零新增错误码、零既有帧字段变化**，旧客户端忽略未知帧即可 | 缺陷修复（好友入座后房主等待页没同步）；用户需求「服务器应该做同步」 |
 | **v1.20** | **场终剩棒归一位**（`mode=riichi`）：§12.13 新增整节 —— 本场以荒庄/击飞收尾时，台面剩下的立直棒全部归**一位**（持点最高，同点 seat 升序），点数计入该局 `results[].delta_score` / `match_total` / `points_after[]`，与 `match_end.rankings[].final_score` 逐点一致；新增**可选字段** `game_end.kyoutaku_award`（`{seat, sticks, points}`，非场终局恒 `null`）。**classic 逐字节不变**，零新增错误码 | 需求（场供归属）；规则口径见 `GAME_DESIGN_RIICHI_DRAFT.md` §7.7 |
