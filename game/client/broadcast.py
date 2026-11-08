@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable, Sequence
 
 from . import vo_durations as VO
-from .tiles import LIMIT_LABEL, RIICHI_YAKU_LABEL
+from .tiles import LIMIT_LABEL, RIICHI_YAKU_LABEL, limit_name, yaku_name
 
 import sys
 from pathlib import Path
@@ -601,12 +601,13 @@ def _parse_yaku_rows(
 
 
 def _yaku_row(item: dict, labels: dict | None = None) -> YakuRow:
-    yid = item.get("id")
+    # v2.1：线上 id 是整数；解析边界转回规范名，标签/语音表继续按名字查。
+    yid = yaku_name(item.get("id"))
     han = _as_int(item.get("han")) or 0
-    label = (labels or YAKU_LABEL).get(str(yid), YAKU_LABEL.get(str(yid), str(yid)))
+    label = (labels or YAKU_LABEL).get(yid, YAKU_LABEL.get(yid, yid))
     # 箭刻合并为一条（han = 组数）：han > 1 时写「箭刻 N 组」
     name = f"{label} {han} 组" if (yid == "yakuhai" and han > 1) else label
-    return YakuRow(yaku_id=str(yid), name=name, han=han)
+    return YakuRow(yaku_id=yid, name=name, han=han)
 
 
 def leader_text(results: Iterable[dict], name_of: Callable[[int], str] | None = None) -> str:
@@ -672,7 +673,7 @@ def plan_for(
     has_yaku_key = "yaku" in win
     raw_yaku = win.get("yaku")
     yaku_list = (
-        [item for item in raw_yaku if isinstance(item, dict) and isinstance(item.get("id"), str)]
+        [item for item in raw_yaku if isinstance(item, dict) and _as_int(item.get("id")) is not None]
         if isinstance(raw_yaku, list)
         else []
     )
@@ -766,7 +767,7 @@ def plan_for(
         riichi_mode=riichi_mode,
         fu=fu_field,
         points=riichi_points,
-        limit_text=riichi_limit_text(str(win.get("limit") or "")),
+        limit_text=riichi_limit_text(limit_name(win.get("limit"))),
     )
 
     # RULINGS §2.6（v1.6 修订）：L2（协议里没有 `yaku` 键）**仍播报**，但只播结论
@@ -794,7 +795,7 @@ def plan_for(
         mult=mult,
         fu=fu_field,
         points=riichi_points,
-        limit=str(win.get("limit") or ""),
+        limit=limit_name(win.get("limit")),
         riichi_mode=riichi_mode,
         capped_input=capped_input,
         cap_state=cap_state,

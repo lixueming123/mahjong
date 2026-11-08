@@ -18,7 +18,7 @@ import pygame
 
 from .. import broadcast as BC
 from .. import theme as T
-from ..tiles import LIMIT_LABEL, RIICHI_YAKU_LABEL
+from ..tiles import LIMIT_LABEL, RIICHI_YAKU_LABEL, limit_name, yaku_name
 from ..game_state import GameState
 from ..tiles import multiset_remove
 from ..view import UiView
@@ -118,7 +118,10 @@ def _yaku_detail(win_diff: dict | None) -> str:
     # F6（RULINGS §2.6）：「`yaku` 键缺失」≠「0 番」——只有键**存在**且为空数组才是真的无番。
     if "yaku" not in win_diff:
         return "番种明细不可用"
-    yaku = [y for y in (win_diff.get("yaku") or []) if isinstance(y, dict) and isinstance(y.get("id"), str)]
+    yaku = [
+        y for y in (win_diff.get("yaku") or [])
+        if isinstance(y, dict) and isinstance(y.get("id"), int) and not isinstance(y.get("id"), bool)
+    ]
     if not yaku:
         return "无番（0 番）"
     # `win.fu` 键存在即日麻（役满 `fu = 0` 也算，不能用 `> 0` 判，否则退回 classic 公式）
@@ -127,10 +130,10 @@ def _yaku_detail(win_diff: dict | None) -> str:
     parts: list[str] = []
     base = 0
     for item in yaku:
-        yid = item["id"]
+        yid = yaku_name(item["id"])
         han = item.get("han") if isinstance(item.get("han"), int) else 0
         base += han
-        label = labels.get(yid, YAKU_LABEL.get(yid, str(yid)))
+        label = labels.get(yid, YAKU_LABEL.get(yid, yid))
         # 箭刻合并为一条（han = 组数）：han > 1 时显示「箭刻 N 组」（§9.4）
         if yid == "yakuhai" and han > 1:
             parts.append(f"{label} {han} 组")
@@ -158,10 +161,10 @@ def _yaku_detail(win_diff: dict | None) -> str:
     points = win_diff.get("points")
     if isinstance(fu, int) and isinstance(points, int):
         # 日麻：符 × 番 → 点数（不是 2^番 的倍率制）；役满 `fu = 0` 不写符
-        limit = win_diff.get("limit")
+        limit = limit_name(win_diff.get("limit"))
         fu_text = f" {fu} 符" if fu > 0 else ""
         text += f" ｜ 合计 {total} 番{fu_text}（{points} 点）"
-        if isinstance(limit, str) and limit not in ("none", ""):
+        if limit not in ("none", ""):
             text += f" {LIMIT_LABEL.get(limit, limit)}"
         return text
     text += f" ｜ 合计 {total} 番（{multiplier} 分）"

@@ -29,7 +29,7 @@ _game_root = next(
     if (p / "protocol" / "enums.json").is_file()
 )
 sys.path.insert(0, str(_game_root))
-from protocol.enums import ACTION
+from protocol.enums import ACTION, FRAME_TYPE, name_of
 
 NUMBER_SUITS = "mps"          # 数牌花色（排序序 m < p < s）；字牌见 HONOR_SUIT
 HONOR_SUIT = "z"
@@ -160,6 +160,7 @@ def button_label(action: int, tiles: list[str] | None = None) -> str:
         return "吃 " + " ".join(names) if names else "吃"
     return {
         ACTION.WIN: "胡", ACTION.PASS: "过", ACTION.RIICHI: "立直",
+        FRAME_TYPE.DISCARD: "打牌",
     }.get(action, str(action))
 
 
@@ -209,6 +210,25 @@ LIMIT_LABEL = {
     "sanbaiman": "三倍满",
     "yakuman": "役满",
 }
+
+
+def yaku_name(value: object) -> str:
+    """Wire yaku id（v2.1 整数；兼容旧日志字符串）→ 规范名。
+
+    未知整数回退为数字字符串，保证渲染/语音查表不会因单个坏值崩溃。
+    """
+    if isinstance(value, int) and not isinstance(value, bool):
+        name = name_of("yaku", value)
+        return str(value) if name == "INVALID" else name
+    return str(value or "")
+
+
+def limit_name(value: object) -> str:
+    """Wire limit（v2.1 整数；兼容旧日志字符串）→ 规范名；未知值回退数字。"""
+    if isinstance(value, int) and not isinstance(value, bool):
+        name = name_of("limit", value)
+        return str(value) if name == "INVALID" else name
+    return str(value or "")
 
 
 def remove_leftmost(tiles: list[str], face: str) -> bool:
