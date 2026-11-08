@@ -42,7 +42,7 @@ enum class Limit : uint8_t {
 };
 
 struct Yaku {
-  std::string id;  // ASCII 小写下划线，与协议 win.yaku[].id 同源
+  protocol::YakuId id = protocol::YakuId::kInvalid;  // 线协议枚举（PROTOCOL v2.1 §1.3.1）
   int han = 0;
 
   friend bool operator==(const Yaku& a, const Yaku& b) { return a.id == b.id && a.han == b.han; }
@@ -89,16 +89,15 @@ struct ScoreResult {
 // 指示牌 → 宝牌牌面（数牌 9→1；风 东→南→西→北→东；三元 白→发→中→白）。非法输入原样返回。
 Face DoraFaceFromIndicator(Tile indicator);
 
-// 番数表（供测试与展示）。`closed` 决定门前/副露两档；未知 id 返回 0。
-int YakuHan(std::string_view id, bool closed);
-bool IsYakumanYaku(std::string_view id);
-std::string_view LimitName(Limit limit);
+// 番数表（供测试与展示）。`closed` 决定门前/副露两档；非日麻番种/加成 id 返回 0。
+int YakuHan(protocol::YakuId id, bool closed);
+bool IsYakumanYaku(protocol::YakuId id);
 
 // ---- 双倍役满（v1.18）----------------------------------------------------------
 // 四种「双倍役满」各记 2 倍：`kokushi_13`（国士十三面）、`suuankou_tanki`（四暗刻单骑）、
 // `chuuren_junsei`（纯正九莲宝灯）、`daisuushii`（大四喜）。其余役满 1 倍，非役满 0。
 // 一手多役满时**倍数相加**（大四喜 + 字一色 = 3 倍 = 48000 / 闲家自摸每家 16000）。
-int YakumanMultiplier(std::string_view id);
+int YakumanMultiplier(protocol::YakuId id);
 
 // ---- 场风 / 自风 --------------------------------------------------------------
 // 每「場」4 局（东场 4 局或南场 4 局）。半庄 = 东场 + 南场 = 8 局。

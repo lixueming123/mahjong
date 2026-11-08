@@ -1553,9 +1553,12 @@ TEST_F(RoomActorTest, FullGamesSatisfyProtocolInvariants) {
       ASSERT_NE(yaku, nullptr);
       ASSERT_NE(breakdown, nullptr);
       int base = 0;
-      std::vector<std::string> yaku_ids;
+      std::vector<int64_t> yaku_ids;
       for (const json::Value& item : yaku->AsArray()) {
-        yaku_ids.push_back(StrOf(item, "id"));
+        const int64_t id = IntOf(item, "id");
+        EXPECT_GE(id, 1) << "yaku[].id 必须是 1..47 的整数";
+        EXPECT_LE(id, protocol::kYakuMax) << "yaku[].id 必须是 1..47 的整数";
+        yaku_ids.push_back(id);
         base += static_cast<int>(IntOf(item, "han"));
       }
       EXPECT_EQ(static_cast<int>(IntOf(*breakdown, "base")), base);
@@ -1567,10 +1570,10 @@ TEST_F(RoomActorTest, FullGamesSatisfyProtocolInvariants) {
       EXPECT_EQ(static_cast<int>(IntOf(*win, "han")), total_han);
       EXPECT_EQ(multiplier, 1 << total_han);
       EXPECT_EQ(win->Find("dealer_bonus")->AsBool(), dealer_bonus == 1);
-      // tags ⊆ yaku id（tags 保持旧语义）
-      std::vector<std::string> tags;
-      for (const json::Value& tag : win->Find("tags")->AsArray()) tags.push_back(tag.AsString());
-      for (const std::string& tag : tags) {
+      // tags ⊆ yaku id（tags 为整数线值，1..45）
+      std::vector<int64_t> tags;
+      for (const json::Value& tag : win->Find("tags")->AsArray()) tags.push_back(tag.AsInt());
+      for (int64_t tag : tags) {
         EXPECT_NE(std::find(yaku_ids.begin(), yaku_ids.end(), tag), yaku_ids.end()) << "tags ⊆ yaku[].id";
       }
 
@@ -1585,21 +1588,24 @@ TEST_F(RoomActorTest, FullGamesSatisfyProtocolInvariants) {
         EXPECT_NE(std::find_if(flat.begin(), flat.end(),
                                [&winning_tile](Tile tile) { return FormatTile(tile) == winning_tile; }),
                   flat.end());
-        std::vector<std::string> types;
+        std::vector<int64_t> types;
         for (const json::Value& entry : winner_entry.Find("win_type")->AsArray()) {
-          types.push_back(entry.AsString());
+          types.push_back(entry.AsInt());
         }
         ASSERT_FALSE(types.empty());
-        EXPECT_EQ(types.back(), tsumo ? "tsumo" : "ron");
+        EXPECT_EQ(types.back(), protocol::WireOf(tsumo ? protocol::YakuId::kWinTsumo : protocol::YakuId::kWinRon));
         types.pop_back();
         ScoreContext ctx;
         ctx.winner_seat = winner;
         ctx.from_seat = tsumo ? -1 : (winner + 1) % 4;
         ctx.winner_is_dealer = winner == round_dealer;
         ctx.is_rinshan = false;  // 杠上开花记录已随局终清空，这里只交叉验证非杠上开花口径
-        const std::vector<std::string> expected_tags =
-            WinTags(test_room.room()->hand_of(winner), melds, *ParseTile(winning_tile), ctx);
-        if (std::find(types.begin(), types.end(), "rinshan") == types.end()) {
+        std::vector<int64_t> expected_tags;
+        for (protocol::YakuId id : WinTags(test_room.room()->hand_of(winner), melds, *ParseTile(winning_tile), ctx)) {
+          expected_tags.push_back(protocol::WireOf(id));
+        }
+        const int64_t rinshan = protocol::WireOf(protocol::YakuId::kRinshan);
+        if (std::find(types.begin(), types.end(), rinshan) == types.end()) {
           EXPECT_EQ(types, expected_tags) << "seed " << seed << ": 最后一局的 tags 必须可由规则库复算";
         }
       }

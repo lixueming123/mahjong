@@ -249,17 +249,18 @@ int WinGroupIndex(const Decomposition& decomposition, Face winning_face);
 // ---------------------------------------------------------------------------
 // 判番（GAME_DESIGN_V2 §1.2 的 14 个番种；序 = 判定顺序 = 数组顺序 = 渲染顺序）
 // ---------------------------------------------------------------------------
-// `id` 一律 ASCII 小写下划线；**同一 id 在一份结果里至多一条**（yakuhai 合并为一条，han = 组数）。
+// `id` 为线协议枚举（PROTOCOL v2.1 §1.3.1，出站时经 WireOf 转整数）；
+// **同一 id 在一份结果里至多一条**（yakuhai 合并为一条，han = 组数）。
 struct Yaku {
-  std::string id;
+  protocol::YakuId id = protocol::YakuId::kInvalid;
   int han = 0;
 
   friend bool operator==(const Yaku& a, const Yaku& b) { return a.id == b.id && a.han == b.han; }
   friend bool operator!=(const Yaku& a, const Yaku& b) { return !(a == b); }
 };
 
-// 番种表（仅供测试与展示，不参与判定）：未知 id 返回 0。yakuhai 返回**单组**的 1 番。
-int YakuHan(std::string_view id);
+// 番种表（仅供测试与展示，不参与判定）：非本玩法/加成 id 返回 0。yakuhai 返回**单组**的 1 番。
+int YakuHan(protocol::YakuId id);
 int YakuHanTotal(const std::vector<Yaku>& yaku);
 
 // 判番上下文。**自摸不是番种**（B1.1 裁决）：不计入番种合计，"自摸 ×2" 已并入支付公式的
@@ -280,12 +281,12 @@ struct ScoreContext {
 std::vector<Yaku> DetectYaku(const std::vector<Tile>& concealed_with_winning_tile, const std::vector<Meld>& melds,
                              Tile winning_tile, const ScoreContext& ctx);
 
-// 兼容封装：返回番种 id 列表（= DetectYaku 的 id 序列），供既有断言与协议 `win_type` 使用。
+// 兼容封装：返回番种 id 列表（= DetectYaku 的 id 序列），供既有断言与内部交叉验证使用。
 // `winning_tile` / `ctx` 省略时按「自摸、非庄家、非杠上开花」解释（保守默认；
 // 需要精确判番（三暗刻的荣和排除、杠上开花）请显式传入）。
-std::vector<std::string> WinTags(const std::vector<Tile>& concealed_with_winning_tile, const std::vector<Meld>& melds,
-                                 std::optional<Tile> winning_tile = std::nullopt,
-                                 std::optional<ScoreContext> ctx = std::nullopt);
+std::vector<protocol::YakuId> WinTags(const std::vector<Tile>& concealed_with_winning_tile,
+                                      const std::vector<Meld>& melds, std::optional<Tile> winning_tile = std::nullopt,
+                                      std::optional<ScoreContext> ctx = std::nullopt);
 
 // ---------------------------------------------------------------------------
 // 动作可选项与超时默认动作（RULESET §5）

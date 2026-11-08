@@ -19,6 +19,8 @@ namespace mahjong {
 namespace riichi {
 namespace {
 
+using protocol::YakuId;
+
 constexpr int kSuitFaces = kRankCount;  // 每门 9 个牌面
 constexpr int kDragonBase = 31;         // 5z 白 / 6z 发 / 7z 中
 
@@ -193,9 +195,9 @@ bool PairIsYakuhai(Face pair, const WinContext& ctx) {
 std::vector<Yaku> YakuForDecomposition(const Decomposition& decomp, const std::vector<Meld>& melds, Face winning,
                                        const WinContext& ctx, const HandFacts& facts, WaitKind wait, bool* out_pinfu) {
   std::vector<Yaku> yaku;
-  auto push = [&yaku](std::string_view id, int han) {
+  auto push = [&yaku](YakuId id, int han) {
     if (han > 0) {
-      yaku.push_back(Yaku {.id = std::string(id), .han = han});
+      yaku.push_back(Yaku {.id = id, .han = han});
     }
   };
   const bool closed = facts.closed;
@@ -252,21 +254,21 @@ std::vector<Yaku> YakuForDecomposition(const Decomposition& decomp, const std::v
 
   // ---- 立直系（全部要求门前清）----
   if (closed) {
-    push("riichi", ctx.is_riichi ? 1 : 0);
-    push("ippatsu", (ctx.is_riichi && ctx.is_ippatsu) ? 1 : 0);
-    push("tsumo", tsumo ? 1 : 0);  // 门前清自摸和
+    push(YakuId::kRiichi, ctx.is_riichi ? 1 : 0);
+    push(YakuId::kIppatsu, (ctx.is_riichi && ctx.is_ippatsu) ? 1 : 0);
+    push(YakuId::kTsumo, tsumo ? 1 : 0);  // 门前清自摸和
   }
-  push("rinshan", ctx.is_rinshan ? 1 : 0);
-  push("chankan", ctx.is_chankan ? 1 : 0);
-  push("haitei", (ctx.is_haitei && tsumo) ? 1 : 0);
-  push("houtei", (ctx.is_houtei && !tsumo) ? 1 : 0);
+  push(YakuId::kRinshan, ctx.is_rinshan ? 1 : 0);
+  push(YakuId::kChankan, ctx.is_chankan ? 1 : 0);
+  push(YakuId::kHaitei, (ctx.is_haitei && tsumo) ? 1 : 0);
+  push(YakuId::kHoutei, (ctx.is_houtei && !tsumo) ? 1 : 0);
 
   // ---- 断幺九 ----
-  push("tanyao", facts.has_terminal_or_honor ? 0 : 1);
+  push(YakuId::kTanyao, facts.has_terminal_or_honor ? 0 : 1);
 
   // ---- 平和：门前 + 四顺子 + 非役牌将 + 两面待ち ----
   const bool pinfu = closed && all_runs && !PairIsYakuhai(decomp.pair, ctx) && wait == WaitKind::kRyanmen;
-  push("pinfu", pinfu ? 1 : 0);
+  push(YakuId::kPinfu, pinfu ? 1 : 0);
   if (out_pinfu != nullptr) {
     *out_pinfu = pinfu;
   }
@@ -280,14 +282,14 @@ std::vector<Yaku> YakuForDecomposition(const Decomposition& decomp, const std::v
       }
     }
     if (repeated >= 2) {
-      push("ryanpeikou", 3);
+      push(YakuId::kRyanpeikou, 3);
     } else if (repeated == 1) {
-      push("iipeikou", 1);
+      push(YakuId::kIipeikou, 1);
     }
   }
 
   // ---- 役牌 ----
-  push("yakuhai", yakuhai_han);
+  push(YakuId::kYakuhai, yakuhai_han);
 
   // ---- 三色同顺 / 一气通贯 ----
   bool sanshoku = false;
@@ -297,7 +299,7 @@ std::vector<Yaku> YakuForDecomposition(const Decomposition& decomp, const std::v
       sanshoku = true;
     }
   }
-  push("sanshoku_doujun", sanshoku ? (closed ? 2 : 1) : 0);
+  push(YakuId::kSanshokuDoujun, sanshoku ? (closed ? 2 : 1) : 0);
 
   bool ittsuu = false;
   for (int suit = 0; suit < kSuitCount; ++suit) {
@@ -306,35 +308,35 @@ std::vector<Yaku> YakuForDecomposition(const Decomposition& decomp, const std::v
       ittsuu = true;
     }
   }
-  push("ittsuu", ittsuu ? (closed ? 2 : 1) : 0);
+  push(YakuId::kIttsuu, ittsuu ? (closed ? 2 : 1) : 0);
 
   // ---- 混全带幺九 / 纯全带幺九（必须有顺子，否则走混老头）----
   const bool pair_terminal_or_honor = IsTerminalOrHonor(decomp.pair);
   if (run_count > 0 && pair_terminal_or_honor && all_groups_terminal_honor) {
     if (!facts.has_honor && IsTerminalFace(decomp.pair) && all_groups_terminal) {
-      push("junchan", closed ? 3 : 2);
+      push(YakuId::kJunchan, closed ? 3 : 2);
     } else if (facts.has_honor) {
-      push("chanta", closed ? 2 : 1);
+      push(YakuId::kChanta, closed ? 2 : 1);
     }
   }
 
   // ---- 对对和 / 三暗刻 / 三杠子 / 小三元 ----
-  push("toitoi", run_count == 0 ? 2 : 0);
-  push("sanankou", concealed_triplets >= 3 ? 2 : 0);
-  push("sankantsu", facts.kans >= 3 ? 2 : 0);
-  push("shousangen", (dragon_triplets == 2 && IsDragon(decomp.pair)) ? 2 : 0);
+  push(YakuId::kToitoi, run_count == 0 ? 2 : 0);
+  push(YakuId::kSanankou, concealed_triplets >= 3 ? 2 : 0);
+  push(YakuId::kSankantsu, facts.kans >= 3 ? 2 : 0);
+  push(YakuId::kShousangen, (dragon_triplets == 2 && IsDragon(decomp.pair)) ? 2 : 0);
 
   // ---- 混老头 ----
   if (facts.all_terminals_honors && run_count == 0) {
-    push("honroutou", 2);
+    push(YakuId::kHonroutou, 2);
   }
 
   // ---- 混一色 / 清一色 ----
   if (facts.single_suit && facts.suit >= 0) {
     if (facts.has_honor) {
-      push("honitsu", closed ? 3 : 2);
+      push(YakuId::kHonitsu, closed ? 3 : 2);
     } else {
-      push("chinitsu", closed ? 6 : 5);
+      push(YakuId::kChinitsu, closed ? 6 : 5);
     }
   }
 
@@ -402,28 +404,26 @@ std::vector<Yaku> DetectYakuman(const std::vector<Tile>& concealed, const std::v
   std::vector<Yaku> result;
   const bool tsumo = ctx.Tsumo();
   const HandFacts facts = ComputeFacts(concealed, melds);
-  auto push = [&result](std::string_view id) {
-    result.push_back(Yaku {.id = std::string(id), .han = 13 * YakumanMultiplier(id)});
-  };
+  auto push = [&result](YakuId id) { result.push_back(Yaku {.id = id, .han = 13 * YakumanMultiplier(id)}); };
 
   if (facts.all_honors) {
-    push("tsuuiisou");
+    push(YakuId::kTsuuiisou);
   }
   if (facts.all_green) {
-    push("ryuuiisou");
+    push(YakuId::kRyuuiisou);
   }
   if (facts.only_terminals) {
-    push("chinroutou");
+    push(YakuId::kChinroutou);
   }
   if (facts.kans >= 4) {
-    push("suukantsu");
+    push(YakuId::kSuukantsu);
   }
   // 天和 / 地和：都是「第一巡自摸」的役满，由房间按牌河/副露状态置位（见 BuildRiichiContext）。
   if (ctx.is_tenhou) {
-    push("tenhou");
+    push(YakuId::kTenhou);
   }
   if (ctx.is_chiihou) {
-    push("chiihou");
+    push(YakuId::kChiihou);
   }
 
   if (melds.empty()) {
@@ -453,7 +453,7 @@ std::vector<Yaku> DetectYakuman(const std::vector<Tile>& concealed, const std::v
     }
     if (only_orphans && all_present && has_pair) {
       // 国士十三面：和牌张正是那张「对子」⇒ 和牌前 13 张是十三种各一张（十三面听）。
-      push(counts[static_cast<size_t>(FaceOf(winning))] == 2 ? "kokushi_13" : "kokushi");
+      push(counts[static_cast<size_t>(FaceOf(winning))] == 2 ? YakuId::kKokushi13 : YakuId::kKokushi);
       return result;  // 国士无双不与其它役满复合
     }
 
@@ -474,7 +474,8 @@ std::vector<Yaku> DetectYakuman(const std::vector<Tile>& concealed, const std::v
         }
       }
       if (ok) {
-        push(IsJunseiChuuren(concealed, winning, static_cast<uint8_t>(facts.suit)) ? "chuuren_junsei" : "chuuren");
+        push(IsJunseiChuuren(concealed, winning, static_cast<uint8_t>(facts.suit)) ? YakuId::kChuurenJunsei
+                                                                                   : YakuId::kChuuren);
       }
     }
   }
@@ -504,15 +505,15 @@ std::vector<Yaku> DetectYakuman(const std::vector<Tile>& concealed, const std::v
     }
     if (concealed_triplets >= 4) {
       // 四暗刻单骑：单骑（和牌张进将）比双碰多一番，记双倍役满。
-      push(melds.empty() && IsTankiWait(concealed, winning) ? "suuankou_tanki" : "suuankou");
+      push(melds.empty() && IsTankiWait(concealed, winning) ? YakuId::kSuuankouTanki : YakuId::kSuuankou);
     }
     if (dragon_triplets >= 3) {
-      push("daisangen");
+      push(YakuId::kDaisangen);
     }
     if (wind_triplets >= 4) {
-      push("daisuushii");
+      push(YakuId::kDaisuushii);
     } else if (wind_triplets == 3 && IsWindFace(decomp.pair)) {
-      push("shousuushii");
+      push(YakuId::kShousuushii);
     }
     break;
   }
@@ -523,19 +524,19 @@ std::vector<Yaku> DetectYakuman(const std::vector<Tile>& concealed, const std::v
 // 七对子形态（独立于标准型；固定 25 符）
 std::vector<Yaku> YakuOfSevenPairs(const WinContext& ctx, const HandFacts& facts) {
   std::vector<Yaku> yaku;
-  auto push = [&yaku](std::string_view id, int han) {
+  auto push = [&yaku](YakuId id, int han) {
     if (han > 0) {
-      yaku.push_back(Yaku {.id = std::string(id), .han = han});
+      yaku.push_back(Yaku {.id = id, .han = han});
     }
   };
-  push("riichi", (facts.closed && ctx.is_riichi) ? 1 : 0);
-  push("ippatsu", (facts.closed && ctx.is_riichi && ctx.is_ippatsu) ? 1 : 0);
-  push("tsumo", (facts.closed && ctx.Tsumo()) ? 1 : 0);
-  push("chiitoitsu", 2);
-  push("tanyao", facts.has_terminal_or_honor ? 0 : 1);
+  push(YakuId::kRiichi, (facts.closed && ctx.is_riichi) ? 1 : 0);
+  push(YakuId::kIppatsu, (facts.closed && ctx.is_riichi && ctx.is_ippatsu) ? 1 : 0);
+  push(YakuId::kTsumo, (facts.closed && ctx.Tsumo()) ? 1 : 0);
+  push(YakuId::kChiitoitsu, 2);
+  push(YakuId::kTanyao, facts.has_terminal_or_honor ? 0 : 1);
   if (facts.single_suit && facts.suit >= 0) {
-    push("honitsu", facts.has_honor ? 3 : 0);
-    push("chinitsu", facts.has_honor ? 0 : 6);
+    push(YakuId::kHonitsu, facts.has_honor ? 3 : 0);
+    push(YakuId::kChinitsu, facts.has_honor ? 0 : 6);
   }
   return yaku;
 }
@@ -673,64 +674,93 @@ Face DoraFaceFromIndicator(Tile indicator) {
   return static_cast<Face>(kDragonBase + (index + 1) % 3);
 }
 
-int YakuHan(std::string_view id, bool closed) {
-  if (id == "riichi" || id == "ippatsu" || id == "tsumo" || id == "pinfu" || id == "iipeikou" || id == "tanyao" ||
-      id == "yakuhai" || id == "rinshan" || id == "chankan" || id == "haitei" || id == "houtei" || id == "dora" ||
-      id == "ura_dora" || id == "aka_dora") {
-    return 1;
+int YakuHan(YakuId id, bool closed) {
+  switch (id) {
+    case YakuId::kRiichi:
+    case YakuId::kIppatsu:
+    case YakuId::kTsumo:
+    case YakuId::kPinfu:
+    case YakuId::kIipeikou:
+    case YakuId::kTanyao:
+    case YakuId::kYakuhai:
+    case YakuId::kRinshan:
+    case YakuId::kChankan:
+    case YakuId::kHaitei:
+    case YakuId::kHoutei:
+    case YakuId::kDora:
+    case YakuId::kUraDora:
+    case YakuId::kAkaDora:
+      return 1;
+    case YakuId::kChiitoitsu:
+    case YakuId::kToitoi:
+    case YakuId::kSanankou:
+    case YakuId::kSankantsu:
+    case YakuId::kShousangen:
+    case YakuId::kHonroutou:
+      return 2;
+    case YakuId::kSanshokuDoujun:
+    case YakuId::kIttsuu:
+    case YakuId::kChanta:
+      return closed ? 2 : 1;
+    case YakuId::kJunchan:
+      return closed ? 3 : 2;
+    case YakuId::kRyanpeikou:
+      return 3;
+    case YakuId::kHonitsu:
+      return closed ? 3 : 2;
+    case YakuId::kChinitsu:
+      return closed ? 6 : 5;
+    default:
+      return 0;
   }
-  if (id == "chiitoitsu" || id == "toitoi" || id == "sanankou" || id == "sankantsu" || id == "shousangen" ||
-      id == "honroutou") {
-    return 2;
-  }
-  if (id == "sanshoku_doujun" || id == "ittsuu" || id == "chanta") {
-    return closed ? 2 : 1;
-  }
-  if (id == "junchan") {
-    return closed ? 3 : 2;
-  }
-  if (id == "ryanpeikou") {
-    return 3;
-  }
-  if (id == "honitsu") {
-    return closed ? 3 : 2;
-  }
-  if (id == "chinitsu") {
-    return closed ? 6 : 5;
-  }
-  return 0;
 }
 
-bool IsYakumanYaku(std::string_view id) {
-  return id == "tenhou" || id == "chiihou" || id == "kokushi" || id == "kokushi_13" || id == "suuankou" ||
-         id == "suuankou_tanki" || id == "daisangen" || id == "tsuuiisou" || id == "ryuuiisou" || id == "chinroutou" ||
-         id == "chuuren" || id == "chuuren_junsei" || id == "suukantsu" || id == "shousuushii" || id == "daisuushii";
+bool IsYakumanYaku(YakuId id) {
+  switch (id) {
+    case YakuId::kTenhou:
+    case YakuId::kChiihou:
+    case YakuId::kKokushi:
+    case YakuId::kKokushi13:
+    case YakuId::kSuuankou:
+    case YakuId::kSuuankouTanki:
+    case YakuId::kDaisangen:
+    case YakuId::kTsuuiisou:
+    case YakuId::kRyuuiisou:
+    case YakuId::kChinroutou:
+    case YakuId::kChuuren:
+    case YakuId::kChuurenJunsei:
+    case YakuId::kSuukantsu:
+    case YakuId::kShousuushii:
+    case YakuId::kDaisuushii:
+      return true;
+    default:
+      return false;
+  }
 }
 
-int YakumanMultiplier(std::string_view id) {
+int YakumanMultiplier(YakuId id) {
   // 双倍役满四兄弟：国士十三面 / 四暗刻单骑 / 纯正九莲 / 大四喜。
-  if (id == "kokushi_13" || id == "suuankou_tanki" || id == "chuuren_junsei" || id == "daisuushii") {
-    return 2;
+  switch (id) {
+    case YakuId::kKokushi13:
+    case YakuId::kSuuankouTanki:
+    case YakuId::kChuurenJunsei:
+    case YakuId::kDaisuushii:
+      return 2;
+    case YakuId::kTenhou:
+    case YakuId::kChiihou:
+    case YakuId::kKokushi:
+    case YakuId::kSuuankou:
+    case YakuId::kDaisangen:
+    case YakuId::kTsuuiisou:
+    case YakuId::kRyuuiisou:
+    case YakuId::kChinroutou:
+    case YakuId::kChuuren:
+    case YakuId::kSuukantsu:
+    case YakuId::kShousuushii:
+      return 1;
+    default:
+      return 0;
   }
-  return IsYakumanYaku(id) ? 1 : 0;
-}
-
-std::string_view LimitName(Limit limit) {
-  switch (limit) {
-    case Limit::kMangan:
-      return "mangan";
-    case Limit::kHaneman:
-      return "haneman";
-    case Limit::kBaiman:
-      return "baiman";
-    case Limit::kSanbaiman:
-      return "sanbaiman";
-    case Limit::kYakuman:
-      return "yakuman";
-    case Limit::kNone:
-      break;
-  }
-  return "none";
 }
 
 bool CanDeclareRiichi(const std::vector<Tile>& concealed_with_winning_tile, const std::vector<Meld>& melds,
@@ -1239,13 +1269,13 @@ ScoreResult ScoreHand(const std::vector<Tile>& concealed_with_winning_tile, cons
     ScoreResult candidate;
     candidate.yaku = base_yaku;
     if (dora > 0) {
-      candidate.yaku.push_back(Yaku {.id = "dora", .han = dora});
+      candidate.yaku.push_back(Yaku {.id = YakuId::kDora, .han = dora});
     }
     if (ura_dora > 0) {
-      candidate.yaku.push_back(Yaku {.id = "ura_dora", .han = ura_dora});
+      candidate.yaku.push_back(Yaku {.id = YakuId::kUraDora, .han = ura_dora});
     }
     if (aka > 0) {
-      candidate.yaku.push_back(Yaku {.id = "aka_dora", .han = aka});
+      candidate.yaku.push_back(Yaku {.id = YakuId::kAkaDora, .han = aka});
     }
     candidate.han = han;
     candidate.fu = fu;

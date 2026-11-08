@@ -834,8 +834,8 @@ std::string RoomActor::BuildGameEnd(const Settlement& settlement) const {
     entry.Set("hand", TilesToJson(settlement.flat_hands[static_cast<size_t>(seat)], riichi_mode));
     if (seat == settlement.winner_seat) {
       json::Value types = json::Value::Arr(settlement.winner_types.size());
-      for (const std::string& type : settlement.winner_types) {
-        types.Append(json::Value::Str(type));
+      for (protocol::YakuId type : settlement.winner_types) {
+        types.Append(json::Value::Int(protocol::WireOf(type)));
       }
       entry.Set("win_type", std::move(types));
     } else {
@@ -882,8 +882,8 @@ std::string RoomActor::BuildGameEnd(const Settlement& settlement) const {
     }
     win.Set("tsumo", json::Value::Bool(settlement.tsumo));
     json::Value tags = json::Value::Arr(settlement.tags.size());
-    for (const std::string& tag : settlement.tags) {
-      tags.Append(json::Value::Str(tag));
+    for (protocol::YakuId tag : settlement.tags) {
+      tags.Append(json::Value::Int(protocol::WireOf(tag)));
     }
     win.Set("tags", std::move(tags));
     win.Set("multiplier", json::Value::Int(settlement.multiplier));
@@ -893,7 +893,7 @@ std::string RoomActor::BuildGameEnd(const Settlement& settlement) const {
     json::Value yaku = json::Value::Arr(settlement.yaku.size());
     for (const Yaku& item : settlement.yaku) {
       json::Value entry = json::Value::Obj(2);  // id, han
-      entry.Set("id", json::Value::Str(item.id));
+      entry.Set("id", json::Value::Int(protocol::WireOf(item.id)));
       entry.Set("han", json::Value::Int(item.han));
       yaku.Append(std::move(entry));
     }
@@ -915,7 +915,7 @@ std::string RoomActor::BuildGameEnd(const Settlement& settlement) const {
       // 日麻载荷：符 / 点数 / 满贯分档 / 宝牌 / 立直 / 供托与本场
       win.Set("fu", json::Value::Int(settlement.fu));
       win.Set("points", json::Value::Int(settlement.points));
-      win.Set("limit", json::Value::Str(settlement.limit));
+      win.Set("limit", json::Value::Int(protocol::WireOf(ToWire(settlement.limit))));
       win.Set("dora", json::Value::Int(settlement.dora));
       win.Set("ura_dora", json::Value::Int(settlement.ura_dora));
       win.Set("riichi", json::Value::Bool(settlement.riichi));
@@ -1949,16 +1949,16 @@ stdexec::task<void> RoomActor::EndRoundWithWin(int winner_seat, int from_seat, T
     settlement.points = riichi_score.points;
     settlement.fu = riichi_score.fu;
     settlement.han = riichi_score.han;
-    settlement.limit = std::string(riichi::LimitName(riichi_score.limit));
+    settlement.limit = riichi_score.limit;
     settlement.riichi = was_riichi;
     settlement.dora = riichi_score.dora;
     settlement.ura_dora = riichi_score.ura_dora;
     settlement.aka_dora = riichi_score.aka;
     settlement.dora_indicators = dora_indicators_;
     settlement.dealer_bonus = winner_seat == dealer_ ? 1 : 0;
-    settlement.rinshan =
-        riichi_score.yaku.size() > 0 && std::any_of(riichi_score.yaku.begin(), riichi_score.yaku.end(),
-                                                    [](const riichi::Yaku& item) { return item.id == "rinshan"; });
+    settlement.rinshan = riichi_score.yaku.size() > 0 &&
+                         std::any_of(riichi_score.yaku.begin(), riichi_score.yaku.end(),
+                                     [](const riichi::Yaku& item) { return item.id == protocol::YakuId::kRinshan; });
     settlement.yaku.clear();
     for (const riichi::Yaku& item : riichi_score.yaku) {
       settlement.yaku.push_back(Yaku {.id = item.id, .han = item.han});
@@ -1978,7 +1978,7 @@ stdexec::task<void> RoomActor::EndRoundWithWin(int winner_seat, int from_seat, T
   }
   for (const Yaku& yaku : settlement.yaku) settlement.tags.push_back(yaku.id);
   settlement.winner_types = settlement.tags;
-  settlement.winner_types.emplace_back(tsumo ? "tsumo" : "ron");
+  settlement.winner_types.emplace_back(tsumo ? protocol::YakuId::kWinTsumo : protocol::YakuId::kWinRon);
   settlement.tsumo = tsumo;
   settlement.winning_tile = winning_tile;
   settlement.from_seat = tsumo ? -1 : from_seat;

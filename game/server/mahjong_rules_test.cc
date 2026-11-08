@@ -39,28 +39,34 @@ Meld Kong(std::vector<std::string> texts) {
 int Sum(const std::array<int, 4>& delta) { return delta[0] + delta[1] + delta[2] + delta[3]; }
 
 // ---- B1 辅助：番种列表的常用断言形态 ----
+// 测试仍用规范名书写断言；名字经 FromName 转成线枚举，映射本身由一致性测试守护。
+std::optional<protocol::YakuId> YakuIdOf(std::string_view id) { return protocol::FromName<protocol::YakuId>(id); }
+
 std::vector<std::string> Ids(const std::vector<Yaku>& yaku) {
   std::vector<std::string> ids;
   ids.reserve(yaku.size());
-  for (const Yaku& item : yaku) ids.push_back(item.id);
+  for (const Yaku& item : yaku) ids.push_back(std::string(protocol::NameOf(item.id)));
   return ids;
 }
 
 bool HasYakuId(const std::vector<Yaku>& yaku, std::string_view id) {
+  const std::optional<protocol::YakuId> want = YakuIdOf(id);
   for (const Yaku& item : yaku)
-    if (item.id == id) return true;
+    if (want.has_value() && item.id == *want) return true;
   return false;
 }
 
 int HanOfYaku(const std::vector<Yaku>& yaku, std::string_view id) {
+  const std::optional<protocol::YakuId> want = YakuIdOf(id);
   for (const Yaku& item : yaku)
-    if (item.id == id) return item.han;
+    if (want.has_value() && item.id == *want) return item.han;
   return 0;
 }
 
 bool HasTag(const std::vector<Tile>& hand, const std::vector<Meld>& melds, std::string_view id) {
-  for (const std::string& tag : WinTags(hand, melds))
-    if (tag == id) return true;
+  const std::optional<protocol::YakuId> want = YakuIdOf(id);
+  for (protocol::YakuId tag : WinTags(hand, melds))
+    if (want.has_value() && tag == *want) return true;
   return false;
 }
 
@@ -254,7 +260,8 @@ TEST(MahjongRules, WinStandardHands) {  // 4
   p1_full.push_back(*ParseTile("5s"));
   // B1：`pinfu` 的语义由「没有番的普通和牌」改为「门清 + 全顺子 + 数牌将」1 番（GAME_DESIGN_V2 §5.1 #11），
   // 因此这手牌现在判出 menzen + pinfu 两条番种，不再是「无标签」。
-  EXPECT_EQ(WinTags(p1_full, {}), (std::vector<std::string> {"menzen", "pinfu"}));
+  EXPECT_EQ(WinTags(p1_full, {}),
+            (std::vector<protocol::YakuId> {protocol::YakuId::kMenzen, protocol::YakuId::kPinfu}));
 
   // P2：含刻子
   std::vector<Tile> p2 = H({"1m", "1m", "1m", "2m", "3m", "4m", "5p", "5p", "5p", "7s", "8s", "9s", "9m"});
@@ -269,7 +276,8 @@ TEST(MahjongRules, WinSevenPairs) {  // 5
   std::vector<Tile> p3 = H({"1m", "1m", "3m", "3m", "5m", "5m", "7m", "7m", "2p", "2p", "6p", "6p", "8p", "8p"});
   EXPECT_TRUE(CanWinExact(p3, {}));
   EXPECT_TRUE(IsSevenPairs(p3));
-  EXPECT_EQ(WinTags(p3, {}), (std::vector<std::string> {"menzen", "seven_pairs"}));
+  EXPECT_EQ(WinTags(p3, {}),
+            (std::vector<protocol::YakuId> {protocol::YakuId::kMenzen, protocol::YakuId::kSevenPairs}));
 
   // 自摸形态统一入口
   EXPECT_TRUE(IsWinningHand(p3, {}, *ParseTile("8p"), /*is_tsumo=*/true));
@@ -280,13 +288,16 @@ TEST(MahjongRules, WinPureOneSuit) {  // 6
   EXPECT_TRUE(CanWinExact(p4, {}));
   EXPECT_FALSE(IsSevenPairs(p4));
   // 清一色 5 番 + 门清 1 番 + 三暗刻 2 番（111/222/333 三组暗刻）
-  EXPECT_EQ(WinTags(p4, {}), (std::vector<std::string> {"menzen", "sanankou", "pure_one_suit"}));
+  EXPECT_EQ(WinTags(p4, {}), (std::vector<protocol::YakuId> {protocol::YakuId::kMenzen, protocol::YakuId::kSanankou,
+                                                             protocol::YakuId::kPureOneSuit}));
 
   std::vector<Tile> p5 = H({"1m", "1m", "2m", "2m", "3m", "3m", "4m", "4m", "5m", "5m", "6m", "6m", "7m", "7m"});
   EXPECT_TRUE(CanWinExact(p5, {}));
   // 七对子（1+2+5=8 番）与「四顺子 + 将」拆法（menzen1+pinfu1+iipeikou1+pure5=8 番）同分；
   // §1.3.4：同分取**枚举序第一个** ⇒ 标准型拆法（枚举先于七对子候选）胜出。
-  EXPECT_EQ(WinTags(p5, {}), (std::vector<std::string> {"menzen", "pinfu", "iipeikou", "pure_one_suit"}));
+  EXPECT_EQ(WinTags(p5, {}),
+            (std::vector<protocol::YakuId> {protocol::YakuId::kMenzen, protocol::YakuId::kPinfu,
+                                            protocol::YakuId::kIipeikou, protocol::YakuId::kPureOneSuit}));
 }
 
 TEST(MahjongRules, WinWithMelds) {  // 7
@@ -617,7 +628,9 @@ TEST(MahjongRules, HonorInWinningHands) {  // 21
       H({"5z", "5z", "5z", "6z", "6z", "6z", "7z", "7z", "7z", "1m", "1m", "1m", "9s", "9s"});
   EXPECT_TRUE(CanWinExact(honor_triplet, {}));
   // menzen 1 + yakuhai 3（白/发/中各一组，合并为一条）+ toitoi 2 + sanankou 2 = 8 番
-  EXPECT_EQ(WinTags(honor_triplet, {}), (std::vector<std::string> {"menzen", "yakuhai", "toitoi", "sanankou"}));
+  EXPECT_EQ(WinTags(honor_triplet, {}),
+            (std::vector<protocol::YakuId> {protocol::YakuId::kMenzen, protocol::YakuId::kYakuhai,
+                                            protocol::YakuId::kToitoi, protocol::YakuId::kSanankou}));
   // 字牌不产生清一色 / 混一色（全字牌不满足「恰含一门数牌」）
   EXPECT_TRUE(IsPureOneSuit(honor_triplet, {}) == false);
   EXPECT_FALSE(HasTag(honor_triplet, {}, "honitsu"));
@@ -626,7 +639,7 @@ TEST(MahjongRules, HonorInWinningHands) {  // 21
   std::vector<Tile> honor_pair =
       H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "1z", "1z"});
   EXPECT_TRUE(CanWinExact(honor_pair, {}));
-  EXPECT_EQ(WinTags(honor_pair, {}), std::vector<std::string> {"menzen"});
+  EXPECT_EQ(WinTags(honor_pair, {}), std::vector<protocol::YakuId> {protocol::YakuId::kMenzen});
 
   // 字牌做将（荣和形态：13 张 + 和牌张）
   std::vector<Tile> ron_hand = H({"1m", "2m", "3m", "4m", "5m", "6m", "7p", "8p", "9p", "1s", "2s", "3s", "1z"});
@@ -644,7 +657,8 @@ TEST(MahjongRules, HonorSevenPairsAndScoring) {  // 22
   EXPECT_TRUE(IsSevenPairs(honor_seven));
   EXPECT_TRUE(CanWinExact(honor_seven, {}));
   // menzen 1 + seven_pairs 2 = 3 番（字牌不额外加成，也不构成混一色：三色数牌）
-  EXPECT_EQ(WinTags(honor_seven, {}), (std::vector<std::string> {"menzen", "seven_pairs"}));
+  EXPECT_EQ(WinTags(honor_seven, {}),
+            (std::vector<protocol::YakuId> {protocol::YakuId::kMenzen, protocol::YakuId::kSevenPairs}));
   const ScoreResult r = ScoreWin(0, 3, honor_seven, {});
   EXPECT_EQ(r.han, 3);
   EXPECT_EQ(r.multiplier, 8);
@@ -656,7 +670,8 @@ TEST(MahjongRules, HonorSevenPairsAndScoring) {  // 22
   std::vector<Tile> all_honor_seven =
       H({"1z", "1z", "2z", "2z", "3z", "3z", "4z", "4z", "5z", "5z", "6z", "6z", "7z", "7z"});
   EXPECT_TRUE(CanWinExact(all_honor_seven, {}));
-  EXPECT_EQ(WinTags(all_honor_seven, {}), (std::vector<std::string> {"menzen", "seven_pairs"}));
+  EXPECT_EQ(WinTags(all_honor_seven, {}),
+            (std::vector<protocol::YakuId> {protocol::YakuId::kMenzen, protocol::YakuId::kSevenPairs}));
   EXPECT_EQ(ScoreWin(0, 3, all_honor_seven, {}).multiplier, 8);  // 不得拿到清一色/混一色的倍率
 }
 
@@ -669,7 +684,9 @@ TEST(MahjongRules, HonorIsNotPureOneSuit) {  // 23
   EXPECT_FALSE(HasTag(all_honor, {}, "pure_one_suit"));
   EXPECT_FALSE(HasTag(all_honor, {}, "honitsu"));
   // menzen 1 + toitoi 2 + sanankou 2 = 5 番
-  EXPECT_EQ(WinTags(all_honor, {}), (std::vector<std::string> {"menzen", "toitoi", "sanankou"}));
+  EXPECT_EQ(WinTags(all_honor, {}),
+            (std::vector<protocol::YakuId> {protocol::YakuId::kMenzen, protocol::YakuId::kToitoi,
+                                            protocol::YakuId::kSanankou}));
 
   // 含单个字牌对的数牌手牌 → 不是清一色，而是**混一色**（B1 新增番种，§1.4）
   std::vector<Tile> one_honor_pair =
@@ -1163,17 +1180,18 @@ void ExpectFrozenYakuOrder(const std::vector<Yaku>& yaku) {
   int last = -1;
   std::set<std::string> seen;
   for (const Yaku& item : yaku) {
-    const auto it = std::find(kYakuOrder.begin(), kYakuOrder.end(), item.id);
-    ASSERT_NE(it, kYakuOrder.end()) << "未知番种 id: " << item.id;
+    const std::string id = std::string(protocol::NameOf(item.id));
+    const auto it = std::find(kYakuOrder.begin(), kYakuOrder.end(), id);
+    ASSERT_NE(it, kYakuOrder.end()) << "未知番种 id: " << id;
     const int index = static_cast<int>(it - kYakuOrder.begin());
-    EXPECT_GT(index, last) << "番种顺序不是冻结表序: " << item.id;
+    EXPECT_GT(index, last) << "番种顺序不是冻结表序: " << id;
     last = index;
-    EXPECT_TRUE(seen.insert(item.id).second) << "同一 id 出现多次: " << item.id;
-    if (item.id == "yakuhai") {
+    EXPECT_TRUE(seen.insert(id).second) << "同一 id 出现多次: " << id;
+    if (item.id == protocol::YakuId::kYakuhai) {
       EXPECT_GE(item.han, 1);
       EXPECT_LE(item.han, 3);
     } else {
-      EXPECT_EQ(item.han, YakuHan(item.id)) << item.id;
+      EXPECT_EQ(item.han, YakuHan(item.id)) << id;
     }
   }
 }
@@ -1462,7 +1480,8 @@ TEST(MahjongRules, YakuYakuhai) {  // #5 箭刻：多条合并为一条，han = 
       H({"5z", "5z", "5z", "2m", "2m", "2m", "3p", "4p", "5p", "6s", "7s", "8s", "9m", "9m"});
   const std::vector<Yaku> single = YakuOf(one_dragon, {});
   EXPECT_EQ(HanOfYaku(single, "yakuhai"), 1);
-  EXPECT_EQ(std::count_if(single.begin(), single.end(), [](const Yaku& y) { return y.id == "yakuhai"; }), 1)
+  EXPECT_EQ(
+      std::count_if(single.begin(), single.end(), [](const Yaku& y) { return y.id == protocol::YakuId::kYakuhai; }), 1)
       << "yakuhai 只能出现一条";
 
   // 两组白/发 ⇒ 仍是一条，han = 2；三组 ⇒ han = 3
@@ -1470,7 +1489,7 @@ TEST(MahjongRules, YakuYakuhai) {  // #5 箭刻：多条合并为一条，han = 
       H({"5z", "5z", "5z", "6z", "6z", "6z", "2m", "3m", "4m", "5p", "6p", "7p", "9s", "9s"});
   const std::vector<Yaku> two = YakuOf(two_dragons, {});
   EXPECT_EQ(HanOfYaku(two, "yakuhai"), 2);
-  EXPECT_EQ(std::count_if(two.begin(), two.end(), [](const Yaku& y) { return y.id == "yakuhai"; }), 1);
+  EXPECT_EQ(std::count_if(two.begin(), two.end(), [](const Yaku& y) { return y.id == protocol::YakuId::kYakuhai; }), 1);
   std::vector<Tile> three_dragons =
       H({"5z", "5z", "5z", "6z", "6z", "6z", "7z", "7z", "7z", "1m", "2m", "3m", "9s", "9s"});
   EXPECT_EQ(HanOfYaku(YakuOf(three_dragons, {}), "yakuhai"), 3);
@@ -1670,7 +1689,7 @@ TEST(MahjongRules, BonusTsumoAndDealerBonus) {  // 2 个加成：自摸 +1、庄
   const ScoreResult dealer = ScoreHand(hand, {}, *ParseTile("5s"), Ctx(2, 1, /*dealer=*/true));
   EXPECT_EQ(dealer.han, 4);
   EXPECT_EQ(dealer.dealer_bonus, 1);
-  EXPECT_FALSE(HasYakuId(dealer.yaku, "dealer"));
+  EXPECT_EQ(dealer.yaku.size(), 3u);  // 庄家加成不进 yaku[]
   EXPECT_EQ(dealer.multiplier, 16);
   // 庄家加成与自摸可叠加（自摸不影响 han），且受**同一**封顶
   const ScoreResult both = ScoreHand(hand, {}, *ParseTile("5s"), Ctx(2, -1, true));

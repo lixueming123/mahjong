@@ -42,8 +42,9 @@ Meld Chow(std::initializer_list<const char*> texts) {
 }
 
 bool HasId(const std::vector<Yaku>& yaku, std::string_view id) {
+  const std::optional<protocol::YakuId> want = protocol::FromName<protocol::YakuId>(id);
   for (const Yaku& item : yaku) {
-    if (item.id == id) {
+    if (want.has_value() && item.id == *want) {
       return true;
     }
   }
@@ -301,7 +302,7 @@ TEST(RiichiChankan, OpenHandWithoutYakuCanStillRob) {
         return chankan;
       }());
   ASSERT_EQ(score.yaku.size(), 1u);
-  EXPECT_EQ(score.yaku[0].id, "chankan");
+  EXPECT_EQ(score.yaku[0].id, protocol::YakuId::kChankan);
   EXPECT_EQ(score.han, 1);
 }
 
@@ -340,7 +341,7 @@ TEST(RiichiKokushi, ShapeAndScoring) {
   const ScoreResult score = ScoreHand(hand, {}, *ParseTile("7z"), Tsumo());
   ASSERT_EQ(score.yaku.size(), 1u);
   // 7z 成对 ⇒ 和牌前是十三种各一张 ⇒ 国士十三面（双倍役满）
-  EXPECT_EQ(score.yaku[0].id, "kokushi_13");
+  EXPECT_EQ(score.yaku[0].id, protocol::YakuId::kKokushi13);
   EXPECT_EQ(score.limit, Limit::kYakuman);
   EXPECT_EQ(score.points, 64000);  // 闲家自摸 16000/16000/32000
 
@@ -395,7 +396,7 @@ TEST(RiichiYakuman, TenhouAndChiihou) {
   dealer.is_tenhou = true;
   const ScoreResult tenhou = ScoreHand(hand, {}, *ParseTile("4s"), dealer);
   ASSERT_FALSE(tenhou.yaku.empty());
-  EXPECT_EQ(tenhou.yaku[0].id, "tenhou");
+  EXPECT_EQ(tenhou.yaku[0].id, protocol::YakuId::kTenhou);
   EXPECT_EQ(tenhou.limit, Limit::kYakuman);
   EXPECT_EQ(tenhou.points, 48000);  // 庄家役满自摸：16000 × 3
 
@@ -403,7 +404,7 @@ TEST(RiichiYakuman, TenhouAndChiihou) {
   child.is_chiihou = true;
   const ScoreResult chiihou = ScoreHand(hand, {}, *ParseTile("4s"), child);
   ASSERT_FALSE(chiihou.yaku.empty());
-  EXPECT_EQ(chiihou.yaku[0].id, "chiihou");
+  EXPECT_EQ(chiihou.yaku[0].id, protocol::YakuId::kChiihou);
   EXPECT_EQ(chiihou.limit, Limit::kYakuman);
   EXPECT_EQ(chiihou.points, 32000);  // 16000 + 8000 + 8000
 
@@ -635,8 +636,8 @@ TEST(RiichiAka, AkaIsNotAYaku) {
   EXPECT_FALSE(HasId(score.yaku, "aka_dora"));  // 无役 ⇒ 整个手牌不算（与宝牌同口径）
   EXPECT_TRUE(score.yaku.empty());
   EXPECT_EQ(score.points, 0);
-  EXPECT_EQ(YakuHan("aka_dora", /*closed=*/true), 1);
-  EXPECT_FALSE(IsYakumanYaku("aka_dora"));
+  EXPECT_EQ(YakuHan(protocol::YakuId::kAkaDora, /*closed=*/true), 1);
+  EXPECT_FALSE(IsYakumanYaku(protocol::YakuId::kAkaDora));
 }
 
 // ============================================================================
@@ -644,21 +645,22 @@ TEST(RiichiAka, AkaIsNotAYaku) {
 // ============================================================================
 
 TEST(RiichiYakuman, MultiplierTable) {
-  EXPECT_EQ(YakumanMultiplier("kokushi_13"), 2);
-  EXPECT_EQ(YakumanMultiplier("suuankou_tanki"), 2);
-  EXPECT_EQ(YakumanMultiplier("chuuren_junsei"), 2);
-  EXPECT_EQ(YakumanMultiplier("daisuushii"), 2);
+  EXPECT_EQ(YakumanMultiplier(protocol::YakuId::kKokushi13), 2);
+  EXPECT_EQ(YakumanMultiplier(protocol::YakuId::kSuuankouTanki), 2);
+  EXPECT_EQ(YakumanMultiplier(protocol::YakuId::kChuurenJunsei), 2);
+  EXPECT_EQ(YakumanMultiplier(protocol::YakuId::kDaisuushii), 2);
 
-  EXPECT_EQ(YakumanMultiplier("kokushi"), 1);
-  EXPECT_EQ(YakumanMultiplier("suuankou"), 1);
-  EXPECT_EQ(YakumanMultiplier("chuuren"), 1);
-  EXPECT_EQ(YakumanMultiplier("shousuushii"), 1);
-  EXPECT_EQ(YakumanMultiplier("daisangen"), 1);
-  EXPECT_EQ(YakumanMultiplier("tenhou"), 1);
-  EXPECT_EQ(YakumanMultiplier("pinfu"), 0);
+  EXPECT_EQ(YakumanMultiplier(protocol::YakuId::kKokushi), 1);
+  EXPECT_EQ(YakumanMultiplier(protocol::YakuId::kSuuankou), 1);
+  EXPECT_EQ(YakumanMultiplier(protocol::YakuId::kChuuren), 1);
+  EXPECT_EQ(YakumanMultiplier(protocol::YakuId::kShousuushii), 1);
+  EXPECT_EQ(YakumanMultiplier(protocol::YakuId::kDaisangen), 1);
+  EXPECT_EQ(YakumanMultiplier(protocol::YakuId::kTenhou), 1);
+  EXPECT_EQ(YakumanMultiplier(protocol::YakuId::kPinfu), 0);
 
-  for (const char* id : {"kokushi_13", "suuankou_tanki", "chuuren_junsei", "daisuushii"}) {
-    EXPECT_TRUE(IsYakumanYaku(id)) << id;
+  for (protocol::YakuId id : {protocol::YakuId::kKokushi13, protocol::YakuId::kSuuankouTanki,
+                              protocol::YakuId::kChuurenJunsei, protocol::YakuId::kDaisuushii}) {
+    EXPECT_TRUE(IsYakumanYaku(id)) << protocol::NameOf(id);
   }
 }
 

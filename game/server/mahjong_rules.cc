@@ -749,9 +749,9 @@ GroupView ViewOfGroup(const Group& group, const std::vector<Meld>& melds) {
   return view;
 }
 
-void PushYaku(std::vector<Yaku>& yaku, std::string id, int han) {
+void PushYaku(std::vector<Yaku>& yaku, protocol::YakuId id, int han) {
   if (han <= 0) return;
-  yaku.push_back(Yaku {.id = std::move(id), .han = han});
+  yaku.push_back(Yaku {.id = id, .han = han});
 }
 
 // 单个拆法的番种列表（**按 §1.2 表序**，同一 id 至多一条）
@@ -819,48 +819,60 @@ std::vector<Yaku> YakuOfDecomposition(const Decomposition& decomposition, const 
 
   std::vector<Yaku> yaku;
   // ---- 以下 push 次序 = §1.2 表序，不得调整 ----
-  PushYaku(yaku, "menzen", facts.menzen ? 1 : 0);
-  PushYaku(yaku, "tanyao", facts.tanyao ? 1 : 0);
-  PushYaku(yaku, "pinfu", (facts.menzen && all_runs && IsNumberFace(decomposition.pair)) ? 1 : 0);
-  PushYaku(yaku, "iipeikou", iipeikou ? 1 : 0);
-  PushYaku(yaku, "yakuhai", yakuhai);  // 多条合并为一条，han = 组数（§1.3.3）
-  PushYaku(yaku, "rinshan", facts.rinshan ? 1 : 0);
-  PushYaku(yaku, "sanshoku_doujun", sanshoku ? 2 : 0);
-  PushYaku(yaku, "ittsuu", ittsuu ? 2 : 0);
-  PushYaku(yaku, "toitoi", all_triplets ? 2 : 0);
-  PushYaku(yaku, "sanankou", ankou >= 3 ? 2 : 0);
-  PushYaku(yaku, "honitsu", facts.honitsu ? 2 : 0);
-  PushYaku(yaku, "shousangen", shousangen ? 2 : 0);
+  PushYaku(yaku, protocol::YakuId::kMenzen, facts.menzen ? 1 : 0);
+  PushYaku(yaku, protocol::YakuId::kTanyao, facts.tanyao ? 1 : 0);
+  PushYaku(yaku, protocol::YakuId::kPinfu, (facts.menzen && all_runs && IsNumberFace(decomposition.pair)) ? 1 : 0);
+  PushYaku(yaku, protocol::YakuId::kIipeikou, iipeikou ? 1 : 0);
+  PushYaku(yaku, protocol::YakuId::kYakuhai, yakuhai);  // 多条合并为一条，han = 组数（§1.3.3）
+  PushYaku(yaku, protocol::YakuId::kRinshan, facts.rinshan ? 1 : 0);
+  PushYaku(yaku, protocol::YakuId::kSanshokuDoujun, sanshoku ? 2 : 0);
+  PushYaku(yaku, protocol::YakuId::kIttsuu, ittsuu ? 2 : 0);
+  PushYaku(yaku, protocol::YakuId::kToitoi, all_triplets ? 2 : 0);
+  PushYaku(yaku, protocol::YakuId::kSanankou, ankou >= 3 ? 2 : 0);
+  PushYaku(yaku, protocol::YakuId::kHonitsu, facts.honitsu ? 2 : 0);
+  PushYaku(yaku, protocol::YakuId::kShousangen, shousangen ? 2 : 0);
   // 一色组：两边都判，绝不双命中（结构上互斥，§1.3.2 —— 不写互斥分支）
-  PushYaku(yaku, "pure_one_suit", facts.pure ? 5 : 0);
+  PushYaku(yaku, protocol::YakuId::kPureOneSuit, facts.pure ? 5 : 0);
   return yaku;
 }
 
 // 七对子形态的番种（与顺子类/刻子类天然互斥，只可能与 #1/#2/#6/#11/#14 叠加）
 std::vector<Yaku> YakuOfSevenPairs(const HandFacts& facts) {
   std::vector<Yaku> yaku;
-  PushYaku(yaku, "menzen", facts.menzen ? 1 : 0);
-  PushYaku(yaku, "tanyao", facts.tanyao ? 1 : 0);
-  PushYaku(yaku, "rinshan", facts.rinshan ? 1 : 0);
-  PushYaku(yaku, "honitsu", facts.honitsu ? 2 : 0);
-  PushYaku(yaku, "seven_pairs", 2);
-  PushYaku(yaku, "pure_one_suit", facts.pure ? 5 : 0);
+  PushYaku(yaku, protocol::YakuId::kMenzen, facts.menzen ? 1 : 0);
+  PushYaku(yaku, protocol::YakuId::kTanyao, facts.tanyao ? 1 : 0);
+  PushYaku(yaku, protocol::YakuId::kRinshan, facts.rinshan ? 1 : 0);
+  PushYaku(yaku, protocol::YakuId::kHonitsu, facts.honitsu ? 2 : 0);
+  PushYaku(yaku, protocol::YakuId::kSevenPairs, 2);
+  PushYaku(yaku, protocol::YakuId::kPureOneSuit, facts.pure ? 5 : 0);
   return yaku;
 }
 
 }  // namespace
 
-int YakuHan(std::string_view id) {
+int YakuHan(protocol::YakuId id) {
   // 冻结番数表（GAME_DESIGN_V2 §1.2）；yakuhai 返回**单组**的 1 番
-  if (id == "menzen" || id == "tanyao" || id == "pinfu" || id == "iipeikou" || id == "yakuhai" || id == "rinshan") {
-    return 1;
+  switch (id) {
+    case protocol::YakuId::kMenzen:
+    case protocol::YakuId::kTanyao:
+    case protocol::YakuId::kPinfu:
+    case protocol::YakuId::kIipeikou:
+    case protocol::YakuId::kYakuhai:
+    case protocol::YakuId::kRinshan:
+      return 1;
+    case protocol::YakuId::kSanshokuDoujun:
+    case protocol::YakuId::kIttsuu:
+    case protocol::YakuId::kToitoi:
+    case protocol::YakuId::kSanankou:
+    case protocol::YakuId::kHonitsu:
+    case protocol::YakuId::kShousangen:
+    case protocol::YakuId::kSevenPairs:
+      return 2;
+    case protocol::YakuId::kPureOneSuit:
+      return 5;
+    default:
+      return 0;
   }
-  if (id == "sanshoku_doujun" || id == "ittsuu" || id == "toitoi" || id == "sanankou" || id == "honitsu" ||
-      id == "shousangen" || id == "seven_pairs") {
-    return 2;
-  }
-  if (id == "pure_one_suit") return 5;
-  return 0;
 }
 
 int YakuHanTotal(const std::vector<Yaku>& yaku) {
@@ -896,8 +908,9 @@ std::vector<Yaku> DetectYaku(const std::vector<Tile>& concealed_with_winning_til
   return best;
 }
 
-std::vector<std::string> WinTags(const std::vector<Tile>& concealed_with_winning_tile, const std::vector<Meld>& melds,
-                                 std::optional<Tile> winning_tile, std::optional<ScoreContext> ctx) {
+std::vector<protocol::YakuId> WinTags(const std::vector<Tile>& concealed_with_winning_tile,
+                                      const std::vector<Meld>& melds, std::optional<Tile> winning_tile,
+                                      std::optional<ScoreContext> ctx) {
   ScoreContext effective = ctx.value_or(ScoreContext {});
   Tile tile = Tile {};
   if (winning_tile.has_value()) {
@@ -905,7 +918,7 @@ std::vector<std::string> WinTags(const std::vector<Tile>& concealed_with_winning
   } else if (!concealed_with_winning_tile.empty()) {
     tile = concealed_with_winning_tile.front();
   }
-  std::vector<std::string> tags;
+  std::vector<protocol::YakuId> tags;
   for (const Yaku& yaku : DetectYaku(concealed_with_winning_tile, melds, tile, effective)) {
     tags.push_back(yaku.id);
   }
@@ -1329,7 +1342,7 @@ namespace {
 
 constexpr int kHanCap = 6;  // 封顶 6 番（庄家加成受同一封顶，§2.5）
 
-bool HasYaku(const std::vector<Yaku>& yaku, std::string_view id) {
+bool HasYaku(const std::vector<Yaku>& yaku, protocol::YakuId id) {
   for (const Yaku& item : yaku) {
     if (item.id == id) return true;
   }
@@ -1351,7 +1364,7 @@ ScoreResult ScoreHand(const std::vector<Tile>& concealed_with_winning_tile, cons
 
   result.yaku = DetectYaku(concealed_with_winning_tile, melds, winning_tile, ctx);
   result.dealer_bonus = ctx.winner_is_dealer ? 1 : 0;
-  result.rinshan = HasYaku(result.yaku, "rinshan");
+  result.rinshan = HasYaku(result.yaku, protocol::YakuId::kRinshan);
 
   // han = 番种合计 + 庄家(1)，受**同一**封顶（B1.1 裁决：自摸不是番种，不计入合计；
   // "自摸 ×2" 已并入下方支付公式的 2R/6R）

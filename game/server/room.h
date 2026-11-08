@@ -62,6 +62,24 @@ inline protocol::WireLength ToWire(GameLength length) {
   return length == GameLength::kHanchan ? protocol::WireLength::kHanchan : protocol::WireLength::kTonpu;
 }
 
+inline protocol::WireLimit ToWire(riichi::Limit limit) {
+  switch (limit) {
+    case riichi::Limit::kNone:
+      return protocol::WireLimit::kNone;
+    case riichi::Limit::kMangan:
+      return protocol::WireLimit::kMangan;
+    case riichi::Limit::kHaneman:
+      return protocol::WireLimit::kHaneman;
+    case riichi::Limit::kBaiman:
+      return protocol::WireLimit::kBaiman;
+    case riichi::Limit::kSanbaiman:
+      return protocol::WireLimit::kSanbaiman;
+    case riichi::Limit::kYakuman:
+      return protocol::WireLimit::kYakuman;
+  }
+  return protocol::WireLimit::kInvalid;
+}
+
 // 这个玩法下的一共几局：classic 恒 4（C15），日麻按 kTonpu/kHanchan 取 4/8。
 int RoundCountOf(GameMode mode, GameLength length);
 
@@ -400,11 +418,11 @@ class RoomActor {
     std::vector<Tile> winner_flat_hand;
     //: v4.5：结算摊牌——四家的扁平手牌（门前 + 副露），只随 game_end 下发。
     std::array<std::vector<Tile>, kSeatCount> flat_hands {};
-    std::vector<std::string> winner_types;  // tags + "ron"/"tsumo"
+    std::vector<protocol::YakuId> winner_types;  // tags + kWinRon/kWinTsumo
     bool tsumo = false;
     Tile winning_tile {};
     int from_seat = -1;
-    std::vector<std::string> tags;  // = yaku[].id（tags ⊆ yaku id，单一出口）
+    std::vector<protocol::YakuId> tags;  // = yaku[].id（tags ⊆ yaku id，单一出口）
     int multiplier = 0;             // R = 2^han
     int per_payer = 0;
     int total = 0;
@@ -419,9 +437,9 @@ class RoomActor {
     int dealer_bonus = 0;                   // 0/1
     bool rinshan = false;
     // ---- 日麻（mode == kRiichi）专用；classic 下全部保持默认值 ----
-    int fu = 0;           // 符（classic 恒 0）
-    int points = 0;       // 和牌点数（classic = multiplier）
-    std::string limit;    // none/mangan/haneman/baiman/sanbaiman/yakuman
+    int fu = 0;                                  // 符（classic 恒 0）
+    int points = 0;                              // 和牌点数（classic = multiplier）
+    riichi::Limit limit = riichi::Limit::kNone;  // 满贯分档（出站经 ToWire 转整数）
     bool riichi = false;  // 本局和牌者是否立直
     int dora = 0;
     int ura_dora = 0;
