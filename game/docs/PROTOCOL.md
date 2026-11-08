@@ -1,7 +1,8 @@
 # 麻将里程碑协议（PROTOCOL）
 
 - 文档 ID：PROTOCOL
-- 版本：**v1.22（冻结）**
+- 版本：**v1.23（冻结）**
+  v1.23 **等待页座位同步**：新增服务端帧 **`room_update`**（S→C 15 → **16 条**，§5.17）——`join_room` 成功、以及未开局时非房主真人断开，都向房间内**全部真人**广播当前四席位快照；`room_joined` 仍只回本人。修复「好友已入座、房主等待页仍显示 3 个 AI」的缺陷，客户端 **MUST** 用本帧刷新等待页。**零新增错误码、零既有帧字段变化**；不读新帧的旧客户端行为不变（未知帧忽略，§1.3）。见 §3.2、§4.3、§5.17
   v1.22 **玩法徽标（纯客户端，零帧变化）**：`game_start` **不新增** `mode` 字段（classic 帧逐字节冻结、仍是 6 键），客户端按「帧里有没有 `points[4]`」判定玩法——日麻恒带、classic 恒不带——并在场况卡右上角画徽标（`日麻` 金色 / `经典` 灰色）。这条只为回答一个反复出现的问题：**「这里怎么不能立直」多数时候答案是「这是经典房」**。服务端一字节未改。见 §5.4
   v1.21 **立直宣言牌候选**（`mode=riichi`）：`action_request` 新增**可选字段** `riichi_tiles`（牌面数组），只在 `window=="discard"` 且 `options` 含 `riichi` 时出现，值 = 手中「打出去之后仍在听牌且不落振听」的牌面（升序去重、恒用普通牌面码，赤 5 写 `5m`）。**候选为空时服务端不下发 `riichi` 选项**（不再出现"点了注定被拒"的按钮）。客户端据此在手牌上标记可宣言的牌，消除「选错宣言牌 → ILLEGAL_ACTION」的试错。**零新增帧、零新增错误码**；classic 与 v1.20 逐字节一致。见 §5.7、§12.5
   v1.20 **场终剩棒归一位**（`mode=riichi`）：本场以**荒庄或击飞**收尾时，台面上还没被收走的立直棒（`kyoutaku`）不再凭空消失，而是**全部归一位**（持点最高者；同点按东一局座次 = seat 升序）。这笔点数**已计入**该局 `game_end.results[].delta_score` / `points_after[]` 与 `match_end.rankings[].final_score`（三者同源），并新增**可选字段** `game_end.kyoutaku_award`（`{seat, sticks, points}`，非场终局恒 `null`）供结算页显示「场供 N 根 → 一位」。classic 无供托概念、帧与 v1.19 逐字节一致。见 §12.13
@@ -231,7 +232,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | C9 | `register` | `username`, `password`, `name?` | 账号注册（v1.3，`ACCOUNT_DESIGN.md` §3.2）；注册成功即登录 |
 | C10 | `stats_request` | — | 登录后任意时刻（v1.3，查询本人累计战绩） |
 
-### 3.2 服务端 → 客户端（15 条）
+### 3.2 服务端 → 客户端（16 条）
 
 | # | `type` | 字段 | 收件人 |
 | --- | --- | --- | --- |
@@ -250,9 +251,10 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | S14 | `room_list` | `rooms[]` | 请求 `list_rooms` 的连接（v1.5） |
 | S15 | `match_end` | `hands_played`, `renchan_count`, `rankings[]` | 广播 4 家（**场终**，v1.6；**无 `seq`**） |
 | S16 | `tenpai` | `tenpai_seq`, `is_tenpai`, `waits[]{tile,remaining}` | **仅本家**（v1.7；**走 `tenpai_seq`，不参与 `room.seq` 比较**） |
+| S17 | `room_update` | `room_id`, `seats[]` | **广播房间内全部真人**（v1.23；未开局的座位变动，见 §5.17） |
 
-> 表中 `S12` 不存在：本版本共 14 类服务端帧 + `pong` 计 **15 条**（v1.6 增补 `match_end`、v1.7 增补 `tenpai`），与 GAME_DESIGN §11.2 的对应关系见该节。
-> （编号沿用 v1.0 的历史序：`S12` 从未存在，v1.3 新增的 `stats` 取 `S13`，v1.6 的 `match_end` 取 `S15`，v1.7 的 `tenpai` 取 `S16`。）
+> 表中 `S12` 不存在：本版本共 15 类服务端帧 + `pong` 计 **16 条**（v1.6 增补 `match_end`、v1.7 增补 `tenpai`、v1.23 增补 `room_update`），与 GAME_DESIGN §11.2 的对应关系见该节。
+> （编号沿用 v1.0 的历史序：`S12` 从未存在，v1.3 新增的 `stats` 取 `S13`，v1.6 的 `match_end` 取 `S15`，v1.7 的 `tenpai` 取 `S16`，v1.23 的 `room_update` 取 `S17`。）
 
 ---
 
@@ -309,7 +311,8 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 - 只在目标房间**还没**收到 `ready` 时成功：把编号最小的 AI 座位换成该玩家，`seat` 为该编号。已经坐在这间房里再发一次 → 再回一帧当前的 `room_joined`，状态不变。
 - 已经在别的房间 → `error{code:"BAD_REQUEST"}`（`message:"already in a room"`）。
 - 房间不存在、已经开局、或没有剩余 AI 座位 → `error{code:"ROOM_NOT_FOUND"}`，连接保持。
-- 未开局时房主断开：房间删除。其他真人断开：该座位恢复为原来的 AI。
+- 成功入座后，服务端 **MUST** 向房间内**所有真人连接**广播一帧 `room_update`（§5.17）。`room_joined` 只回给加入者本人；房主与先到的玩家靠 `room_update` 才知道座位变化，否则等待页永远显示旧名单。
+- 未开局时其他真人断开：该座位恢复为原来的 AI，服务端 **MUST** 同样广播一帧 `room_update`。房主断开则房间删除，不发该帧（房间已不存在）。
 
 ### 4.4 `ready`
 
@@ -836,6 +839,27 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 
 - 无 `seq`（走 `tenpai_seq`）；`tenpai` **不改变**任何牌局状态，纯只读快照。
 
+### 5.17 `room_update`（**v1.23 新增**，未开局房间的座位快照）
+
+```json
+{"type":"room_update","room_id":"r-0f3k9m2p7q1sx",
+ "seats":[{"seat":0,"name":"小明","is_bot":false},
+          {"seat":1,"name":"小红","is_bot":false},
+          {"seat":2,"name":"AI-2","is_bot":true},
+          {"seat":3,"name":"AI-3","is_bot":true}]}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `room_id` | string | 与 `room_joined.room_id` 一致；客户端 **MUST** 丢弃不属于当前等待房间的帧 |
+| `seats[]` | array | 恒 4 项，按 `seat` 升序；每项 `{seat,name,is_bot}`，形状与 `room_joined.seats[]` 完全一致（§5.3） |
+
+- 收件人：**房间内全部真人连接**（含刚入座者——他会同时收到 `room_joined` 与本帧，两份 `seats[]` 相同，幂等渲染即可）；AI 座位不发。
+- 下发时机：① `join_room` 成功且回完 `room_joined` 之后；② 未开局时非房主真人断开、其座位恢复为 AI 之后。开局（`ready`）之后 **不再发**；重复 `join_room` 状态不变，也不发。
+- 无 `seq`（与 `login_ok` / `room_joined` / `room_list` 同类，见 §6.2）。不改任何牌局状态，纯只读快照。
+- 客户端 **MUST** 用本帧刷新等待页的四席位（昵称 / 玩家·AI 标记）与人数提示；**不得**靠 `room_list.rooms[].players` 反推座位——该帧只有人数，没有座位名单（§5.14）。`room_list` 轮询只是等待页的兜底。
+- **零新增错误码**；v1.22 客户端不读本帧也能正常跑（未知帧类型忽略，§1.3），只是等待页不会同步他人入座。
+
 ---
 
 ## 6. 动作窗口与 `seq` 作废
@@ -1107,6 +1131,7 @@ S→C match_end{hands_played:5,renchan_count:1,
 
 - [ ] NDJSON 分帧、UTF-8 校验、64 KB 上限、坏帧计数、限速与断开阈值（§1）
 - [ ] `login`/`create_room`/`join_room`/`ready` 与 `error` 路由（§4.1–§4.4、§7）
+- [ ] **v1.23**：`join_room` 成功 / 未开局非房主真人断开后，向房间内全部真人广播 `room_update`；房主断开删房间时不得发（§4.3、§5.17）
 - [ ] 未知 `type`、非法 JSON 不崩溃且不影响其他连接（§1.3、§7.3）
 - [ ] 私有信息按连接隔离（§8.1）
 
@@ -1644,6 +1669,7 @@ remaining(tile) = 4
 
 | 版本 | 内容 | 来源 |
 | --- | --- | --- |
+| **v1.23** | **等待页座位同步**：新增 S→C 帧 `room_update`（S17，§5.17，15 → 16 条），`join_room` 成功 / 未开局非房主断开后广播房间内全部真人的四席位快照；`room_joined` 仍只回本人，`room_list` 仍只有人数。客户端据此刷新等待页席位与人数提示，不得靠 `players` 反推座位。**零新增错误码、零既有帧字段变化**，旧客户端忽略未知帧即可 | 缺陷修复（好友入座后房主等待页没同步）；用户需求「服务器应该做同步」 |
 | **v1.20** | **场终剩棒归一位**（`mode=riichi`）：§12.13 新增整节 —— 本场以荒庄/击飞收尾时，台面剩下的立直棒全部归**一位**（持点最高，同点 seat 升序），点数计入该局 `results[].delta_score` / `match_total` / `points_after[]`，与 `match_end.rankings[].final_score` 逐点一致；新增**可选字段** `game_end.kyoutaku_award`（`{seat, sticks, points}`，非场终局恒 `null`）。**classic 逐字节不变**，零新增错误码 | 需求（场供归属）；规则口径见 `GAME_DESIGN_RIICHI_DRAFT.md` §7.7 |
 | **v1.19** | **击飞终局**（`mode=riichi`）：§12.12 新增整节 —— 任一持点 **< 0** ⇒ 本场立即终局，优先级高于局数与连庄（`match_will_continue=false`，随后 `match_end`）；击飞那一局**不推进**庄家/局号/本场；**恰好 0 点继续**；负点不截断（箱下照算，`points_after` / `rankings[].final_score` 用真实负值）。**classic 不参与**（无持点），**零新增字段、零新增错误码、零新增 `reason` 值** | 需求（击飞）；规则口径见 `GAME_DESIGN_RIICHI_DRAFT.md` §7.6 |
 | **v1.18** | **赤宝牌 + 双倍役满**（`mode=riichi`）：① §2.1 牌码新增 `0m`/`0p`/`0s` = 赤宝牌（5 的第 4 张物理牌，牌面仍是 5，每张 +1 番）；② §12.5 `win` 新增 `aka_dora`（张数），`win.yaku[]` 新增 `aka_dora` 条目（与 `dora`/`ura_dora` 同形）；③ §12.11 新增整节：赤牌的物理身份 / 下发位置 / 提交匹配 / 鸣牌扣牌顺序 / 听牌与指示牌口径，以及四个**双倍役满** id `kokushi_13`/`suuankou_tanki`/`chuuren_junsei`/`daisuushii`（`yaku[].han = 26`，多役满倍数相加，`limit` 仍是 `yakuman`）。**classic 帧逐字节不变**（同一张物理牌在 classic 里仍下发 `5m`），零新增帧、零新增错误码 | 需求（赤宝牌 / 双倍役满） |
