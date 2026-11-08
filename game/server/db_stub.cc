@@ -34,7 +34,7 @@ stdexec::task<void> DbActor::Login(std::string /*username*/, std::string /*passw
                                 ex_actor::ActorRef<PlayerActor> reply) {
   if (!reply.IsEmpty()) {
     ActorSendScope().spawn(reply.Send<&PlayerActor::Dispatch>(
-        PlayerEnvelope::OnLoginResult(AuthOutcome {AuthStatus::kUnavailable, AccountRow {}})));
+        PlayerEnvelope::OnLoginResult(AuthOutcome {.status = AuthStatus::kUnavailable, .account = AccountRow {}})));
   }
   co_return;
 }
@@ -43,7 +43,7 @@ stdexec::task<void> DbActor::Register(std::string /*username*/, std::string /*pa
                                    ex_actor::ActorRef<PlayerActor> reply) {
   if (!reply.IsEmpty()) {
     ActorSendScope().spawn(reply.Send<&PlayerActor::Dispatch>(
-        PlayerEnvelope::OnRegisterResult(AuthOutcome {AuthStatus::kUnavailable, AccountRow {}})));
+        PlayerEnvelope::OnRegisterResult(AuthOutcome {.status = AuthStatus::kUnavailable, .account = AccountRow {}})));
   }
   co_return;
 }

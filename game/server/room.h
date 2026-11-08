@@ -257,7 +257,7 @@ struct RoomEnvelope {
   static RoomEnvelope Ready(PlayerInfo player) { return {ReadyMsg {std::move(player)}}; }
   static RoomEnvelope Sync(PlayerInfo player) { return {SyncMsg {std::move(player)}}; }
   static RoomEnvelope GameFrame(PlayerInfo player, json::Value frame) {
-    return {GameFrameMsg {std::move(player), std::move(frame)}};
+    return {GameFrameMsg {.player = std::move(player), .frame = std::move(frame)}};
   }
   static RoomEnvelope WindowTimeout(uint64_t token) { return {WindowTimeoutMsg {token}}; }
   static RoomEnvelope PlayerDisconnected(PlayerInfo player) { return {PlayerDisconnectedMsg {std::move(player)}}; }

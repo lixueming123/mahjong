@@ -230,7 +230,7 @@ stdexec::task<void> LobbyActor::CreateRoomWithMode(ex_actor::ActorRef<SeatEndpoi
     creating_.erase(pending);
   }
   if (owned && spawn_error.empty()) {
-    players_[player.player_id] = PlayerState {room_id, conn};
+    players_[player.player_id] = PlayerState {.room_id = room_id, .conn = conn};
     rooms_[room_id] = room;
     room_seats_[room_id] = seats;
     room_started_[room_id] = false;
@@ -275,9 +275,12 @@ stdexec::task<void> LobbyActor::OnRoomFinished(GameSettlement settlement) {
         continue;  // guests and bots have no history to keep (§4.2)
       }
       // DB 落库仍是字符串词表（v2.0 只改线格式），在边界用 NameOf 翻译一次。
-      ActorSendScope().spawn(db_.RecordMatch(
-          MatchRecord {seat.player.account_id, settlement.room_id, std::string(protocol::NameOf(settlement.reason)),
-                       seat.delta_score, seat.winner, std::string(protocol::NameOf(settlement.mode))}));
+      ActorSendScope().spawn(db_.RecordMatch(MatchRecord {.account_id = seat.player.account_id,
+                                                          .room_id = settlement.room_id,
+                                                          .reason = std::string(protocol::NameOf(settlement.reason)),
+                                                          .delta_score = seat.delta_score,
+                                                          .win = seat.winner,
+                                                          .mode = std::string(protocol::NameOf(settlement.mode))}));
     }
   }
   // ACCOUNT_DESIGN.md v1.3 §4 item 7: the match summary is written ONCE per match (at
@@ -385,7 +388,7 @@ stdexec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, 
       claimed.disconnected = false;
       claimed.endpoint = conn;
       seats[static_cast<size_t>(free)] = claimed;
-      players_[player.player_id] = PlayerState {room_id, conn};
+      players_[player.player_id] = PlayerState {.room_id = room_id, .conn = conn};
       snapshot = seats;
       room = rooms_[room_id];
     }

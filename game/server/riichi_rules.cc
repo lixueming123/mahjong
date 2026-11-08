@@ -195,7 +195,7 @@ std::vector<Yaku> YakuForDecomposition(const Decomposition& decomp, const std::v
   std::vector<Yaku> yaku;
   auto push = [&yaku](std::string_view id, int han) {
     if (han > 0) {
-      yaku.push_back(Yaku {std::string(id), han});
+      yaku.push_back(Yaku {.id = std::string(id), .han = han});
     }
   };
   const bool closed = facts.closed;
@@ -402,7 +402,9 @@ std::vector<Yaku> DetectYakuman(const std::vector<Tile>& concealed, const std::v
   std::vector<Yaku> result;
   const bool tsumo = ctx.Tsumo();
   const HandFacts facts = ComputeFacts(concealed, melds);
-  auto push = [&result](std::string_view id) { result.push_back(Yaku {std::string(id), 13 * YakumanMultiplier(id)}); };
+  auto push = [&result](std::string_view id) {
+    result.push_back(Yaku {.id = std::string(id), .han = 13 * YakumanMultiplier(id)});
+  };
 
   if (facts.all_honors) {
     push("tsuuiisou");
@@ -523,7 +525,7 @@ std::vector<Yaku> YakuOfSevenPairs(const WinContext& ctx, const HandFacts& facts
   std::vector<Yaku> yaku;
   auto push = [&yaku](std::string_view id, int han) {
     if (han > 0) {
-      yaku.push_back(Yaku {std::string(id), han});
+      yaku.push_back(Yaku {.id = std::string(id), .han = han});
     }
   };
   push("riichi", (facts.closed && ctx.is_riichi) ? 1 : 0);
@@ -926,7 +928,7 @@ std::vector<Option> DiscardOptions(const std::vector<Tile>& concealed_with_winni
   }
   // 国士无双：共享的 `DiscardOptions` 按番数制的牌型判和，认不出国士，这里补一条 win。
   if (FindOption(options, protocol::Action::kWin) == nullptr && IsKokushiHand(concealed_with_winning_tile, melds)) {
-    options.insert(options.begin(), Option {protocol::Action::kWin, {}});  // 顺序仍是 win 在最前
+    options.insert(options.begin(), Option {.action = protocol::Action::kWin, .tiles = {}});  // 顺序仍是 win 在最前
   }
   if (riichi_declared && drawn_tile.has_value()) {
     for (int index = 0; index < kFaceCount; ++index) {
@@ -956,7 +958,7 @@ std::vector<Option> ClaimOptions(const std::vector<Tile>& hand, const std::vecto
     std::vector<Tile> full = hand;
     full.push_back(discarded);
     if (IsKokushiHand(full, melds)) {
-      options.insert(options.begin(), Option {protocol::Action::kWin, {}});
+      options.insert(options.begin(), Option {.action = protocol::Action::kWin, .tiles = {}});
     }
   }
   if (furiten) {
@@ -1237,13 +1239,13 @@ ScoreResult ScoreHand(const std::vector<Tile>& concealed_with_winning_tile, cons
     ScoreResult candidate;
     candidate.yaku = base_yaku;
     if (dora > 0) {
-      candidate.yaku.push_back(Yaku {"dora", dora});
+      candidate.yaku.push_back(Yaku {.id = "dora", .han = dora});
     }
     if (ura_dora > 0) {
-      candidate.yaku.push_back(Yaku {"ura_dora", ura_dora});
+      candidate.yaku.push_back(Yaku {.id = "ura_dora", .han = ura_dora});
     }
     if (aka > 0) {
-      candidate.yaku.push_back(Yaku {"aka_dora", aka});
+      candidate.yaku.push_back(Yaku {.id = "aka_dora", .han = aka});
     }
     candidate.han = han;
     candidate.fu = fu;

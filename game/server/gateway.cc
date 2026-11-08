@@ -133,8 +133,8 @@ void Gateway::Run() {
   while (!StopRequested() && running_) {
     poll_fds.clear();
     poll_clients.clear();
-    poll_fds.push_back(pollfd {listen_fd_, POLLIN, 0});
-    poll_fds.push_back(pollfd {wake_fds_[0], POLLIN, 0});
+    poll_fds.push_back(pollfd {.fd = listen_fd_, .events = POLLIN, .revents = 0});
+    poll_fds.push_back(pollfd {.fd = wake_fds_[0], .events = POLLIN, .revents = 0});
     for (size_t index = 0; index < clients_.size(); ++index) {
       Client& client = clients_[index];
       if (client.dead) {
@@ -146,7 +146,7 @@ void Gateway::Run() {
       if (!closing && client.conn->HasPendingOutbox()) {
         events |= POLLOUT;
       }
-      poll_fds.push_back(pollfd {client.conn->fd(), events, 0});
+      poll_fds.push_back(pollfd {.fd = client.conn->fd(), .events = events, .revents = 0});
       poll_clients.push_back(index);
     }
 

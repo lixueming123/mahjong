@@ -599,7 +599,7 @@ void CollectDecompositions(FaceCounts& counts, int need_groups, std::vector<Grou
   // A. 刻子（先于顺子：与既有 Decompose 的 A/B 分支次序逐字一致）
   if (counts[static_cast<size_t>(first)] >= 3) {
     counts[static_cast<size_t>(first)] -= 3;
-    pending.push_back(Group {false, -1, false, static_cast<Face>(first)});
+    pending.push_back(Group {.from_meld = false, .meld_index = -1, .is_run = false, .face = static_cast<Face>(first)});
     CollectDecompositions(counts, need_groups - 1, pending, meld_groups, meld_count, out);
     pending.pop_back();
     counts[static_cast<size_t>(first)] += 3;
@@ -611,7 +611,7 @@ void CollectDecompositions(FaceCounts& counts, int need_groups, std::vector<Grou
     counts[static_cast<size_t>(first)] -= 1;
     counts[static_cast<size_t>(first + 1)] -= 1;
     counts[static_cast<size_t>(first + 2)] -= 1;
-    pending.push_back(Group {false, -1, true, static_cast<Face>(first)});
+    pending.push_back(Group {.from_meld = false, .meld_index = -1, .is_run = true, .face = static_cast<Face>(first)});
     CollectDecompositions(counts, need_groups - 1, pending, meld_groups, meld_count, out);
     pending.pop_back();
     counts[static_cast<size_t>(first)] += 1;
@@ -751,7 +751,7 @@ GroupView ViewOfGroup(const Group& group, const std::vector<Meld>& melds) {
 
 void PushYaku(std::vector<Yaku>& yaku, std::string id, int han) {
   if (han <= 0) return;
-  yaku.push_back(Yaku {std::move(id), han});
+  yaku.push_back(Yaku {.id = std::move(id), .han = han});
 }
 
 // 单个拆法的番种列表（**按 §1.2 表序**，同一 id 至多一条）
@@ -918,15 +918,16 @@ std::vector<std::string> WinTags(const std::vector<Tile>& concealed_with_winning
 std::vector<Option> ClaimOptions(const std::vector<Tile>& hand, const std::vector<Meld>& melds, Tile discarded,
                                  int remaining, bool is_next_player) {
   std::vector<Option> options;
-  if (CanWinWith(hand, melds, discarded)) options.push_back(Option {protocol::Action::kWin, {}});
-  if (CanKong(hand, discarded, remaining)) options.push_back(Option {protocol::Action::kKong, {discarded}});
-  if (CanPong(hand, discarded)) options.push_back(Option {protocol::Action::kPong, {discarded}});
+  if (CanWinWith(hand, melds, discarded)) options.push_back(Option {.action = protocol::Action::kWin, .tiles = {}});
+  if (CanKong(hand, discarded, remaining))
+    options.push_back(Option {.action = protocol::Action::kKong, .tiles = {discarded}});
+  if (CanPong(hand, discarded)) options.push_back(Option {.action = protocol::Action::kPong, .tiles = {discarded}});
   if (is_next_player) {
     for (const auto& combo : ChowCombinations(hand, discarded)) {
-      options.push_back(Option {protocol::Action::kChow, {combo[0], combo[1]}});
+      options.push_back(Option {.action = protocol::Action::kChow, .tiles = {combo[0], combo[1]}});
     }
   }
-  options.push_back(Option {protocol::Action::kPass, {}});
+  options.push_back(Option {.action = protocol::Action::kPass, .tiles = {}});
   return options;
 }
 
@@ -934,7 +935,7 @@ std::vector<Option> DiscardOptions(const std::vector<Tile>& concealed_with_winni
                                    int remaining) {
   std::vector<Option> options;
   if (CanWinExact(concealed_with_winning_tile, melds)) {
-    options.push_back(Option {protocol::Action::kWin, {}});
+    options.push_back(Option {.action = protocol::Action::kWin, .tiles = {}});
   }
   // 暗杠 / 加杠只在**本家行动态**（逻辑 14 张）提供，且需要 ≥ 1 张补牌
   // （`remaining < 1` 时不提供，与 CanKong 的守卫同源，GAME_DESIGN_V2 §4.2/§4.3）。
@@ -944,7 +945,7 @@ std::vector<Option> DiscardOptions(const std::vector<Tile>& concealed_with_winni
   // PROTOCOL v1.6 §4.6 冻结：元素多于 1 个 ⇒ ILLEGAL_ACTION）。
   if (logical == 14u && remaining >= 1) {
     for (Face face : AnkanFaces(concealed_with_winning_tile)) {
-      options.push_back(Option {protocol::Action::kAnkan, {MakeTileFromFace(face)}});
+      options.push_back(Option {.action = protocol::Action::kAnkan, .tiles = {MakeTileFromFace(face)}});
     }
     for (int meld_index : KakanMeldIndices(concealed_with_winning_tile, melds)) {
       const Meld& meld = melds[static_cast<size_t>(meld_index)];
@@ -956,7 +957,7 @@ std::vector<Option> DiscardOptions(const std::vector<Tile>& concealed_with_winni
           break;
         }
       }
-      options.push_back(Option {protocol::Action::kKakan, {fourth}});
+      options.push_back(Option {.action = protocol::Action::kKakan, .tiles = {fourth}});
     }
   }
   return options;
