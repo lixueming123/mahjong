@@ -8,7 +8,7 @@
  */
 import { ALL_CODES } from './config.js';
 import { normTile } from './state.js';
-import { ACTION, REASON } from './protocol_enums.js';
+import { ACTION, REASON, yakuName } from './protocol_enums.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -354,7 +354,7 @@ export class UI {
     el.rsWinner.hidden = !win;
     if (win) {
       const yaku = (win.yaku || [])
-        .map((item) => `${YAKU_LABELS[item.id] || item.id}${item.han != null ? ` ${item.han}番` : ''}`)
+        .map((item) => `${YAKU_LABELS[yakuName(item.id)] || yakuName(item.id)}${item.han != null ? ` ${item.han}番` : ''}`)
         .join(' · ');
       const parts = [];
       if (yaku) parts.push(yaku);
@@ -454,8 +454,8 @@ export class UI {
     const agariHtml = agari ? face(agari, 'agari') : '';
 
     const yakuHtml = (Array.isArray(win.yaku) ? win.yaku : [])
-      .filter((item) => item && typeof item.id === 'string')
-      .map((item) => `<b>${esc(YAKU_LABELS[item.id] || item.id)}</b>`
+      .filter((item) => item && (typeof item.id === 'number' || typeof item.id === 'string'))
+      .map((item) => `<b>${esc(YAKU_LABELS[yakuName(item.id)] || yakuName(item.id))}</b>`
         + `${Number.isInteger(item.han) ? ` ${item.han}番` : ''}`)
       .join('<span class="sep"> · </span>');
 

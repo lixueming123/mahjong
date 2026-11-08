@@ -12,7 +12,7 @@
  * 渲染层只读，不碰网络。
  */
 import { RIVER, HAND, HAND_SIZE } from './config.js';
-import { ACTION, REASON, MELD_TYPE, nameOf } from './protocol_enums.js';
+import { ACTION, REASON, MELD_TYPE, nameOf, yakuName } from './protocol_enums.js';
 
 const WINDS = ['東', '南', '西', '北'];
 
@@ -480,7 +480,9 @@ export function createState() {
     let text = reasonLabel(frame.reason);
     if (win) {
       const seat = viewSeat(win.seat);
-      const yaku = (win.yaku || []).map((item) => YAKU_NAMES[item.id] || item.id).join(' ');
+      const yaku = (win.yaku || [])
+        .map((item) => YAKU_NAMES[yakuName(item.id)] || yakuName(item.id))
+        .join(' ');
       text = `${state.seatNames[seat]} ${win.tsumo ? '自摸' : '荣和'} ${win.tile || ''}`
         + (yaku ? ` · ${yaku}` : '') + (win.han != null ? ` · ${win.han}番` : '');
     }

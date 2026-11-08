@@ -20,7 +20,7 @@
 import { Net } from './net.js';
 import { normTile, isValidTile, drawnIndex } from './state.js';
 import { buildVoiceCues, voiceDuration } from './voice.js';
-import { FRAME_TYPE, ACTION, WINDOW, MODE, LENGTH, ERROR_CODE } from './protocol_enums.js';
+import { FRAME_TYPE, ACTION, WINDOW, MODE, LENGTH, ERROR_CODE, yakuName } from './protocol_enums.js';
 
 const FALLBACK_NAMES = ['自', '右', '对', '左'];
 
@@ -1122,7 +1122,8 @@ export class MahjongClient {
     const win = frame.win;
     const detail = win
       ? `${this.state.seatNames[this.app.viewSeat(win.seat)]} ${win.tsumo ? '自摸' : '荣和'} `
-        + `${win.tile || ''} ${(win.yaku || []).map((item) => YAKU_NAMES[item.id] || item.id).join('·')}`
+        + `${win.tile || ''} ${(win.yaku || [])
+          .map((item) => YAKU_NAMES[yakuName(item.id)] || yakuName(item.id)).join('·')}`
         + (win.han != null ? ` ${win.han}番` : '')
       : '荒庄';
     this.hint(`[局终] ${detail} ｜ ${rows.join(' / ')}`);
@@ -1139,7 +1140,7 @@ export class MahjongClient {
     if (win) {
       const name = this.state.seatNames[this.app.viewSeat(win.seat)] || '';
       const yaku = (win.yaku || [])
-        .map((item) => YAKU_NAMES[item.id] || item.id)
+        .map((item) => YAKU_NAMES[yakuName(item.id)] || yakuName(item.id))
         .join('·');
       const parts = [
         `${name} ${win.tsumo ? '自摸' : '荣和'}${win.tile ? ` ${win.tile}` : ''}`,

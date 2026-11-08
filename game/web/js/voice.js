@@ -10,6 +10,7 @@
  *  - 日麻专属役用 tools/gen_riichi_vo.py 生成的带番值后缀资产；
  *  - 宝牌类（dora/ura_dora/aka_dora）不是役，不念。
  */
+import { yakuName } from './protocol_enums.js';
 
 /** 实测时长表（ms）：classic 57 条移植 vo_durations.py，日麻 18 条来自 gen_riichi_vo.py。 */
 export const VOICE_MS = {
@@ -125,15 +126,17 @@ export function buildVoiceCues(frame) {
   let yakuman = false;
   const yaku = Array.isArray(win.yaku) ? win.yaku : [];
   for (const row of yaku) {
-    if (!row || typeof row.id !== 'string') continue;
+    if (!row || (typeof row.id !== 'number' && typeof row.id !== 'string')) continue;
+    // v2.1：线上 id 是整数；解析边界转回规范名，cue 表继续按名字查。
+    const id = yakuName(row.id);
     const han = Number.isInteger(row.han) ? row.han : null;
-    if (YAKUMAN_IDS.has(row.id)) { yakuman = true; continue; }
-    if (row.id === 'yakuhai') {
+    if (YAKUMAN_IDS.has(id)) { yakuman = true; continue; }
+    if (id === 'yakuhai') {
       // 箭刻/风牌按组数分三条（>3 归 3）
       cues.push(`vo_yaku_yakuhai_${Math.min(3, Math.max(1, han ?? 1))}`);
       continue;
     }
-    const entry = RIICHI_YAKU_CUES[row.id];
+    const entry = RIICHI_YAKU_CUES[id];
     if (!entry || han == null) continue;
     const cue = typeof entry === 'function' ? entry(han) : (entry[1] === han ? entry[0] : null);
     if (cue && VOICE_MS[cue]) cues.push(cue);
