@@ -156,6 +156,9 @@ class GameApp:
         self.login_password_error = False
         # 提交时定下的登录意图（(FRAME_TYPE.LOGIN, {...}) / (FRAME_TYPE.REGISTER, {...})），连接建立后发出。
         self.pending_auth: tuple[int, dict] | None = None
+        # PROTOCOL v2.2 §4.1：下一次账号 login 是否请求恢复对局。结算页「返回大厅」/「再来
+        # 一局」要的是新房间，所以它们把这一位清掉；普通登录/启动默认恢复。
+        self.resume_next_login = True
         # 战绩（ACCOUNT_DESIGN §3.4）：保存最近的 `stats` 载荷本身，渲染时才格式化。
         self.stats: dict | None = None
         self.stats_open = False
@@ -621,6 +624,7 @@ class GameApp:
         auth = self._validate_login_inputs(register)
         if auth is None:
             return
+        self.resume_next_login = True
         self.pending_auth = auth
         # 记住的是**提交出去**的凭据：握手期间输入框仍可编辑，落盘不能用 `self.password` 兜底。
         self._submitted_credentials = (
@@ -693,6 +697,11 @@ class GameApp:
             # 握手第一帧由提交时定下的意图决定（ACCOUNT_DESIGN §5）：游客是 login{name}，
             # 账号是 login{username,password} 或 register{...}。没有意图时退回游客登录。
             ftype, fields = self.pending_auth or (FRAME_TYPE.LOGIN, {"name": self.nickname})
+            if ftype == FRAME_TYPE.LOGIN and "username" in fields:
+                # PROTOCOL v2.2 §4.1：账号登录默认恢复对局；结算页的两个出口显式要求脱离旧房。
+                fields = dict(fields)
+                if not self.resume_next_login:
+                    fields["resume"] = False
             self.send_frame(ftype, **fields)
         elif kind == "connect_failed":
             self.connected = False
@@ -727,6 +736,10 @@ class GameApp:
         if ftype == FRAME_TYPE.LOGIN_OK:
             # 握手完成：从这里开始才允许发心跳（t28 / GD-C1 零 error 帧）
             self.logged_in = True
+            self.resume_next_login = True
+            # 注册成功即登录；之后的重连/再来一局必须重放 login，不能重放 register。
+            if self.pending_auth is not None and self.pending_auth[0] == FRAME_TYPE.REGISTER:
+                self.pending_auth = (FRAME_TYPE.LOGIN, dict(self.pending_auth[1]))
             self.last_ping = now          # 心跳时钟自登录起算 → 首个 ping 在 HEARTBEAT_INTERVAL 之后
             # 账号会话才有战绩：`u-` 前缀是服务端对账号 id 的既定口径（ACCOUNT_DESIGN §1.2），
             # 游客的 `p-` 会话在界面上不出现战绩入口。
@@ -1448,6 +1461,8 @@ class GameApp:
         """
         self.close_socket(status)
         self.state.reset_all()
+        # 这两个出口都是"换新房间/回大厅"，不能恢复旧房间；带 resume:false 让服务端先脱离。
+        self.resume_next_login = False
         self.disconnect_reason = None
         self.connected = False
         self.login_stage = "IDLE"
