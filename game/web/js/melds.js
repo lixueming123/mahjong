@@ -133,6 +133,7 @@ export class MeldView {
         d: depth,
         persp: true,
         rot: item.claimed ? (L.rot + 1) % QUARTER : L.rot,
+        atlas: 'hand',
       });
       tile.renderOrder = Z.RIVER + 2 + item.group * .1 + i * .01;
       this.pass.placeWorld(tile, this.group, () => {

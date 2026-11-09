@@ -39,6 +39,8 @@ export function makeRiverTile(code, seat) {
     d: RIVER.d,
     persp: true,
     rot: RIVER_ROT[seat] || 0,
+    // 和本家手牌 / 副露同一套立牌图集（无描边的白牌面），否则看着像两套牌
+    atlas: 'hand',
   });
   tile.renderOrder = Z.RIVER;
   return tile;
