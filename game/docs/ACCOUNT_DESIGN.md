@@ -1,7 +1,8 @@
 # 账号与战绩设计（ACCOUNT_DESIGN）
 
 - 文档 ID：ACCOUNT_DESIGN
-- 版本：**v1.4**
+- 版本：**v1.5**
+  v1.5 **账号登录时查房 + 刷新重连（仅账号玩家，无令牌）**：账号 `login` 新增可选 `resume`（缺省 true），账号 `login_ok` 新增 `in_room`；认证成功后由 Lobby 按 `player_id` 查房，命中则重放 `room_joined` + 当前相位快照，未命中/等待页/`resume:false` 则进大厅。**一账号一连接不变**：不接管旧连接，`ALREADY_ONLINE` 由客户端在同一连接上短重试；游客不参与重连。见 §1.3、§3.1 与 `PROTOCOL.md` v2.2 §8.5
 - 修订：v1.4 依用户需求（「登录优化一下 每次都有重新输入账号密码」）在 §5 增第 7 条**客户端本地记住登录**：账号登录成功后把账号名与口令存本机 `~/.ex_actor_mahjong/login.json`（目录 `0700` / 文件 `0600`，**明文**、按 `host:port` 分条），冷启动预填并默认自动登录一次，取消勾选即删档；**服务端与线协议零改动**（复用既有 `login{username,password}`），表现层细节见 `UI_UX_SPEC.md` v4.6 §3.5
   v1.3 依 captain 裁决（A 批需求评审）**新增场次汇总表 `match_results`**（一场每账号一行：`hands_played` / `dealer_hands` / `final_score` / `final_rank`），**`matches` 表一个字段都不加**（保持"一行 = 一局"语义，零回归），`stats` 帧本期**不动**（`match_results` 先只落库不展示）。既有账号模型、口令口径、身份映射、错误码、降级语义、`matches` 的写入时机与字段**一律未动**（见 §8 修订记录）
   v1.2 依用户需求（本轮 actor 化重构）更正 §6.1 第 1 条的**论据**：DB 不放进 actor 的 handler，理由只有「会阻塞」——原文另举的「handler 一旦挂起就不再持有 mailbox」自 `GAME_DESIGN.md` §0.3 v1.8 起已不成立（每 actor 的 handler 由 `AsyncGate` 保证互斥，挂起不再破坏原子性）。**实现形状与 §1–§5 口径一律未动**
@@ -28,6 +29,7 @@
 2. **身份映射**：账号的 `player_id = "u-" + <accounts.id 十进制>`（如 `u-000042`）；游客仍是既有 `PlayerIdAllocator` 的 `p-<6 位十六进制>`；机器人是 `bot-<seat>`。前缀 `u-` / `p-` / `bot-` 互不重叠，`player_id` 对客户端仍是不透明串。
 3. **一个账号同时只有一个在线连接**：第二个连接用同一账号登录 → `error{code:14}`，连接保持（该连接仍可改用游客身份登录）。首个连接关闭时释放。
    - 释放时机是**连接关闭**（FIN/RST、心跳超时断开、配额断开），而不是「进入房间」或「对局结束」。因此登录后一直挂在登录界面、又持续 `ping` 保活的连接，会一直占用该账号（这是刻意的：简单、可预期，且客户端把 `ALREADY_ONLINE` 单独提示为「该账号已在别处登录」而不是泛化错误）。
+   - **v1.5 刷新重连不改变这条**：不接管旧连接、不建第二连接。客户端在收到 `ALREADY_ONLINE` 后**在同一连接上**短重试 `login`（约 500 ms、至多 6 次），旧连接释放后登录成功；旧连接迟到的 `close`/idle 由 Lobby 的连接代际校验忽略，不会把新座位置为托管。
 4. **账号不改变对局语义**：房间、座位、窗口、超时、托管、结算一律与游客相同；账号只影响身份来源、战绩落库与战绩查询。
 5. 账号的昵称（`nickname`）在注册时确定，默认取账号名；对局内展示用的是昵称，规则仍受 `GAME_DESIGN` §3.5 约束（1..16 字符、无控制字符，**允许重名**）。
 
@@ -120,9 +122,11 @@ CREATE TABLE IF NOT EXISTS match_results (
 | `name` | string | 游客路径必填 | 1..16 个 UTF-8 字符；不含 `\n`/`\r`/控制字符（`0x00`–`0x1F`）——**与既有 §4.1 逐字相同** |
 | `username` | string | 账号路径必填 | 3..16 个字符；仅 `[A-Za-z0-9_]`（ASCII） |
 | `password` | string | 账号路径必填 | 6..64 个字符；仅可见 ASCII（`0x20`–`0x7E`），不含控制字符 |
+| `resume` | bool | 否（缺省 `true`） | **v1.5**：是否尝试回到旧房间；`false` = 恢复身份但不回旧座（结算页出口） |
 
-- **判定规则**：帧中出现 `username` 即走账号路径（此时 `password` 必填，`name` 忽略）；否则走既有游客路径，行为与 v1.2 逐字相同。
-- 账号路径成功 → `login_ok{player_id:"u-<id>", name:<nickname>}`（**字段形状与游客路径完全相同**，仅取值不同）。
+- **判定规则**：帧中出现 `username` 即走账号路径（此时 `password` 必填，`name` 忽略）；否则走既有游客路径，行为与 v1.2 逐字相同（`resume` 对游客无效）。
+- 账号路径成功 → `login_ok{player_id:"u-<id>", name:<nickname>, in_room:<bool>}`（**字段形状与游客路径相同，另加 `in_room`**，仅取值不同）。
+- **v1.5 登录时查房**：认证成功且 `resume != false` 时，Lobby 按 `player_id` 查该账号是否仍在**已开局**的房间；命中 → `in_room:true` + `room_joined` + 当前相位快照；否则先脱离旧房（对局中转托管，等待页按既有离开语义）→ `in_room:false`。游客路径不回该字段，也不查房。
 - 账号路径失败 → `error{code:12, message:"wrong username or password"}`（账号不存在与口令错误**返回同一错误**，不泄露账号是否存在）；该错误**计入 §7.2 的 illegal-operation 计数**（累计 10 次断开，与既有配额机制一致），连接保持。
 - 同一账号在别处在线 → `error{code:14}`，连接保持。
 - 重复 `login`（含账号路径挂起期间再发）→ `error{code:8, message:"already logged in"}`，连接保持。
@@ -141,7 +145,7 @@ CREATE TABLE IF NOT EXISTS match_results (
 | `password` | string | 是 | 同 §3.1（6..64，可见 ASCII） |
 | `name` | string | 否 | 昵称；缺省取 `username`；给出时按既有昵称规则校验（1..16 字符、无控制字符） |
 
-- 成功 → **直接下发 `login_ok{player_id:"u-<id>", name:<nickname>}`**（不新增 `register_ok` 帧）：注册即登录，客户端后续流程与游客完全一致（`create_room` → `ready`）。
+- 成功 → **直接下发 `login_ok{player_id:"u-<id>", name:<nickname>, in_room:false}`**（不新增 `register_ok` 帧；新账号没有房间）：注册即登录，客户端后续流程与游客完全一致（`create_room` → `ready`）。
 - 账号名已存在 → `error{code:13, message:"username already taken"}`，连接保持，可换名重试。
 - 字段缺失/类型错/校验不过 → `error{code:8}`。
 - 已登录（含账号路径挂起期间）再发 `register` → `error{code:8, message:"already logged in"}`。
@@ -254,6 +258,7 @@ C→S stats_request → S→C stats{...}
 
 1. **游客链路零回归**：`gateway_smoke_test.py`、`room_full_game_test.py`、`client_headless_test.py` **一行不改**且全绿（其中 `login_ok` 字段形状的严格断言不变）。
 2. **账号链路**：注册 → 自动登录 → 建桌 → **打完一场（4 局；v1.3 前为"一局"）** → `stats_request` 与刚打完那几局一致（`games` 增加 4、`net_score` 等于四局之和；v1.3 前为"增加 1"）；重复注册 `USERNAME_TAKEN`；错口令 `AUTH_FAILED` 且累计 10 次断开；同账号二次登录 `ALREADY_ONLINE`。
+   - **v1.5 重连**：`reconnect_e2e_test.py` 覆盖——对局中断开 → 同账号重新登录（`ALREADY_ONLINE` 短重试）→ `login_ok{in_room:true}` + 同 `room_id`/`seat` + `game_start`（含 `match_total`/`renchan_count`）+ `state_sync` + `sync` 仍答同座位；`resume:false` 脱离旧房后可建新房；等待页刷新 `in_room:false`。
    - **v1.3 补充**：`match_results` 的验收 = 同一 `room_id` 恰好 4 行、各行 `final_score` 之和为 0、`final_rank` 与最后一份 `match_end.rankings[]` 逐座位一致、同账号重跑一场后该表行数 +4。
 3. **持久性**：重启服务端后同一账号 `player_id` 不变、战绩仍在。
 4. **降级**：`--mysql-port 1` 起动 → 游客登录与整局照常，账号帧回 `INTERNAL`，服务端不崩。
@@ -263,6 +268,7 @@ C→S stats_request → S→C stats{...}
 
 | 版本 | 修订内容 | 来源 | 是否改动冻结数值 |
 | --- | --- | --- | --- |
+| **v1.5** | **账号登录时查房 + 刷新重连（仅账号玩家，无令牌）**：§3.1 `login` 增可选 `resume`、`login_ok` 增 `in_room`；Lobby 认证后按 `player_id` 查房，命中重放当前相位快照，未命中/等待页/`resume:false` 进大厅。§1.3 明确**不接管旧连接**，`ALREADY_ONLINE` 由客户端同连接短重试；游客不参与。验收补 `reconnect_e2e_test.py`。线协议见 `PROTOCOL.md` v2.2 | 用户需求（Web 刷新后看不到原对局）；方案定稿：仅账号、无令牌 | **否**（账号模型、口令散列、身份映射、一账号一连接、错误码、降级语义、`matches`/`match_results` 全部未动；仅登录成功后的查房/快照与两个字段） |
 | **v1.4** | §5 增第 7 条**客户端本地记住登录**：账号登录成功且勾着「记住密码」时，把账号名与口令存本机 `~/.ex_actor_mahjong/login.json`（目录 `0700` / 文件 `0600`，**明文**，按 `host:port` 分条），冷启动预填并默认自动登录一次，取消勾选即删档；实现落点 `game/client/login_store.py` + `app.py`，验收 `game/tests/login_memory_test.py`。**服务端与线协议零改动**（复用既有 `login{username,password}`，无新增帧/错误码） | 用户需求（「每次都要重新输入账号密码」） | **否**（账号模型、口令散列口径、身份映射、错误码、降级语义、`matches` / `match_results` **全部未动**；新增的只是客户端本机便利文件） |
 | **v1.3（口径修正）** | 同版内修正：`match_results.hands_played` 由「本场计入局数的局数（= `round_count`，恒 4；不含连庄额外手）」改为「**本场实际手数（= `game_end` 下发次数，4..8，含连庄额外手）**」；`dealer_hands` 补「恒 `<= hands_played`」。与 `PROTOCOL.md` §5.15 的 D2 终裁同批，表结构与既有字段**未动**，代码侧同一快照 | captain 裁决（D2 终裁，第三次裁决） | **否**（仅字段口径措辞，无表结构/字段/类型变化） |
 | **v1.3** | **新增场次汇总**：① §2.1 增第三张表 `match_results`（一场每账号一行：`hands_played` / `dealer_hands` / `final_score` / `final_rank`，`(room_id, account_id)` 唯一），附四条约定（键/建表方式/**加表不改表**/本期不展示）；② §0 增"局制（v1.3）"一行，说明 `matches` 仍按局一行、场次维度另表承载；③ §4 增第 7 条"场次汇总"口径与一致性约束；④ §0 数值行注明**算分数值由 `RULESET` 的 A 批修订版承载**，本文不涉及。**`matches` 表零字段变更、`StatsJob`/`RecordJob` 零改动、`stats` 帧零改动** | captain 裁决（A 批需求评审；线协议侧见 `PROTOCOL.md` v1.6 §5.15 `match_end`） | **否**（账号模型、口令口径、身份映射、错误码与配额、降级语义、`matches` 的字段与写入时机、`stats` 帧形状**全部未动**；仅新增一张表与一段口径） |

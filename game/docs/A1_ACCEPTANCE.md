@@ -84,6 +84,7 @@
 | --- | --- | --- | --- | --- |
 | P1 | **t4 清单（§10.2）逐条**：seq 单调/窗口唯一、seq 跨局不重置、超时走 seq 作废、超时/托管永不选杠、H1 打牌窗口不收 pass、H3 action_event 语义、H8 重算、广播并行、game_end 零和字段完整 | PROTOCOL §10.2 | 已覆盖：room 测试群（`StaleSequencesAreDroppedSilently`、`TimeoutPlaysTheDefaultActionAndStaleTimeoutsAreIgnored`、`IllegalOperationsChangeNothing`、`EntrustedSeatPlaysImmediately`、invariants 群） | 自动化测试 |
 | P2 | **t5 清单（§10.3）逐条**：出站回带 seq、options 内取值、按 from_seat 移牌河、他家无牌面、state_sync 整体覆盖、局终≠场终、暗杠/加杠按钮位、局间不显示倒计时 | PROTOCOL §10.3 | **需人工**（B4 未开工；随 B4 验收执行，占位见 §五） | 人工 + 用户试玩 |
+| **R16** | **账号刷新重连（v2.2）**：对局中断开 → 同账号重新登录（`ALREADY_ONLINE` 短重试）→ `login_ok{in_room:true}` + 同 `room_id`/`seat` + `game_start`（`match_total`/`renchan_count`）+ `state_sync`；`resume:false` 脱离旧房；等待页 `in_room:false`；一账号一连接不产生双连接 | PROTOCOL v2.2 §4.1/§5.1/§5.4/§8.5 | **自动化已覆盖**：`reconnect_e2e_test.py`（MySQL 不可用时 ctest SKIP）+ `mahjong_room_test.ReconnectedSeatReplaysTheOpenWindow` + `mahjong_lobby_test.LoggedInAccountRebindsItsSeatedRoom` | 自动化测试 |
 | P3 | **t6 清单（§10.4）逐条**：场次级断言（M1/M2/M3/M8 组）、暗杠断言（P6/P12 组）、番数断言（N1/N11/R15 组）落到 e2e | PROTOCOL §10.4 | 已覆盖：`match_full_e2e_test.py`（M1/M2/M7/M8 真链路）+ `e2e_full_game.py --matches`（M10/N1/N11/P5/P9/P11/P12/P6/P7 组，实测通过） | 自动化测试 |
 | P4 | 零新增错误码：错误码总数恒 14、语义未动；整场全程零 `error` 帧（GD-C1） | PROTOCOL §7.1/§10.2 | 已覆盖：静态核对 `protocol.h` 错误码枚举 + 现行 e2e GD-C1 | 自动化测试 |
 | P5 | `seq` 整场严格递增、跨局不重置 | PROTOCOL §6.2 第 5 条、§10.4 | 已覆盖：room `SameSeedReplaysTheWholeMatchFrameForFrame` + 帧计数；e2e 随 E2 补 | 自动化测试 |

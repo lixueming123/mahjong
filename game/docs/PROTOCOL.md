@@ -1,7 +1,8 @@
 # 麻将里程碑协议（PROTOCOL）
 
 - 文档 ID：PROTOCOL
-- 版本：**v2.1（冻结）**
+- 版本：**v2.2（增补，兼容 v2.1 客户端）**
+  v2.2 **账号登录时查房 + 刷新重连（仅账号玩家，无令牌）**：`login` 新增可选 `resume`（缺省 true；`false` = 恢复身份但不回旧房）；`login_ok` 新增可选 `in_room`（账号登录由 Lobby 在查房后下发；`true` 表示随后重发 `room_joined` + 牌桌快照）；`game_start` 新增 `match_total[4]` 与 `renchan_count`（本局开始前的场次进度，供刷新恢复）。**一账号一连接不变**：重连是同一账号的新连接，旧连接必须先释放，不做接管/令牌；游客不参与重连；等待页不恢复原房。零新增帧、零新增错误码。见 §4.1、§5.1、§5.4、§8.5
   v2.1 **番种 / 满贯分档整数化（破坏性变更，硬切换，不兼容 v2.0）**：`win.yaku[].id`、`win.tags[]`、`results[].win_type[]`、`win.limit` 四类字段由字符串改传**整数**；新增 §1.3.1 的 `yaku`（47 值）与 `limit`（6 值）两张冻结表。`win_type` 末位的和牌方式规范名为 `win_ron` / `win_tsumo`（46/47），不与番种 `tsumo`（17）混用。牌码、昵称、id、自由文本仍保持字符串。**无双读兼容层、无版本协商**：服务端、Python 客户端、Web 客户端、全部测试与录制帧日志同批改完；v2.0 客户端无法连接 v2.1 服务端。
   v2.0 **控制字段整数化（破坏性变更，硬切换，不兼容 v1.x）**：`type`、`action`、`window`、`mode`、`length`、`melds[].type`、`reason`、`code` 八类控制字段在线上一律改传**整数**；字段名不变，其余字段（牌码、`yaku[].id`、`tags`、`win_type`、`limit`、昵称、id、自由文本）保持字符串。取值表见新增 §1.3.1，机器可读真值 `game/protocol/enums.json`，由 `protocol_enums_consistency_test.py` 守护 C++ / Python / JS / 文档四方一致。**无双读兼容层、无版本协商**：服务端只接受整数，服务端、Python 客户端、Web 客户端、全部测试与录制帧日志必须同批改完；v1.x 客户端无法连接 v2.0 服务端。
   v1.23 **等待页座位同步**：新增服务端帧 **`room_update`**（S→C 15 → **16 条**，§5.17）——`join_room` 成功、以及未开局时非房主真人断开，都向房间内**全部真人**广播当前四席位快照；`room_joined` 仍只回本人。修复「好友已入座、房主等待页仍显示 3 个 AI」的缺陷，客户端 **MUST** 用本帧刷新等待页。**零新增错误码、零既有帧字段变化**；不读新帧的旧客户端行为不变（未知帧忽略，§1.3）。见 §3.2、§4.3、§5.17
@@ -20,7 +21,8 @@
   v1.6 **A 批增补**（番型表 + 番数结算 + 一场四局/连庄/场次总分 + 暗杠/加杠）：① `action` 动作词表 5 → **7**（+`ankan`、+`kakan`），**不新增窗口类型**（两者是 `discard` 窗口的附加 `options`）；② `melds[].type` 3 → **5**（+`ankan`、+`kakan`），暗杠对他家的 `tiles` 为**空数组**并在局终揭示（§5.9、§8.1）；③ `game_end` **只增字段**（`win.yaku[]` / `win.han_breakdown{base,tsumo,dealer,total}` / `win.han` / `win.dealer_bonus` / `win.rinshan` / `results[].match_total` / 顶层 `round_index` / `dealer` / `renchan_count` / `match_will_continue`），既有字段形状一律不动（**`win.tags` 保持旧语义**，仍是 `yaku[].id` 的子集）；④ 新增服务端帧 **`match_end`**（场终，§5.15）；⑤ **零新增错误码**（仍 14 条，§7.1）；⑥ 明确 `seq` **跨局单调不重置**（§6.2）。见附录 C v1.6 行。
   v1.5 大厅选房：新增 `list_rooms` / `room_list`；`join_room` 在开局前替换一个 AI 座位并回 `room_joined`；`create_room` 不自动开局；`ready` 仍是开局信号。错误码不新增。见 §3、§4.2–§4.4、§4.11、§5.14。
 - 状态：**已冻结**（t3 网关、t4 房间状态机、t5 客户端、t6 端到端脚本必须严格按本文实现；变更须走新的需求评审）
-- 修订：v2.1 **番种 / 分档整数化（破坏性、硬切换）**：`yaku[].id` / `tags[]` / `win_type[]` / `limit` 改传整数（新增 §1.3.1 `yaku` / `limit` 两域），全文示例帧与字段值表同步，客户端解析边界改回规范名；与服务端 / 三端 / 测试 / golden 日志同批切换
+- 修订：v2.2 **账号刷新重连（增补）**：`login.resume` / `login_ok.in_room` / `game_start.match_total`+`renchan_count`；登录时由 Lobby 查房并重放快照；不改帧数、错误码与一账号一连接。
+  v2.1 **番种 / 分档整数化（破坏性、硬切换）**：`yaku[].id` / `tags[]` / `win_type[]` / `limit` 改传整数（新增 §1.3.1 `yaku` / `limit` 两域），全文示例帧与字段值表同步，客户端解析边界改回规范名；与服务端 / 三端 / 测试 / golden 日志同批切换
   v2.0 **控制字段整数化（破坏性、硬切换）**：`type` / `action` / `window` / `mode` / `length` / `melds[].type` / `reason` / `code` 八域一律改传整数（取值见新增 §1.3.1），全文示例帧与字段值表同步改整数并加名称注释，派生文档只改示例代码块；与服务端 / 三端 / 测试 / golden 日志同批切换
   v1.22 增补 §5.4 的「玩法判定口径」（`game_start` 无 `mode` 键，客户端按 `points` 反推）
   v1.21 增补 §5.7 的 `action_request.riichi_tiles`（立直宣言牌候选）与 §12.5 的客户端标记口径
@@ -76,7 +78,7 @@
 
 单房间、四座位（1 真人客户端 + 3 服务端 AI 机器人）。**v1.6 起局制为「一场 4 局 + 连庄」**（`max_rounds = 4`、`max_renchan = 4` 双闸；连庄不占局数、超过连庄上限即结束），一场结束后房间仍按 §1.4 第 5 条回收。
 
-**不做**（v1.6 确认）：观战（spectator）、断线重连与**对局状态**的持久化恢复（断线一律走托管，见 §8.5）、立直/宝牌/振听/符数/役满（番数封顶 6 番）、**抢杠**（加杠为自理动作，不设应答窗口；此项**永久不做**，不是延后）、多人同房/换座、移动端。
+**不做**（v1.6 确认，v2.2 收窄）：观战（spectator）、**对局状态的持久化恢复**（房间/手牌/牌河是进程内内存，服务端重启即丢；断线仍走托管，见 §8.5）、立直/宝牌/振听/符数/役满（番数封顶 6 番）、**抢杠**（加杠为自理动作，不设应答窗口；此项**永久不做**，不是延后）、多人同房/换座、移动端。**v2.2 例外**：账号玩家在同一服务端进程内的刷新重连已实现（登录时查房 + 重放当前相位），不引入持久化快照、令牌或第二连接。
 
 **在范围内**：账号与战绩持久化（v1.3，见 `ACCOUNT_DESIGN.md`）、番种表与番数结算、暗杠与加杠、多局场次/连庄/场次总分（以上四项 v1.6）。协议中不存在对应消息的，实现方不得私自扩展（§0.1 第 3 条）。
 
@@ -438,7 +440,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 
 | # | 值 | `type`（名称） | 字段 | 何时发送 |
 | --- | --- | --- | --- | --- |
-| C1 | 1 | `login` | `name` | 建连后第一步 |
+| C1 | 1 | `login` | `name` / `username`+`password`（账号形态） / `resume?` | 建连后第一步；账号登录默认 `resume:true` |
 | C2 | 6 | `create_room` | — | 大厅点「新建房间」 |
 | C3 | 7 | `join_room` | `room_id` | 大厅点一间还没开局的房间 |
 | C4 | 8 | `ready` | — | 已入座后点「开始对局」 |
@@ -454,10 +456,10 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 
 | # | 值 | `type`（名称） | 字段 | 收件人 |
 | --- | --- | --- | --- | --- |
-| S1 | 12 | `login_ok` | `player_id`, `name` | 本人 |
+| S1 | 12 | `login_ok` | `player_id`, `name`, `in_room?`（账号登录） | 本人 |
 | S2 | 13 | `error` | `code`, `message`, `detail?` | 相关连接 |
 | S3 | 14 | `room_joined` | `room_id`, `seat`, `seats[]` | 本人 |
-| S4 | 15 | `game_start` | `hand[]`, `seat`, `dealer`, `round_index`, `round_count`（v1.6 增两个） | 每人一份（含本家手牌） |
+| S4 | 15 | `game_start` | `hand[]`, `seat`, `dealer`, `round_index`, `round_count`, `match_total[4]`, `renchan_count`（v2.2 增两个） | 每人一份（含本家手牌） |
 | S5 | 16 | `draw` | `tile`, `seat`, `seq` | **仅摸牌者本人** |
 | S6 | 17 | `discard_event` | `seat`, `tile`, `seq` | 广播 4 家 |
 | S7 | 18 | `action_request` | `seq`, `deadline_ms`, `window`, `options[]` | 仅窗内相关座位 |
@@ -500,13 +502,15 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | --- | --- | --- | --- |
 | `username` | string | 账号形态必填 | 3..16 个字符，仅 `[A-Za-z0-9_]` |
 | `password` | string | 账号形态必填 | 6..64 个字符，仅可见 ASCII（`0x20`–`0x7E`） |
+| `resume` | bool | 否（缺省 `true`） | **v2.2**：账号登录是否尝试回到旧房间；显式 `false` = 只恢复身份、不回到旧座（结算页两个出口用） |
 
-- 判定：帧中出现 `username` 即走账号形态（此时忽略 `name`）；否则走上面的游客形态（行为与 v1.2 逐字相同）。
-- 账号形态成功 → `login_ok{player_id:"u-<id>",name:<昵称>}`（字段形状与游客形态相同，仅取值不同）。
+- 判定：帧中出现 `username` 即走账号形态（此时忽略 `name`）；否则走上面的游客形态（行为与 v1.2 逐字相同，`resume` 对游客无效）。
+- 账号形态成功 → `login_ok{player_id:"u-<id>",name:<昵称>,in_room:<bool>}`（字段形状与游客形态相同，仅取值/`in_room` 不同）。
+- **v2.2 登录时查房**：账号认证成功且 `resume != false` 时，服务端按 `player_id` 查该账号是否仍在已开局的房间里。查到时 `login_ok.in_room = true`，随后依次重发 `room_joined`、`game_start`、`state_sync`（以及未回答的 `action_request`/`tenpai`、局终的 `game_end`、场终的 `match_end`）；查不到、等待页或 `resume == false` 时 `in_room = false`，并先释放旧座（对局中 = 转托管；等待页按现有离开语义）。
 - 账号不存在与口令错误 → **同一个** `error{code:12}`（不泄露账号是否存在），连接保持；该错误计入 §7.2 的非法操作计数。
-- 该账号已在别处登录 → `error{code:14}`，连接保持。
+- 该账号已在别处登录 → `error{code:14}`，连接保持。**一账号一连接**：服务端不接管旧连接；客户端应在同一连接上短重试 `login`，等旧连接释放后再成功。旧连接的迟到 `close` 由 Lobby 的连接代际校验忽略，不会把新座位置为托管。
 - 账号形态是异步的：发出后到 `login_ok` 之前，该连接上除 `login`/`register` 外的帧仍一律 `NOT_LOGGED_IN`；期间再发 `login`/`register` → `BAD_REQUEST`（`message:"already logged in"`）。
-- MySQL 不可用 → `error{code:11}`（`message:"account service unavailable"`），**不计配额**（`ACCOUNT_DESIGN.md` §2.3）。
+- MySQL 不可用 → `error{code:11}`（`message:"account service unavailable"`），**不计配额**（`ACCOUNT_DESIGN.md` §2.3）。游客路径不受影响，且**不参与**重连。
 
 - 成功 → `login_ok`；失败 → `error{code:1}`，连接保持；第 4 次非法昵称 → 断开（§1.7）。
 - 同一连接重复 `login` → `error{code:8}`（`message:"already logged in"`），连接保持。
@@ -680,6 +684,8 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 - `player_id`：服务端生成的**非空不透明字符串**，用于区分重名玩家。客户端 **MUST NOT** 解析其格式。
   - 游客（`login{name}`）：`p-<6 位十六进制>`，**进程内**唯一，重启即变（与 v1.0 相同）。
   - 账号（`login{username,password}` / `register{...}`，v1.3）：`u-<账号 id>`，**全局**唯一且跨重启不变（`ACCOUNT_DESIGN.md` §1.2）。
+- `in_room`（**v2.2，仅账号登录**）：bool。`true` = 该账号仍在一个**已开局**的房间/座位上，服务端随后重发 `room_joined` + 牌桌快照；`false` = 进大厅。游客帧不带该键（等价于 `false`）。
+- **v2.2 发送方**：游客的 `login_ok` 由 PlayerActor 直发；账号的 `login_ok` 由 LobbyActor 在查房/脱离旧房之后发送，因此 `in_room` 是确定值，且 `resume:false` 一定先完成脱离。
 
 ### 5.2 `error`
 
@@ -710,6 +716,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 
 ```json
 {"type":15,"seat":0,"dealer":0,"round_index":0,"round_count":4,
+ "match_total":[0,0,0,0],"renchan_count":0,
  "hand":["1m","1m","2m","3m","4m","5m","6p","6p","7p","8p","9s","9s","9s","9s"]}
 ```
 > 数值对照：`15`=game_start（帧）；完整表见 §1.3.1。
@@ -721,6 +728,8 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | `dealer` | **本局**庄家座位（0..3）。v1.6 起**不再恒为 0**：庄家按局轮转，连庄时不变；取值口径见 `RULESET.md` A 批修订版 |
 | `round_index` | **v1.6 新增**：本局在整场中的序号，**0 基**（0..`round_count − 1`）。连庄**不**增加该值（连庄仍属同一局序号） |
 | `round_count` | **v1.6 新增**：本场固定局数，恒为 **4** |
+| `match_total` | **v2.2 新增**：长度为 4 的整数数组，**本局开始前**的场次累计得失分（第 1 局全 0；与 `game_end.results[].match_total` 同口径，但不含本局） |
+| `renchan_count` | **v2.2 新增**：**本局开始前**已累计的连庄次数（第 1 局 0；与 `game_end.renchan_count` 的「含本局触发」语义不同） |
 
 - 收件人：**逐座位单独下发**（每人一份，只含自己的手牌）。绝不广播同一份内容。
 - 起始牌山的剩余张数由 `RULESET.md` §1 冻结；服务端在首个 `state_sync` 中给出。
@@ -1258,8 +1267,13 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | 对局中真人断开（socket 关闭或 20 s 无入站帧） | 该座位 `disconnected = true` 并**立即托管**（不等 15 s），牌局继续；`state_sync.seats[].disconnected` 告知其他座位 |
 | 托管座位参与结算 | 照常计算并出现在 `game_end.results`；昵称由客户端加「（断线托管）」后缀 |
 | **局间真人断开（v1.6）** | 与"对局中"同口径：座位保持 `disconnected = true` 并**跨局延续**（托管标记不因局终而清除），下一局照常为该座位代打；房间不因局间断线而销毁 |
-| **场次中任何时刻重连** | **不在本里程碑范围**；重连是新的 `player_id`，无法回到原房间（原座位由托管跑完本场） |
-| 断线重连恢复 | **不在本里程碑范围**；重连只能重新 `login` + `create_room` 开新场 |
+| **场次中重连（v2.2，仅账号）** | 账号重新 `login`（同一账号）→ 旧连接必须先释放（`ALREADY_ONLINE` 时同连接短重试）→ Lobby 查房 → `login_ok{in_room:true}` + `room_joined` + 当前相位快照；座位 `disconnected` 清零并广播 `state_sync`，其他三家立即看到「托管」标记消失 |
+| **恢复哪些相位** | 局中（`game_start` + `state_sync` + 未回答的 `action_request`/`tenpai`）、局终（`state_sync` 揭示版 + `game_end`）、场终（`state_sync` 揭示版 + `match_end`）；重放的 `action_request` 使用**原 `deadline_ms`**，不重新给 15 秒 |
+| **`login{resume:false}`** | 恢复账号身份但**不**回旧房：对局中旧座转托管，等待页按现有离开语义释放；`login_ok{in_room:false}` 后进大厅，可直接 `create_room` |
+| **一账号一连接** | 不接管、不建第二连接；旧连接未释放时第二次登录持续 `ALREADY_ONLINE`。旧连接迟到的 `close`/idle 由 Lobby 的连接代际校验忽略 |
+| **游客** | 不参与重连：游客仍是 `p-<id>` 的新连接，刷新即新身份；匿名账号/令牌**不在本版本** |
+| **等待页刷新** | 不恢复原房（房主断开丢房、加入者座位回 AI），回大厅；这是显式取舍 |
+| **服务端重启** | 房间在内存中，重连只能回大厅；账号身份与战绩仍由 MySQL 保留 |
 
 ---
 
@@ -1301,6 +1315,24 @@ S→C {"type":13,"code":12,"message":"wrong username or password"}   # 连接保
 ```
 C→S {"type":4}
 S→C {"type":23,"games":12,"wins":5,"draws":3,"net_score":-14,"recent":[…]}
+```
+
+### 9.1d 账号刷新重连（v2.2）
+
+```
+# 旧连接刚断；同账号重新登录（可先在旧连接上收到 ALREADY_ONLINE 并重试）
+C→S {"type":1,"username":"alice","password":"s3cret","resume":true}
+S→C {"type":12,"player_id":"u-000042","name":"爱丽丝","in_room":true}
+S→C {"type":14,"room_id":"r-0f3k9m2p7q1sx","seat":0,"seats":[…]}
+S→C {"type":15,...,"match_total":[-8,8,0,0],"renchan_count":1,"hand":[当前手牌]}
+S→C {"type":20,...,"hand":[当前手牌],"seats":[…]}
+S→C {"type":18,"seq":42,"deadline_ms":1760000000000,"window":1,"options":[…]}
+```
+
+```
+# 结算页「返回大厅」：恢复身份但不回旧房
+C→S {"type":1,"username":"alice","password":"s3cret","resume":false}
+S→C {"type":12,"player_id":"u-000042","name":"爱丽丝","in_room":false}
 ```
 
 ### 9.2 一次「打牌 → 他家碰 → 鸣牌者打牌」
@@ -1879,17 +1911,17 @@ remaining(tile) = 4
 
 | `type` | 方向 | 关键字段 | `seq` |
 | --- | --- | --- | --- |
-| `login` | C→S | `name`（游客）**或** `username`,`password`（账号，v1.3） | — |
+| `login` | C→S | `name`（游客）**或** `username`,`password`（账号，v1.3） + `resume?`（v2.2） | — |
 | `register` | C→S | `username`, `password`, `name?` | — |
 | `stats_request` | C→S | — | — |
 | `create_room` / `join_room` / `ready` | C→S | `room_id`（仅 join） | — |
 | `discard` | C→S | `tile`, `seq` | ✅ 必带 |
 | `action` | C→S | `action`（**integer** `1..8`，见 §1.3.1）, `tiles[]`, `seq` | ✅ 必带 |
 | `sync` / `ping` | C→S | — | — |
-| `login_ok` | S→C | `player_id`, `name` | — |
+| `login_ok` | S→C | `player_id`, `name`, `in_room?`（账号，v2.2） | — |
 | `error` | S→C | `code`（**14 条之一**）, `message`, `detail?` | — |
 | `room_joined` | S→C | `room_id`, `seat`, `seats[]` | — |
-| `game_start` | S→C | `hand`, `seat`, `dealer`, `round_index`, `round_count`（后两个 v1.6） | — |
+| `game_start` | S→C | `hand`, `seat`, `dealer`, `round_index`, `round_count`（后两个 v1.6）, `match_total`, `renchan_count`（v2.2） | — |
 | `draw` | S→C | `tile`, `seat` | ✅ |
 | `discard_event` | S→C | `seat`, `tile` | ✅ |
 | `action_request` | S→C | `deadline_ms`, `window`（**integer**：`1`=discard / `2`=claim / `3`=chankan 抢杠）, `options[]` | ✅ |
@@ -1919,6 +1951,7 @@ remaining(tile) = 4
 
 | 版本 | 内容 | 来源 |
 | --- | --- | --- |
+| **v2.2** | **账号登录时查房 + 刷新重连（增补，仅账号玩家）**：`login` 新增可选 `resume`（缺省 true）；账号 `login_ok` 新增可选 `in_room`（由 Lobby 在查房后下发）；`game_start` 新增 `match_total[4]` / `renchan_count`。恢复快照按相位重放既有帧，未回答窗口沿用原 `deadline_ms`。**一账号一连接不变**：不接管、不建第二连接，`ALREADY_ONLINE` 由客户端同连接短重试；游客不参与、等待页不恢复、服务端重启只回大厅。零新增帧、零新增错误码 | 用户需求（Web 刷新后看不到原对局）；方案讨论定稿：无令牌、仅账号 |
 | **v2.1** | **番种 / 满贯分档整数化（破坏性变更、硬切换，不兼容 v2.0）**：`win.yaku[].id`、`win.tags[]`、`results[].win_type[]`、`win.limit` 四类字段由字符串改为整数；新增 §1.3.1 的 `yaku`（47 值）与 `limit`（6 值）两张冻结表，总计 **10 域 117 值**。`results[].win_type[]` 末位用 `win_ron`（46）/ `win_tsumo`（47），与番种 `tsumo`（17）区分。牌码、昵称、id、自由文本、错误 `message` 保持不变；服务端、Python 客户端、Web、全部测试与 golden 日志同批切换，**无双读兼容层、无版本协商** | 线协议 v2.1 补齐 v2.0 漏掉的展示型枚举（10 域 117 值，见 §1.3.1） |
 | **v2.0** | **控制字段整数化（破坏性变更、硬切换，不兼容 v1.x）**：`type`、`action`、`window`、`mode`、`length`、`melds[].type`、`reason`、`code` 八域共 **64 个线值**由字符串改为整数（各域 `0` 保留、真实值 `1..N` 连续），字段名不变；新增 §1.3.1 八张冻结枚举表与 `game/protocol/enums.json` 单一真值，由一致性测试守护 C++/Python/JS/文档四方；服务端、Python 客户端、Web、全部测试、golden 日志与文档同批切换，**无双读兼容层、无版本协商**。牌码、`yaku[].id`、`tags`、`win_type`、`limit`、错误 `message` 等展示型字符串保持不变 | 线协议 v2.0 重构（8 域 64 值，见 §1.3.1） |
 | **v1.23** | **等待页座位同步**：新增 S→C 帧 `room_update`（S17，§5.17，15 → 16 条），`join_room` 成功 / 未开局非房主断开后广播房间内全部真人的四席位快照；`room_joined` 仍只回本人，`room_list` 仍只有人数。客户端据此刷新等待页席位与人数提示，不得靠 `players` 反推座位。**零新增错误码、零既有帧字段变化**，旧客户端忽略未知帧即可 | 缺陷修复（好友入座后房主等待页没同步）；用户需求「服务器应该做同步」 |
