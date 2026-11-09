@@ -309,7 +309,17 @@ export class OpponentHandsView {
           entry.tiles[i] = tile;
         }
         // 局部 y 就是世界竖直方向：牌底贴桌面、牌背朝玩家，真正的立牌
-        tile.holder.position.set(t, L.h * k / 2 + (isDrawn ? 7 * k : 0), isDrawn ? 5 * k : 0);
+        if (want !== 'back') {
+          // 摊牌：牌以底边为轴向后倒下、牌面朝上平躺（牌顶朝向本家），
+          // 不再像立着的牌被翻了个面。
+          tile.holder.rotation.x = -Math.PI / 2;
+          tile.holder.position.set(
+            t, L.d * k / 2 + (isDrawn ? 2 * k : 0), -L.h * k / 2 + L.d * k / 2 + (isDrawn ? 8 * k : 0),
+          );
+        } else {
+          tile.holder.rotation.x = 0;
+          tile.holder.position.set(t, L.h * k / 2 + (isDrawn ? 7 * k : 0), isDrawn ? 5 * k : 0);
+        }
         tile.holder.userData = { kind: 'opponentHand', seat, index: i, t };
       }
 
@@ -321,8 +331,9 @@ export class OpponentHandsView {
         const t1 = tNear == null
           ? (n - 1 - 6) * L.step * k * towardMeld
           : Math.max(tNear, tNear + signAway * (n - 1) * L.step * k);
-        entry.strip.scale.set(t1 - t0 + L.w * k * 1.3, L.d * k * 3, 1);
-        entry.strip.position.set((t0 + t1) / 2, .6, 0);
+        // 摊牌后牌平躺、向本家方向伸出一个牌高，金条跟着盖住这一整片
+        entry.strip.scale.set(t1 - t0 + L.w * k * 1.3, L.h * k * 1.15, 1);
+        entry.strip.position.set((t0 + t1) / 2, .6, -L.h * k / 2 + L.d * k / 2);
       }
       entry.group.visible = false;    // 由 renderOverlay 逐家点亮
     }

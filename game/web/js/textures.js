@@ -15,7 +15,7 @@ function canvas(w, h) {
 function texture(c) {
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
-  t.anisotropy = 4;
+  t.anisotropy = 8;
   t.needsUpdate = true;
   return t;
 }
@@ -56,6 +56,14 @@ export function makeClothTexture() {
   }
   g.restore();
 
+  // 木框高光：左上受光、右下压暗
+  const woodSheen = g.createLinearGradient(0, 0, W, H);
+  woodSheen.addColorStop(0, 'rgba(255,190,130,.14)');
+  woodSheen.addColorStop(.5, 'rgba(0,0,0,0)');
+  woodSheen.addColorStop(1, 'rgba(0,0,0,.25)');
+  g.fillStyle = woodSheen;
+  g.fillRect(0, 0, W, H);
+
   // 台布八边形（四角切掉露木框）
   const oct = [[110, 0], [1810, 0], [W, 70], [W, 1010], [1810, H], [110, H], [0, 1010], [0, 70]];
   g.save();
@@ -71,14 +79,35 @@ export function makeClothTexture() {
   g.fillStyle = rg;
   g.fillRect(0, 0, W, H);
 
-  // 细布纹噪点
-  g.globalAlpha = .045;
-  for (let i = 0; i < 5200; i++) {
-    const x = (i * 7919) % W, y = (i * 104729) % H;
-    g.fillStyle = i % 2 ? '#ffffff' : '#000814';
-    g.fillRect(x, y, 2, 2);
+  // 中央柔和光池：模拟头顶灯光打在台布上
+  const pool = g.createRadialGradient(960, 470, 40, 960, 470, 760);
+  pool.addColorStop(0, 'rgba(120,175,235,.22)');
+  pool.addColorStop(.6, 'rgba(80,130,200,.06)');
+  pool.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = pool;
+  g.fillRect(0, 0, W, H);
+
+  // 毛毡细纤维：固定种子的伪随机，避免规则点阵出现摩尔纹
+  let seed = 20240607;
+  const rnd = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  for (let i = 0; i < 22000; i++) {
+    const x = rnd() * W, y = rnd() * H;
+    const light = rnd() < .5;
+    g.globalAlpha = .02 + rnd() * .04;
+    g.fillStyle = light ? '#cfe4ff' : '#000814';
+    g.fillRect(x, y, 1 + rnd() * 2, 1 + rnd() * 2);
   }
   g.globalAlpha = 1;
+
+  // 四周暗角，把视线收向牌桌中央
+  const vg = g.createRadialGradient(960, 540, 520, 960, 540, 1180);
+  vg.addColorStop(0, 'rgba(0,0,0,0)');
+  vg.addColorStop(1, 'rgba(0,6,18,.2)');
+  g.fillStyle = vg;
+  g.fillRect(0, 0, W, H);
 
   // 放射线：外框角 -> 中央板四角
   g.strokeStyle = COLOR.clothLine;

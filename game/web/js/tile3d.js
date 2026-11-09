@@ -53,34 +53,102 @@ function materials(faceUp, code) {
   if (cache.has(key)) return cache.get(key);
 
   const std = (opts) => new THREE.MeshStandardMaterial({ roughness: .78, metalness: .02, ...opts });
-  const px = std({ color: TILE_3D.sideDark });
-  const nx = std({ color: TILE_3D.sideDark });
-  const py = std({ color: TILE_3D.side });        // 后仰后露出的「白侧棱」
-  const ny = std({ color: TILE_3D.side });   // 另一侧的端面，同样亮
-  const nz = std({ color: 0xd9d5c8 });            // 朝内的一面：象牙白牌身，不要黑块
+  const side = std({ color: TILE_3D.side, roughness: .5, emissive: 0xffffff, emissiveIntensity: .22 });   // 侧面 + 倒棱：象牙白
+  const nz = std({ color: 0xd9d5c8, emissive: 0xffffff, emissiveIntensity: .15 });            // 朝内的一面：象牙白牌身，不要黑块
 
   let pz;
   if (faceUp) {
-    pz = std({ map: getAtlas() });
+    pz = std({ map: getAtlas(), emissive: 0xffffff, emissiveMap: getAtlas(), emissiveIntensity: .3 });
   } else {
-    pz = std({ map: backTexture() });
+    pz = std({ map: backTexture(), emissive: 0xffffff, emissiveMap: backTexture(), emissiveIntensity: .55 });
   }
-  const mats = [px, nx, py, ny, pz, nz];         // BoxGeometry: +x,-x,+y,-y,+z,-z
+  const mats = [side, nz, pz];                   // bevelTileGeometry 分组：侧面、背面(-z)、正面(+z)
   cache.set(key, mats);
   return mats;
 }
 
-/** 把 BoxGeometry 的 +z 面 UV 重映射到图集里 code 那一格 */
-function mapAtlasUV(geo, code) {
-  const idx = INDEX.has(code) ? INDEX.get(code) : INDEX.get('back');
-  const col = idx % ATLAS_COLS, row = Math.floor(idx / ATLAS_COLS);
-  const u0 = col / ATLAS_COLS, u1 = (col + 1) / ATLAS_COLS;
-  const v1 = 1 - row / ATLAS_ROWS, v0 = 1 - (row + 1) / ATLAS_ROWS;
-  const uv = geo.attributes.uv;
-  // +z 面是第 5 个面，顶点 16..19，顺序：左上/右上/左下/右下
-  uv.setXY(16, u0, v1); uv.setXY(17, u1, v1);
-  uv.setXY(18, u0, v0); uv.setXY(19, u1, v0);
-  uv.needsUpdate = true;
+/**
+ * 圆角倒棱的牌身：比直角 BoxGeometry 多出一圈会反光的斜面，
+ * 一整排牌之间天然有凹缝，不再像一根长方体。
+ * 材质分组与 BoxGeometry 兼容的三组：[侧面+斜面, 背面(-z), 正面(+z)]，
+ * 对应 materials() 里 [side, nz, pz]。
+ */
+function bevelTileGeometry(w, h, d, code, faceUp) {
+  const bs = Math.min(w, h) * .09;     // 斜面水平宽度
+  const bt = Math.min(d * .22, bs);    // 斜面厚度
+  const iw = w - 2 * bs, ih = h - 2 * bs;
+  const r = Math.min(iw, ih) * .18;
+  const x0 = -iw / 2, y0 = -ih / 2;
+  const shape = new THREE.Shape();
+  shape.moveTo(x0 + r, y0);
+  shape.lineTo(x0 + iw - r, y0);
+  shape.quadraticCurveTo(x0 + iw, y0, x0 + iw, y0 + r);
+  shape.lineTo(x0 + iw, y0 + ih - r);
+  shape.quadraticCurveTo(x0 + iw, y0 + ih, x0 + iw - r, y0 + ih);
+  shape.lineTo(x0 + r, y0 + ih);
+  shape.quadraticCurveTo(x0, y0 + ih, x0, y0 + ih - r);
+  shape.lineTo(x0, y0 + r);
+  shape.quadraticCurveTo(x0, y0, x0 + r, y0);
+
+  const ext = new THREE.ExtrudeGeometry(shape, {
+    depth: d - 2 * bt,
+    bevelEnabled: true,
+    bevelThickness: bt,
+    bevelSize: bs,
+    bevelOffset: 0,
+    bevelSegments: 2,
+    curveSegments: 4,
+  });
+  ext.translate(0, 0, -(d - 2 * bt) / 2);
+  const src = ext.toNonIndexed();
+  ext.dispose();
+
+  // 非索引几何：每 3 个顶点一个三角形；按面法线把三角形分到 侧面 / 背面 / 正面
+  const pos = src.attributes.position;
+  const nor = src.attributes.normal;
+  const uvA = src.attributes.uv;
+  const buckets = [[], [], []];
+  for (let t = 0; t < pos.count / 3; t++) {
+    const nz = (nor.getZ(t * 3) + nor.getZ(t * 3 + 1) + nor.getZ(t * 3 + 2)) / 3;
+    const onCap = Math.abs(nz) > .98;
+    buckets[onCap ? (nz > 0 ? 2 : 1) : 0].push(t);
+  }
+  const total = pos.count;
+  const P3 = new Float32Array(total * 3);
+  const N3 = new Float32Array(total * 3);
+  const U2 = new Float32Array(total * 2);
+  const geo = new THREE.BufferGeometry();
+  let cursor = 0;
+  buckets.forEach((tris, gi) => {
+    const start = cursor;
+    for (const t of tris) {
+      for (let k = 0; k < 3; k++) {
+        const s = t * 3 + k;
+        P3.set([pos.getX(s), pos.getY(s), pos.getZ(s)], cursor * 3);
+        N3.set([nor.getX(s), nor.getY(s), nor.getZ(s)], cursor * 3);
+        let u = uvA.getX(s), v = uvA.getY(s);
+        if (gi === 2) {
+          // 正面：按位置映射成 0..1，再落到图集格 / 牌背纹理
+          u = Math.min(1, Math.max(0, (pos.getX(s) + w / 2) / w));
+          v = Math.min(1, Math.max(0, (pos.getY(s) + h / 2) / h));
+          if (faceUp) {
+            const idx = INDEX.has(code) ? INDEX.get(code) : INDEX.get('back');
+            const col = idx % ATLAS_COLS, row = Math.floor(idx / ATLAS_COLS);
+            u = (col + u) / ATLAS_COLS;
+            v = 1 - (row + 1 - v) / ATLAS_ROWS;
+          }
+        }
+        U2.set([u, v], cursor * 2);
+        cursor++;
+      }
+    }
+    geo.addGroup(start, cursor - start, gi);
+  });
+  src.dispose();
+  geo.setAttribute('position', new THREE.BufferAttribute(P3, 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(N3, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(U2, 2));
+  return geo;
 }
 
 /**
@@ -92,8 +160,7 @@ function mapAtlasUV(geo, code) {
  * @param {number} o.d 牌厚
  */
 export function makeTile3D({ code = 'back', faceUp = false, w, h, d }) {
-  const geo = new THREE.BoxGeometry(w, h, d);
-  if (faceUp) mapAtlasUV(geo, code);
+  const geo = bevelTileGeometry(w, h, d, code, faceUp);
   const mesh = new THREE.Mesh(geo, materials(faceUp, code));
   mesh.castShadow = true;
   // 不接收自阴影：否则光斜着打过来时，左邻牌会把自己那半截白侧棱染暗，

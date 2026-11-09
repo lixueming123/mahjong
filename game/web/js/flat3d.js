@@ -45,6 +45,28 @@ const ROT = [
 
 let MATS = null;
 let MATS_SIDE = null;
+
+let goldTex = null;
+/**
+ * 牌背侧面的竖向色阶（录像里的样子）：顶部一线象牙白倒棱 -> 亮橙 -> 深橙 ->
+ * 底缘一线深褐收边。比单纯两点顶点色渐变更像「有厚度的牌身」。
+ */
+function goldTexture() {
+  if (goldTex) return goldTex;
+  const c = document.createElement('canvas');
+  c.width = 4; c.height = 64;
+  const g = c.getContext('2d');
+  const grad = g.createLinearGradient(0, 0, 0, 64);
+  // 真实牌侧：上 ~70% 是象牙白牌身，下 ~30% 是极细的橙色牌背边，中间是硬分界
+  grad.addColorStop(0, '#e9e6da');
+  grad.addColorStop(.7, '#c4bfae');
+  grad.addColorStop(.72, '#f2a02a');
+  grad.addColorStop(1, '#c8700c');
+  g.fillStyle = grad; g.fillRect(0, 0, 4, 64);
+  goldTex = new THREE.CanvasTexture(c);
+  goldTex.colorSpace = THREE.SRGBColorSpace;
+  return goldTex;
+}
 /**
  * 六面材质：正俯视下只有「被斜切拉开」的那两个面能露出投影，
  * 所以真正决定牌长什么样的就是 +z 牌面、-y 下缘、+x 右缘这三张。
@@ -61,8 +83,8 @@ function materials(withSide) {
   // 下缘橙金牌背：色阶来自几何顶点色（上缘棱线亮黄 -> 下缘深棕），
   // 再乘真实光照；不是一张画好渐变的贴图。
   const gold = std({
-    color: 0xffffff, vertexColors: true, roughness: .48, metalness: .12,
-    emissive: 0x4a2400, emissiveIntensity: .18,
+    color: 0xffffff, map: goldTexture(), roughness: .5, metalness: .1,
+    emissive: 0xffffff, emissiveIntensity: .55, emissiveMap: goldTexture(),
   });
   const flatTex = getFlatAtlas();
   const face = std({
@@ -76,7 +98,7 @@ function materials(withSide) {
     // 两种牌摆在一起就像两套素材。这里让贴图自己发一点光补回亮度，
     // 侧面/棱线仍然吃光照，「厚度」不会被抹平。
     emissive: 0xffffff,
-    emissiveIntensity: .40,
+    emissiveIntensity: .30,
     emissiveMap: flatTex,
   });
   // BoxGeometry 面序：+x, -x, +y, -y, +z, -z
@@ -138,6 +160,12 @@ function geometry({ code, w, h, d, thick, rot, angle = 0, side = 0 }) {
   put(0, 0xffd67a); put(1, 0xffd67a);
   put(2, 0x9c5309); put(3, 0x9c5309);
   geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  {
+    // 下缘面 12..15 与右缘面 0..3：v 上=1 下=0，对应 goldTexture 的竖向色阶
+    const guv = geo.attributes.uv;
+    [[12, 1], [13, 1], [14, 0], [15, 0], [0, 1], [1, 1], [2, 0], [3, 0]]
+      .forEach(([vi, v]) => guv.setXY(vi, .5, v));
+  }
 
   // 顶面 UV -> 图集里 code 那一格，并按座位/横躺旋转
   const c = cornerUV(code);
@@ -152,6 +180,60 @@ function geometry({ code, w, h, d, thick, rot, angle = 0, side = 0 }) {
 
   geoCache.set(key, geo);
   return geo;
+}
+
+/* ------------------------------------------------------- 牌身底衬 */
+
+const bodyCache = new Map();
+/**
+ * 一整块「牌身侧影」：圆角矩形，上段象牙白（牌身），下段橙色（牌背层），
+ * 垫在牌面正下方。牌面图集四角是透明的，没有这块底衬时，牌面与橙边之间会
+ * 露出台布的蓝色缝，橙边就像漂在牌下面的一根黄条。
+ * 底衬与牌面同宽、圆角连续，牌面+侧面才读成同一块实心的牌。
+ */
+function bodyMesh(w, h, thick, d) {
+  const key = `${w}:${h}:${thick}`;
+  let entry = bodyCache.get(key);
+  if (!entry) {
+    const K = 4;                                   // 每设计像素 4 个贴图像素
+    const cw = Math.round(w * K), ch = Math.round((h + thick) * K);
+    const c = document.createElement('canvas');
+    c.width = cw; c.height = ch;
+    const g = c.getContext('2d');
+    const r = Math.min(9 * K, cw / 6);
+    g.beginPath();
+    g.moveTo(r, 0); g.arcTo(cw, 0, cw, ch, r); g.arcTo(cw, ch, 0, ch, r * .7);
+    g.arcTo(0, ch, 0, 0, r * .7); g.arcTo(0, 0, cw, 0, r); g.closePath();
+    g.clip();
+    const orangeH = Math.max(3, thick * .62) * K;
+    const split = ch - orangeH;
+    const ivory = g.createLinearGradient(0, 0, 0, split);
+    ivory.addColorStop(0, '#f4f1e8');
+    ivory.addColorStop(.7, '#e6e2d4');
+    ivory.addColorStop(1, '#c9c4b2');
+    g.fillStyle = ivory; g.fillRect(0, 0, cw, split);
+    const orange = g.createLinearGradient(0, split, 0, ch);
+    orange.addColorStop(0, '#ffc050');
+    orange.addColorStop(.35, '#f39a1c');
+    orange.addColorStop(1, '#c46c08');
+    g.fillStyle = orange; g.fillRect(0, split, cw, orangeH);
+    // 象牙/橙色交界一条细暗线（两种材料的接缝）
+    g.fillStyle = 'rgba(110,60,0,.55)';
+    g.fillRect(0, split - K * .4, cw, K * .8);
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 4;
+    entry = {
+      tex,
+      geo: new THREE.PlaneGeometry(w, h + thick),
+      mat: new THREE.MeshBasicMaterial({ map: tex, transparent: true, alphaTest: .3 }),
+    };
+    bodyCache.set(key, entry);
+  }
+  const m = new THREE.Mesh(entry.geo, entry.mat);
+  m.position.set(0, -thick / 2, d / 2 - .6);
+  m.raycast = () => {};
+  return m;
 }
 
 /* ------------------------------------------------------- 软接触阴影 */
@@ -172,13 +254,64 @@ function softShadowTexture() {
     g.quadraticCurveTo(x, y, x + r, y); g.closePath();
   };
   for (let i = 9; i >= 0; i--) {
-    g.fillStyle = `rgba(2,8,20,${.052})`;
+    g.fillStyle = `rgba(2,8,20,${.1})`;
     rr(20 - i * 1.7, 18 - i * 1.7, 88 + i * 3.4, 124 + i * 3.4, 9 + i * 1.7);
     g.fill();
   }
   shadowTex = new THREE.CanvasTexture(c);
   return shadowTex;
 }
+
+/* ------------------------------------------------------- 牌面倒棱高光 */
+
+let bevelTex = null;
+/**
+ * 盖在牌面上的透明层：左上缘一圈亮边、右下缘一圈暗边，
+ * 外加一层很淡的明暗渐变，让平躺的牌面读成「微凸的圆角面」而不是贴纸。
+ */
+function bevelTexture() {
+  if (bevelTex) return bevelTex;
+  const W = 128, H = 160, R = 14;
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const g = c.getContext('2d');
+  const path = (inset) => {
+    const x = inset, y = inset, w = W - inset * 2, h = H - inset * 2, r = R - inset * .5;
+    g.beginPath();
+    g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r);
+    g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r);
+    g.arcTo(x, y, x + w, y, r); g.closePath();
+  };
+  g.save();
+  path(1); g.clip();
+  const lit = g.createLinearGradient(0, 0, W, H);
+  lit.addColorStop(0, 'rgba(255,255,255,.22)');
+  lit.addColorStop(.5, 'rgba(255,255,255,0)');
+  lit.addColorStop(1, 'rgba(40,50,70,.26)');
+  g.fillStyle = lit; g.fillRect(0, 0, W, H);
+  // 亮边：整圈描边后用渐变裁成只剩左上
+  g.lineWidth = 6;
+  const hi = g.createLinearGradient(0, 0, W, H);
+  hi.addColorStop(0, 'rgba(255,255,255,.85)');
+  hi.addColorStop(.55, 'rgba(255,255,255,0)');
+  hi.addColorStop(.6, 'rgba(30,40,60,0)');
+  hi.addColorStop(1, 'rgba(30,40,60,.75)');
+  g.strokeStyle = hi;
+  path(3); g.stroke();
+  // 最外圈细暗线：把相邻两张牌明确分开（淡一点，免得牌面与金边之间出一道黑缝）
+  g.lineWidth = 2;
+  g.strokeStyle = 'rgba(20,28,44,.2)';
+  path(1); g.stroke();
+  g.restore();
+  bevelTex = new THREE.CanvasTexture(c);
+  bevelTex.colorSpace = THREE.SRGBColorSpace;
+  return bevelTex;
+}
+
+const bevelMat = () => new THREE.MeshBasicMaterial({
+  map: bevelTexture(), transparent: true, depthTest: true, depthWrite: false,
+});
+let sharedBevelMat = null;
 
 const shadowGeoCache = new Map();
 function shadowPlane(w, h, thick, d) {
@@ -187,11 +320,11 @@ function shadowPlane(w, h, thick, d) {
   const m = new THREE.Mesh(
     new THREE.PlaneGeometry(w + 30, h + thick + 30),
     new THREE.MeshBasicMaterial({
-      map: softShadowTexture(), transparent: true, opacity: .9,
+      map: softShadowTexture(), transparent: true, opacity: .5,
       depthTest: false, depthWrite: false,
     }),
   );
-  m.position.set(5, -4 - thick / 2, -d / 2 - 2);
+  m.position.set(7, -6 - thick / 2, -d / 2 - 2);
   m.renderOrder = Z.RIVER_SHADOW;
   shadowGeoCache.set(key, m);
   return m;
@@ -229,6 +362,20 @@ export function makeFlatTile({
     m.depthTest = true;
     m.depthWrite = true;
   }
+  // 牌面倒棱高光层：和牌共用同一个 renderOrder（略高一点），随牌移动/倾斜
+  sharedBevelMat = sharedBevelMat || bevelMat();
+  const bevel = new THREE.Mesh(new THREE.PlaneGeometry(w, h), sharedBevelMat);
+  bevel.position.z = d / 2 + .4;
+  bevel.raycast = () => {};
+  mesh.add(bevel);
+  const body = bodyMesh(w, h, thick, d);
+  if (side === 0) { mesh.add(body); }
+  let order = mesh.renderOrder;
+  Object.defineProperty(mesh, 'renderOrder', {
+    get: () => order,
+    set: (v) => { order = v; body.renderOrder = v - .0004; bevel.renderOrder = v + .0004; },
+  });
+  mesh.renderOrder = order;
   mesh.userData = { kind: 'flatTile', code, w, h, d, thick, rot, side };
   return mesh;
 }
@@ -236,9 +383,13 @@ export function makeFlatTile({
 export function clearFlatTileCache() {
   for (const g of geoCache.values()) g.dispose();
   geoCache.clear();
+  for (const { tex, geo, mat } of bodyCache.values()) { tex.dispose(); geo.dispose(); mat.dispose(); }
+  bodyCache.clear();
   for (const m of shadowGeoCache.values()) { m.geometry.dispose(); m.material.dispose(); }
   shadowGeoCache.clear();
   if (shadowTex) { shadowTex.dispose(); shadowTex = null; }
+  if (sharedBevelMat) { sharedBevelMat.dispose(); sharedBevelMat = null; }
+  if (bevelTex) { bevelTex.dispose(); bevelTex = null; }
   // 两套材质数组共用同一批材质对象，去重后再释放
   for (const m of new Set([...(MATS || []), ...(MATS_SIDE || [])])) m.dispose();
   MATS = null; MATS_SIDE = null;

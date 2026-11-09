@@ -34,7 +34,7 @@ export function riverSlot(seat, n) {
   const baseX = seat === 3 ? RIVER.firstColLeft : RIVER.firstColRight;
   return {
     x: baseX + outward * row * (RIVER.hW + 2),
-    y: RIVER.sideRowY0 + (col - 1) * (RIVER.hH + 2),
+    y: RIVER.sideRowY0 + (col - 1) * (RIVER.hH + RIVER.thick + 1),
   };
 }
 

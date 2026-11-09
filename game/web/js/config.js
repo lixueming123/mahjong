@@ -31,9 +31,9 @@ export const Z = {
 };
 
 export const COLOR = {
-  clothDark: '#102a49',
-  clothMid: '#224c7d',
-  clothLight: '#2b5c92',
+  clothDark: '#183c6a',
+  clothMid: '#2d62a2',
+  clothLight: '#3a74b8',
   clothLine: 'rgba(9,26,48,.55)',
   woodDark: '#2a0d0b',
   woodMid: '#5a2118',
@@ -60,9 +60,9 @@ export const RIVER = {
   cap: 18,
   vW: 54, vH: 70,          // 上下家：竖立
   hW: 70, hH: 54,          // 左右家：横躺
-  thick: 13,               // 牌身外侧下方的橙金厚边（录像实测约 13，不遮牌面）
+  thick: 9,               // 牌侧厚度：上段象牙白 + 下段橙色牌背（录像约 10）
   colGap: 56,              // 列距（含 2px 缝）
-  rowGap: 64,              // 行距
+  rowGap: 76,              // 行距：牌高 70 + 厚边 9 − 3，相邻行只让厚边被下一排牌面轻压，不互相遮牌面
   firstRowTop: 238,        // 上家第一行中心 y（含金边的牌底离板顶约 6px）
   firstRowBottom: 580,     // 下家第一行中心 y
   firstColLeft: 728,       // 左家第一列中心 x

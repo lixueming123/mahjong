@@ -46,7 +46,7 @@ export function makeRiverTile(code, seat) {
     code,
     w: horizontal ? RIVER.hW : RIVER.vW,
     h: horizontal ? RIVER.hH : RIVER.vH,
-    d: 18,
+    d: 26,
     thick: RIVER.thick,
     rot: RIVER_ROT[seat] || 0,
   });
