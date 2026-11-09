@@ -361,7 +361,7 @@ default_action(window, hand, melds, drawn_tile) -> Discard | Pass
       pass
 ```
 
-- 与 `PROTOCOL.md` §6.4、`GAME_DESIGN.md` §5.6.2 完全一致；断线托管用**同一函数**立即执行（不等 15 s）。
+- 与 `PROTOCOL.md` §6.4、`GAME_DESIGN.md` §5.6.2 完全一致；断线托管用**同一函数**，但等该窗口的 `deadline_ms` 到达才执行（断线本身不提前代打）。
 - 窗口时长与配置见 `PROTOCOL.md` §1.8（默认 15000 ms，区间 `[1000, 60000]`）。
 
 ---
