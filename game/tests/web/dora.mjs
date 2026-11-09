@@ -1,16 +1,17 @@
 /**
  * dora.mjs — 场况卡第一行（宝牌指示牌槽位）的 DOM 逻辑单测。
  *
- * ui.js 的 renderDoraRow 只碰 classList/textContent/background，用 20 行
+ * ui.js 的 renderDoraRow 只碰 classList/textContent/style 自定义属性，用 20 行
  * DOM stub 就能在 node 里跑，不用开浏览器。覆盖：无宝牌（显示场风）、
  * 翻 1 张（贴图取格）、杠后多张、新的一局清干净 face 类与内联贴图。
  *
- * 贴图口径：图集 8x5，background-size 800%x500%，百分比位移
- * x = col/7、y = row/4（bg-position 百分比 = 图的 p% 对齐槽的 p%）。
+ * 贴图口径：平躺图集 8x5 写进 --face，CSS 用 background-size 800%x500%，
+ * 百分比位移 --fx = col/7、--fy = row/4（bg-position 百分比 = 图的 p% 对齐槽的 p%）。
  */
 const els = new Map();
 function makeEl(id) {
   const classes = new Set();
+  const props = new Map();
   return {
     id,
     classList: {
@@ -19,7 +20,11 @@ function makeEl(id) {
       toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)),
     },
     textContent: '',
-    style: {},
+    style: {
+      setProperty: (k, v) => props.set(k, v),
+      removeProperty: (k) => props.delete(k),
+      getPropertyValue: (k) => props.get(k) ?? '',
+    },
     _classes: classes,
   };
 }
@@ -54,27 +59,29 @@ const posOf = (code) => {
   const i = idx(code);
   return `${(i % 8) / 7 * 100}% ${Math.floor(i / 8) / 4 * 100}%`;
 };
+const face = (el) => el.style.getPropertyValue('--face');
+const pos = (el) => `${el.style.getPropertyValue('--fx')} ${el.style.getPropertyValue('--fy')}`;
 
 // 无宝牌：slot0 显示场风，其余背面，且无贴图残留
 ui.renderDoraRow({ round: '東1局', dora: [] });
 assert('无宝牌 slot0=東', slot0.textContent === '東' && !slot0._classes.has('face'));
 assert('无宝牌 bars 空', ui.el.roundBars.every((b) => b.textContent === '' && !b._classes.has('face')));
-assert('无宝牌无贴图', !slot0.style.backgroundImage);
+assert('无宝牌无贴图', !face(slot0));
 
 // 1 张宝牌：slot0 贴中（红中在图集里本来就是红色），其余背面
 ui.renderDoraRow({ dora: ['7z'] });
 assert('1张 slot0 贴中',
   slot0.textContent === '' && slot0._classes.has('face')
-  && slot0.style.backgroundImage.includes('tile-atlas-hand.png')
-  && slot0.style.backgroundPosition === posOf('7z'));
+  && face(slot0).includes('tile-atlas-flat.png')
+  && pos(slot0) === posOf('7z'));
 assert('1张 不再挂 red/sm 字色类', !slot0._classes.has('red') && !slot0._classes.has('sm'));
 assert('1张 bar0 背面', !ui.el.roundBars[0]._classes.has('face') && ui.el.roundBars[0].textContent === '');
 
 // 杠后 3 张：slot0/1/2 依次翻面，各自取自己的格
 ui.renderDoraRow({ dora: ['7z', '5m', '1p'] });
-assert('3张 slot1 贴5万', ui.el.roundBars[0].style.backgroundPosition === posOf('5m')
+assert('3张 slot1 贴5万', pos(ui.el.roundBars[0]) === posOf('5m')
   && ui.el.roundBars[0]._classes.has('face'));
-assert('3张 slot2 贴1筒', ui.el.roundBars[1].style.backgroundPosition === posOf('1p'));
+assert('3张 slot2 贴1筒', pos(ui.el.roundBars[1]) === posOf('1p'));
 assert('3张 slot3 背面', !ui.el.roundBars[2]._classes.has('face'));
 
 // 从有到无（新的一局）：face 类与内联贴图都要清干净
@@ -82,7 +89,7 @@ ui.renderDoraRow({ round: '東2局', dora: [] });
 assert('清空后 slot0 回场风',
   slot0.textContent === '東' && !slot0._classes.has('face') && !slot0._classes.has('red'));
 assert('清空后 bar0 清 face 与贴图',
-  !ui.el.roundBars[0]._classes.has('face') && !ui.el.roundBars[0].style.backgroundImage);
+  !ui.el.roundBars[0]._classes.has('face') && !face(ui.el.roundBars[0]));
 
 console.log(`宝牌槽位：${fail ? 'FAIL' : 'ALL PASS'}  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

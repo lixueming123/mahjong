@@ -33,17 +33,39 @@ function backTexture() {
     g.beginPath(); g.moveTo(d, 0); g.lineTo(d + c.height, c.height); g.stroke();
   }
   g.restore();
-  // 每节之间的深灰分隔线：录像里靠这条线把紧挨的 13 张牌分开，
-  // 牌本身不能靠偏角留缝（那样牌会散开，反而更不像录像）。
-  g.strokeStyle = 'rgba(48,32,14,.88)'; g.lineWidth = 9;
-  g.strokeRect(4, 4, c.width - 8, c.height - 8);
-  g.strokeStyle = 'rgba(255,232,168,.42)'; g.lineWidth = 2;
-  g.strokeRect(9, 9, c.width - 18, c.height - 18);
-  g.fillStyle = 'rgba(255,232,168,.28)';
-  g.fillRect(c.width / 2 - 13, c.height / 2 - 2, 26, 4);
+  // 录像里牌背是一整块橙色，紧挨的牌之间只有一道很细的暗缝；
+  // 缝主要靠橙色倒棱的明暗给出，这里不再画粗边框（会像嵌在白框里的按钮）。
+  g.strokeStyle = 'rgba(120,58,6,.45)'; g.lineWidth = 3;
+  g.strokeRect(1.5, 1.5, c.width - 3, c.height - 3);
   backTex = new THREE.CanvasTexture(c);
   backTex.colorSpace = THREE.SRGBColorSpace;
   return backTex;
+}
+
+const layerTex = new Map();
+/**
+ * 侧面 + 倒棱的厚度分层：真实麻将牌是「橙色牌背层 + 象牙白牌面层」粘起来的，
+ * 侧面应当一半橙一半白。v 沿牌厚（v=1 在 +z），backAtTop = 牌背朝 +z。
+ */
+function layerTexture(backAtTop) {
+  if (layerTex.has(backAtTop)) return layerTex.get(backAtTop);
+  const c = document.createElement('canvas');
+  c.width = 4; c.height = 64;
+  const g = c.getContext('2d');
+  const BACK = .42;                      // 牌背层占厚度的比例
+  const grad = g.createLinearGradient(0, 0, 0, 64);
+  const stops = [
+    [0, TILE_3D.backMid], [BACK - .02, TILE_3D.backMid],
+    [BACK, '#f6f3ea'], [1, '#e4e2d8'],
+  ];
+  for (const [t, color] of stops) {
+    grad.addColorStop(backAtTop ? t : 1 - t, color);
+  }
+  g.fillStyle = grad; g.fillRect(0, 0, 4, 64);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  layerTex.set(backAtTop, tex);
+  return tex;
 }
 
 const cache = new Map();
@@ -53,8 +75,12 @@ function materials(faceUp, code) {
   if (cache.has(key)) return cache.get(key);
 
   const std = (opts) => new THREE.MeshStandardMaterial({ roughness: .78, metalness: .02, ...opts });
-  const side = std({ color: TILE_3D.side, roughness: .5, emissive: 0xffffff, emissiveIntensity: .22 });   // 侧面 + 倒棱：象牙白
-  const nz = std({ color: 0xd9d5c8, emissive: 0xffffff, emissiveIntensity: .15 });            // 朝内的一面：象牙白牌身，不要黑块
+  const layers = layerTexture(!faceUp);
+  const side = std({ map: layers, roughness: .5, emissive: 0xffffff, emissiveMap: layers, emissiveIntensity: .22 });   // 侧面 + 倒棱：橙/白分层
+  // 朝内的一面：牌背朝外时是象牙白牌面一侧；明牌摊开时则是橙色牌背
+  const nz = faceUp
+    ? std({ color: TILE_3D.backMid, emissive: TILE_3D.backMid, emissiveIntensity: .15 })
+    : std({ color: 0xd9d5c8, emissive: 0xffffff, emissiveIntensity: .15 });
 
   let pz;
   if (faceUp) {
@@ -74,10 +100,10 @@ function materials(faceUp, code) {
  * 对应 materials() 里 [side, nz, pz]。
  */
 function bevelTileGeometry(w, h, d, code, faceUp) {
-  const bs = Math.min(w, h) * .09;     // 斜面水平宽度
-  const bt = Math.min(d * .22, bs);    // 斜面厚度
+  const bs = Math.min(w, h) * .06;     // 斜面水平宽度
+  const bt = Math.min(d * .2, bs);     // 斜面厚度
   const iw = w - 2 * bs, ih = h - 2 * bs;
-  const r = Math.min(iw, ih) * .18;
+  const r = Math.min(iw, ih) * .12;
   const x0 = -iw / 2, y0 = -ih / 2;
   const shape = new THREE.Shape();
   shape.moveTo(x0 + r, y0);
@@ -127,6 +153,10 @@ function bevelTileGeometry(w, h, d, code, faceUp) {
         P3.set([pos.getX(s), pos.getY(s), pos.getZ(s)], cursor * 3);
         N3.set([nor.getX(s), nor.getY(s), nor.getZ(s)], cursor * 3);
         let u = uvA.getX(s), v = uvA.getY(s);
+        if (gi === 0) {
+          u = .5;
+          v = Math.min(1, Math.max(0, (pos.getZ(s) + d / 2) / d));
+        }
         if (gi === 2) {
           // 正面：按位置映射成 0..1，再落到图集格 / 牌背纹理
           u = Math.min(1, Math.max(0, (pos.getX(s) + w / 2) / w));
@@ -174,4 +204,6 @@ export function makeTile3D({ code = 'back', faceUp = false, w, h, d }) {
 export function clearTile3DCache() {
   cache.clear();
   if (backTex) { backTex.dispose(); backTex = null; }
+  for (const tex of layerTex.values()) tex.dispose();
+  layerTex.clear();
 }

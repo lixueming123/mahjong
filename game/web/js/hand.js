@@ -65,7 +65,8 @@ export class HandView {
   /** 从手牌位置抛物线飞到牌河；状态在 main 里已即时落地，动画只做视觉 */
   fly(code, from, to) {
     const tile = makeHandTile(code, -1);
-    const s = RIVER.vH / HAND.h;
+    // 牌河的牌宽不受透视纵向压缩，按宽度收缩落地最贴合
+    const s = RIVER.w / HAND.w;
     tile.scale.setScalar(1);
     const [fx, fy] = P(from.x, from.y);
     const [tx, ty] = P(to.x, to.y);

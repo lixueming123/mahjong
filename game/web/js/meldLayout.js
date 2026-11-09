@@ -34,15 +34,18 @@ export function tileExtent(L, w, h) {
  * `maxLen` 是副露带允许的长度，放不下时整块等比缩小（k < 1）。
  */
 export function flatten(L, melds, maxLen = Infinity) {
+  // 三家副露在透视通道里按世界尺寸平躺，屏幕上纵向被压缩 fore 倍；
+  // 设计坐标里的落位（钉牌解算、回归）要用屏幕尺寸估算。本家正交，fore = 1。
+  const fore = L.fore || 1;
   const build = (k) => {
     const flat = [];
     melds.forEach((meld, gi) => {
       for (const item of meldOrder(meld)) {
-        // 被鸣牌宽高互换（麻将规则里的「横放」）
+        // 被鸣牌宽高互换（麻将规则里的「横放」）：在世界尺寸上互换
         const swap = item.claimed && L.swap;
-        const w = (swap ? L.h : L.w) * k;
-        const h = (swap ? L.w : L.h) * k;
-        flat.push({ ...item, w, h, group: gi });
+        const worldW = (swap ? L.h : L.w) * k;
+        const worldH = (swap ? L.w : L.h) * k;
+        flat.push({ ...item, w: worldW, h: worldH * fore, worldW, worldH, group: gi });
       }
     });
     const scaled = { ...L, side: L.side * k, thick: L.thick * k };
@@ -91,7 +94,8 @@ export function meldLayout(L, melds, near) {
   // 横跨带子的是 local-x），横放牌的横跨 = L.h+side，邻牌 = L.w+side；
   // 本家/对家 θ≈0°，横跨的是 local-y，正好反过来。对齐量取半差。
   const acrossSwap = Math.abs(Math.sin(L.angle - (L.tilt || 0))) > .5;
-  const dropBase = acrossSwap ? (L.w - L.h) / 2 : (L.h - L.w) / 2;
+  const fore = L.fore || 1;
+  const dropBase = acrossSwap ? (L.w - L.h) / 2 : (L.h - L.w) / 2 * fore;
   const tiles = flat.map((item, i) => {
     const dist = along + item.extent / 2;
     // 被鸣横放的牌沿**带的垂直方向**挪半截，让无金边的那条长边和邻牌

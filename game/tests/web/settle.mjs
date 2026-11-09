@@ -2,11 +2,13 @@
 // + 摊牌渲染冒烟（真 three.js 驱动 OpponentHandsView，不开浏览器）
 import { FRAME_TYPE, MELD_TYPE, YAKU } from '../../web/js/protocol_enums.js';
 
-// DOM/canvas stub：tile3d 的牌背纹理要 2d canvas；本测试不做 GL 渲染，够用
+// DOM/canvas stub：tile3d 的牌背/侧面纹理要 2d canvas；本测试不做 GL 渲染，够用。
+// 方法都返回 stub 自身，createLinearGradient().addColorStop() 这类链式调用才不炸
+const ctx2d = new Proxy({}, { get: () => () => ctx2d });
 globalThis.document = {
   createElement: () => ({
     width: 0, height: 0,
-    getContext: () => new Proxy({}, { get: () => () => {} }),
+    getContext: () => ctx2d,
   }),
 };
 
@@ -246,8 +248,9 @@ const { readFile } = await import('node:fs/promises');
 const uiCss = await readFile(new URL('../../web/css/ui.css', import.meta.url), 'utf8');
 const claimRule = uiCss.match(/\.rstile\.claim\s*>\s*\.rsface\s*\{([^}]*)\}/)?.[1] || '';
 check('面板：横放牌面旋转 90°（与 3D 的 rot+1 一致）', claimRule.includes('rotate(90deg)'), true);
-check('面板：横放牌面保持 46x64 原始比例',
-  /width:\s*46px/.test(claimRule) && /height:\s*64px/.test(claimRule), true);
+// 横放牌面与竖牌正面同为 34x52，旋转后图案比例不变
+check('面板：横放牌面保持竖牌正面比例',
+  /width:\s*34px/.test(claimRule) && /height:\s*52px/.test(claimRule), true);
 
 console.log(`\n${pass} pass, ${fail} fail`);
 process.exit(fail ? 1 : 0);

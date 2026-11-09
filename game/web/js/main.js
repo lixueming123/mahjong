@@ -8,10 +8,11 @@ import { DESIGN } from './config.js';
 import { loadAtlas } from './assets.js';
 import { createState } from './state.js';
 import { TableView } from './board.js';
-import { RiverView, riverSlot } from './rivers.js';
+import { RiverView } from './rivers.js';
 import { MeldView } from './melds.js';
 import { HandView } from './hand.js';
 import { OpponentHandsView } from './opponents.js';
+import { TablePass } from './tablepass.js';
 import { UI } from './ui.js';
 import { Lobby } from './lobby.js';
 import { Input } from './input.js';
@@ -54,6 +55,7 @@ fill.position.set(180, -900, 900);
 scene.add(fill);
 
 let opponents = null;
+let tablePass = null;
 
 function resize() {
   const w = window.innerWidth, h = window.innerHeight;
@@ -64,7 +66,10 @@ function resize() {
   camera.left = -vw / 2; camera.right = vw / 2;
   camera.top = vh / 2; camera.bottom = -vh / 2;
   camera.updateProjectionMatrix();
-  if (opponents) opponents.resize(w / h, vw, vh);
+  if (opponents) {
+    opponents.resize(w / h, vw, vh);
+    if (tablePass) tablePass.relayout();
+  }
   document.documentElement.style.setProperty('--ui-scale', String(scale));
 }
 window.addEventListener('resize', resize);
@@ -106,8 +111,9 @@ async function boot() {
   const scale0 = Math.min(window.innerWidth / DESIGN.W, window.innerHeight / DESIGN.H);
   opponents.resize(window.innerWidth / window.innerHeight,
     window.innerWidth / scale0, window.innerHeight / scale0);
-  const rivers = new RiverView(scene);
-  const melds = new MeldView(scene);
+  tablePass = new TablePass(opponents);
+  const rivers = new RiverView(tablePass);
+  const melds = new MeldView(tablePass, scene);
   const hand = new HandView(scene);
   const ui = new UI(app);
 
@@ -123,7 +129,7 @@ async function boot() {
   app.on('discard', ({ code, from, seat }) => {
     sfx.play('discard');
     if (seat === 0 && from) {
-      hand.fly(code, from, riverSlot(0, app.state.rivers[0].length - 1));
+      hand.fly(code, from, rivers.slot(0, app.state.rivers[0].length - 1));
     }
   });
   app.on('draw', ({ seat }) => { if (seat === 0) sfx.play('draw'); });
@@ -187,6 +193,7 @@ async function boot() {
     requestAnimationFrame(loop);
     hand.update(now);
     renderer.render(scene, camera);
+    if (tablePass) tablePass.renderOverlay(renderer);
     opponents.renderOverlay(renderer);   // 透视立牌叠加在 1:1 主桌之上
     frames++;
     if (now - last >= 1000) {

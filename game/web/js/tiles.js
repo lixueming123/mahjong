@@ -10,22 +10,13 @@
  * 所以横躺那张不会再出现「厚边跑到左边变成大黄条」。
  */
 import * as THREE from 'three';
-import { faceGeometry, getHandAtlas } from './assets.js';
 import { RIVER, HAND, Z } from './config.js';
 import { makeFlatTile } from './flat3d.js';
 
 /** 舍牌角度：下家正立 / 右家顺时针 / 对家 180° / 左家逆时针（90° 步数） */
 export const RIVER_ROT = { 0: 0, 1: 1, 2: 2, 3: 3 };
 
-/** 2D 覆盖层（本家立牌 / 落影）用的无光照材质 */
-const atlasMaterial = (texture = getHandAtlas()) => new THREE.MeshBasicMaterial({
-  map: texture,
-  transparent: true,
-  depthTest: false,
-  depthWrite: false,
-  side: THREE.DoubleSide,
-});
-
+/** 2D 覆盖层（落影 / 高亮）用的无光照材质 */
 export const flat = (color, opacity = 1) => new THREE.MeshBasicMaterial({
   color, transparent: true, opacity, depthTest: false, depthWrite: false,
 });
@@ -37,17 +28,16 @@ export function rectMesh(w, h, material, order) {
 }
 
 /**
- * 一张平躺舍牌 = 单个真 3D Mesh。
- * 占屏包围盒仍是 fw × (fh + thick)，与旧版一致，牌河坐标无需改动。
+ * 一张平躺舍牌 = 单个真 3D Mesh（透视通道渲染，局部单位 = 桌面世界尺寸）。
  */
 export function makeRiverTile(code, seat) {
   const horizontal = seat === 1 || seat === 3;
   const tile = makeFlatTile({
     code,
-    w: horizontal ? RIVER.hW : RIVER.vW,
-    h: horizontal ? RIVER.hH : RIVER.vH,
-    d: 26,
-    thick: RIVER.thick,
+    w: horizontal ? RIVER.h : RIVER.w,
+    h: horizontal ? RIVER.w : RIVER.h,
+    d: RIVER.d,
+    persp: true,
     rot: RIVER_ROT[seat] || 0,
   });
   tile.renderOrder = Z.RIVER;
@@ -55,9 +45,11 @@ export function makeRiverTile(code, seat) {
 }
 
 /**
- * 本家立牌：牌面正对屏幕、牌背在上缘露出一条橙金厚边。
- * 立体层次（橙金圆角牌顶 / 灰紫阴影带 / 白色圆角牌面 / 左右暗缝）
- * 已经预烘在 tile-atlas-hand.png 里；这里只补落影和触底暗边。
+ * 本家立牌：和躺牌同一套真 3D 圆角倒棱牌身，正面朝镜头。
+ * 牌背一侧的顶点往 +y 斜切 HAND.top：1:1 正交相机下也能看到牌的上表面，
+ * 侧面色阶给出「象牙白顶面 + 一线橙色牌背」，吃光照、有棱边。
+ * 以前是一张画好的平面贴图（橙条 + 白面），那就是纸片感的来源。
+ * 占屏包围盒仍是 HAND.w × HAND.h、中心不变，handLayout 坐标不用动。
  */
 export function makeHandTile(code, index) {
   const g = new THREE.Group();
@@ -70,19 +62,19 @@ export function makeHandTile(code, index) {
   sh2.position.set(HAND.shadowDx + 3, HAND.shadowDy - 3, 0);
   g.add(sh2);
 
-  // 牌面比布局宽 seam：相邻牌各溢出 2px 轻微叠压，录像里手牌几乎无缝。
-  // 只改渲染宽度、不改 handLayout 的坐标，整排 1:1 位置保持不动。
-  const face = new THREE.Mesh(
-    faceGeometry(code, HAND.w + HAND.seam, HAND.h), atlasMaterial(),
-  );
-  face.renderOrder = Z.HAND;
-  face.userData.face = true;
-  g.add(face);
-
-  // 触底暗边：牌立在桌布上的接触阴影
-  const foot = rectMesh(HAND.w - 16, HAND.foot, flat(0x16202e, .5), Z.HAND + 1);
-  foot.position.set(0, -HAND.h / 2 + HAND.foot / 2 + 3, 0);
-  g.add(foot);
+  const body = makeFlatTile({
+    code,
+    w: HAND.body,
+    h: HAND.h - HAND.top,
+    d: HAND.d,
+    thick: -HAND.top,
+    atlas: 'hand',
+    shadow: false,
+  });
+  body.position.y = -HAND.top / 2;
+  body.renderOrder = Z.HAND;
+  body.userData.face = true;
+  g.add(body);
 
   g.userData = { kind: 'hand', code, index, w: HAND.w, h: HAND.h };
   return g;

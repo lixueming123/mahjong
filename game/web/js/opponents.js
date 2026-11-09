@@ -57,12 +57,12 @@ export class OpponentHandsView {
   }
 
   /** 设计坐标 -> 透视相机下 z=0 桌面上的世界点（射线反投影） */
-  unprojectToTable(dx, dy) {
+  unprojectToTable(dx, dy, z = 0) {
     const nx = 2 * (dx - DESIGN.CX) / this.viewW;
     const ny = 2 * (DESIGN.CY - dy) / this.viewH;
     const p = new THREE.Vector3(nx, ny, .5).unproject(this.camera);
     const dir = p.sub(this.camera.position).normalize();
-    const t = -this.camera.position.z / dir.z;
+    const t = (z - this.camera.position.z) / dir.z;
     return this.camera.position.clone().addScaledVector(dir, t);
   }
 
@@ -122,7 +122,7 @@ export class OpponentHandsView {
       const growing = Math.cos(L.angle) * Math.cos(meldAngle)
         + Math.sin(L.angle) * Math.sin(meldAngle);
       const towardMeld = growing >= 0 ? 1 : -1;
-      const pin = meldNearPoint(seat, state);
+      const pin = MELD.seat[seat]?.pin === false ? null : meldNearPoint(seat, state);
       let tNear = null;
       let signAway = 1;
       let k = 1;   // 远端出屏时整列的等比压缩（牌身 + 间距一起缩）

@@ -12,8 +12,13 @@ import { ACTION, REASON, yakuName } from './protocol_enums.js';
 
 const $ = (id) => document.getElementById(id);
 
-/** 宝牌槽位贴图：手牌图集 8x5，格位与 assets.js 的 UV 同源（每格 120x200） */
+/** 结算摊牌贴图：手牌图集 8x5，格位与 assets.js 的 UV 同源（每格 120x200） */
 const DORA_ATLAS_URL = './assets/tile-atlas-hand.png';
+/**
+ * 场况卡宝牌是平躺的小牌：用平躺牌面图集（无立牌牌顶），格位同为 8x5。
+ * 经 CSS 变量传给 ui.css 时 url() 会按样式表目录解析，所以这里给绝对地址。
+ */
+const DORA_FLAT_ATLAS_URL = new URL('../assets/tile-atlas-flat.png', import.meta.url).href;
 const DORA_INDEX = new Map(ALL_CODES.map((code, i) => [code, i]));
 
 const WIND_CHARS = ['東', '南', '西', '北'];
@@ -192,15 +197,15 @@ export class UI {
         slot.classList.add('face');
         slot.classList.remove('red', 'sm');
         slot.textContent = '';
-        slot.style.backgroundImage = `url(${DORA_ATLAS_URL})`;
-        slot.style.backgroundSize = '800% 500%';
-        slot.style.backgroundPosition = `${col / 7 * 100}% ${row / 4 * 100}%`;
+        slot.style.setProperty('--face', `url(${DORA_FLAT_ATLAS_URL})`);
+        slot.style.setProperty('--fx', `${col / 7 * 100}%`);
+        slot.style.setProperty('--fy', `${row / 4 * 100}%`);
       } else {
         slot.classList.remove('face', 'red', 'sm');
         slot.textContent = i === 0 && !dora.length ? (state.round || '東')[0] : '';
-        slot.style.backgroundImage = '';
-        slot.style.backgroundSize = '';
-        slot.style.backgroundPosition = '';
+        for (const prop of ['--face', '--fx', '--fy']) {
+          slot.style.removeProperty(prop);
+        }
       }
     });
   }
@@ -428,7 +433,7 @@ export class UI {
       const col = idx % 8;
       const row = Math.floor(idx / 8);
       return `<i class="rstile${cls ? ` ${cls}` : ''}"><i class="rsface" style="background-image:url(${DORA_ATLAS_URL});`
-        + `background-size:800% 500%;background-position:${col / 7 * 100}% ${row / 4 * 100}%"></i></i>`;
+        + `background-size:800% auto;background-position:${col / 7 * 100}% ${row / 4 * 100}%"></i></i>`;
     };
 
     // 副露分组：被鸣的那张横置（meld.rotated 是 action_event 反查的下标）；

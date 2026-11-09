@@ -27,33 +27,45 @@ body { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-s
 }
 /* 槽位 40x66 ≈ 图集格 120x200 的 0.6 比例：宝牌翻面时整格贴图铺满不变形 */
 .round-row { display: flex; align-items: stretch; gap: 3px; }
+/* 每格是一张平躺的小牌：上 54px 是牌顶面，下 12px 是朝向屏幕的牌侧厚边。
+   明牌：白牌面 + 侧边「象牙白牌面层 -> 橙色牌背层」；
+   暗牌：橙牌背 + 侧边「橙色牌背层 -> 象牙白牌面层」—— 与桌上的 3D 牌同一套分层。 */
+.round-mark, .round-bars i {
+  box-sizing: border-box; width: 40px; height: 66px; padding-bottom: 12px;
+  border-radius: 7px;
+  box-shadow: 0 0 0 1px rgba(36,20,4,.7), 0 3px 6px rgba(0,0,0,.5);
+  background-repeat: no-repeat;
+}
 .round-mark {
-  width: 40px; height: 66px; border: 1px solid #60656f; border-radius: 6px;
-  background: linear-gradient(#fdfdfa, #e5e6e1); color: #b42424;
-  font-size: 38px; font-weight: 800; text-align: center; line-height: 54px;
-  box-shadow: inset 0 -10px 0 #efa327, 0 2px 7px rgba(0,0,0,.5);
+  color: #b42424; font-size: 34px; font-weight: 800; text-align: center; line-height: 54px;
+  background-image:
+    linear-gradient(#fdfdfa, #e9e9e4),
+    linear-gradient(#e8e4d8 0 54px, #f2a02a 59px, #c8700c 66px);
+  background-origin: content-box, border-box;
+  background-clip: content-box, border-box;
 }
 .round-bars { display: flex; gap: 3px; }
 .round-bars i {
-  width: 40px; height: 66px; border: 1px solid rgba(72,36,4,.7); border-radius: 6px;
-  background: linear-gradient(180deg, #ffd06a 0%, #f5a92c 38%, #d58213 100%);
-  box-shadow: inset 0 2px 0 rgba(255,244,205,.85), 0 2px 7px rgba(0,0,0,.45);
+  background-image:
+    linear-gradient(165deg, #ffd27a 0%, #f4a62c 40%, #e48f19 100%),
+    linear-gradient(#c97810 0 54px, #a9600a 58px, #efebe0 59px, #cdc7b6 66px);
+  background-origin: content-box, border-box;
+  background-clip: content-box, border-box;
 }
-/* 宝牌指示牌翻开的槽位：白牌面 + 金色下缘，与 round-mark 同一观感。
-   贴图尺寸/偏移由 ui.js 内联写入（图集 8x5，background-size 800% 500%，
-   百分比位移取格：x=col/7, y=row/4），border-radius 自动裁掉方角。 */
-.round-bars i.face {
-  background: linear-gradient(#fdfdfa, #e5e6e1);
-  border-color: #60656f;
-  box-shadow: inset 0 -10px 0 #efa327, 0 2px 7px rgba(0,0,0,.5);
-  color: #12161d; font-style: normal; font-weight: 800;
-  font-size: 30px; text-align: center; line-height: 56px;
-  background-repeat: no-repeat;
+/* 宝牌指示牌翻开的槽位：平躺牌面图集（白牌身、无金框）铺满顶面。
+   图集 URL / 取格位移由 ui.js 写进 --face / --fx / --fy（8x5，size 800% 500%，
+   百分比位移 x=col/7, y=row/4）；图集四角透明，透出底层象牙白，圆角自然连续。 */
+.round-mark.face, .round-bars i.face {
+  background-image:
+    var(--face),
+    linear-gradient(#f4f2ea 0 54px, #e3dfd2 55px, #f2a02a 58px, #c8700c 66px);
+  background-size: 800% 500%, auto;
+  background-position: var(--fx) var(--fy), 0 0;
+  background-origin: content-box, border-box;
+  background-clip: content-box, border-box;
 }
-.round-bars i.face.sm { font-size: 20px; letter-spacing: -1px; line-height: 60px; }
-.round-bars i.face.red, .round-mark.red { color: #b42424; }
+.round-mark.red { color: #b42424; }
 .round-mark.sm { font-size: 24px; letter-spacing: -1px; }
-.round-mark.face { background-repeat: no-repeat; }
 .round-sub {
   margin-top: 6px; display: flex; gap: 6px; align-items: center;
   padding: 3px 6px; border: 1px solid rgba(150,170,205,.42); border-radius: 4px;
@@ -373,15 +385,20 @@ body { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-s
 .rshand-concealed { display: flex; gap: 2px; flex-wrap: wrap; }
 .rshand-agari { display: flex; padding-left: 12px; margin-left: 2px;
   border-left: 2px dashed rgba(230, 166, 60, .55); }
+/* 手牌图集只有正面（牌顶由桌面 3D 几何给出），这里用外层画出同样的层次：
+   一线橙色牌背 + 象牙白顶面 + 白色正面，右缘一道暗棱。 */
 .rstile { position: relative; display: inline-block; width: 46px; height: 64px; border-radius: 6px;
-  background-repeat: no-repeat; background-color: #f5f1e6;
-  box-shadow: 0 2px 5px rgba(0, 0, 0, .45), inset 0 0 0 1px rgba(90, 60, 20, .25); }
-.rsface { position: absolute; inset: 0; border-radius: inherit; background-repeat: no-repeat; }
+  background: linear-gradient(#f3a632 0, #e08c1a 3px, #f7f5ee 3px, #e9e7de 9px, #fbfbf8 9px);
+  box-shadow: 0 2px 5px rgba(0, 0, 0, .45), inset 0 0 0 1px rgba(70, 60, 40, .28),
+    inset -2px -2px 0 rgba(0, 0, 0, .10); }
+/* 正面 34x52：图集格按宽铺满（800% auto）、上下各裁掉一点，墨迹保持原比例 */
+.rsface { position: absolute; left: 50%; top: 9px; width: 34px; height: 52px;
+  transform: translateX(-50%); border-radius: 4px; background-repeat: no-repeat; }
 .rstile.claim { width: 64px; height: 46px; align-self: flex-end; }
-/* 被鸣张：外层只负责横躺占位，内层保持 46x64 原比例贴图后顺时针转 90°，
-   朝向与 3D 桌面 makeFlatTile(rot+1) 一致；只改外层尺寸会把牌面压扁。 */
-.rstile.claim > .rsface { inset: auto; width: 46px; height: 64px;
-  left: 50%; top: 50%; transform: translate(-50%, -50%) rotate(90deg); }
+/* 被鸣张：外层只负责横躺占位（牌顶仍在上缘），内层正面与竖牌同为 34x52，
+   贴图后顺时针转 90°，朝向与 3D 桌面 makeFlatTile(rot+1) 一致；只改外层尺寸会把牌面压扁。 */
+.rstile.claim > .rsface { top: calc(50% + 3px);
+  width: 34px; height: 52px; transform: translate(-50%, -50%) rotate(90deg); }
 .rstile.agari { outline: 2px solid var(--gold); outline-offset: -2px;
   box-shadow: 0 0 12px rgba(230, 166, 60, .85); }
 .rshand-yaku { margin-top: 10px; text-align: center; font-size: 15px;

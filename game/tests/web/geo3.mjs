@@ -62,7 +62,7 @@ function handPolys(view, seat, state) {
   const meldAngle = MELD.seat[seat]?.angle ?? L.angle;
   const growing = Math.cos(L.angle) * Math.cos(meldAngle) + Math.sin(L.angle) * Math.sin(meldAngle);
   const towardMeld = growing >= 0 ? 1 : -1;
-  const pin = meldNearPoint(seat, state);
+  const pin = MELD.seat[seat]?.pin === false ? null : meldNearPoint(seat, state);
   let tNear = null, signAway = 1, k = 1;
   if (pin) {
     group.updateMatrixWorld(true);

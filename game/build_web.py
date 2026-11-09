@@ -7,8 +7,8 @@
                           同样的圆角和细暗边，但没有牌顶、没有金框。
                           厚度不画进贴图，由 flat3d 的斜切盒侧面 + 灯光给出，
                           这样躺牌和立牌摆在一起不会像是两套素材。
-  tile-atlas-hand.png  —— 本家立牌，按录像的 2.5D 立牌画法程序化绘制：
-                          橙金圆角牌顶 + 灰紫阴影带 + 白色圆角牌面 + 左右暗缝 + 底部接触暗边
+  tile-atlas-hand.png  —— 本家立牌的**正面**（白牌面 + 墨迹）；牌顶 / 橙色牌背 / 圆角棱边
+                          由 flat3d 的真 3D 牌身给出
 
 素材只取 client/assets/mahjong/faces/*.png 的「牌面墨迹」（白底抠成透明），
 牌身、配色、立体层次全部按参考录像采样，不复用 pygame 客户端的界面绘制。
@@ -21,7 +21,7 @@ import shutil
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parent
 FACES = ROOT / "client" / "assets" / "mahjong" / "faces"
@@ -47,8 +47,7 @@ BORDER = (186, 148, 72)
 
 # ---- 立牌图集：120:200 = 0.6，与设计坐标 90:150 完全一致（贴图不拉伸）----
 H_W, H_H = 120, 200
-CAP_H = 10           # 橙金牌顶（设计 7.5px，录像实测约 7px）
-SHADE_H = 16         # 牌顶下的灰紫阴影带（设计 12px）
+INK_H = 158          # 立牌墨迹高（格内）：立牌正面只看得见中间约 120x179
 CORNER = 13
 
 
@@ -173,81 +172,34 @@ def _gradient(stops: list[tuple[float, tuple[int, int, int]]], h: int, w: int) -
 
 
 def _hand_cell(code: str) -> Image.Image:
-    """一张立牌：橙金牌顶 + 灰紫阴影带 + 白色圆角牌面 + 左右暗缝 + 触底暗边。"""
-    # 牌身轮廓（圆角外全透明 -> 牌间露出深色台布形成缝）
-    body = Image.new("L", (H_W, H_H), 0)
-    ImageDraw.Draw(body).rounded_rectangle([2, 2, H_W - 3, H_H - 4], radius=CORNER, fill=255)
-    body_a = np.asarray(body, dtype=np.uint8)
+    """一张立牌的正面：整格不透明的白牌面 + 居中墨迹。
 
-    # 白色牌面：上略灰 -> 中亮 -> 下略灰，左右再压暗形成柱面受光
+    牌顶、橙色牌背、圆角、棱边都由 flat3d 的真 3D 牌身给出（几何轮廓裁出圆角），
+    这里只画正面，不再预烘「橙条 + 顶面带」——那会让立牌看起来像一张纸片。
+    """
     base = _gradient([
-        (0.00, (232, 232, 230)), (0.42, (252, 252, 250)), (1.00, (226, 227, 225)),
-    ], H_H, H_W).astype(np.float32)
-    xs = np.linspace(0, 1, H_W)[None, :, None]
-    edge = np.clip((np.abs(xs - .5) * 2 - .70) / .30, 0, 1)
-    base *= (1 - edge * .13)
-    arr = np.concatenate([
-        np.clip(base, 0, 255).astype(np.uint8), body_a[..., None],
-    ], axis=2)
-
-    # 灰紫阴影带：牌顶内侧，越往下越亮（录像里这段是明显的灰紫渐变）
-    y0 = 2 + CAP_H
-    for y in range(y0, y0 + SHADE_H):
-        t = (y - y0) / SHADE_H
-        c = np.array([186, 183, 198], np.float32) * (1 - t) + \
-            np.array([246, 246, 244], np.float32) * t
-        row = arr[y, :, :3].astype(np.float32)
-        arr[y, :, :3] = np.clip(
-            np.where(body_a[y, :, None] > 0, row * .18 + c * .82, row), 0, 255
-        ).astype(np.uint8)
-
-    cell = Image.fromarray(arr, "RGBA")
-
-    # 橙金圆角牌顶：圆上角、直下缘，上亮下深
-    cap = Image.new("L", (H_W, H_H), 0)
-    ImageDraw.Draw(cap).rounded_rectangle(
-        [2, 2, H_W - 3, 2 + CAP_H + CORNER], radius=CORNER, fill=255
-    )
-    strip = Image.new("L", (H_W, H_H), 0)
-    ImageDraw.Draw(strip).rectangle([0, 0, H_W, 2 + CAP_H], fill=255)
-    cap = ImageChops.multiply(cap, strip)
-    cap_h = 2 + CAP_H + 1
-    cap_rgba = np.zeros((H_H, H_W, 4), np.uint8)
-    cap_rgba[:cap_h, :, :3] = _gradient([
-        (0.00, (255, 198, 92)), (0.45, (231, 155, 48)), (1.00, (178, 106, 26)),
-    ], cap_h, H_W)
-    cap_rgba[:, :, 3] = np.asarray(cap, dtype=np.uint8)
-    cell = Image.alpha_composite(cell, Image.fromarray(cap_rgba, "RGBA"))
-
-    d = ImageDraw.Draw(cell)
-    d.line([(CORNER, 3), (H_W - CORNER, 3)], fill=(255, 224, 152, 190), width=2)
-    d.line([(3, 2 + CAP_H), (H_W - 3, 2 + CAP_H)], fill=(120, 74, 20, 150), width=2)
-    d.rounded_rectangle([2, 2, H_W - 3, H_H - 4], radius=CORNER,
-                        outline=(62, 66, 80, 135), width=3)
+        (0.00, (240, 240, 237)), (0.30, (252, 252, 250)), (1.00, (232, 233, 230)),
+    ], H_H, H_W)
+    cell = Image.fromarray(np.concatenate([
+        base, np.full((H_H, H_W, 1), 255, np.uint8),
+    ], axis=2), "RGBA")
 
     if code == "back":
         # 牌背：橙金底 + 原牌背花纹做浮雕明暗
-        top = y0 + SHADE_H
-        iw, ih = H_W - 22, H_H - top - 12
         relief = np.asarray(Image.open(FACES / "back.png").convert("L").resize(
-            (iw, ih), Image.LANCZOS), dtype=np.float32)[..., None] / 255.0
+            (H_W, H_H), Image.LANCZOS), dtype=np.float32)[..., None] / 255.0
         gold = np.array([230, 158, 46], np.float32)[None, None, :]
         rgb = np.clip(gold * (.55 + relief * .75), 0, 255).astype(np.uint8)
-        patch = Image.fromarray(np.concatenate([
-            rgb, np.full((ih, iw, 1), 255, np.uint8),
+        return Image.fromarray(np.concatenate([
+            rgb, np.full((H_H, H_W, 1), 255, np.uint8),
         ], axis=2), "RGBA")
-        inner = Image.new("L", (H_W, H_H), 0)
-        ImageDraw.Draw(inner).rounded_rectangle(
-            [11, top, 11 + iw, top + ih], radius=8, fill=255
-        )
-        layer = Image.new("RGBA", (H_W, H_H), (0, 0, 0, 0))
-        layer.paste(patch, (11, top))
-        layer.putalpha(ImageChops.multiply(layer.getchannel("A"), inner))
-        cell = Image.alpha_composite(cell, layer)
-    else:
-        ink = _ink_layer(code, H_W - 22, H_H - 46)
-        cell.alpha_composite(ink, (11, y0 + SHADE_H + 4))
 
+    # 墨迹保持素材原比例 98:154。flat3d 按「裁切铺满」采样这一格：立牌正面偏方
+    # 会裁掉上下、横放副露偏窄会裁掉左右，墨迹要落在两者都看得见的中心区内
+    ih = INK_H
+    iw = round(ih * 98 / 154)
+    ink = _ink_layer(code, iw, ih)
+    cell.alpha_composite(ink, ((H_W - iw) // 2, (H_H - ih) // 2))
     return cell
 
 
