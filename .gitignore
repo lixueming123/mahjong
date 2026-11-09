@@ -22,3 +22,7 @@ vcpkg
 __pycache__/
 game/tests/artifacts/
 .run/
+
+# 视频/截图参考产物（非源码，体积大，不入库）
+game/docs/video-reference/
+game/docs/reference/
