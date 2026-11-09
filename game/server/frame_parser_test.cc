@@ -125,6 +125,28 @@ TEST(FrameParserLogin, AccountFormRequiresBothFields) {
   EXPECT_EQ(numeric.message, "account login requires a string \"username\" and a string \"password\"");
 }
 
+TEST(FrameParserLogin, ResumeDefaultsTrueAndParsesFalse) {
+  frame_parser::Error defaults;
+  std::optional<frame_parser::Login> intent =
+      frame_parser::ParseLogin(Frame(R"({"type":1,"username":"Alice_99","password":"hunter2"})"), &defaults);
+  ASSERT_TRUE(intent.has_value());
+  EXPECT_TRUE(intent->resume) << "an omitted resume must default to true";
+
+  frame_parser::Error explicit_false;
+  intent = frame_parser::ParseLogin(Frame(R"({"type":1,"username":"Alice_99","password":"hunter2","resume":false})"),
+                                    &explicit_false);
+  ASSERT_TRUE(intent.has_value());
+  EXPECT_FALSE(intent->resume);
+}
+
+TEST(FrameParserLogin, ResumeMustBeBoolean) {
+  frame_parser::Error error;
+  EXPECT_FALSE(
+      frame_parser::ParseLogin(Frame(R"({"type":1,"username":"Alice_99","password":"hunter2","resume":"no"})"), &error)
+          .has_value());
+  EXPECT_EQ(error.message, "\"resume\" must be a boolean");
+}
+
 TEST(FrameParserLogin, AccountFieldRulesAreEnforced) {
   frame_parser::Error short_name;
   EXPECT_FALSE(

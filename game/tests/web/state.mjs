@@ -86,5 +86,13 @@ app.applyMatchEnd({ hands_played: 8, renchan_count: 2,
   rankings: [{ seat: 0, final_score: 32000, rank: 1 }] });
 check('场终载荷落地', { phase: s.phase, hands: s.matchEnd.hands_played }, { phase: 'ended', hands: 8 });
 
+// 9. v2.2 game_start：恢复场次累计分与连庄数（刷新重连）
+app.startRound({ seat: 0, dealer: 2, round_index: 2, round_count: 4,
+  match_total: [-8, 8, 0, 0], renchan_count: 2,
+  hand: ['1m', '2m', '3m', '4m', '5m', '6p', '7p', '8p', '9p', '1s', '1s', '2z', '2z'] });
+check('game_start 恢复场次累计分', s.matchTotal, [-8, 8, 0, 0]);
+check('经典场分数用累计分', s.scores, [-8, 8, 0, 0]);
+check('game_start 恢复连庄数', s.honba, 2);
+
 console.log(`\n状态归约：${fail ? 'FAILED' : 'ALL PASS'}  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

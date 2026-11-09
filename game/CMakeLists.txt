@@ -201,6 +201,13 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/account_e2e_test.py
             --server-bin $<TARGET_FILE:mahjong_server>)
   set_tests_properties(account_e2e_test PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
+
+  # PROTOCOL v2.2 §8.5：账号刷新重连（登录时查房 + 同座位快照 / resume:false 脱离）
+  add_test(
+    NAME reconnect_e2e_test
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/reconnect_e2e_test.py
+            --server-bin $<TARGET_FILE:mahjong_server>)
+  set_tests_properties(reconnect_e2e_test PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
 endif()
 
 # 日麻端到端：真服务端 + create_room{"mode":"riichi"} 打完一局，验牌山切分/持点/和牌载荷

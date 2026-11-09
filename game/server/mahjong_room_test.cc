@@ -988,7 +988,7 @@ TEST_F(RoomActorTest, TimeoutAndEntrustedStayImmediateUnderAiDelay) {
     test_room.PendingRequest();
     const int before = test_room.DiscardsBy(kSeat0);
     const uint64_t acted_window = test_room.room()->seq();
-    test_room.Send(RoomEnvelope::PlayerDisconnected(test_room.human()));
+    test_room.Send(RoomEnvelope::PlayerDisconnected(test_room.human(), /*conn=*/ {}));
     test_room.PendingRequest();
     EXPECT_EQ(test_room.DiscardsBy(kSeat0), before + 1) << "an entrusted seat discards immediately";
     for (const std::pair<int64_t, uint64_t>& entry : test_room.AiPacingScheduled()) {
@@ -1341,7 +1341,7 @@ TEST_F(RoomActorTest, EntrustedSeatPlaysImmediately) {
   test_room.sink()->Drain();
 
   const std::vector<Tile> hand = SortedTiles(test_room.room()->hand_of(kSeat0));
-  test_room.Send(RoomEnvelope::PlayerDisconnected(test_room.human()));
+  test_room.Send(RoomEnvelope::PlayerDisconnected(test_room.human(), /*conn=*/ {}));
 
   std::vector<json::Value> frames = test_room.sink()->Drain();
   ASSERT_FALSE(frames.empty());
@@ -1356,6 +1356,52 @@ TEST_F(RoomActorTest, EntrustedSeatPlaysImmediately) {
   ASSERT_NE(seats, nullptr);
   ASSERT_EQ(seats->AsArray().size(), 4u);
   EXPECT_TRUE(seats->AsArray()[0].Find("disconnected")->AsBool());
+}
+
+TEST_F(RoomActorTest, ReconnectedSeatReplaysTheOpenWindow) {
+  TestRoom test_room(20251005);
+  test_room.Ready();
+  const std::optional<json::Value> request = test_room.PendingRequest();
+  ASSERT_TRUE(request.has_value());
+  const uint64_t seq = test_room.room()->seq();
+  const int64_t deadline = IntOf(*request, "deadline_ms");
+  ASSERT_EQ(test_room.room()->CurrentWindow(), protocol::Window::kDiscard);
+  ASSERT_EQ(test_room.room()->current_seat(), kSeat0);
+
+  auto new_sink = std::make_shared<CapturingSink>();
+  ex_actor::ActorRef<CapturingSeatActor> new_endpoint =
+      std::get<0>(stdexec::sync_wait(ex_actor::Spawn<CapturingSeatActor>(new_sink)).value());
+  test_room.Send(RoomEnvelope::Reconnected(test_room.human(), new_endpoint));
+
+  std::vector<json::Value> frames = new_sink->Drain();
+  const std::vector<const json::Value*> starts = FramesOfType(frames, protocol::FrameType::kGameStart);
+  const std::vector<const json::Value*> syncs = FramesOfType(frames, protocol::FrameType::kStateSync);
+  const std::vector<const json::Value*> requests = FramesOfType(frames, protocol::FrameType::kActionRequest);
+  ASSERT_EQ(starts.size(), 1u) << "a reconnect must replay game_start";
+  ASSERT_FALSE(syncs.empty()) << "a reconnect must replay the authoritative state";
+  ASSERT_EQ(requests.size(), 1u) << "an unanswered window must be re-sent";
+  // PROTOCOL v2.2 §5.4: the replayed start carries the round's match progress.
+  EXPECT_NE(starts.front()->Find("match_total"), nullptr);
+  EXPECT_NE(starts.front()->Find("renchan_count"), nullptr);
+  EXPECT_EQ(IntOf(*requests.front(), "seq"), static_cast<int64_t>(seq));
+  EXPECT_EQ(IntOf(*requests.front(), "deadline_ms"), deadline)
+      << "the replayed window must keep the original deadline, not grant a fresh 15s";
+  const json::Value* hand = syncs.front()->Find("hand");
+  ASSERT_NE(hand, nullptr);
+  EXPECT_EQ(hand->AsArray().size(), test_room.room()->hand_of(kSeat0).size());
+  const json::Value* seats = syncs.front()->Find("seats");
+  ASSERT_NE(seats, nullptr);
+  ASSERT_EQ(seats->AsArray().size(), 4u);
+  EXPECT_FALSE(seats->AsArray()[0].Find("disconnected")->AsBool());
+
+  // The new endpoint owns the seat: a discard from the same player lands on it.
+  const Tile tile = test_room.room()->hand_of(kSeat0).back();
+  test_room.SendDiscard(tile, seq);
+  frames = new_sink->Drain();
+  const std::vector<const json::Value*> discards = FramesOfType(frames, protocol::FrameType::kDiscardEvent);
+  ASSERT_FALSE(discards.empty());
+  EXPECT_EQ(IntOf(*discards.front(), "seat"), kSeat0);
+  EXPECT_EQ(StrOf(*discards.front(), "tile"), FormatTile(tile));
 }
 
 TEST_F(RoomActorTest, FullGamesSatisfyProtocolInvariants) {

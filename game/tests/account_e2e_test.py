@@ -478,7 +478,7 @@ def run(args: argparse.Namespace) -> None:
         # gets a brand-new room — that reconnect-and-replay handshake is all the client's
         # rematch button does, and the server needs no new frame for it.
         rematch = Client(server.port, "rematch")
-        rematch.send({"type": FRAME_TYPE.LOGIN, "username": username, "password": password})
+        rematch.send({"type": FRAME_TYPE.LOGIN, "username": username, "password": password, "resume": False})
         check(rematch.recv_frame().get("type") == FRAME_TYPE.LOGIN_OK, "rematch must be able to log in again")
         rematch.send({"type": FRAME_TYPE.CREATE_ROOM})
         rejoined = rematch.recv_type(FRAME_TYPE.ROOM_JOINED)

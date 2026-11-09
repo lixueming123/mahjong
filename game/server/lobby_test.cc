@@ -151,6 +151,34 @@ TEST_F(LobbyTest, ReclaimsARoomAndItsConnectionAfterMatchEnd) {
   EXPECT_TRUE(conn->close_requested()) << "the reclaim must close the room's connection";
 }
 
+// PROTOCOL v2.2 §5.1: the lobby answers an account login and, when the account is still
+// seated in a started room, rebinds the new connection to that seat instead of creating a room.
+TEST_F(LobbyTest, LoggedInAccountRebindsItsSeatedRoom) {
+  ex_actor::ActorRef<LobbyActor> lobby =
+      WaitValue(ex_actor::Spawn<LobbyActor>(/*seed=*/20251005, kFastWindowMs, timer_, kFastReclaimMs));
+  stdexec::sync_wait(lobby.Send<&LobbyActor::SetSelfRef>(lobby));
+
+  const PlayerInfo player = MakePlayer();
+  auto first_conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1, /*wake_write_fd=*/-1);
+  const ex_actor::ActorRef<SeatEndpoint> first = SpawnConnector(first_conn, lobby);
+  stdexec::sync_wait(lobby.Send<&LobbyActor::CreateRoom>(first, player));
+  const std::string room_id = JoinedRoomId(first_conn);
+  ASSERT_FALSE(room_id.empty());
+  stdexec::sync_wait(lobby.Send<&LobbyActor::Ready>(first, player));
+
+  // The refresh: the old socket goes away, the seat is entrusted, then a fresh connection logs
+  // in with the same account and must take the seat back.
+  stdexec::sync_wait(lobby.Send<&LobbyActor::OnConnectionClosed>(player, first));
+  auto second_conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/2, /*wake_write_fd=*/-1);
+  const ex_actor::ActorRef<SeatEndpoint> second = SpawnConnector(second_conn, lobby);
+  stdexec::sync_wait(lobby.Send<&LobbyActor::OnLoggedIn>(second, player, /*resume=*/true));
+
+  std::string outbox;
+  second_conn->DrainOutbox(&outbox);
+  EXPECT_NE(outbox.find("\"in_room\":true"), std::string::npos) << outbox;
+  EXPECT_NE(outbox.find("\"room_id\":\"" + room_id + "\""), std::string::npos) << outbox;
+}
+
 // The reclaim is idempotent and must not touch anything else: a second delivery (a late timer,
 // or a room that was already dropped with its owner) is a no-op.
 TEST_F(LobbyTest, ReapRoomIsIdempotentAndLeavesOtherRoomsAlone) {
@@ -275,7 +303,7 @@ TEST_F(LobbyTest, DisconnectAroundCreateRoomLeavesNoRoom) {
   auto conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1, /*wake_write_fd=*/-1);
 
   stdexec::sync_wait(lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(conn, lobby), MakePlayer()));
-  stdexec::sync_wait(lobby.Send<&LobbyActor::OnConnectionClosed>(MakePlayer()));
+  stdexec::sync_wait(lobby.Send<&LobbyActor::OnConnectionClosed>(MakePlayer(), ex_actor::ActorRef<SeatEndpoint> {}));
 
   const auto room_count = [&lobby]() { return WaitValue(lobby.Send<&LobbyActor::room_count>()); };
   ASSERT_TRUE(WaitFor([&room_count]() { return room_count() == 0; }))
@@ -417,7 +445,7 @@ TEST(RoomPerf, ConcurrentRooms) {
       player.player_id = "p-" + std::to_string(i);
       player.name = "n";
       games.spawn(actors[static_cast<size_t>(i)].Send<&RoomActor::Dispatch>(
-          RoomEnvelope::PlayerDisconnected(std::move(player))));
+          RoomEnvelope::PlayerDisconnected(std::move(player), /*conn=*/ {})));
     }
     stdexec::sync_wait(games.on_empty());
     const auto us =
