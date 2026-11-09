@@ -190,7 +190,12 @@ export function createState() {
     state.tenpai = { isTenpai: false, waits: [], noYaku: false };
     state.tenpaiSeq = null;                       // 新场次：服务端计数器也不再生效（§5.16）
     state.tenpaiFlags = [];
-    state.honba = 0;
+    // PROTOCOL v2.2 §5.4：本局开始前的场次进度。刷新恢复时靠它把经典场累计分和连庄数
+    // 一次对齐，不再依赖客户端从上一局 game_end 累加。
+    if (Array.isArray(frame.match_total) && frame.match_total.length === 4) {
+      state.matchTotal = frame.match_total.map((value) => (Number.isInteger(value) ? value : 0));
+    }
+    state.honba = Number.isInteger(frame.renchan_count) && frame.renchan_count >= 0 ? frame.renchan_count : 0;
     state.phase = 'playing';
     state.disconnected = [false, false, false, false];
     state.result = null;

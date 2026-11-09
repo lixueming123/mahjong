@@ -124,6 +124,13 @@ export class MahjongClient {
     this._zeroSince = 0;
     this._zeroWarned = false;
     this._reconnecting = false;   // 主动重连中：旧连接的 close 不再当作"断线"提示
+    // PROTOCOL v2.2 §5.1：账号登录会带 in_room，命中时进入"恢复快照"模式，不能再自动建房/
+    // 自动 ready。`restoring` 只用于抑制重放快照期间的开场语音与播报。
+    this.resumeNext = true;       // 下一次 login 是否请求恢复（返回大厅时置 false）
+    this.resumedInRoom = false;   // 本次登录命中 in_room:true
+    this.restoring = false;
+    this._restoreTimer = 0;
+    this.alreadyOnlineRetries = 0;
 
     this.bindNet();
     this.bindButtons();
@@ -145,6 +152,7 @@ export class MahjongClient {
       };
       this.lobbyDriven = true;
       this.autoReady = false;
+      this.resumeNext = true;   // 大厅手动登录默认请求恢复；只有结算页出口会显式置 false
     } else if (!this.credential) {
       this.credential = {
         name: this.config.name || '',
@@ -195,6 +203,13 @@ export class MahjongClient {
       this._zeroSince = 0;
       this._zeroWarned = false;
       this._reconnecting = false;
+      this.alreadyOnlineRetries = 0;
+      this.resumedInRoom = false;
+      this.restoring = false;
+      if (this._restoreTimer) {
+        clearTimeout(this._restoreTimer);
+        this._restoreTimer = 0;
+      }
       this.app.reset();
       this.app.emit('session', { stage: 'connecting' });
       if (this.credential) {
@@ -213,6 +228,12 @@ export class MahjongClient {
       if (this._reconnecting) return;    // 主动重连：旧连接的 close 不当作断线
       const wasPlaying = this.state.phase === 'playing';
       this.pending = false;
+      this.restoring = false;
+      this.resumedInRoom = false;
+      if (this._restoreTimer) {
+        clearTimeout(this._restoreTimer);
+        this._restoreTimer = 0;
+      }
       this.stage = 'closed';
       this.applyButtons();
       this.app.emit('session', { stage: 'closed' });
@@ -244,6 +265,8 @@ export class MahjongClient {
         password: String(cred.pass || ''),
       };
       if (name) frame.name = name;
+      // PROTOCOL v2.2 §4.1：账号登录默认请求恢复对局；结算页「返回大厅」把下一帧置 false。
+      if (!cred.register && this.resumeNext === false) frame.resume = false;
       this.name = name || String(cred.user);
       return frame;
     }
@@ -502,24 +525,60 @@ export class MahjongClient {
 
   handleFrame(frame) {
     switch (frame.type) {
-      case FRAME_TYPE.LOGIN_OK:
+      case FRAME_TYPE.LOGIN_OK: {
         this.playerId = frame.player_id;
         this.name = frame.name || this.name;
         // `u-` 前缀 = 账号会话（ACCOUNT_DESIGN §1.2）：只有账号才有战绩
         this.hasAccount = typeof frame.player_id === 'string' && frame.player_id.startsWith('u-');
         this.loginTimeouts = 0;
-        this.stage = 'lobby';
-        this.stageSince = performance.now();
+        this.alreadyOnlineRetries = 0;
+        // 注册成功后同一个凭据再重连必须是 login，不能重放 register（否则 USERNAME_TAKEN）。
+        if (this.credential && this.credential.register) this.credential.register = false;
+        const inRoom = frame.in_room === true;
         // §4.8：心跳必须在 login_ok 之后才开始，否则可能被判 NOT_LOGGED_IN
         this.net.startHeartbeat();
         this.hint(`已登录：${this.name}${this.hasAccount ? '（账号）' : ''}`);
-        this.app.emit('session', { stage: 'lobby' });
-        this.app.emit('login_ok', { name: this.name, hasAccount: this.hasAccount, playerId: this.playerId });
+        this.app.emit('session', { stage: inRoom ? 'resuming' : 'lobby' });
+        this.app.emit('login_ok', {
+          name: this.name, hasAccount: this.hasAccount, playerId: this.playerId, inRoom,
+        });
         if (this.hasAccount) this.send({ type: FRAME_TYPE.STATS_REQUEST });
+        if (inRoom) {
+          // PROTOCOL v2.2 §5.1：服务端马上会重发 room_joined + game_start/state_sync 快照。
+          // 这里清空本地残留，避免慢帧被旧 seq/旧窗口判过期；不自动建房、不自动 ready。
+          this.resumedInRoom = true;
+          this.restoring = true;
+          this.autoReady = false;
+          this.room = null;
+          this.state.roomId = null;
+          this.window = null;
+          this.lastSeq = null;
+          this.pending = false;
+          this.frozen = false;
+          this.riichiArming = false;
+          this.roomRequested = false;
+          this.readySent = false;
+          this.stage = 'resuming';
+          this.stageSince = performance.now();
+          if (this._restoreTimer) clearTimeout(this._restoreTimer);
+          this._restoreTimer = setTimeout(() => {
+            this._restoreTimer = 0;
+            this.restoring = false;
+          }, 1500);
+          this.resumeNext = true;
+          this.hint('已登录，正在恢复对局…');
+          break;
+        }
+        this.resumedInRoom = false;
+        this.restoring = false;
+        this.resumeNext = true;
+        this.stage = 'lobby';
+        this.stageSince = performance.now();
         // 大厅路径：停在 hall 等玩家选玩法；URL 一步到位：直接建房
         if (this.lobbyDriven) this.listRooms();
         else this.createRoom();
         break;
+      }
 
       case FRAME_TYPE.ROOM_JOINED:
         this.room = {
@@ -528,6 +587,8 @@ export class MahjongClient {
           seats: frame.seats || [],
           mode: this.config.mode || 'classic',
         };
+        // 恢复模式：服务端已经开局，客户端绝不能因为 autoReady 再发 ready()。
+        if (this.resumedInRoom) this.autoReady = false;
         // 入座即确定视角：join_room 拿到 1/2/3 号位时，名牌与 viewSeat 都要立刻正确
         if (Number.isInteger(frame.seat)) this.state.mySeat = frame.seat;
         this.state.roomId = typeof frame.room_id === 'string' ? frame.room_id : null;
@@ -576,7 +637,9 @@ export class MahjongClient {
         this.ui?.hideResult?.();
         this.app.emit('game_start', frame);
         const modeText = this.state.mode === 'riichi' ? '日麻' : '经典';
-        this.ui?.broadcast?.(this.state.round, `${modeText} · 共 ${this.state.roundCount} 局`, 1200);
+        if (!this.restoring) {
+          this.ui?.broadcast?.(this.state.round, `${modeText} · 共 ${this.state.roundCount} 局`, 1200);
+        }
         // 参考端兜底：进了牌桌但手牌为空（丢帧/重连）⇒ 立刻要一份权威状态
         this.maybeSyncEmptyHand();
         break;
@@ -626,7 +689,7 @@ export class MahjongClient {
         this.stage = 'idle';
         this.app.applyGameEnd(frame);
         this.logGameEnd(frame);
-        this.playEndVoice(frame);
+        if (!this.restoring) this.playEndVoice(frame);
         this.app.emit('game_end', frame);
         // 先让「和 / 流局」播报落地，再弹结算；期间若已开下一局则不再弹（守 phase）
         setTimeout(() => {
@@ -700,6 +763,19 @@ export class MahjongClient {
   handleError(frame) {
     const code = Number.isInteger(frame.code) ? frame.code : ERROR_CODE.INTERNAL;
     const message = typeof frame.message === 'string' ? frame.message : '';
+    // PROTOCOL v2.2 §4.2：一账号一连接。刷新时旧连接可能还没被服务端判定关闭，账号登录先撞
+    // ALREADY_ONLINE；在同一连接上短重试 login，等服务端释放旧账号。绝不接管、不建第二连接。
+    if (code === ERROR_CODE.ALREADY_ONLINE && this.stage === 'login' && this.credential?.user &&
+        !this.credential.register && this.alreadyOnlineRetries < 6) {
+      this.alreadyOnlineRetries += 1;
+      this.stageSince = performance.now();
+      this.hint(`正在释放旧连接（${this.alreadyOnlineRetries}/6）…`);
+      this.app.emit('session', { stage: 'login' });
+      setTimeout(() => {
+        if (this.net.connected && this.stage === 'login') this.send(this.authFrame());
+      }, 500);
+      return;
+    }
     const rejected = this.pending;
     this.pending = false;
     this.pendingLabel = '';
@@ -736,7 +812,9 @@ export class MahjongClient {
     } else if (code === ERROR_CODE.USERNAME_TAKEN) {
       text = '账号名已被占用，换一个再注册';
     } else if (code === ERROR_CODE.ALREADY_ONLINE) {
-      text = '该账号已在另一处登录';
+      text = this.alreadyOnlineRetries >= 6
+        ? '该账号仍在另一连接上，请关闭其他页面后重试'
+        : '该账号已在另一处登录';
     } else if (code === ERROR_CODE.INVALID_NAME) {
       text = '昵称非法：需 1~16 个字符，且不含换行或控制字符';
     }
@@ -847,6 +925,14 @@ export class MahjongClient {
     this.lastSeq = null;
     this.pending = false;
     this.stage = 'idle';
+    this.resumeNext = true;
+    this.restoring = false;
+    this.resumedInRoom = false;
+    this.alreadyOnlineRetries = 0;
+    if (this._restoreTimer) {
+      clearTimeout(this._restoreTimer);
+      this._restoreTimer = 0;
+    }
     this.state.roomId = null;
     this._reconnecting = true;      // 主动断开：不弹「连接已断开」
     setTimeout(() => { this._reconnecting = false; }, 800);
@@ -860,6 +946,14 @@ export class MahjongClient {
     if (!this.credential) return;
     this.lobbyDriven = true;
     this._reconnecting = true;
+    // PROTOCOL v2.2 §4.1：恢复同一账号，但明确不要回到旧房间；由服务端先把旧座位转托管。
+    this.resumeNext = false;
+    this.restoring = false;
+    this.resumedInRoom = false;
+    if (this._restoreTimer) {
+      clearTimeout(this._restoreTimer);
+      this._restoreTimer = 0;
+    }
     this.room = null;
     this.window = null;
     this.lastSeq = null;
@@ -873,6 +967,7 @@ export class MahjongClient {
       .then(() => { this.app.emit('session', { stage: this.stage }); })
       .catch((err) => {
         this._reconnecting = false;
+        this.resumeNext = true;
         this.hint(`无法连接服务器：${err.message}`);
         this.app.emit('session', { stage: 'closed' });
       });
@@ -1064,6 +1159,18 @@ export class MahjongClient {
     if (this.stage === 'room' && now - this.stageSince > ROOM_TIMEOUT_MS) {
       this.stage = 'idle';
       this.hint('等待 room_joined 超时（3 秒），可刷新页面重试');
+      return;
+    }
+    if (this.stage === 'resuming' && now - this.stageSince > 5000) {
+      // 服务端承诺 in_room:true 后马上重发快照；5 秒还没到说明房间已被回收/异常，
+      // 退回大厅，避免卡在"正在恢复"。
+      this.stage = 'lobby';
+      this.stageSince = now;
+      this.restoring = false;
+      this.resumedInRoom = false;
+      this.hint('恢复对局超时，已回到大厅');
+      this.app.emit('session', { stage: 'lobby' });
+      this.listRooms();
       return;
     }
     if (this.stage === 'start' && now - this.stageSince > START_TIMEOUT_MS) {

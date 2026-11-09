@@ -84,6 +84,8 @@ export class Lobby {
       viewLogin: $('view-login'),
       viewHall: $('view-hall'),
       viewRoom: $('view-room'),
+      viewResume: $('view-resume'),
+      resumeTip: $('resume-tip'),
       tabs: [...document.querySelectorAll('.tab')],
       panes: { guest: $('pane-guest'), account: $('pane-account') },
       name: $('in-name'),
@@ -162,13 +164,19 @@ export class Lobby {
   }
 
   bindClient() {
-    this.app.on('login_ok', ({ name, hasAccount }) => {
+    this.app.on('login_ok', ({ name, hasAccount, inRoom }) => {
       this.busy = false;
       this.el.hallName.textContent = name || '玩家';
       this.el.hallKind.textContent = hasAccount ? '账号' : '游客';
       this.el.statsKind.textContent = hasAccount ? '' : '游客不计战绩';
       this.setMessage('');
       this.setConnected(true);
+      // PROTOCOL v2.2 §5.1：in_room:true 表示服务端马上重发牌桌快照，不能进大厅，
+      // 也不能再触发建房；game_start/game_end 到达后由牌桌/结算接管。
+      if (inRoom) {
+        this.showResuming('正在恢复对局…');
+        return;
+      }
       // URL 一步到位（auto 且不是大厅发起的登录）：不进大厅，直接让 client 建房
       if (this.auto && !this.client.lobbyDriven) return;
       this.showHall();
@@ -183,6 +191,8 @@ export class Lobby {
     this.app.on('room_joined', (room) => {
       this.busy = false;
       this.setButtonsEnabled(true);
+      // in_room:true 的恢复路径：房间页不要闪一下，直接等 game_start/game_end 接管。
+      if (this.client.resumedInRoom) return;
       if (!this.visible || this.auto) return;
       this.showRoom(room);
     });
@@ -195,6 +205,10 @@ export class Lobby {
     this.app.on('game_start', () => this.hide());
     this.app.on('session', ({ stage }) => {
       this.setConnected(stage !== 'closed' && stage !== 'idle');
+      // 恢复超时/失败后 client 退回 lobby：这里补上视图切换，避免停在恢复页。
+      if (stage === 'lobby' && this.el.viewResume && !this.el.viewResume.hidden) {
+        this.showHall();
+      }
     });
     this.app.on('error', ({ text }) => {
       this.busy = false;
@@ -220,11 +234,24 @@ export class Lobby {
     this.el.viewLogin.hidden = false;
     this.el.viewHall.hidden = true;
     if (this.el.viewRoom) this.el.viewRoom.hidden = true;
+    if (this.el.viewResume) this.el.viewResume.hidden = true;
     this.setMessage(message);
     this.hideLobbyToast();
     this.stopPolling();
     this.setButtonsEnabled(true);
     this.el.name?.focus();
+  }
+
+  /** PROTOCOL v2.2：账号在恢复对局时停在独立视图，避免误点登录/建房按钮。 */
+  showResuming(message = '正在恢复对局…') {
+    this.visible = true;
+    this.el.root.hidden = false;
+    this.el.viewLogin.hidden = true;
+    this.el.viewHall.hidden = true;
+    if (this.el.viewRoom) this.el.viewRoom.hidden = true;
+    if (this.el.viewResume) this.el.viewResume.hidden = false;
+    if (this.el.resumeTip) this.el.resumeTip.textContent = message;
+    this.stopPolling();
   }
 
   showHall() {
@@ -233,6 +260,7 @@ export class Lobby {
     this.el.viewLogin.hidden = true;
     this.el.viewHall.hidden = false;
     if (this.el.viewRoom) this.el.viewRoom.hidden = true;
+    if (this.el.viewResume) this.el.viewResume.hidden = true;
     this.setButtonsEnabled(true);
     this.startPolling();
   }
@@ -244,6 +272,7 @@ export class Lobby {
     this.el.viewLogin.hidden = true;
     this.el.viewHall.hidden = true;
     if (this.el.viewRoom) this.el.viewRoom.hidden = false;
+    if (this.el.viewResume) this.el.viewResume.hidden = true;
     this.stopPolling();
 
     const mode = this.mode === 'riichi' ? '日麻' : '经典';
