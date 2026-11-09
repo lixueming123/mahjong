@@ -267,9 +267,18 @@ struct RoomEnvelope {
   };
   struct PlayerDisconnectedMsg {
     PlayerInfo player;
+    // The connection that went away. A reconnect replaces the seat's endpoint, so a late close
+    // from the old one must not entrust the new session.
+    ex_actor::ActorRef<SeatEndpoint> conn;
   };
   struct IdleTimeoutMsg {
     PlayerInfo player;
+  };
+  // PROTOCOL v2.2 §8.5: a fresh connection has taken over an already-seated player. The room
+  // swaps the seat's endpoint, clears `disconnected` and replays the current-phase snapshot.
+  struct ReconnectedMsg {
+    PlayerInfo player;
+    ex_actor::ActorRef<SeatEndpoint> endpoint;
   };
 
   static RoomEnvelope Ready(PlayerInfo player) { return {ReadyMsg {std::move(player)}}; }
@@ -278,10 +287,16 @@ struct RoomEnvelope {
     return {GameFrameMsg {.player = std::move(player), .frame = std::move(frame)}};
   }
   static RoomEnvelope WindowTimeout(uint64_t token) { return {WindowTimeoutMsg {token}}; }
-  static RoomEnvelope PlayerDisconnected(PlayerInfo player) { return {PlayerDisconnectedMsg {std::move(player)}}; }
+  static RoomEnvelope PlayerDisconnected(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> conn) {
+    return {PlayerDisconnectedMsg {.player = std::move(player), .conn = std::move(conn)}};
+  }
   static RoomEnvelope IdleTimeout(PlayerInfo player) { return {IdleTimeoutMsg {std::move(player)}}; }
+  static RoomEnvelope Reconnected(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> endpoint) {
+    return {ReconnectedMsg {.player = std::move(player), .endpoint = std::move(endpoint)}};
+  }
 
-  std::variant<ReadyMsg, SyncMsg, GameFrameMsg, WindowTimeoutMsg, PlayerDisconnectedMsg, IdleTimeoutMsg> msg;
+  std::variant<ReadyMsg, SyncMsg, GameFrameMsg, WindowTimeoutMsg, PlayerDisconnectedMsg, IdleTimeoutMsg, ReconnectedMsg>
+      msg;
 };
 
 class RoomActor {
@@ -390,8 +405,9 @@ class RoomActor {
 
   // Frozen timeout scheme: the message carries the window seq it was scheduled for.
   stdexec::task<void> OnWindowTimeout(uint64_t window_seq);
-  stdexec::task<void> OnPlayerDisconnected(PlayerInfo player);
+  stdexec::task<void> OnPlayerDisconnected(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> conn);
   stdexec::task<void> OnIdleTimeout(PlayerInfo player);
+  stdexec::task<void> OnReconnected(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> endpoint);
 
   enum class Phase {
     kIdle,           // created, no match yet
@@ -423,7 +439,7 @@ class RoomActor {
     Tile winning_tile {};
     int from_seat = -1;
     std::vector<protocol::YakuId> tags;  // = yaku[].id（tags ⊆ yaku id，单一出口）
-    int multiplier = 0;             // R = 2^han
+    int multiplier = 0;                  // R = 2^han
     int per_payer = 0;
     int total = 0;
     // ---- v1.6（C8 场次扩展）----
@@ -440,7 +456,7 @@ class RoomActor {
     int fu = 0;                                  // 符（classic 恒 0）
     int points = 0;                              // 和牌点数（classic = multiplier）
     riichi::Limit limit = riichi::Limit::kNone;  // 满贯分档（出站经 ToWire 转整数）
-    bool riichi = false;  // 本局和牌者是否立直
+    bool riichi = false;                         // 本局和牌者是否立直
     int dora = 0;
     int ura_dora = 0;
     int aka_dora = 0;              // 赤宝牌张数（v1.18，classic 恒 0）
@@ -642,6 +658,11 @@ class RoomActor {
   // pong/chow, where the hand is not a complete 14-tile form). Set by OpenDiscardWindow.
   bool discard_window_win_check_ = false;
   std::optional<Tile> drawn_tile_;  // draw record of the current seat (timeout default)
+  // PROTOCOL v2.2 §8.5: the exact frame the reconnecting seat needs. Rebuilding the options at
+  // reconnect time could drift if any helper is not deterministic, so the window stores them.
+  std::vector<Option> discard_options_;
+  std::vector<Tile> discard_riichi_tiles_;
+  int64_t window_deadline_ms_ = 0;
 
   // claim window
   bool claim_open_ = false;
@@ -653,7 +674,13 @@ class RoomActor {
   std::array<bool, kSeatCount> claim_recipient_ {};
   std::array<std::vector<Option>, kSeatCount> claim_options_;
   std::array<ClaimAnswer, kSeatCount> claim_answers_;
+  // Set when a disconnecting human was auto-passed in this window. A reconnect before the
+  // window resolves may undo that pass (PROTOCOL v2.2 §8.5).
+  std::array<bool, kSeatCount> claim_auto_passed_by_disconnect_ {};
   int claim_pending_humans_ = 0;
+  // The last settled round, kept for a reconnect during kRoundEnd/kMatchEnd. Cleared only when
+  // the next settlement overwrites it; StartRound does not need it.
+  std::optional<Settlement> last_settlement_;
 
   TimeoutScheduler timeout_scheduler_;
   // Set only by the unit test; production reports through |owner_| instead.

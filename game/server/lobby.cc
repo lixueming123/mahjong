@@ -138,11 +138,16 @@ stdexec::task<void> LobbyActor::BroadcastRoomUpdate(const std::string& room_id, 
   frame.Set("room_id", json::Value::Str(room_id));
   frame.Set("seats", BuildSeatArray(seats));
   const std::string payload = frame.Dump();
+  // Copy the recipients before the first suspension: another lobby message (e.g. ReapRoom) may
+  // run while this coroutine is parked, and the caller's roster reference would then dangle.
+  std::vector<ex_actor::ActorRef<SeatEndpoint>> recipients;
   for (const RoomSeat& room_seat : seats) {
-    if (room_seat.is_bot || room_seat.endpoint.IsEmpty()) {
-      continue;
+    if (!room_seat.is_bot && !room_seat.endpoint.IsEmpty()) {
+      recipients.push_back(room_seat.endpoint);
     }
-    co_await ReplyFrame(room_seat.endpoint, payload);
+  }
+  for (const ex_actor::ActorRef<SeatEndpoint>& recipient : recipients) {
+    co_await ReplyFrame(recipient, payload);
   }
 }
 
@@ -152,6 +157,11 @@ std::string LobbyActor::NextRoomId() {
   // The sequence keeps the seed derivation (a pure function of the creation order) and the
   // id in lockstep: both advance once per room.
   return FormatRoomId(room_tag_, static_cast<uint64_t>(next_room_number_++));
+}
+
+bool LobbyActor::IsCurrentConnection(const std::string& player_id, const ex_actor::ActorRef<SeatEndpoint>& conn) const {
+  const auto it = players_.find(player_id);
+  return it != players_.end() && it->second.conn == conn;
 }
 
 const LobbyActor::PlayerState* LobbyActor::FindPlayer(const std::string& player_id) const {
@@ -473,7 +483,69 @@ stdexec::task<void> LobbyActor::Sync(ex_actor::ActorRef<SeatEndpoint> conn, Play
   ActorSendScope().spawn(room.Send<&RoomActor::Dispatch>(RoomEnvelope::Sync(std::move(player))));
 }
 
-stdexec::task<void> LobbyActor::OnConnectionClosed(PlayerInfo player) {
+stdexec::task<void> LobbyActor::OnLoggedIn(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player, bool resume) {
+  // PROTOCOL v2.2 §5.1: only the lobby knows whether this account still owns a seat, so the
+  // account login's answer is sent from here rather than by PlayerActor.
+  std::string room_id;
+  int seat = -1;
+  for (const auto& [candidate_room, roster] : room_seats_) {
+    for (const RoomSeat& slot : roster) {
+      if (!slot.is_bot && slot.player.player_id == player.player_id) {
+        room_id = candidate_room;
+        seat = slot.seat;
+        break;
+      }
+    }
+    if (seat >= 0) {
+      break;
+    }
+  }
+
+  const auto room_it = rooms_.find(room_id);
+  const auto started_it = room_started_.find(room_id);
+  const bool resumable =
+      resume && seat >= 0 && room_it != rooms_.end() && started_it != room_started_.end() && started_it->second;
+  if (!resumable) {
+    // Never keep a pre-deal room/seat alive just because its owner refreshed; that would change
+    // the existing "owner leaves the waiting room" semantics. A started match is different: the
+    // seat is already entrusted and the room keeps playing.
+    co_await DropPlayer(player, /*conn=*/ {}, /*force=*/true);
+    co_await ReplyFrame(conn, protocol::LoginOkFrame(player.player_id, player.name, /*in_room=*/false));
+    co_return;
+  }
+
+  ex_actor::ActorRef<SeatEndpoint> old_conn;
+  if (const auto old_it = players_.find(player.player_id); old_it != players_.end()) {
+    old_conn = old_it->second.conn;
+  }
+  players_[player.player_id] = PlayerState {.room_id = room_id, .conn = conn};
+  room_seats_[room_id][static_cast<size_t>(seat)].endpoint = conn;
+  // Snapshot everything the awaits below need: a lobby message that runs while this coroutine is
+  // parked (ReapRoom is the dangerous one) must not leave us holding a reference into the map.
+  std::vector<RoomSeat> roster = room_seats_[room_id];
+  // One player, one connection: the old socket is only being retired, never kept as a second
+  // live session. Its late close carries |old_conn| and is ignored by DropPlayer's generation
+  // check.
+  if (!old_conn.IsEmpty() && old_conn != conn) {
+    ActorSendScope().spawn(old_conn.Send<&SeatEndpoint::Dispatch>(PlayerEnvelope::Close("replaced by a reconnect")));
+  }
+
+  co_await ReplyFrame(conn, protocol::LoginOkFrame(player.player_id, player.name, /*in_room=*/true));
+  ex_actor::ActorRef<RoomActor> room = FindRoom(room_id);
+  if (room.IsEmpty() || !IsCurrentConnection(player.player_id, conn)) {
+    // Reclaimed, or a newer login for this player already won while this answer was in flight.
+    co_return;
+  }
+  co_await ReplyFrame(conn, BuildRoomJoinedFrame(room_id, seat, roster));
+  room = FindRoom(room_id);
+  if (room.IsEmpty() || !IsCurrentConnection(player.player_id, conn)) {
+    co_return;
+  }
+  co_await conn.Send<&SeatEndpoint::Dispatch>(PlayerEnvelope::SetRoom(room));
+  co_await room.Send<&RoomActor::Dispatch>(RoomEnvelope::Reconnected(player, conn));
+}
+
+stdexec::task<void> LobbyActor::DropPlayer(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> conn, bool force) {
   // A create still in Spawn has no players_ entry yet. Dropping the reservation makes that
   // commit refuse the room.
   creating_.erase(player.player_id);
@@ -481,17 +553,24 @@ stdexec::task<void> LobbyActor::OnConnectionClosed(PlayerInfo player) {
   if (it == players_.end()) {
     co_return;
   }
+  // A connection that was already superseded must not release the seat of the newer one.
+  if (!force && !it->second.conn.IsEmpty() && !conn.IsEmpty() && it->second.conn != conn) {
+    co_return;
+  }
   std::string room_id = it->second.room_id;
+  ex_actor::ActorRef<SeatEndpoint> old_conn = it->second.conn;
   players_.erase(it);
   if (room_id.empty()) {
     spdlog::info("lobby: player {} left the lobby", player.player_id);
     co_return;
   }
   ex_actor::ActorRef<RoomActor> room = FindRoom(room_id);
-  if (room_started_[room_id]) {
+  const auto started_it = room_started_.find(room_id);
+  if (started_it != room_started_.end() && started_it->second) {
     if (!room.IsEmpty()) {
       // PROTOCOL.md §8.5: during a game the seat becomes entrusted and the round keeps going.
-      ActorSendScope().spawn(room.Send<&RoomActor::Dispatch>(RoomEnvelope::PlayerDisconnected(player)));
+      // The old connection travels with the message so the room can ignore it after a reconnect.
+      ActorSendScope().spawn(room.Send<&RoomActor::Dispatch>(RoomEnvelope::PlayerDisconnected(player, old_conn)));
     }
     spdlog::info("lobby: player {} disconnected mid-game, room {} keeps playing (seat entrusted)", player.player_id,
                  room_id);
@@ -526,6 +605,10 @@ stdexec::task<void> LobbyActor::OnConnectionClosed(PlayerInfo player) {
   room_seats_.erase(room_id);
   room_started_.erase(room_id);
   spdlog::info("lobby: player {} disconnected, room {} dropped", player.player_id, room_id);
+}
+
+stdexec::task<void> LobbyActor::OnConnectionClosed(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> conn) {
+  co_await DropPlayer(std::move(player), std::move(conn), /*force=*/false);
 }
 
 stdexec::task<size_t> LobbyActor::room_count() { co_return rooms_.size(); }
@@ -568,6 +651,9 @@ stdexec::task<void> LobbyActor::OnIdleTimeout(ex_actor::ActorRef<SeatEndpoint> c
     // PROTOCOL.md §1.6: in the lobby a 20s silence drops the connection. A create still in
     // Spawn has no players_ entry yet; closing the socket makes OnConnectionClosed cancel it.
     drop_connection = true;
+  } else if (!state->conn.IsEmpty() && !conn.IsEmpty() && state->conn != conn) {
+    // The previous connection's idle timer must not entrust the seat of a reconnect.
+    co_return;
   } else {
     room = FindRoom(state->room_id);
   }

@@ -190,13 +190,14 @@ void PlayerActor::OnFrame(std::string line) {
 // that needs the database or the identity allocator, which no handler may touch.
 void PlayerActor::SendFrame(std::string frame) { conn_->SendFrame(frame); }
 
-void PlayerActor::BeginAccountLogin(std::string username, std::string password) {
+void PlayerActor::BeginAccountLogin(std::string username, std::string password, bool resume) {
   if (db_.IsEmpty() || self_ref_.IsEmpty()) {
     AccountServiceUnavailable();
     return;
   }
   // Asynchronous by necessity (§6.1): the actor submits to DbActor and returns; OnLoginResult,
   // which runs inside this actor's mailbox, is the only place the session identity changes.
+  pending_resume_ = resume;
   session_.BeginAuth();
   ActorSendScope().spawn(db_.Login(std::move(username), std::move(password), self_ref_));
 }
@@ -204,6 +205,7 @@ void PlayerActor::BeginAccountLogin(std::string username, std::string password) 
 void PlayerActor::LoginAsGuest(std::string name) {
   session_.LoginAsGuest(player_ids_->Next(), std::move(name));
   spdlog::info("{}: logged in as {} ({})", conn_->Describe(), session_.player_id(), session_.name());
+  // PROTOCOL v2.2 §5.1: the guest path keeps its frozen frame shape (no in_room).
   conn_->SendFrame(protocol::LoginOkFrame(session_.player_id(), session_.name()));
 }
 
@@ -212,6 +214,8 @@ void PlayerActor::BeginRegister(std::string username, std::string password, std:
     AccountServiceUnavailable();
     return;
   }
+  // A brand-new account has no room to resume; the lobby will answer in_room:false.
+  pending_resume_ = true;
   session_.BeginAuth();
   ActorSendScope().spawn(db_.Register(std::move(username), std::move(password), std::move(nickname), self_ref_));
 }
@@ -300,7 +304,15 @@ bool PlayerActor::AcceptAccount(const AuthOutcome& outcome) {
   }
   spdlog::info("{}: logged in as {} ({}), account {}", conn_->Describe(), session_.player_id(), session_.name(),
                outcome.account.username);
-  conn_->SendFrame(protocol::LoginOkFrame(session_.player_id(), session_.name()));
+  // PROTOCOL v2.2 §5.1: the lobby owns room membership, so it answers `login_ok` with the
+  // authoritative `in_room` and, when the account is still seated, pushes the room snapshot.
+  // An empty self ref only happens in a test harness that never installed it; keep the old
+  // direct answer there rather than dereferencing an empty actor ref.
+  if (self_ref_.IsEmpty()) {
+    conn_->SendFrame(protocol::LoginOkFrame(session_.player_id(), session_.name(), /*in_room=*/false));
+    return true;
+  }
+  ActorSendScope().spawn(lobby_.Send<&LobbyActor::OnLoggedIn>(self_ref_, session_.Info(), pending_resume_));
   return true;
 }
 
@@ -318,8 +330,9 @@ void PlayerActor::OnClosed(std::string reason) {
   spdlog::info("{}: closed ({})", conn_->Describe(), reason);
   if (was_logged_in) {
     // PROTOCOL.md §1.4: only this connection's state is released; rooms of other players are
-    // untouched. LobbyActor drops the room of a disconnecting owner (§8.5).
-    ActorSendScope().spawn(lobby_.Send<&LobbyActor::OnConnectionClosed>(player));
+    // untouched. LobbyActor drops the room of a disconnecting owner (§8.5). The connection ref
+    // carried with the message lets the lobby ignore a close that arrives after a reconnect.
+    ActorSendScope().spawn(lobby_.Send<&LobbyActor::OnConnectionClosed>(player, self_ref_));
   }
   // ACCOUNT_DESIGN.md §1.3: the account becomes available again for a new connection.
   if (held_account) {

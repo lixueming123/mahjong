@@ -357,7 +357,8 @@ void StartPoker() {
         for (const ex_actor::ActorRef<mj::RoomActor>& room : g_rooms) {
           // A seat the room does not know: SeatOf() returns -1 and the handler returns without
           // touching any state. A pure "is the room still running messages" probe.
-          mj::ActorSendScope().spawn(room.Send<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::PlayerDisconnected(nobody)));
+          mj::ActorSendScope().spawn(
+              room.Send<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::PlayerDisconnected(nobody, /*conn=*/ {})));
         }
       }
     }

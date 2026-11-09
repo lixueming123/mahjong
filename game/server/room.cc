@@ -56,16 +56,24 @@ json::Value OptionsToJson(const std::vector<Option>& options, bool red) {
 
 std::string BuildGameStartFrame(int for_seat, int dealer, int round_index, int round_count,
                                 const std::vector<Tile>& hand, GameMode mode, const std::array<int, kSeatCount>& points,
-                                const std::vector<Tile>& dora_indicators, int round_wind) {
+                                const std::vector<Tile>& dora_indicators, int round_wind,
+                                const std::array<int, kSeatCount>& match_total, int renchan_count) {
   // PROTOCOL v1.6 §5.4：+round_index / round_count（低频场次信息，state_sync 不带，§5.9 性能注）。
   // 日麻追加：持点、宝牌指示牌、场风/自风（classic 下不写这些键，帧字节与之前一致）。
-  json::Value frame = json::Value::Obj(mode == GameMode::kRiichi ? 10 : 6);
+  // v2.2：+match_total / renchan_count（本局开始**前**的场次进度），供刷新恢复场次信息。
+  json::Value frame = json::Value::Obj(mode == GameMode::kRiichi ? 12 : 8);
   frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kGameStart)));
   frame.Set("seat", json::Value::Int(for_seat));
   frame.Set("dealer", json::Value::Int(dealer));
   frame.Set("round_index", json::Value::Int(round_index));
   frame.Set("round_count", json::Value::Int(round_count));
   frame.Set("hand", TilesToJson(hand, mode == GameMode::kRiichi));
+  json::Value totals = json::Value::Arr(kSeatCount);
+  for (int seat = 0; seat < kSeatCount; ++seat) {
+    totals.Append(json::Value::Int(match_total[static_cast<size_t>(seat)]));
+  }
+  frame.Set("match_total", std::move(totals));
+  frame.Set("renchan_count", json::Value::Int(renchan_count));
   if (mode == GameMode::kRiichi) {
     json::Value scores = json::Value::Arr(kSeatCount);
     for (int seat = 0; seat < kSeatCount; ++seat) {
@@ -320,8 +328,13 @@ stdexec::task<void> RoomActor::Dispatch(RoomEnvelope envelope) {
           [this](RoomEnvelope::SyncMsg&& m) { return Sync(std::move(m.player)); },
           [this](RoomEnvelope::GameFrameMsg&& m) { return HandleGameFrame(std::move(m.player), std::move(m.frame)); },
           [this](RoomEnvelope::WindowTimeoutMsg&& m) { return OnWindowTimeout(m.token); },
-          [this](RoomEnvelope::PlayerDisconnectedMsg&& m) { return OnPlayerDisconnected(std::move(m.player)); },
+          [this](RoomEnvelope::PlayerDisconnectedMsg&& m) {
+            return OnPlayerDisconnected(std::move(m.player), std::move(m.conn));
+          },
           [this](RoomEnvelope::IdleTimeoutMsg&& m) { return OnIdleTimeout(std::move(m.player)); },
+          [this](RoomEnvelope::ReconnectedMsg&& m) {
+            return OnReconnected(std::move(m.player), std::move(m.endpoint));
+          },
       },
       std::move(envelope.msg));
 }
@@ -757,7 +770,7 @@ stdexec::task<void> RoomActor::DeliverTenpai(int seat) {
 
 std::string RoomActor::BuildGameStart(int for_seat) const {
   return BuildGameStartFrame(for_seat, dealer_, round_index_, round_count_, hands_[static_cast<size_t>(for_seat)],
-                             mode_, points_, dora_indicators_, round_wind_);
+                             mode_, points_, dora_indicators_, round_wind_, match_totals_, renchan_count_);
 }
 
 std::string RoomActor::BuildMatchEnd() const {
@@ -930,6 +943,9 @@ std::string RoomActor::BuildGameEnd(const Settlement& settlement) const {
 }
 
 stdexec::task<void> RoomActor::BroadcastSettlement(const Settlement& settlement) {
+  // PROTOCOL v2.2 §8.5: keep the last settlement so a reconnect during kRoundEnd/kMatchEnd can
+  // replay the same game_end the other seats already received.
+  last_settlement_ = settlement;
   std::array<std::string, kSeatCount> frames;
   const std::string end = BuildGameEnd(settlement);
   for (int seat = 0; seat < kSeatCount; ++seat) {
@@ -1146,6 +1162,10 @@ stdexec::task<void> RoomActor::OpenDiscardWindow(bool win_check, std::optional<T
   ai_discard_pending_ = false;  // a fresh window schedules its own pacing message
   discard_window_win_check_ = win_check;
   const int seat = current_seat_;
+  // Clear any previous window's replay data before the early return for an automated seat.
+  window_deadline_ms_ = 0;
+  discard_options_.clear();
+  discard_riichi_tiles_.clear();
   if (!NeedsPlayerReply(seat)) {
     co_return;  // bots / entrusted seats act inside this same message: no frame, no timer
   }
@@ -1157,9 +1177,13 @@ stdexec::task<void> RoomActor::OpenDiscardWindow(bool win_check, std::optional<T
     // 这里同时取走「立直宣言牌候选」，随帧下发（v1.21 §4.4）。
     options = DiscardOptionsFor(seat, &riichi_tiles);
   }
-  co_await ReplyFrame(
-      seat, BuildActionRequestFrame(seq_, clock::EpochMs() + action_timeout_ms_, protocol::Window::kDiscard, options,
-                                    std::nullopt, mode_ == GameMode::kRiichi, riichi_tiles));
+  // PROTOCOL v2.2 §8.5: remember the exact window so a reconnect can replay it instead of
+  // guessing options or granting a fresh 15s deadline.
+  window_deadline_ms_ = clock::EpochMs() + action_timeout_ms_;
+  discard_options_ = options;
+  discard_riichi_tiles_ = riichi_tiles;
+  co_await ReplyFrame(seat, BuildActionRequestFrame(seq_, window_deadline_ms_, protocol::Window::kDiscard, options,
+                                                    std::nullopt, mode_ == GameMode::kRiichi, riichi_tiles));
   OpenWindowTimer();
 }
 
@@ -1234,8 +1258,11 @@ stdexec::task<void> RoomActor::OpenClaimWindow(int from_seat, Tile tile, const s
   claim_recipient_ = recipients;
   claim_options_ = options;
   claim_answers_ = {};
+  claim_auto_passed_by_disconnect_ = {};
   claim_pending_humans_ = 0;
   ai_claim_pending_ = false;
+  // PROTOCOL v2.2 §8.5: same deadline the frame carries, so a replay is exact.
+  window_deadline_ms_ = clock::EpochMs() + action_timeout_ms_;
   phase_ = Phase::kClaimWindow;
   bool ai_pending = false;
 
@@ -1275,7 +1302,7 @@ stdexec::task<void> RoomActor::OpenClaimWindow(int from_seat, Tile tile, const s
     ++claim_pending_humans_;
     if (!seats_[static_cast<size_t>(seat)].endpoint.IsEmpty()) {
       requests[static_cast<size_t>(seat)] = BuildActionRequestFrame(
-          seq_, clock::EpochMs() + action_timeout_ms_, chankan ? protocol::Window::kChankan : protocol::Window::kClaim,
+          seq_, window_deadline_ms_, chankan ? protocol::Window::kChankan : protocol::Window::kClaim,
           options[static_cast<size_t>(seat)], chankan ? std::optional<Tile>(tile) : std::nullopt,
           mode_ == GameMode::kRiichi);
     }
@@ -1346,6 +1373,7 @@ void RoomActor::ResetClaimWindow() {
   claim_recipient_ = {};
   claim_options_ = {};
   claim_answers_ = {};
+  claim_auto_passed_by_disconnect_ = {};
   claim_pending_humans_ = 0;
   claim_chankan_ = false;
 }
@@ -2334,9 +2362,14 @@ stdexec::task<void> RoomActor::Sync(PlayerInfo player) {
   co_await DeliverTenpai(seat);
 }
 
-stdexec::task<void> RoomActor::OnPlayerDisconnected(PlayerInfo player) {
+stdexec::task<void> RoomActor::OnPlayerDisconnected(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> conn) {
   const int seat = SeatOf(player.player_id);
   if (seat < 0 || seats_[static_cast<size_t>(seat)].disconnected) {
+    co_return;
+  }
+  // A close that arrives after a reconnect belongs to the old socket; the seat is already wired
+  // to the new one and must not be entrusted.
+  if (!conn.IsEmpty() && seats_[static_cast<size_t>(seat)].endpoint != conn) {
     co_return;
   }
   seats_[static_cast<size_t>(seat)].disconnected = true;
@@ -2349,12 +2382,78 @@ stdexec::task<void> RoomActor::OnPlayerDisconnected(PlayerInfo player) {
     answer.answered = true;
     answer.action = protocol::Action::kPass;
     claim_answers_[static_cast<size_t>(seat)] = std::move(answer);
+    claim_auto_passed_by_disconnect_[static_cast<size_t>(seat)] = true;
     --claim_pending_humans_;
   }
   co_await Pump();
 }
 
-stdexec::task<void> RoomActor::OnIdleTimeout(PlayerInfo player) { co_await OnPlayerDisconnected(std::move(player)); }
+stdexec::task<void> RoomActor::OnIdleTimeout(PlayerInfo player) {
+  co_await OnPlayerDisconnected(std::move(player), /*conn=*/ {});
+}
+
+stdexec::task<void> RoomActor::OnReconnected(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> endpoint) {
+  const int seat = SeatOf(player.player_id);
+  if (seat < 0) {
+    co_return;
+  }
+  seats_[static_cast<size_t>(seat)].endpoint = std::move(endpoint);
+  seats_[static_cast<size_t>(seat)].disconnected = false;
+  spdlog::info("room {}: seat {} reconnected", room_id_, seat);
+
+  // The disconnect auto-passed this seat. If the window has not resolved yet, give the player
+  // the answer back; a window that already resolved is not rewound.
+  if (phase_ == Phase::kClaimWindow && claim_open_ && claim_recipient_[static_cast<size_t>(seat)] &&
+      claim_auto_passed_by_disconnect_[static_cast<size_t>(seat)] &&
+      claim_answers_[static_cast<size_t>(seat)].answered &&
+      claim_answers_[static_cast<size_t>(seat)].action == protocol::Action::kPass) {
+    claim_answers_[static_cast<size_t>(seat)] = {};
+    claim_auto_passed_by_disconnect_[static_cast<size_t>(seat)] = false;
+    ++claim_pending_humans_;
+  }
+
+  if (!game_started_ || phase_ == Phase::kIdle) {
+    // The lobby already sent room_joined. A pending Ready will deal and broadcast game_start to
+    // the newly installed endpoint on its own.
+    co_return;
+  }
+
+  // PROTOCOL v2.2 §8.5: replay the low-frequency round metadata first, then the authoritative
+  // board. The restored client treats game_start as a full local reset.
+  co_await ReplyFrame(seat, BuildGameStart(seat));
+  if (phase_ == Phase::kRoundEnd || phase_ == Phase::kMatchEnd) {
+    co_await Deliver(StateSyncFramesRevealed());
+  } else {
+    co_await Deliver(StateSyncFrames());
+  }
+
+  if (phase_ == Phase::kRoundEnd) {
+    if (last_settlement_.has_value()) {
+      co_await ReplyFrame(seat, BuildGameEnd(*last_settlement_));
+    }
+    co_return;
+  }
+  if (phase_ == Phase::kMatchEnd) {
+    co_await ReplyFrame(seat, BuildMatchEnd());
+    co_return;
+  }
+
+  // Playing phases: the listening bar is not part of state_sync (v1.7 §5.16 T3).
+  co_await DeliverTenpai(seat);
+  const int64_t now = clock::EpochMs();
+  if (phase_ == Phase::kDiscardWindow && discard_window_open_ && current_seat_ == seat && window_deadline_ms_ > now) {
+    co_await ReplyFrame(seat,
+                        BuildActionRequestFrame(seq_, window_deadline_ms_, protocol::Window::kDiscard, discard_options_,
+                                                std::nullopt, mode_ == GameMode::kRiichi, discard_riichi_tiles_));
+  } else if (phase_ == Phase::kClaimWindow && claim_open_ && claim_recipient_[static_cast<size_t>(seat)] &&
+             !claim_answers_[static_cast<size_t>(seat)].answered && window_deadline_ms_ > now) {
+    co_await ReplyFrame(
+        seat, BuildActionRequestFrame(
+                  seq_, window_deadline_ms_, claim_chankan_ ? protocol::Window::kChankan : protocol::Window::kClaim,
+                  claim_options_[static_cast<size_t>(seat)],
+                  claim_chankan_ ? std::optional<Tile>(claim_tile_) : std::nullopt, mode_ == GameMode::kRiichi));
+  }
+}
 
 stdexec::task<void> RoomActor::HandleGameFrame(PlayerInfo player, json::Value frame) {
   const int seat = SeatOf(player.player_id);

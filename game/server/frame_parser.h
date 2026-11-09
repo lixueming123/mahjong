@@ -60,6 +60,9 @@ struct Login {
   std::string username;
   std::string password;
   std::string name;
+  // PROTOCOL v2.2 §4.1: account logins default to resuming an in-progress room; `false` means
+  // "log in normally but stay in the lobby" (the post-game exits use this to leave the room).
+  bool resume = true;
 };
 std::optional<Login> ParseLogin(const json::Value& frame, Error* error);
 

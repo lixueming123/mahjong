@@ -82,7 +82,7 @@ class PlayerActor : public SeatEndpoint {
 
   // The account entry points. Each owns the "no database" refusal (INTERNAL), so a handler never
   // has to know about quotas, and the password never travels further than this class (§6.1).
-  void BeginAccountLogin(std::string username, std::string password);
+  void BeginAccountLogin(std::string username, std::string password, bool resume);
   void LoginAsGuest(std::string name);
   void BeginRegister(std::string username, std::string password, std::string nickname);
   void RequestStats();
@@ -130,6 +130,9 @@ class PlayerActor : public SeatEndpoint {
   // Identity and phase live in one value (session.h) instead of loose bools: five states, not
   // sixteen combinations, and every transition is visible in that one file.
   Session session_;
+  // PROTOCOL v2.2 §4.1: the account login's `resume` flag, remembered across the asynchronous
+  // database round trip so the success path can tell the lobby whether to reattach the room.
+  bool pending_resume_ = true;
   // Routing cache, not identity: the lobby keeps the same fact as a room_id string and this
   // side needs the ref to skip the lobby on every gameplay frame. Empty until the lobby sets it.
   ex_actor::ActorRef<RoomActor> room_;

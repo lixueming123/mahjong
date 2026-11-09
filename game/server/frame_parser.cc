@@ -72,6 +72,18 @@ std::optional<Envelope> ParseEnvelope(std::string_view line, Error* error) {
 }
 
 std::optional<Login> ParseLogin(const json::Value& frame, Error* error) {
+  // PROTOCOL v2.2 §4.1: `resume` is optional and defaults to true. It only affects the account
+  // form (the guest path ignores it), but it is validated for every login so a typo is a
+  // BAD_REQUEST instead of a silently ignored field.
+  bool resume = true;
+  if (const json::Value* value = frame.Find("resume"); value != nullptr) {
+    if (!value->IsBool()) {
+      RejectBadRequest(error, "\"resume\" must be a boolean");
+      return std::nullopt;
+    }
+    resume = value->AsBool();
+  }
+
   // ACCOUNT_DESIGN.md §3.1: the presence of `username` selects the account form; without it
   // the frame is the frozen name-only guest login.
   const json::Value* account_name = frame.Find("username");
@@ -89,6 +101,7 @@ std::optional<Login> ParseLogin(const json::Value& frame, Error* error) {
     intent.account_form = true;
     intent.username = account_name->AsString();
     intent.password = password->AsString();
+    intent.resume = resume;
     return intent;
   }
 
@@ -103,6 +116,7 @@ std::optional<Login> ParseLogin(const json::Value& frame, Error* error) {
   }
   Login intent;
   intent.name = name->AsString();
+  intent.resume = resume;
   return intent;
 }
 

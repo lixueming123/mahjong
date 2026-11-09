@@ -115,7 +115,7 @@ std::string ErrorFrame(ErrorCode code, std::string_view message);
 std::string ErrorFrame(ErrorCode code, std::string_view message, json::Value detail);
 
 // ---- §5.1 login_ok / §5.11 pong -------------------------------------------------------
-std::string LoginOkFrame(std::string_view player_id, std::string_view name);
+std::string LoginOkFrame(std::string_view player_id, std::string_view name, std::optional<bool> in_room = std::nullopt);
 std::string PongFrame();
 
 // ---- §5.13 stats (ACCOUNT_DESIGN.md §3.4) ----------------------------------------------

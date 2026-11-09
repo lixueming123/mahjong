@@ -22,11 +22,16 @@ std::string ErrorFrame(ErrorCode code, std::string_view message, json::Value det
   return frame.Dump();
 }
 
-std::string LoginOkFrame(std::string_view player_id, std::string_view name) {
+std::string LoginOkFrame(std::string_view player_id, std::string_view name, std::optional<bool> in_room) {
   json::Value frame = json::Value::Obj();
   frame.Set("type", json::Value::Int(WireOf(FrameType::kLoginOk)));
   frame.Set("player_id", json::Value::Str(std::string(player_id)));
   frame.Set("name", json::Value::Str(std::string(name)));
+  // PROTOCOL v2.2 §5.1: only account logins report whether the player is already in a room.
+  // The guest path leaves the key out, keeping its frozen frame shape.
+  if (in_room.has_value()) {
+    frame.Set("in_room", json::Value::Bool(*in_room));
+  }
   return frame.Dump();
 }
 

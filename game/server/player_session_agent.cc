@@ -13,13 +13,9 @@
 
 namespace mahjong {
 
-void HandlePing(const PlayerServices& services, json::Value) {
-  services.player.SendFrame(protocol::PongFrame());
-}
+void HandlePing(const PlayerServices& services, json::Value) { services.player.SendFrame(protocol::PongFrame()); }
 
-void HandleStatsRequest(const PlayerServices& services, json::Value) {
-  services.player.RequestStats();
-}
+void HandleStatsRequest(const PlayerServices& services, json::Value) { services.player.RequestStats(); }
 
 void HandleLogin(const PlayerServices& services, json::Value frame) {
   // Checked before parsing so a second login is refused as "already logged in"; a malformed
@@ -37,7 +33,7 @@ void HandleLogin(const PlayerServices& services, json::Value frame) {
   // ACCOUNT_DESIGN.md §3.1: the presence of `username` selected the account form; without it
   // the frame is the frozen name-only guest login.
   if (intent->account_form) {
-    services.player.BeginAccountLogin(std::move(intent->username), std::move(intent->password));
+    services.player.BeginAccountLogin(std::move(intent->username), std::move(intent->password), intent->resume);
     return;
   }
   services.player.LoginAsGuest(std::move(intent->name));
@@ -54,8 +50,7 @@ void HandleRegister(const PlayerServices& services, json::Value frame) {
     services.player.ReplyParseError(parse_error);
     return;
   }
-  services.player.BeginRegister(std::move(intent->username), std::move(intent->password),
-                                std::move(intent->nickname));
+  services.player.BeginRegister(std::move(intent->username), std::move(intent->password), std::move(intent->nickname));
 }
 
 }  // namespace mahjong

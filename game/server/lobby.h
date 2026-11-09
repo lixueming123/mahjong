@@ -77,7 +77,12 @@ class LobbyActor : public RoomOwner {
   stdexec::task<void> OnRoomFinished(GameSettlement settlement) override;
 
   // Connection lifecycle (PROTOCOL.md §1.4, §1.6, §8.5).
-  stdexec::task<void> OnConnectionClosed(PlayerInfo player);
+  // PROTOCOL v2.2 §5.1: an account login is completed here because only the lobby knows
+  // whether the account still owns a seat. `resume == false` logs in but leaves the room.
+  stdexec::task<void> OnLoggedIn(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player, bool resume);
+  // The default empty ref is for unit tests; production always carries the connection so a
+  // late close from a superseded connection can be ignored.
+  stdexec::task<void> OnConnectionClosed(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> conn = {});
   // Lobby: drop the connection. In a room: forward to RoomActor, the seat becomes
   // entrusted and the connection stays open.
   stdexec::task<void> OnIdleTimeout(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player);
@@ -96,6 +101,11 @@ class LobbyActor : public RoomOwner {
   // PROTOCOL.md §5.17: `room_joined` reaches one player only, so joins and pre-game
   // departures broadcast the whole roster to every human seat that is still wired.
   stdexec::task<void> BroadcastRoomUpdate(const std::string& room_id, const std::vector<RoomSeat>& seats);
+  // The shared body of "this player is leaving": used by a close, an idle timeout and an
+  // explicit `login{resume:false}`. |force| skips the connection-ownership check (the caller
+  // already decided to detach); otherwise a stale connection for a superseded session is a
+  // no-op. In a started room the seat is entrusted; before the deal the room/seat is released.
+  stdexec::task<void> DropPlayer(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> conn, bool force);
 
   // Deliberately no `name`: the lobby never reads it. The nickname a client sees comes from
   // RoomSeat::player (the room's copy) and from PlayerInfo on the wire, both owned elsewhere.
@@ -109,6 +119,9 @@ class LobbyActor : public RoomOwner {
   std::string NextRoomId();
   ex_actor::ActorRef<RoomActor> FindRoom(const std::string& room_id) const;
   const PlayerState* FindPlayer(const std::string& player_id) const;
+  // True when |conn| is still the connection registered for |player_id|; used across an await
+  // so a superseded login cannot rebind the seat.
+  bool IsCurrentConnection(const std::string& player_id, const ex_actor::ActorRef<SeatEndpoint>& conn) const;
 
   uint64_t seed_;
   int action_timeout_ms_;
