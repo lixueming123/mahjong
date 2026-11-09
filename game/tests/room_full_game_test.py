@@ -24,6 +24,9 @@ with the match-level assertions (M1/M2/M3/N8/M10/N1/N11/P5/P9/P11/P12 + M7 局�
 M8 局间隔) on top. `--timeout-scenario` additionally starts the server with
 --action-timeout-ms 1000 and never answers the first window: the server must play the default
 action (§5.6.2) while a late reply with the stale seq stays silent.
+`--disconnect-scenario` drops the client mid-round and asserts the room keeps playing; since
+v2.3 the entrusted seat keeps each window's deadline instead of discarding at the instant the
+socket closes, so this scenario runs with --action-timeout-ms 1000 and --ai-delay-ms 0.
 
 Usage:
   python3 game/tests/room_full_game_test.py --server-bin build/game/mahjong_server
@@ -649,7 +652,8 @@ def run_timeout_scenario(binary: str, seed: int, verbose: bool, port: int | None
     """PROTOCOL.md §5.6.2: an unanswered window is played with the default action."""
     port = port or free_port()
     log = tempfile.NamedTemporaryFile(prefix="mahjong_e2e_timeout_", suffix=".log", delete=False)
-    process = subprocess.Popen([binary, "--port", str(port), "--seed", str(seed), "--action-timeout-ms", "1000"],
+    process = subprocess.Popen([binary, "--port", str(port), "--seed", str(seed),
+                                "--action-timeout-ms", "1000", "--ai-delay-ms", "0"],
                                stdout=log, stderr=subprocess.STDOUT)
     try:
         wait_for_server(port, process)
@@ -705,7 +709,11 @@ def run_disconnect_scenario(binary: str, seed: int, verbose: bool, port: int | N
     """PROTOCOL.md §8.5: a mid-game disconnect entrusts the seat and the round keeps going."""
     port = port or free_port()
     log = tempfile.NamedTemporaryFile(prefix="mahjong_e2e_disconnect_", suffix=".log", delete=False)
-    process = subprocess.Popen([binary, "--port", str(port), "--seed", str(seed)], stdout=log, stderr=subprocess.STDOUT)
+    # Since v2.3 a disconnected seat keeps its window countdown instead of being played at the
+    # instant the socket closes, so the round still runs one deadline per human turn. A short
+    # window keeps this scenario fast while exercising exactly that path.
+    process = subprocess.Popen([binary, "--port", str(port), "--seed", str(seed), "--action-timeout-ms", "1000"],
+                               stdout=log, stderr=subprocess.STDOUT)
     try:
         wait_for_server(port, process)
         client = Client(port, "掉线玩家")
@@ -718,20 +726,20 @@ def run_disconnect_scenario(binary: str, seed: int, verbose: bool, port: int | N
         client.sock.close()
 
         log_path = log.name
-        # t31: the server now paces every AI decision (default 900 ms), so the remainder of a
-        # round takes tens of seconds instead of ~1s. The budget must cover a whole paced round
-        # (~40s measured) or the scenario reports a stall that never happened.
+        # Since v2.3 every human window left by the disconnected seat waits out its 1 s
+        # deadline (ai-delay-ms is 0 here). The budget must cover a whole round of those
+        # deadlines, or the scenario reports a stall that never happened.
         deadline = time.monotonic() + 120
         text = ""
         while time.monotonic() < deadline:
             with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
                 text = handle.read()
-            if "game over" in text:
+            if "round over" in text:
                 break
             time.sleep(0.2)
         check("keeps playing (seat entrusted)" in text,
               "the room must survive a mid-game disconnect and entrust the seat")
-        check("game over" in text, "the round must still reach its end after the disconnect")
+        check("round over" in text, "the round must still reach its end after the disconnect")
         if verbose:
             print("[e2e-disconnect] server log tail:")
             print("\n".join(text.splitlines()[-6:]))

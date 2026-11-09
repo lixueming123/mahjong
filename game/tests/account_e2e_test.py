@@ -156,10 +156,11 @@ def resolve_binary(explicit: str | None) -> str:
 class Server:
     """The compiled server under test, with a log file kept for diagnostics."""
 
-    def __init__(self, binary: str, args: argparse.Namespace):
+    def __init__(self, binary: str, args: argparse.Namespace, action_timeout_ms: int = 1000):
         self.binary = binary
         self.args = args
         self.port = args.port or free_port()
+        self.action_timeout_ms = action_timeout_ms
         self.log = tempfile.NamedTemporaryFile(prefix="mahjong-account-", suffix=".log", delete=False)
         self.process: subprocess.Popen | None = None
 
@@ -169,7 +170,7 @@ class Server:
             "--port", str(self.port),
             "--seed", "20251005",
             "--ai-delay-ms", "0",
-            "--action-timeout-ms", "1000",
+            "--action-timeout-ms", str(self.action_timeout_ms),
             "--mysql-host", self.args.mysql_host,
             "--mysql-port", str(self.args.mysql_port),
             "--mysql-user", self.args.mysql_user,

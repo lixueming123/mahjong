@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from protocol.enums import ERROR_CODE, FRAME_TYPE
+from protocol.enums import ERROR_CODE, FRAME_TYPE, WINDOW
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from account_e2e_test import (  # noqa: E402
@@ -56,6 +56,9 @@ ERROR = FRAME_TYPE.ERROR
 READY = FRAME_TYPE.READY
 CREATE_ROOM = FRAME_TYPE.CREATE_ROOM
 SYNC = FRAME_TYPE.SYNC
+ACTION_REQUEST = FRAME_TYPE.ACTION_REQUEST
+DISCARD = FRAME_TYPE.DISCARD
+DISCARD_EVENT = FRAME_TYPE.DISCARD_EVENT
 
 
 def fresh_account(prefix: str) -> tuple[str, str]:
@@ -117,14 +120,20 @@ def recv_type_skipping(client: Client, expected: int, timeout: float = 10.0) -> 
     raise TestFailure(f"timed out waiting for frame {expected}")
 
 
-def start_game(client: Client, room_id: str) -> dict:
+def start_game(client: Client, room_id: str) -> tuple[dict, dict]:
+    # The first round opens with game_start + action_request (no state_sync: the hand rides in
+    # game_start). A reconnect later replays all three, which is what read_until checks below.
     client.send({"type": READY})
-    seen = read_until(client, {GAME_START, STATE_SYNC})
-    check(seen[GAME_START].get("match_total") is not None, "game_start must carry match_total")
-    check(isinstance(seen[GAME_START].get("match_total"), list), "match_total must be an array")
-    check(len(seen[GAME_START]["match_total"]) == 4, "match_total must have four entries")
-    check(isinstance(seen[GAME_START].get("renchan_count"), int), "game_start must carry renchan_count")
-    return seen[STATE_SYNC]
+    seen = read_until(client, {GAME_START, ACTION_REQUEST})
+    start = seen[GAME_START]
+    check(start.get("match_total") is not None, "game_start must carry match_total")
+    check(isinstance(start.get("match_total"), list), "match_total must be an array")
+    check(len(start["match_total"]) == 4, "match_total must have four entries")
+    check(isinstance(start.get("renchan_count"), int), "game_start must carry renchan_count")
+    request = seen[ACTION_REQUEST]
+    check(request.get("window") == WINDOW.DISCARD,
+          f"the dealer must own the first discard window: {request}")
+    return start, request
 
 
 def wait_room_dropped(client: Client, username: str, password: str) -> dict:
@@ -143,7 +152,7 @@ def run(args: argparse.Namespace) -> None:
     if not mysql_reachable(args.mysql_host, args.mysql_port):
         skip(f"no MySQL at {args.mysql_host}:{args.mysql_port}")
 
-    server = Server(binary, args)
+    server = Server(binary, args, action_timeout_ms=60000)
     server.start()
     usernames: list[str] = []
     try:
@@ -157,19 +166,35 @@ def run(args: argparse.Namespace) -> None:
         joined = first.recv_type(ROOM_JOINED)
         room_id = joined["room_id"]
         seat = joined["seat"]
-        sync_before = start_game(first, room_id)
-        check(len(sync_before.get("hand", [])) in (13, 14), f"bad hand snapshot: {sync_before.get('hand')}")
+        start_before, request_before = start_game(first, room_id)
+        hand_before = list(start_before.get("hand", []))
+        check(len(hand_before) in (13, 14), f"bad hand snapshot: {hand_before}")
+        first_seq = request_before["seq"]
+        first_deadline = request_before["deadline_ms"]
         first.close()
 
         second = Client(server.port, "second")
         resumed = wait_room_dropped(second, username, password)
         check(resumed.get("player_id") == player_id, "reconnect must keep the same player_id")
         check(resumed.get("in_room") is True, "reconnect must report in_room:true")
-        seen = read_until(second, {ROOM_JOINED, GAME_START, STATE_SYNC})
+        seen = read_until(second, {ROOM_JOINED, GAME_START, STATE_SYNC, ACTION_REQUEST})
         check(seen[ROOM_JOINED]["room_id"] == room_id, "reconnect must return to the same room")
         check(seen[ROOM_JOINED]["seat"] == seat, "reconnect must keep the same seat")
-        check(len(seen[STATE_SYNC].get("hand", [])) in (13, 14), "the resumed board needs a hand")
+        check(seen[STATE_SYNC].get("hand") == hand_before,
+              "a disconnect must not auto-discard before the countdown: "
+              f"{hand_before} -> {seen[STATE_SYNC].get('hand')}")
         check(isinstance(seen[GAME_START].get("match_total"), list), "the resumed game_start needs match_total")
+        replayed = seen[ACTION_REQUEST]
+        check(replayed["seq"] == first_seq, "the reconnect must replay the same window, not open a new one")
+        check(replayed["deadline_ms"] == first_deadline,
+              "the replayed window must keep the original deadline, not grant a fresh one")
+
+        # The tile is still in hand: the player can answer the replayed window themselves.
+        hand_after = list(seen[STATE_SYNC]["hand"])
+        second.send({"type": DISCARD, "tile": hand_after[-1], "seq": first_seq})
+        event = recv_type_skipping(second, DISCARD_EVENT)
+        check(event.get("seat") == seat,
+              f"the replayed discard window must accept the player's tile: {event}")
         # A `sync` on the new socket must answer for the rebound seat, not a new room.
         second.send({"type": SYNC})
         sync_after = recv_type_skipping(second, STATE_SYNC)

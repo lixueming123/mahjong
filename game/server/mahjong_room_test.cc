@@ -979,22 +979,27 @@ TEST_F(RoomActorTest, HumanWinDuringTheAiDelayResolvesImmediately) {
   FAIL() << "no human ron window with a pending paced bot claim was found";
 }
 
-// t31: the pacing is for AI decisions only. A timed-out window and an entrusted seat both
-// represent "already waited", so they act immediately even when ai_delay_ms > 0.
-TEST_F(RoomActorTest, TimeoutAndEntrustedStayImmediateUnderAiDelay) {
+// t31: the pacing is for AI decisions only. A window deadline still plays the default action
+// at once when ai_delay_ms > 0, and a disconnect must not race that deadline.
+TEST_F(RoomActorTest, TimeoutAndDisconnectPlayAtTheDeadlineUnderAiDelay) {
   {
     TestRoom test_room(20251005, kDefaultTimeoutMs, /*ai_delay_ms=*/900);
     test_room.Ready();
-    test_room.PendingRequest();
+    std::optional<json::Value> request = test_room.PendingRequest();
+    ASSERT_TRUE(request.has_value());
+    const uint64_t window_seq = test_room.room()->seq();
     const int before = test_room.DiscardsBy(kSeat0);
-    const uint64_t acted_window = test_room.room()->seq();
     test_room.Send(RoomEnvelope::PlayerDisconnected(test_room.human(), /*conn=*/ {}));
-    test_room.PendingRequest();
-    EXPECT_EQ(test_room.DiscardsBy(kSeat0), before + 1) << "an entrusted seat discards immediately";
+    EXPECT_TRUE(test_room.sink()->Drain().empty()) << "a disconnect must not play the open window";
+    EXPECT_EQ(test_room.DiscardsBy(kSeat0), before) << "the countdown must reach the deadline first";
     for (const std::pair<int64_t, uint64_t>& entry : test_room.AiPacingScheduled()) {
-      EXPECT_NE(WindowSeqOfToken(entry.second), acted_window)
-          << "the entrusted seat's own window must not be paced (a later bot window may be)";
+      EXPECT_NE(WindowSeqOfToken(entry.second), window_seq)
+          << "the disconnected seat's own window must not be paced (a later bot window may be)";
     }
+    // The plain window deadline (untagged token), exactly as OpenWindowTimer() schedules it.
+    test_room.Send(RoomEnvelope::WindowTimeout(window_seq));
+    test_room.PendingRequest();
+    EXPECT_EQ(test_room.DiscardsBy(kSeat0), before + 1) << "the deadline plays the default action";
   }
   {
     TestRoom test_room(20251005, kDefaultTimeoutMs, /*ai_delay_ms=*/900);
@@ -1335,27 +1340,76 @@ TEST_F(RoomActorTest, RoundAdvanceTokenIsTheOnlyWayAcrossRounds) {
   EXPECT_EQ(snapshot(), after) << "推进令牌不得重复推进";
 }
 
-TEST_F(RoomActorTest, EntrustedSeatPlaysImmediately) {
+// 用户反馈：断线的一瞬间不能抢在倒计时之前出牌，否则刷新重连回来牌已经没了。座位标记
+// `disconnected`，但当前窗口继续走完自己的 deadline；到了 deadline 才按 §5.6.2 代打。
+TEST_F(RoomActorTest, DisconnectedSeatWaitsForTheWindowDeadline) {
   TestRoom test_room(20251005);
   test_room.Ready();
-  test_room.sink()->Drain();
-
+  const std::optional<json::Value> request = test_room.PendingRequest();
+  ASSERT_TRUE(request.has_value());
+  ASSERT_EQ(test_room.room()->CurrentWindow(), protocol::Window::kDiscard);
+  const uint64_t seq = test_room.room()->seq();
   const std::vector<Tile> hand = SortedTiles(test_room.room()->hand_of(kSeat0));
+
   test_room.Send(RoomEnvelope::PlayerDisconnected(test_room.human(), /*conn=*/ {}));
+  EXPECT_TRUE(test_room.sink()->Drain().empty()) << "the disconnect itself must not play the window";
+  EXPECT_EQ(test_room.room()->CurrentWindow(), protocol::Window::kDiscard);
+  EXPECT_EQ(test_room.room()->seq(), seq);
 
+  // 倒计时到点：默认动作 = 庄家第一打无摸牌记录 ⇒ 打出排序后的最后一张。
+  test_room.Send(RoomEnvelope::WindowTimeout(seq));
   std::vector<json::Value> frames = test_room.sink()->Drain();
-  ASSERT_FALSE(frames.empty());
-  EXPECT_EQ(TypeOf(frames[0]), protocol::FrameType::kDiscardEvent);
-  EXPECT_EQ(IntOf(frames[0], "seat"), 0);
-  EXPECT_EQ(StrOf(frames[0], "tile"), FormatTile(hand.back()));
+  const std::vector<const json::Value*> discards = FramesOfType(frames, protocol::FrameType::kDiscardEvent);
+  ASSERT_FALSE(discards.empty());
+  EXPECT_EQ(IntOf(*discards.front(), "seat"), kSeat0);
+  EXPECT_EQ(StrOf(*discards.front(), "tile"), FormatTile(hand.back()));
 
-  // The entrusted seat is reported in the per-seat public view (PROTOCOL.md §8.5).
+  // 托管标记进入公共视图（PROTOCOL.md §8.5）。
   const std::vector<const json::Value*> syncs = FramesOfType(frames, protocol::FrameType::kStateSync);
   ASSERT_FALSE(syncs.empty());
   const json::Value* seats = syncs.front()->Find("seats");
   ASSERT_NE(seats, nullptr);
   ASSERT_EQ(seats->AsArray().size(), 4u);
   EXPECT_TRUE(seats->AsArray()[0].Find("disconnected")->AsBool());
+}
+
+// 断线后、deadline 之前重连：窗口必须原样交还给玩家（同 seq / 同 deadline / 同 options），
+// 不能因为断线而代打或换一个新窗口。
+TEST_F(RoomActorTest, ReconnectBeforeTheDeadlineKeepsTheOpenWindow) {
+  TestRoom test_room(20251005);
+  test_room.Ready();
+  const std::optional<json::Value> request = test_room.PendingRequest();
+  ASSERT_TRUE(request.has_value());
+  const uint64_t seq = test_room.room()->seq();
+  const int64_t deadline = IntOf(*request, "deadline_ms");
+
+  test_room.Send(RoomEnvelope::PlayerDisconnected(test_room.human(), /*conn=*/ {}));
+  EXPECT_TRUE(test_room.sink()->Drain().empty());
+
+  auto new_sink = std::make_shared<CapturingSink>();
+  ex_actor::ActorRef<CapturingSeatActor> new_endpoint =
+      std::get<0>(stdexec::sync_wait(ex_actor::Spawn<CapturingSeatActor>(new_sink)).value());
+  test_room.Send(RoomEnvelope::Reconnected(test_room.human(), new_endpoint));
+
+  const std::vector<json::Value> frames = new_sink->Drain();
+  for (const json::Value& frame : frames) {
+    EXPECT_FALSE(TypeOf(frame) == protocol::FrameType::kDiscardEvent && IntOf(frame, "seat") == kSeat0)
+        << "a reconnect before the deadline must find the tile still in hand";
+  }
+  const std::vector<const json::Value*> requests = FramesOfType(frames, protocol::FrameType::kActionRequest);
+  ASSERT_EQ(requests.size(), 1u) << "the unanswered window must be re-sent";
+  EXPECT_EQ(IntOf(*requests.front(), "seq"), static_cast<int64_t>(seq));
+  EXPECT_EQ(IntOf(*requests.front(), "deadline_ms"), deadline)
+      << "the countdown continues; a reconnect must not grant a fresh deadline";
+
+  // 同一窗口的答复仍然有效。
+  const Tile tile = test_room.room()->hand_of(kSeat0).back();
+  test_room.SendDiscard(tile, seq);
+  const std::vector<json::Value> after = new_sink->Drain();
+  const std::vector<const json::Value*> discards = FramesOfType(after, protocol::FrameType::kDiscardEvent);
+  ASSERT_FALSE(discards.empty());
+  EXPECT_EQ(IntOf(*discards.front(), "seat"), kSeat0);
+  EXPECT_EQ(StrOf(*discards.front(), "tile"), FormatTile(tile));
 }
 
 TEST_F(RoomActorTest, ReconnectedSeatReplaysTheOpenWindow) {
@@ -2373,6 +2427,54 @@ TEST_F(RoomActorTest, ClaimWindowRejectsDiscardAndUnknownAction) {
         // (GAME_DESIGN §5.6.2) and the game moves on without any error frame.
         test_room.Send(RoomEnvelope::WindowTimeout(seq));
         std::vector<json::Value> after = test_room.sink()->Drain();
+        for (const json::Value& frame : after) {
+          EXPECT_NE(TypeOf(frame), protocol::FrameType::kError) << frame.Dump();
+        }
+        EXPECT_NE(test_room.room()->seq(), seq);
+        probed = true;
+        break;
+      }
+      if (test_room.AnswerWindow(request)) {
+        continue;
+      }
+      if (!test_room.AdvanceOpenWindow()) {
+        break;
+      }
+    }
+  }
+  ASSERT_TRUE(probed) << "no seed gave the human a claim window";
+}
+
+// 鸣牌窗口同理：断线不立刻 pass、也不立刻结算；窗口保持到 deadline，期间重连还能自己答。
+TEST_F(RoomActorTest, DisconnectedClaimRecipientWaitsForTheDeadline) {
+  bool probed = false;
+  for (uint64_t seed = 1; seed <= 60 && !probed; ++seed) {
+    TestRoom test_room(seed);
+    test_room.Ready();
+    for (int guard = 0; guard < 400 && !test_room.room()->game_finished(); ++guard) {
+      std::optional<json::Value> request = test_room.PendingRequest();
+      if (test_room.room()->CurrentWindow() == protocol::Window::kClaim && request.has_value() &&
+          IntOf(*request, "window") == protocol::WireOf(protocol::Window::kClaim)) {
+        const uint64_t seq = test_room.room()->seq();
+        const int64_t deadline = IntOf(*request, "deadline_ms");
+        test_room.Send(RoomEnvelope::PlayerDisconnected(test_room.human(), /*conn=*/ {}));
+        EXPECT_TRUE(test_room.sink()->Drain().empty()) << "a disconnect must not pass for the seat";
+        EXPECT_EQ(test_room.room()->seq(), seq) << "a disconnect must not resolve the claim window";
+        EXPECT_EQ(test_room.room()->CurrentWindow(), protocol::Window::kClaim);
+
+        // 在 deadline 之前重连：同一窗口原样交还。
+        auto new_sink = std::make_shared<CapturingSink>();
+        ex_actor::ActorRef<CapturingSeatActor> new_endpoint =
+            std::get<0>(stdexec::sync_wait(ex_actor::Spawn<CapturingSeatActor>(new_sink)).value());
+        test_room.Send(RoomEnvelope::Reconnected(test_room.human(), new_endpoint));
+        const std::vector<json::Value> frames = new_sink->Drain();
+        const std::vector<const json::Value*> requests = FramesOfType(frames, protocol::FrameType::kActionRequest);
+        ASSERT_EQ(requests.size(), 1u) << "the unanswered claim window must be re-sent";
+        EXPECT_EQ(IntOf(*requests.front(), "seq"), static_cast<int64_t>(seq));
+        EXPECT_EQ(IntOf(*requests.front(), "deadline_ms"), deadline);
+
+        test_room.SendAction(protocol::Action::kPass, {}, seq);
+        const std::vector<json::Value> after = new_sink->Drain();
         for (const json::Value& frame : after) {
           EXPECT_NE(TypeOf(frame), protocol::FrameType::kError) << frame.Dump();
         }
