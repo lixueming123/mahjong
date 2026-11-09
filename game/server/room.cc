@@ -474,7 +474,8 @@ stdexec::task<bool> RoomActor::PlayAutomatedDiscard() {
     co_await ApplyDiscard(seat, *tile);
     co_return true;
   }
-  // An entrusted (disconnected) human keeps the frozen §5.6.2 default action, immediately.
+  // A human seat with no wire keeps the frozen §5.6.2 default action, immediately. A
+  // disconnected human never reaches this branch: its window stays open until the deadline.
   std::optional<Tile> tile = DefaultDiscardFor(seat);
   if (!tile.has_value()) {
     co_await EndRoundWithDraw();
@@ -520,8 +521,10 @@ bool RoomActor::HasPendingHumanWin() const {
 }
 
 bool RoomActor::IsAutomated(int seat) const {
-  const RoomSeat& room_seat = seats_[static_cast<size_t>(seat)];
-  return room_seat.is_bot || room_seat.disconnected;
+  // Only a bot (or a seat with no wire, checked by NeedsPlayerReply) acts inside the message
+  // that opens its window. A disconnected human is still waiting for its countdown: the
+  // reconnect path relies on that window staying unanswered until the deadline.
+  return seats_[static_cast<size_t>(seat)].is_bot;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1095,10 +1098,10 @@ stdexec::task<void> RoomActor::Pump() {
         //   * a bot seat plays the tile-efficiency policy (t20): keep the hand whose shanten
         //     after the next draw is best — declared on its own draw, and paced by
         //     ai_delay_ms_ so a human can follow the table (GAME_DESIGN v1.4 §5.4);
-        //   * an entrusted (disconnected) human seat keeps the frozen deterministic fallback
-        //     of GAME_DESIGN §5.6.2 — play the tile just drawn, or the largest tile when the
-        //     window has no draw record — always immediately: an entrusted seat represents a
-        //     player who already waited, so the pacing must not apply to it.
+        //   * a human seat with no wire keeps the frozen deterministic fallback of
+        //     GAME_DESIGN §5.6.2 — play the tile just drawn, or the largest tile when the
+        //     window has no draw record — immediately: there is nobody to answer it. A
+        //     disconnected seat with a wire is NOT here; its window waits for the deadline.
         if (seats_[static_cast<size_t>(seat)].is_bot && ai_delay_ms_ > 0 &&
             (ai_discard_pending_ || ScheduleAiAction(ai_delay_ms_))) {
           ai_discard_pending_ = true;
@@ -1167,8 +1170,10 @@ stdexec::task<void> RoomActor::OpenDiscardWindow(bool win_check, std::optional<T
   discard_options_.clear();
   discard_riichi_tiles_.clear();
   if (!NeedsPlayerReply(seat)) {
-    co_return;  // bots / entrusted seats act inside this same message: no frame, no timer
+    co_return;  // bots / seats with no wire act inside this same message: no frame, no timer
   }
+  // A disconnected human still gets a real window here: the deadline is the only path that may
+  // play for them, and a reconnect before it replays this exact request (PROTOCOL v2.3 §8.5).
   std::vector<Option> options;
   std::vector<Tile> riichi_tiles;
   if (win_check) {
@@ -1177,13 +1182,15 @@ stdexec::task<void> RoomActor::OpenDiscardWindow(bool win_check, std::optional<T
     // 这里同时取走「立直宣言牌候选」，随帧下发（v1.21 §4.4）。
     options = DiscardOptionsFor(seat, &riichi_tiles);
   }
-  // PROTOCOL v2.2 §8.5: remember the exact window so a reconnect can replay it instead of
-  // guessing options or granting a fresh 15s deadline.
+  // PROTOCOL v2.3 §8.5: remember the exact window so a reconnect can replay it instead of
+  // guessing options or granting a fresh deadline.
   window_deadline_ms_ = clock::EpochMs() + action_timeout_ms_;
   discard_options_ = options;
   discard_riichi_tiles_ = riichi_tiles;
-  co_await ReplyFrame(seat, BuildActionRequestFrame(seq_, window_deadline_ms_, protocol::Window::kDiscard, options,
-                                                    std::nullopt, mode_ == GameMode::kRiichi, riichi_tiles));
+  if (!seats_[static_cast<size_t>(seat)].disconnected) {
+    co_await ReplyFrame(seat, BuildActionRequestFrame(seq_, window_deadline_ms_, protocol::Window::kDiscard, options,
+                                                      std::nullopt, mode_ == GameMode::kRiichi, riichi_tiles));
+  }
   OpenWindowTimer();
 }
 
@@ -1258,7 +1265,6 @@ stdexec::task<void> RoomActor::OpenClaimWindow(int from_seat, Tile tile, const s
   claim_recipient_ = recipients;
   claim_options_ = options;
   claim_answers_ = {};
-  claim_auto_passed_by_disconnect_ = {};
   claim_pending_humans_ = 0;
   ai_claim_pending_ = false;
   // PROTOCOL v2.2 §8.5: same deadline the frame carries, so a replay is exact.
@@ -1274,9 +1280,9 @@ stdexec::task<void> RoomActor::OpenClaimWindow(int from_seat, Tile tile, const s
     if (!NeedsPlayerReply(seat)) {
       // GAME_DESIGN v1.4 §5.4: a bot's meld/self-draw choice is its own decision, so it is
       // executed ai_delay_ms after the discard (still without consuming the 15s deadline:
-      // an all-AI window keeps its own pacing timer only). An entrusted human seat is not an
-      // AI: it records the frozen §5.6.2 default action immediately, exactly as the timeout
-      // message would.
+      // an all-AI window keeps its own pacing timer only). A human seat with no wire records
+      // the frozen §5.6.2 default action immediately, exactly as the timeout message would.
+      // A disconnected human is not here: it stays a pending recipient until the deadline.
       // A bot only takes a meld that does not worsen the shanten of its hand (t21/t23).
       if (seats_[static_cast<size_t>(seat)].is_bot && ai_delay_ms_ > 0) {
         ai_pending = true;
@@ -1300,7 +1306,7 @@ stdexec::task<void> RoomActor::OpenClaimWindow(int from_seat, Tile tile, const s
       continue;
     }
     ++claim_pending_humans_;
-    if (!seats_[static_cast<size_t>(seat)].endpoint.IsEmpty()) {
+    if (!seats_[static_cast<size_t>(seat)].endpoint.IsEmpty() && !seats_[static_cast<size_t>(seat)].disconnected) {
       requests[static_cast<size_t>(seat)] = BuildActionRequestFrame(
           seq_, window_deadline_ms_, chankan ? protocol::Window::kChankan : protocol::Window::kClaim,
           options[static_cast<size_t>(seat)], chankan ? std::optional<Tile>(tile) : std::nullopt,
@@ -1373,7 +1379,6 @@ void RoomActor::ResetClaimWindow() {
   claim_recipient_ = {};
   claim_options_ = {};
   claim_answers_ = {};
-  claim_auto_passed_by_disconnect_ = {};
   claim_pending_humans_ = 0;
   claim_chankan_ = false;
 }
@@ -2304,8 +2309,10 @@ stdexec::task<void> RoomActor::OnWindowTimeout(uint64_t token) {
   if (phase_ == Phase::kDiscardWindow && discard_window_open_) {
     const int seat = current_seat_;
     if (!NeedsPlayerReply(seat)) {
-      co_return;  // already auto-played
+      co_return;  // a bot / no-wire window never owns this timer
     }
+    // A disconnected human owns this deadline too: the seat was not auto-played when its
+    // socket closed, so this message is the one that plays the §5.6.2 default action.
     std::optional<Tile> tile = DefaultDiscardFor(seat);
     if (!tile.has_value()) {
       co_return;
@@ -2313,9 +2320,14 @@ stdexec::task<void> RoomActor::OnWindowTimeout(uint64_t token) {
     // Deliberately NOT ChooseDiscard: "play the tile just drawn (or the largest tile when
     // there is no draw record)" is the deterministic fallback frozen by GAME_DESIGN §5.6.2,
     // and both the t17/t22 statistics and the timeout unit test depend on its predictability.
-    // Entrusted (disconnected) seats use the same default action. Consequence by design: an
-    // AI builds its hand, a timed-out human seat does not. 超时永不选杠（PROTOCOL v1.6 §6.4）。
-    spdlog::info("room {}: seat {} timed out, default discard {}", room_id_, seat, FormatTile(*tile));
+    // A disconnected seat uses the same default action. Consequence by design: an AI builds
+    // its hand, a timed-out human seat does not. 超时永不选杠（PROTOCOL v1.6 §6.4）。
+    if (seats_[static_cast<size_t>(seat)].disconnected) {
+      spdlog::info("room {}: seat {} disconnected window expired, default discard {}", room_id_, seat,
+                   FormatTile(*tile));
+    } else {
+      spdlog::info("room {}: seat {} timed out, default discard {}", room_id_, seat, FormatTile(*tile));
+    }
     discard_window_open_ = false;
     co_await ApplyDiscard(seat, *tile);
     co_await Pump();
@@ -2368,24 +2380,15 @@ stdexec::task<void> RoomActor::OnPlayerDisconnected(PlayerInfo player, ex_actor:
     co_return;
   }
   // A close that arrives after a reconnect belongs to the old socket; the seat is already wired
-  // to the new one and must not be entrusted.
+  // to the new one and must not be marked disconnected again.
   if (!conn.IsEmpty() && seats_[static_cast<size_t>(seat)].endpoint != conn) {
     co_return;
   }
   seats_[static_cast<size_t>(seat)].disconnected = true;
-  spdlog::info("room {}: seat {} is entrusted now", room_id_, seat);
-  // GAME_DESIGN §5.6.2: an entrusted seat plays the default action immediately, and a pending
-  // claim window counts it as a pass (no 15s wait).
-  if (claim_open_ && claim_recipient_[static_cast<size_t>(seat)] &&
-      !claim_answers_[static_cast<size_t>(seat)].answered) {
-    ClaimAnswer answer;
-    answer.answered = true;
-    answer.action = protocol::Action::kPass;
-    claim_answers_[static_cast<size_t>(seat)] = std::move(answer);
-    claim_auto_passed_by_disconnect_[static_cast<size_t>(seat)] = true;
-    --claim_pending_humans_;
-  }
-  co_await Pump();
+  spdlog::info("room {}: seat {} lost its wire; its window keeps the countdown", room_id_, seat);
+  // GAME_DESIGN §5.6.2 / PROTOCOL v2.3 §8.5: a disconnect does NOT play for the seat. The
+  // open window (discard or claim) stays unanswered until its deadline, so a reconnect inside
+  // the countdown still owns the decision. There is nothing to pump here.
 }
 
 stdexec::task<void> RoomActor::OnIdleTimeout(PlayerInfo player) {
@@ -2401,25 +2404,15 @@ stdexec::task<void> RoomActor::OnReconnected(PlayerInfo player, ex_actor::ActorR
   seats_[static_cast<size_t>(seat)].disconnected = false;
   spdlog::info("room {}: seat {} reconnected", room_id_, seat);
 
-  // The disconnect auto-passed this seat. If the window has not resolved yet, give the player
-  // the answer back; a window that already resolved is not rewound.
-  if (phase_ == Phase::kClaimWindow && claim_open_ && claim_recipient_[static_cast<size_t>(seat)] &&
-      claim_auto_passed_by_disconnect_[static_cast<size_t>(seat)] &&
-      claim_answers_[static_cast<size_t>(seat)].answered &&
-      claim_answers_[static_cast<size_t>(seat)].action == protocol::Action::kPass) {
-    claim_answers_[static_cast<size_t>(seat)] = {};
-    claim_auto_passed_by_disconnect_[static_cast<size_t>(seat)] = false;
-    ++claim_pending_humans_;
-  }
-
   if (!game_started_ || phase_ == Phase::kIdle) {
     // The lobby already sent room_joined. A pending Ready will deal and broadcast game_start to
     // the newly installed endpoint on its own.
     co_return;
   }
 
-  // PROTOCOL v2.2 §8.5: replay the low-frequency round metadata first, then the authoritative
-  // board. The restored client treats game_start as a full local reset.
+  // PROTOCOL v2.3 §8.5: replay the low-frequency round metadata first, then the authoritative
+  // board. The restored client treats game_start as a full local reset. An unanswered window
+  // still owns its original deadline, so the replayed request grants no extra time.
   co_await ReplyFrame(seat, BuildGameStart(seat));
   if (phase_ == Phase::kRoundEnd || phase_ == Phase::kMatchEnd) {
     co_await Deliver(StateSyncFramesRevealed());

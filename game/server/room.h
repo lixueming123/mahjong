@@ -233,7 +233,9 @@ struct RoomSeat {
   int seat = 0;
   PlayerInfo player;
   bool is_bot = false;
-  bool disconnected = false;  // entrusted: the room plays the default action for it
+  // The player's socket is gone, but the seat is not automated any earlier than the window
+  // deadline: a reconnect inside the countdown still owns the decision (§8.5).
+  bool disconnected = false;
   // Where this seat's frames go (seat_endpoint.h). Empty for a bot, or for a seat with no wire
   // (the deal-only paths in the unit test) — that is the old `sink == nullptr` sentinel.
   ex_actor::ActorRef<SeatEndpoint> endpoint;
@@ -507,8 +509,10 @@ class RoomActor {
   // ---- helpers ----------------------------------------------------------------------
   uint64_t Transition();
   void ResetClaimWindow();
-  // A seat is played by the server when it is a bot, when it is entrusted (disconnected) or
-  // when it has no wire to ask (defensive: only seat 0 ever has a sink in this milestone).
+  // A seat is played by the server inside the message that opens its window only when it is a
+  // bot or when it has no wire to ask (defensive: only seat 0 ever has a sink in this
+  // milestone). A disconnected human seat is NOT automated: it keeps the window's normal
+  // countdown, so the deadline — not the disconnect — plays the default action.
   bool IsAutomated(int seat) const;
   bool NeedsPlayerReply(int seat) const {
     return !IsAutomated(seat) && !seats_[static_cast<size_t>(seat)].endpoint.IsEmpty();
@@ -674,9 +678,6 @@ class RoomActor {
   std::array<bool, kSeatCount> claim_recipient_ {};
   std::array<std::vector<Option>, kSeatCount> claim_options_;
   std::array<ClaimAnswer, kSeatCount> claim_answers_;
-  // Set when a disconnecting human was auto-passed in this window. A reconnect before the
-  // window resolves may undo that pass (PROTOCOL v2.2 §8.5).
-  std::array<bool, kSeatCount> claim_auto_passed_by_disconnect_ {};
   int claim_pending_humans_ = 0;
   // The last settled round, kept for a reconnect during kRoundEnd/kMatchEnd. Cleared only when
   // the next settlement overwrites it; StartRound does not need it.
