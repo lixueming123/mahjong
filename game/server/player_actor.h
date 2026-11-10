@@ -14,8 +14,9 @@
 // which actor owns the intent, and the room re-checks only what is game state: whose turn it
 // is, whether the tile is in hand, whether the window is still open (§4.5/§6.3).
 //
-// It is also the seat endpoint a RoomActor delivers game frames to, which is why it derives from
-// SeatEndpoint: the room holds `ActorRef<SeatEndpoint>` and never sees this class.
+// It is also the seat endpoint a room delivers game frames to, which is why it derives from
+// SeatEndpoint: the room holds `ActorRef<SeatEndpoint>` and never sees this class. Symmetrically
+// this class holds `ActorRef<RoomEndpoint>` and never sees a concrete room.
 //
 // Every message arrives through `Dispatch`. No arm suspends, so the mailbox already runs one
 // message to completion before the next: there is no gate. A later `co_await` in here would
@@ -45,6 +46,7 @@
 #include "lobby.h"
 #include "player.h"
 #include "player_agent.h"
+#include "room_endpoint.h"
 #include "seat_endpoint.h"
 #include "session.h"
 
@@ -97,7 +99,7 @@ class PlayerActor : public SeatEndpoint {
   void OnStatsResult(StatsOutcome outcome);
   // The lobby tells this connection which room it plays in (PlayerEnvelope::SetRoom), so
   // gameplay frames no longer have to round-trip through the lobby.
-  void SetRoom(ex_actor::ActorRef<RoomActor> room);
+  void SetRoom(ex_actor::ActorRef<RoomEndpoint> room);
   // The SeatEndpoint view (room/lobby deliveries).
   void SeatFrame(std::string frame);
   void SeatError(std::string frame, QuotaKind quota);
@@ -135,7 +137,7 @@ class PlayerActor : public SeatEndpoint {
   bool pending_resume_ = true;
   // Routing cache, not identity: the lobby keeps the same fact as a room_id string and this
   // side needs the ref to skip the lobby on every gameplay frame. Empty until the lobby sets it.
-  ex_actor::ActorRef<RoomActor> room_;
+  ex_actor::ActorRef<RoomEndpoint> room_;
 };
 
 }  // namespace mahjong

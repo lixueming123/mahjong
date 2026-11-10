@@ -28,7 +28,7 @@
 #include "ex_actor/api.h"
 #include "json.h"
 #include "player.h"
-#include "room.h"
+#include "room_endpoint.h"
 #include "seat_endpoint.h"
 #include "timer.h"
 
@@ -39,7 +39,7 @@ namespace mahjong {
 inline constexpr int kGameEndReclaimMs = 30000;
 
 // RoomOwner is a direct, non-virtual base: ActorRef<RoomOwner> casts the concrete LobbyActor
-// pointer to the base without a runtime adjustment (room.h documents the rule).
+// pointer to the base without a runtime adjustment (room_contract.h documents the rule).
 class LobbyActor : public RoomOwner {
  public:
   // |db| may be empty (unit tests, or a server without account support): the game then simply
@@ -117,7 +117,7 @@ class LobbyActor : public RoomOwner {
   };
 
   std::string NextRoomId();
-  ex_actor::ActorRef<RoomActor> FindRoom(const std::string& room_id) const;
+  ex_actor::ActorRef<RoomEndpoint> FindRoom(const std::string& room_id) const;
   const PlayerState* FindPlayer(const std::string& player_id) const;
   // True when |conn| is still the connection registered for |player_id|; used across an await
   // so a superseded login cannot rebind the seat.
@@ -135,7 +135,7 @@ class LobbyActor : public RoomOwner {
   // player_id -> room_id reserved by a CreateRoom whose Spawn has not committed yet.
   // OnConnectionClosed erases the entry so the spawn's commit sees it is no longer ours.
   std::unordered_map<std::string, std::string> creating_;
-  std::unordered_map<std::string, ex_actor::ActorRef<RoomActor>> rooms_;
+  std::unordered_map<std::string, ex_actor::ActorRef<RoomEndpoint>> rooms_;
   // Seat roster of a room that has not started. Seat 0 is the owner; the rest begin as bots
   // and can be taken by JoinRoom until someone sends ready.
   std::unordered_map<std::string, std::vector<RoomSeat>> room_seats_;

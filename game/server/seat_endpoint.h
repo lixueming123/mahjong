@@ -40,8 +40,9 @@
 
 namespace mahjong {
 
-class PlayerActor;  // only referenced through ActorRef below
-class RoomActor;        // ditto: the connection caches its room's ref (see kSetRoom)
+class PlayerActor;      // only referenced through ActorRef below
+class RoomEndpoint;     // ditto: the connection caches its room's ref (see kSetRoom). The room is
+                        // seen only through this interface, so nothing here depends on the game.
 
 // PROTOCOL.md §7.2's two client-fault counters a *room* error can be charged to. The nickname
 // counter is the connection actor's own business and is not routed through here.
@@ -75,7 +76,7 @@ struct PlayerEnvelope {
   };
   // lobby -> connection: this connection's room, so gameplay frames skip the lobby
   struct SetRoomMsg {
-    ex_actor::ActorRef<RoomActor> room;
+    ex_actor::ActorRef<RoomEndpoint> room;
   };
   // room/lobby -> connection (the SeatEndpoint view): one frame for this seat (room broadcast
   // or lobby answer).
@@ -106,7 +107,7 @@ struct PlayerEnvelope {
   // The room this connection plays in (an empty ref never happens: the lobby sets it when it
   // registers the room). Gameplay frames go straight to it, so a busy lobby — e.g. one that is
   // suspended inside another player's create_room — cannot delay this connection's frames.
-  static PlayerEnvelope SetRoom(ex_actor::ActorRef<RoomActor> room) { return {SetRoomMsg {std::move(room)}}; }
+  static PlayerEnvelope SetRoom(ex_actor::ActorRef<RoomEndpoint> room) { return {SetRoomMsg {std::move(room)}}; }
   static PlayerEnvelope SeatFrame(std::string frame) { return {SeatFrameMsg {std::move(frame)}}; }
   static PlayerEnvelope SeatError(std::string frame, QuotaKind quota) {
     return {SeatErrorMsg {.frame = std::move(frame), .quota = quota}};

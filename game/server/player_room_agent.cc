@@ -14,13 +14,13 @@
 #include "player_actor.h"
 #include "player_agent.h"
 #include "protocol.h"
-#include "room.h"
+#include "room_endpoint.h"
 
 namespace mahjong {
 namespace {
 
 // Answers ROOM_NOT_FOUND when this player has no room yet. seq/window matching and "is the tile
-// in hand" stay in RoomActor (PROTOCOL.md §4.5, §6.3).
+// in hand" stay in the room (PROTOCOL.md §4.5, §6.3).
 bool HasRoom(const PlayerServices& services) {
   if (!services.room.IsEmpty()) {
     return true;
@@ -30,8 +30,8 @@ bool HasRoom(const PlayerServices& services) {
 }
 
 void ForwardToRoom(const PlayerServices& services, json::Value frame) {
-  ActorSendScope().spawn(
-      services.room.Send<&RoomActor::Dispatch>(RoomEnvelope::GameFrame(services.session.Info(), std::move(frame))));
+  ActorSendScope().spawn(services.room.Send<&RoomEndpoint::Dispatch>(
+      RoomEnvelope::GameFrame(services.session.Info(), std::move(frame))));
 }
 
 }  // namespace

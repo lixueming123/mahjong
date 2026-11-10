@@ -7,7 +7,7 @@
 //
 //   kSessionFrameBindings   login / register / ping / stats_request   the player's own account
 //   kLobbyFrameBindings     list_rooms / create_room / join_room / ready / sync   -> LobbyActor
-//   kRoomFrameBindings      discard / action                          -> RoomActor
+//   kRoomFrameBindings      discard / action                          -> the room (RoomEndpoint)
 //
 // Handlers are free functions rather than members of an agent class: they are stateless, and a
 // free function cannot quietly accumulate player state the way a class can. Everything they may
@@ -30,7 +30,7 @@ namespace mahjong {
 
 class PlayerActor;
 class LobbyActor;
-class RoomActor;
+class RoomEndpoint;
 
 // What a handler is allowed to touch. |player| is for answering this client (frames, errors and
 // their §7.2 quota); the rest are the destinations the handler forwards to.
@@ -38,7 +38,7 @@ struct PlayerServices {
   PlayerActor& player;
   Session& session;
   ex_actor::ActorRef<LobbyActor>& lobby;
-  ex_actor::ActorRef<RoomActor>& room;
+  ex_actor::ActorRef<RoomEndpoint>& room;
   // This player's own address, which every lobby call carries so the lobby can answer it.
   ex_actor::ActorRef<PlayerActor>& self;
 };

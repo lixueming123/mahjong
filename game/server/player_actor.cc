@@ -62,7 +62,7 @@ void PlayerActor::SetSelfRef(ex_actor::ActorRef<PlayerActor> self) { self_ref_ =
 // these three, so their frames never touch Connection from another thread.
 void PlayerActor::SeatFrame(std::string frame) { conn_->SendFrame(frame); }
 
-void PlayerActor::SetRoom(ex_actor::ActorRef<RoomActor> room) {
+void PlayerActor::SetRoom(ex_actor::ActorRef<RoomEndpoint> room) {
   room_ = std::move(room);
   spdlog::info("{}: room set, gameplay frames go straight there", conn_->Describe());
 }

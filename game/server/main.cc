@@ -26,6 +26,9 @@
 #include "lobby.h"
 #include "player.h"
 #include "protocol.h"
+// The bot pacing knobs (kDefaultAiDelayMs / SetAiActionDelayMs ...) are the room's, so main
+// needs the concrete room header — not just the RoomEndpoint surface the lobby uses.
+#include "room.h"
 #include "timer.h"
 
 namespace {

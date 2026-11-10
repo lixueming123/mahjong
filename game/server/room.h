@@ -35,32 +35,12 @@
 #include "mahjong_rules.h"
 #include "player.h"
 #include "riichi_rules.h"
+#include "room_contract.h"
+#include "room_endpoint.h"
 #include "seat_endpoint.h"
 #include "timer.h"
 
 namespace mahjong {
-
-inline constexpr int kSeatCount = 4;
-
-// 玩法（mode）。日麻接入见 game/docs/GAME_DESIGN_RIICHI_DRAFT.md：
-//   kClassic = 现行玩法（番数制、无立直/宝牌/振听），默认值，行为与之前逐字节一致；
-//   kRiichi  = 日麻（符+番、立直、振听、宝牌、点数制）。
-// v2.0：线值是整数（§1.3.1），入站解析在 player_lobby_agent.cc 用 protocol::ParseWireMode；
-// 内部逻辑永远比较本枚举，出站/落库用 ToWire 翻译。
-enum class GameMode : uint8_t { kClassic = 0, kRiichi = 1 };
-
-inline protocol::WireMode ToWire(GameMode mode) {
-  return mode == GameMode::kRiichi ? protocol::WireMode::kRiichi : protocol::WireMode::kClassic;
-}
-
-// 局数（只对日麻有意义；classic 由 C15 冻结为 4 局，传什么都按 4 局走）：
-//   kTonpu   = 东场 4 局（默认，短局）
-//   kHanchan = 半庄 8 局（东场 4 + 南场 4，场风 0 → 1）
-enum class GameLength : uint8_t { kTonpu = 0, kHanchan = 1 };
-
-inline protocol::WireLength ToWire(GameLength length) {
-  return length == GameLength::kHanchan ? protocol::WireLength::kHanchan : protocol::WireLength::kTonpu;
-}
 
 inline protocol::WireLimit ToWire(riichi::Limit limit) {
   switch (limit) {
@@ -82,61 +62,6 @@ inline protocol::WireLimit ToWire(riichi::Limit limit) {
 
 // 这个玩法下的一共几局：classic 恒 4（C15），日麻按 kTonpu/kHanchan 取 4/8。
 int RoundCountOf(GameMode mode, GameLength length);
-
-// Schedules the frozen "window timeout" message: after |delay_ms| the scheduler must call
-// RoomActor::OnWindowTimeout(|window_seq|). Production installs it in ExActorOnSpawned from the
-// window timer and the room's own ActorRef; the unit test injects a capturing one, because a
-// function cannot be serialized into a message.
-using TimeoutScheduler = std::function<void(int64_t delay_ms, uint64_t window_seq)>;
-
-// One seat's outcome of a finished round. It carries the whole identity (not just the seat) so
-// the owner can record the result without asking the room anything (ACCOUNT_DESIGN.md §4).
-struct SettledSeat {
-  PlayerInfo player;  // account_id == 0 for a guest or a bot
-  bool is_bot = false;
-  bool winner = false;
-  int delta_score = 0;
-};
-
-// Everything the owner of a finished round needs. v1.6（一场四局）: the callback fires once per
-// ROUND (4..8 times per match), and `match_over` says whether the match just ended — only then
-// does the owner start the §1.4.5 reclaim; the per-round match records are written every time.
-struct GameSettlement {
-  std::string room_id;
-  protocol::RoundEndReason reason = protocol::RoundEndReason::kInvalid;  // 线枚举（§1.3.1）
-  protocol::WireMode mode = protocol::WireMode::kClassic;                // 线枚举（lobby 落库时在边界翻回词表）
-  std::vector<SettledSeat> seats;                                        // always kSeatCount entries, in seat order
-  bool match_over = false;  // true = the match_end has been/will be broadcast (§5.15)
-  // ---- v1.3 场终快照（match_over 时有效；lobby 据此写 match_results，B3）----
-  int hands_played = 0;                         // 实际计入局数（D2 口径）
-  std::array<int, kSeatCount> dealer_hands {};  // 各座位坐庄手数（含连庄）
-  std::array<int, kSeatCount> totals {};        // final_score = 本场累计得失分（零和）
-  std::array<int, kSeatCount> final_rank {};    // 1..4，并列跳号
-};
-
-// Test seam for the per-round notification: a production room sends the settlement to the
-// LobbyActor that spawned it (a message, so it can be serialized), while the unit test injects
-// this capture callback. Called once per finished round (v1.6: 4..8 times per match); the
-// §1.4.5 reclaim is armed by the lobby only when `settlement.match_over` is true.
-using RoomFinishedCallback = std::function<void(const GameSettlement& settlement)>;
-
-// The room's narrow view of its owner, exactly like SeatEndpoint is the room's view of a seat:
-// LobbyActor implements it, the room only depends on this interface, and the unit test links
-// without the lobby. LobbyActor must derive *directly* from RoomOwner (single, non-virtual
-// inheritance) so the base subobject stays at offset 0 — ActorRef casts the concrete actor
-// pointer to the method pointer's class without a runtime check (seat_endpoint.h has the same
-// rule, and LobbyActor's constructor asserts it).
-class RoomOwner {
- public:
-  RoomOwner() = default;
-  RoomOwner(const RoomOwner&) = delete;
-  RoomOwner& operator=(const RoomOwner&) = delete;
-  virtual ~RoomOwner() = default;
-
-  // Once per finished round: writes the per-round history and, on `match_over`, arms the
-  // reclaim (PROTOCOL.md §1.4.5, ACCOUNT_DESIGN.md §4).
-  virtual stdexec::task<void> OnRoomFinished(GameSettlement settlement) = 0;
-};
 
 // Derives one room's wall seed from the server-level seed and the room's 0-based creation
 // index (RoomActor's caller, LobbyActor, passes exactly this).
@@ -229,79 +154,7 @@ int AiActionDelayMs();
 void SetInterHandDelayMs(int delay_ms);
 int InterHandDelayMs();
 
-struct RoomSeat {
-  int seat = 0;
-  PlayerInfo player;
-  bool is_bot = false;
-  // The player's socket is gone, but the seat is not automated any earlier than the window
-  // deadline: a reconnect inside the countdown still owns the decision (§8.5).
-  bool disconnected = false;
-  // Where this seat's frames go (seat_endpoint.h). Empty for a bot, or for a seat with no wire
-  // (the deal-only paths in the unit test) — that is the old `sink == nullptr` sentinel.
-  ex_actor::ActorRef<SeatEndpoint> endpoint;
-};
-
-// One message into RoomActor. `Dispatch` is the room's message entry point (the only exception
-// is the request/response `TakeSeat`, room.h), so every caller — LobbyActor's sends, the
-// timeout scheduler and the unit tests — builds one of these instead of naming a handler.
-//
-// As in PlayerEnvelope (seat_endpoint.h), the kind is the variant alternative, so a message
-// carries exactly its own fields. The flat version paid for a PlayerInfo, a json::Value and a
-// RoomSeat on every message — the window timeout, the most frequent one, included — on each of
-// the ~5 by-value moves into the mailbox. The variant charges each message only for its own
-// payload (its floor is WindowTimeoutMsg), and every alternative is plain data, so the whole
-// envelope can be serialized.
-struct RoomEnvelope {
-  struct ReadyMsg {  // lobby -> room: this player is ready; deals when the seats are full
-    PlayerInfo player;
-  };
-  struct SyncMsg {  // lobby -> room: resend this player's current view
-    PlayerInfo player;
-  };
-  struct GameFrameMsg {  // a seat's gameplay frame (discard / action)
-    PlayerInfo player;
-    json::Value frame;
-  };
-  // The frozen timeout scheme: |token| is a window seq, or the same seq with the AI pacing bit
-  // set (PROTOCOL.md §0.5).
-  struct WindowTimeoutMsg {
-    uint64_t token;
-  };
-  struct PlayerDisconnectedMsg {
-    PlayerInfo player;
-    // The connection that went away. A reconnect replaces the seat's endpoint, so a late close
-    // from the old one must not entrust the new session.
-    ex_actor::ActorRef<SeatEndpoint> conn;
-  };
-  struct IdleTimeoutMsg {
-    PlayerInfo player;
-  };
-  // PROTOCOL v2.2 §8.5: a fresh connection has taken over an already-seated player. The room
-  // swaps the seat's endpoint, clears `disconnected` and replays the current-phase snapshot.
-  struct ReconnectedMsg {
-    PlayerInfo player;
-    ex_actor::ActorRef<SeatEndpoint> endpoint;
-  };
-
-  static RoomEnvelope Ready(PlayerInfo player) { return {ReadyMsg {std::move(player)}}; }
-  static RoomEnvelope Sync(PlayerInfo player) { return {SyncMsg {std::move(player)}}; }
-  static RoomEnvelope GameFrame(PlayerInfo player, json::Value frame) {
-    return {GameFrameMsg {.player = std::move(player), .frame = std::move(frame)}};
-  }
-  static RoomEnvelope WindowTimeout(uint64_t token) { return {WindowTimeoutMsg {token}}; }
-  static RoomEnvelope PlayerDisconnected(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> conn) {
-    return {PlayerDisconnectedMsg {.player = std::move(player), .conn = std::move(conn)}};
-  }
-  static RoomEnvelope IdleTimeout(PlayerInfo player) { return {IdleTimeoutMsg {std::move(player)}}; }
-  static RoomEnvelope Reconnected(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> endpoint) {
-    return {ReconnectedMsg {.player = std::move(player), .endpoint = std::move(endpoint)}};
-  }
-
-  std::variant<ReadyMsg, SyncMsg, GameFrameMsg, WindowTimeoutMsg, PlayerDisconnectedMsg, IdleTimeoutMsg, ReconnectedMsg>
-      msg;
-};
-
-class RoomActor {
+class RoomActor final : public RoomEndpoint {
  public:
   // |ai_delay_ms| < 0 means "use the process-wide value" (AiActionDelayMs()); the same applies
   // to |inter_hand_delay_ms| (InterHandDelayMs()).
@@ -326,12 +179,12 @@ class RoomActor {
   // Every handler below is private, so no caller can reach room state without passing the gate
   // (async_gate.h explains why that matters). It is a coroutine, so a non-actor caller — the
   // unit test drives the room directly — has to start it (stdexec::sync_wait).
-  stdexec::task<void> Dispatch(RoomEnvelope envelope);
+  stdexec::task<void> Dispatch(RoomEnvelope envelope) override;
 
   // Pre-deal seat replacement, request/response: the outcome travels back as the return value
   // because a `shared_ptr<bool>` reply slot is cross-thread shared state that cannot be
   // serialized. Takes the gate like Dispatch does.
-  stdexec::task<bool> TakeSeat(RoomSeat seat);
+  stdexec::task<bool> TakeSeat(RoomSeat seat) override;
 
   // Test seam (the unit test installs it right after construction, before any traffic):
   // production rooms report through |owner| instead. Deliberately not a message — a

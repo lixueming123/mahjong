@@ -10,6 +10,10 @@
 
 #include "actor_scope.h"
 #include "protocol.h"
+// The lobby is the one place that still names a concrete room: `Spawn<RoomActor>` needs the
+// complete type. Everything the lobby *uses* afterwards goes through RoomEndpoint, so this
+// include is the only remaining coupling to a specific game (and the factory in S2 replaces it).
+#include "room.h"
 
 namespace ex = stdexec;
 
@@ -169,9 +173,9 @@ const LobbyActor::PlayerState* LobbyActor::FindPlayer(const std::string& player_
   return it == players_.end() ? nullptr : &it->second;
 }
 
-ex_actor::ActorRef<RoomActor> LobbyActor::FindRoom(const std::string& room_id) const {
+ex_actor::ActorRef<RoomEndpoint> LobbyActor::FindRoom(const std::string& room_id) const {
   auto it = rooms_.find(room_id);
-  return it == rooms_.end() ? ex_actor::ActorRef<RoomActor>() : it->second;
+  return it == rooms_.end() ? ex_actor::ActorRef<RoomEndpoint>() : it->second;
 }
 
 stdexec::task<void> LobbyActor::CreateRoom(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player) {
@@ -221,7 +225,9 @@ stdexec::task<void> LobbyActor::CreateRoomWithMode(ex_actor::ActorRef<SeatEndpoi
     co_return;
   }
 
-  ex_actor::ActorRef<RoomActor> room;
+  // The concrete room is spawned by name (Spawn's template argument), then narrowed to the
+  // interface the lobby actually uses: everything below holds `ActorRef<RoomEndpoint>`.
+  ex_actor::ActorRef<RoomEndpoint> room;
   std::string spawn_error;
   try {
     // The room gets the lobby's ref up front: it reports finished rounds by message, and it
@@ -361,7 +367,7 @@ stdexec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, 
   std::string message;
   RoomSeat claimed;
   std::vector<RoomSeat> snapshot;
-  ex_actor::ActorRef<RoomActor> room;
+  ex_actor::ActorRef<RoomEndpoint> room;
   bool same_room = false;
   const PlayerState* state = FindPlayer(player.player_id);
   if (creating_.contains(player.player_id)) {
@@ -418,7 +424,7 @@ stdexec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, 
     co_return;
   }
 
-  const bool accepted = co_await room.Send<&RoomActor::TakeSeat>(claimed);
+  const bool accepted = co_await room.Send<&RoomEndpoint::TakeSeat>(claimed);
   if (!accepted) {
     players_.erase(player.player_id);
     std::vector<RoomSeat>& seats_now = room_seats_[room_id];
@@ -442,7 +448,7 @@ stdexec::task<void> LobbyActor::JoinRoom(ex_actor::ActorRef<SeatEndpoint> conn, 
 
 stdexec::task<void> LobbyActor::Ready(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player) {
   std::string error;
-  ex_actor::ActorRef<RoomActor> room;
+  ex_actor::ActorRef<RoomEndpoint> room;
   const PlayerState* state = FindPlayer(player.player_id);
   if (state == nullptr || state->room_id.empty()) {
     error = "not in a room";
@@ -461,12 +467,12 @@ stdexec::task<void> LobbyActor::Ready(ex_actor::ActorRef<SeatEndpoint> conn, Pla
     co_await ReplyError(conn, protocol::ErrorCode::kRoomNotFound, error);
     co_return;
   }
-  ActorSendScope().spawn(room.Send<&RoomActor::Dispatch>(RoomEnvelope::Ready(std::move(player))));
+  ActorSendScope().spawn(room.Send<&RoomEndpoint::Dispatch>(RoomEnvelope::Ready(std::move(player))));
 }
 
 stdexec::task<void> LobbyActor::Sync(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player) {
   std::string error;
-  ex_actor::ActorRef<RoomActor> room;
+  ex_actor::ActorRef<RoomEndpoint> room;
   const PlayerState* state = FindPlayer(player.player_id);
   if (state == nullptr || state->room_id.empty()) {
     error = "not in a room";
@@ -480,7 +486,7 @@ stdexec::task<void> LobbyActor::Sync(ex_actor::ActorRef<SeatEndpoint> conn, Play
     co_await ReplyError(conn, protocol::ErrorCode::kRoomNotFound, error);
     co_return;
   }
-  ActorSendScope().spawn(room.Send<&RoomActor::Dispatch>(RoomEnvelope::Sync(std::move(player))));
+  ActorSendScope().spawn(room.Send<&RoomEndpoint::Dispatch>(RoomEnvelope::Sync(std::move(player))));
 }
 
 stdexec::task<void> LobbyActor::OnLoggedIn(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player, bool resume) {
@@ -531,7 +537,7 @@ stdexec::task<void> LobbyActor::OnLoggedIn(ex_actor::ActorRef<SeatEndpoint> conn
   }
 
   co_await ReplyFrame(conn, protocol::LoginOkFrame(player.player_id, player.name, /*in_room=*/true));
-  ex_actor::ActorRef<RoomActor> room = FindRoom(room_id);
+  ex_actor::ActorRef<RoomEndpoint> room = FindRoom(room_id);
   if (room.IsEmpty() || !IsCurrentConnection(player.player_id, conn)) {
     // Reclaimed, or a newer login for this player already won while this answer was in flight.
     co_return;
@@ -542,7 +548,7 @@ stdexec::task<void> LobbyActor::OnLoggedIn(ex_actor::ActorRef<SeatEndpoint> conn
     co_return;
   }
   co_await conn.Send<&SeatEndpoint::Dispatch>(PlayerEnvelope::SetRoom(room));
-  co_await room.Send<&RoomActor::Dispatch>(RoomEnvelope::Reconnected(player, conn));
+  co_await room.Send<&RoomEndpoint::Dispatch>(RoomEnvelope::Reconnected(player, conn));
 }
 
 stdexec::task<void> LobbyActor::DropPlayer(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> conn, bool force) {
@@ -564,13 +570,13 @@ stdexec::task<void> LobbyActor::DropPlayer(PlayerInfo player, ex_actor::ActorRef
     spdlog::info("lobby: player {} left the lobby", player.player_id);
     co_return;
   }
-  ex_actor::ActorRef<RoomActor> room = FindRoom(room_id);
+  ex_actor::ActorRef<RoomEndpoint> room = FindRoom(room_id);
   const auto started_it = room_started_.find(room_id);
   if (started_it != room_started_.end() && started_it->second) {
     if (!room.IsEmpty()) {
       // PROTOCOL.md §8.5: during a game the seat becomes entrusted and the round keeps going.
       // The old connection travels with the message so the room can ignore it after a reconnect.
-      ActorSendScope().spawn(room.Send<&RoomActor::Dispatch>(RoomEnvelope::PlayerDisconnected(player, old_conn)));
+      ActorSendScope().spawn(room.Send<&RoomEndpoint::Dispatch>(RoomEnvelope::PlayerDisconnected(player, old_conn)));
     }
     spdlog::info("lobby: player {} disconnected mid-game, room {} keeps playing (seat entrusted)", player.player_id,
                  room_id);
@@ -594,7 +600,7 @@ stdexec::task<void> LobbyActor::DropPlayer(PlayerInfo player, ex_actor::ActorRef
     bot.player.name = "AI-" + std::to_string(seat_index);
     roster->second[static_cast<size_t>(seat_index)] = bot;
     if (!room.IsEmpty()) {
-      ActorSendScope().spawn(room.Send<&RoomActor::TakeSeat>(bot) | ex_actor::DiscardResult());
+      ActorSendScope().spawn(room.Send<&RoomEndpoint::TakeSeat>(bot) | ex_actor::DiscardResult());
     }
     // The departing seat is a bot again: tell the remaining humans before they hit "ready".
     co_await BroadcastRoomUpdate(room_id, roster->second);
@@ -645,7 +651,7 @@ stdexec::task<void> LobbyActor::ReapRoom(std::string room_id) {
 
 stdexec::task<void> LobbyActor::OnIdleTimeout(ex_actor::ActorRef<SeatEndpoint> conn, PlayerInfo player) {
   bool drop_connection = false;
-  ex_actor::ActorRef<RoomActor> room;
+  ex_actor::ActorRef<RoomEndpoint> room;
   const PlayerState* state = FindPlayer(player.player_id);
   if (state == nullptr || state->room_id.empty()) {
     // PROTOCOL.md §1.6: in the lobby a 20s silence drops the connection. A create still in
@@ -663,7 +669,7 @@ stdexec::task<void> LobbyActor::OnIdleTimeout(ex_actor::ActorRef<SeatEndpoint> c
   }
   if (!room.IsEmpty()) {
     // In game the connection stays open and the seat becomes entrusted (§1.6/§6.4).
-    ActorSendScope().spawn(room.Send<&RoomActor::Dispatch>(RoomEnvelope::IdleTimeout(std::move(player))));
+    ActorSendScope().spawn(room.Send<&RoomEndpoint::Dispatch>(RoomEnvelope::IdleTimeout(std::move(player))));
   }
 }
 
