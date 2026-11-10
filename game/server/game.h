@@ -13,9 +13,9 @@
 // game unit-testable (mahjong_room_test.cc drives a Game through the shell with capturing seats)
 // and keeps "one actor writes its own state" true.
 //
-// A `GameStep` is what one transition produced: the frames to send, the one deadline to arm (if
-// any), and whether a round/match just settled. `Apply` is the *only* mutator; every other hook
-// is either a query, or is documented as read-only so the shell can call it without a gate.
+// A `GameStep` is what one transition produced: the frames to send, the deadlines to arm, and
+// the rounds that settled. `Apply` is the *only* mutator; every other hook is either a query,
+// or is documented as read-only so the shell can call it without a gate.
 
 #pragma once
 
@@ -38,6 +38,12 @@ namespace mahjong {
 struct GameSeat {
   int seat = 0;
   bool is_bot = false;
+  // True when this seat has somewhere to send frames. Fixed for the life of a match: a seat's
+  // endpoint is installed before the deal and only swapped on reconnect, never cleared. The
+  // game needs it because building a per-seat frame is the expensive half of a broadcast and
+  // an unwired seat (a bot) never sees one; `Outbound` with empty recipients is filtered by the
+  // room, but the per-seat frames of a state_sync have to be skipped before they are built.
+  bool wired = false;
   std::string player_id;
   std::string name;
 };
@@ -49,6 +55,13 @@ struct GameContext {
   uint64_t seed = 0;
   int action_timeout_ms = 0;     // how long a human's window stays open (§5.7 deadline_ms)
   int inter_hand_delay_ms = 0;   // the interlude between rounds (§5.10/§5.15)
+  // The pace at which an automated seat is played (§5.4). < 0 means "the game's own default":
+  // the room does not know whether this game even has bots.
+  int ai_delay_ms = -1;
+  // True when the room can honour `GameStep::deadlines`. The room's unit test deliberately
+  // runs one with no scheduler to prove nothing waits for a message that can never arrive, and
+  // that inline fallback is frozen by tests, so a game has to know which world it is in.
+  bool deadlines_supported = false;
   std::string options_json;
   std::vector<GameSeat> seats;
 };
@@ -82,19 +95,54 @@ struct GameResult {
   std::array<int, kSeatCount> final_rank {};
 };
 
-// What one transition produced. The deadlines are one-shot: a step either arms a new deadline or
-// arms nothing, so a game cannot accumulate timers by forgetting to clear one.
+// One deadline to arm. A step can carry several at once — a claim window arms the human
+// deadline and, in the same message, the AI pacing deadline for the bots that were deferred —
+// which is why this is a list and not a pair of fields.
+struct Deadline {
+  int64_t delay_ms = 0;
+  uint64_t token = 0;
+};
+
+// What one transition produced. The deadlines are one-shot: a step arms the deadlines it
+// lists and nothing else, so a game cannot accumulate timers by forgetting to clear one.
 struct GameStep {
   std::vector<Outbound> outbounds;
-  // > 0: arm a deadline that posts `token` back to OnTimeout after that many milliseconds.
-  // The token is the game's own — see the bit-tagged scheme in the mahjong games (a window
-  // deadline, an AI-pacing deadline and a round-advance deadline all travel through the same
-  // one-argument handler, and only the token says which is which).
-  int64_t deadline_ms = 0;
-  uint64_t token = 0;
-  // Set when a round settled, so the shell can report it to the owner (ACCOUNT_DESIGN.md §4).
-  std::optional<GameResult> result;
+  std::vector<Deadline> deadlines;
+  // Rounds that settled during this transition, in order. Usually one; zero when the step only
+  // moved the table, and (with AI pacing disabled) two if a bot deals itself a winning hand and
+  // the next round settles inside the same message.
+  std::vector<GameResult> results;
+
+  bool empty() const { return outbounds.empty() && deadlines.empty() && results.empty(); }
 };
+
+// Small builders. A game writes its frames into the step it is building; nothing else.
+inline void Emit(GameStep& step, int seat, std::string frame) {
+  if (!frame.empty()) {
+    step.outbounds.push_back(Outbound {{seat}, std::move(frame)});
+  }
+}
+
+// Same frame to every seat that has a wire (the room expands the empty recipient list).
+inline void EmitAll(GameStep& step, std::string frame) {
+  if (!frame.empty()) {
+    step.outbounds.push_back(Outbound {{}, std::move(frame)});
+  }
+}
+
+// One frame per seat, skipping the seats whose frame is empty (a broadcast that has per-seat
+// content: state_sync, and nothing else today).
+inline void EmitPerSeat(GameStep& step, std::array<std::string, kSeatCount> frames) {
+  for (size_t seat = 0; seat < frames.size(); ++seat) {
+    Emit(step, static_cast<int>(seat), std::move(frames[seat]));
+  }
+}
+
+// Arms one deadline. A delay of 0 is legal and means "as soon as the room can" — that is how
+// the unit tests drive round advances without sleeping, and the old room armed those too.
+inline void Arm(GameStep& step, int64_t delay_ms, uint64_t token) {
+  step.deadlines.push_back(Deadline {delay_ms, token});
+}
 
 // What the room should do with an inbound action. Three outcomes, not two, because PROTOCOL §6.3
 // distinguishes them: an action for a window that already moved on is dropped *silently* (the
@@ -162,6 +210,12 @@ class Game {
   // replayed too — and a reconnect must not grant a fresh deadline for a window that is already
   // counting down. Only the game knows which frames that case needs.
   virtual GameStep Reconnect(int seat) = 0;
+
+  // A seat's wire went away or came back. The room has already marked its own seat table; this
+  // only tells the game which seat currently has nobody listening, because a request sent there
+  // would be lost and is replayed on reconnect instead (§8.5). A disconnect never plays for the
+  // seat: the open window keeps its countdown, and that is a rule, not an omission.
+  virtual void OnSeatPresence(int seat, bool present) = 0;
 };
 
 }  // namespace mahjong

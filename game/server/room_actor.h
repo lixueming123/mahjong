@@ -51,7 +51,7 @@ class RoomActor : public RoomEndpoint {
   // |finished_for_test| instead — a scheduler and a capture callback are process-local, so they
   // cannot travel in a message.
   RoomActor(std::string room_id, std::string game_id, std::string options_json, uint64_t seed,
-            int action_timeout_ms, int inter_hand_delay_ms, std::vector<RoomSeat> seats,
+            int action_timeout_ms, int ai_delay_ms, int inter_hand_delay_ms, std::vector<RoomSeat> seats,
             std::shared_ptr<WindowTimer> timer, ex_actor::ActorRef<RoomOwner> owner = {},
             TimeoutScheduler timeout_scheduler = {}, RoomFinishedCallback finished_for_test = {});
 
@@ -112,6 +112,7 @@ class RoomActor : public RoomEndpoint {
   std::string options_json_;
   uint64_t seed_;
   int action_timeout_ms_;
+  int ai_delay_ms_;
   int inter_hand_delay_ms_;
   std::vector<RoomSeat> seats_;
   std::shared_ptr<WindowTimer> timer_;

@@ -14,7 +14,7 @@
 namespace mahjong {
 
 RoomActor::RoomActor(std::string room_id, std::string game_id, std::string options_json, uint64_t seed,
-                     int action_timeout_ms, int inter_hand_delay_ms, std::vector<RoomSeat> seats,
+                     int action_timeout_ms, int ai_delay_ms, int inter_hand_delay_ms, std::vector<RoomSeat> seats,
                      std::shared_ptr<WindowTimer> timer, ex_actor::ActorRef<RoomOwner> owner,
                      TimeoutScheduler timeout_scheduler, RoomFinishedCallback finished_for_test)
     : room_id_(std::move(room_id)),
@@ -22,6 +22,7 @@ RoomActor::RoomActor(std::string room_id, std::string game_id, std::string optio
       options_json_(std::move(options_json)),
       seed_(seed),
       action_timeout_ms_(action_timeout_ms),
+      ai_delay_ms_(ai_delay_ms),
       inter_hand_delay_ms_(inter_hand_delay_ms),
       seats_(std::move(seats)),
       timer_(std::move(timer)),
@@ -69,10 +70,15 @@ GameContext RoomActor::Context() const {
   context.seed = seed_;
   context.action_timeout_ms = action_timeout_ms_;
   context.inter_hand_delay_ms = inter_hand_delay_ms_;
+  context.ai_delay_ms = ai_delay_ms_;
+  context.deadlines_supported = static_cast<bool>(timeout_scheduler_);
   context.options_json = options_json_;
   context.seats.reserve(seats_.size());
   for (const RoomSeat& seat : seats_) {
-    context.seats.push_back(GameSeat {.seat = seat.seat, .is_bot = seat.is_bot, .player_id = seat.player.player_id,
+    context.seats.push_back(GameSeat {.seat = seat.seat,
+                                      .is_bot = seat.is_bot,
+                                      .wired = !seat.endpoint.IsEmpty(),
+                                      .player_id = seat.player.player_id,
                                       .name = seat.player.name});
   }
   return context;
@@ -130,18 +136,19 @@ bool RoomActor::TakeSeatLocked(RoomSeat seat) {
 
 stdexec::task<void> RoomActor::Run(GameStep step) {
   co_await Deliver(step.outbounds);
-  if (step.deadline_ms > 0) {
+  for (const Deadline& deadline : step.deadlines) {
     if (timeout_scheduler_) {
-      timeout_scheduler_(step.deadline_ms, step.token);
+      timeout_scheduler_(deadline.delay_ms, deadline.token);
     } else {
       // A room without a scheduler cannot enforce a deadline; say so once rather than silently
       // freezing the table. Production installs one in BindRuntime, and the unit test injects a
-      // capturing one.
+      // capturing one — a game is told at Setup whether any of this is possible
+      // (GameContext::deadlines_supported) and takes its inline path when it is not.
       spdlog::error("room {}: no deadline scheduler; the armed deadline is dropped", room_id_);
     }
   }
-  if (step.result.has_value()) {
-    ReportResult(*step.result);
+  for (const GameResult& result : step.results) {
+    ReportResult(result);
   }
 }
 
@@ -307,7 +314,11 @@ stdexec::task<void> RoomActor::OnPlayerDisconnected(PlayerInfo player, ex_actor:
   spdlog::info("room {}: seat {} lost its wire; its window keeps the countdown", room_id_, seat);
   // GAME_DESIGN §5.6.2 / PROTOCOL v2.3 §8.5: a disconnect does NOT play for the seat. The open
   // window stays unanswered until its deadline, so a reconnect inside the countdown still owns
-  // the decision. There is nothing to run here — and that is a rule, not an omission.
+  // the decision. There is nothing to run here — and that is a rule, not an omission. The game
+  // is told only so it stops addressing requests at a seat that cannot hear them.
+  if (game_started_) {
+    game().OnSeatPresence(seat, /*present=*/false);
+  }
 }
 
 stdexec::task<void> RoomActor::OnIdleTimeout(PlayerInfo player) {
@@ -327,6 +338,7 @@ stdexec::task<void> RoomActor::OnReconnected(PlayerInfo player, ex_actor::ActorR
     // the newly installed endpoint on its own.
     co_return;
   }
+  game().OnSeatPresence(seat, /*present=*/true);
   // PROTOCOL v2.3 §8.5: the replayed frames are the game's business (round metadata first, then
   // the authoritative board) — the room only knows which seat asked.
   co_await Run(game().Reconnect(seat));

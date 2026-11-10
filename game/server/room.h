@@ -64,45 +64,10 @@ inline protocol::WireLimit ToWire(riichi::Limit limit) {
 int RoundCountOf(GameMode mode, GameLength length);
 
 // Derives one room's wall seed from the server-level seed and the room's 0-based creation
-// index (RoomActor's caller, LobbyActor, passes exactly this).
-//
-// Why this shape:
-//   * it is a pure function of (base_seed, room_index) — no clock, no RNG, no
-//     std::hash<std::string> (whose value is not guaranteed stable across runs/builds), so a
-//     fixed --seed replays the very same sequence of walls and the e2e statistics stay
-//     reproducible;
-//   * it is the identity for room_index 0: a single-room server (every test and every
-//     `e2e_full_game.py --games N` run) deals exactly the wall it dealt before this change;
-//   * odd multiplication + SplitMix64's finalizer are both bijections on 64 bits, so
-//     distinct room indices cannot collide, and XOR-ing a fixed base seed keeps two
-//     different base seeds apart for the same room index.
-inline uint64_t DeriveRoomSeed(uint64_t base_seed, uint32_t room_index) {
-  uint64_t mixed = static_cast<uint64_t>(room_index) * 0x9E3779B97F4A7C15ull;  // odd => bijective
-  mixed ^= mixed >> 30;
-  mixed *= 0xBF58476D1CE4E5B9ull;
-  mixed ^= mixed >> 27;
-  mixed *= 0x94D049BB133111EBull;
-  mixed ^= mixed >> 31;  // finalizer(0) == 0, hence `base_seed` is returned unchanged for room 0
-  return base_seed ^ mixed;
-}
+// index (RoomActor's caller, LobbyActor, passes exactly this). Moved to room_contract.h so a
+// game implementation can use it without depending on the room: see DeriveRoomSeed there.
 
-// v1.6（一场四局 · 局种子）：**房间种子只管「房间之间不同」，局种子管「局与局之间不同」，
-// 两者缺一不可**——只有房间种子时，一场 4~8 局的牌山（连带四家起手牌）会逐局完全相同
-// （B2 把「一局」改「一场」时漏掉的这一层）。
-//
-// 与 DeriveRoomSeed 同族（同 finalizer + 奇数乘子保证双射），但**不能沿用它的
-// finalizer(0)==0 特性**：那一行会让 hand 0 退回 base_seed，与「房间 0 = 房间种子」的约定
-// 撞车。这里让 `hand_index + 1` 参与混合，保证 hand 0 也与 base_seed 不同；纯函数、无时间源，
-// 所以 `--seed` 固定时整场仍逐帧可复现（SameSeedReplaysTheWholeMatchFrameForFrame）。
-inline uint64_t DeriveRoundSeed(uint64_t base_seed, uint32_t hand_index) {
-  uint64_t mixed = (static_cast<uint64_t>(hand_index) + 1) * 0x9E3779B97F4A7C15ull;  // odd => bijective
-  mixed ^= mixed >> 30;
-  mixed *= 0xBF58476D1CE4E5B9ull;
-  mixed ^= mixed >> 27;
-  mixed *= 0x94D049BB133111EBull;
-  mixed ^= mixed >> 31;  // finalizer(hand_index + 1) is non-zero for every hand_index
-  return base_seed ^ mixed;
-}
+// v1.6（一场四局 · 局种子）：DeriveRoundSeed also lives in room_contract.h.
 
 // GAME_DESIGN v1.4 §5.4: a bot's own decision (discard / meld / self-draw win) is executed
 // ai_delay_ms after its window opened, so a human can follow the table. 0 disables the
