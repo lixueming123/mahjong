@@ -80,6 +80,26 @@ target_include_directories(mahjong_room_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 target_include_directories(mahjong_room_shell PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
 target_link_libraries(mahjong_room_shell PUBLIC ex_actor)
 
+# 玩法插件：classic（番数制）。只依赖规则库与共享契约——不认识 actor、端点、定时器
+# （边界写在 game.h 顶部）。现在还没有调用方，先单独编成静态库做类型检查；大厅切到
+# RoomActorFor<ClassicMahjongGame> 之后由 mahjong_server 直接链接。
+# ex_actor 只为了头文件路径：room_contract.h 里的 RoomOwner/TimeoutScheduler 是契约的
+# 一部分，玩法本身不 include 任何 actor 头。
+add_library(mahjong_classic_game STATIC server/classic/classic_mahjong_game.cc)
+target_include_directories(mahjong_classic_game PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(mahjong_classic_game PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_link_libraries(mahjong_classic_game PUBLIC mahjong_rules spdlog::spdlog ex_actor)
+
+# 玩法单测：直接驱动 ClassicMahjongGame，不建房间、不建 actor、不开 socket。
+# 它同时是「端口逐字节兼容」的硬门槛：三个 hash 是拆分前 room.cc 冻结的那三个 classic 值。
+add_executable(mahjong_classic_game_test server/classic/classic_mahjong_game_test.cc server/json.cc
+                                       server/protocol.cc)
+target_include_directories(mahjong_classic_game_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_link_libraries(mahjong_classic_game_test PRIVATE mahjong_classic_game GTest::gtest_main
+                                                     GTest::gmock)
+add_test(NAME mahjong_classic_game_test COMMAND mahjong_classic_game_test)
+set_tests_properties(mahjong_classic_game_test PROPERTIES TIMEOUT 120)
+
 # 麻将服务端（t3：TCP JSON 网关 + 服务器骨架；t4：RoomActor 状态机 / 回合驱动 / 超时 / 结算；
 # 账号与战绩：注册/登录 + 战绩存档，见 game/docs/ACCOUNT_DESIGN.md）
 add_executable(
