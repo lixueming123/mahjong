@@ -39,21 +39,13 @@ inline constexpr int kSeatCount = 4;
 //   kClassic = 现行玩法（番数制、无立直/宝牌/振听），默认值，行为与之前逐字节一致；
 //   kRiichi  = 日麻（符+番、立直、振听、宝牌、点数制）。
 // v2.0：线值是整数（§1.3.1），入站解析在 player_lobby_agent.cc 用 protocol::ParseWireMode；
-// 内部逻辑永远比较本枚举，出站/落库用 ToWire 翻译。
+// 内部逻辑永远比较本枚举。落库不再经过它：GameSettlement 直接带玩法的字符串 id。
 enum class GameMode : uint8_t { kClassic = 0, kRiichi = 1 };
-
-inline protocol::WireMode ToWire(GameMode mode) {
-  return mode == GameMode::kRiichi ? protocol::WireMode::kRiichi : protocol::WireMode::kClassic;
-}
 
 // 局数（只对日麻有意义；classic 由 C15 冻结为 4 局，传什么都按 4 局走）：
 //   kTonpu   = 东场 4 局（默认，短局）
 //   kHanchan = 半庄 8 局（东场 4 + 南场 4，场风 0 → 1）
 enum class GameLength : uint8_t { kTonpu = 0, kHanchan = 1 };
-
-inline protocol::WireLength ToWire(GameLength length) {
-  return length == GameLength::kHanchan ? protocol::WireLength::kHanchan : protocol::WireLength::kTonpu;
-}
 
 // Schedules the frozen "window timeout" message: after |delay_ms| the scheduler must post the
 // token back to the room. Production installs it in ExActorOnSpawned from the window timer and
@@ -76,8 +68,11 @@ struct SettledSeat {
 struct GameSettlement {
   std::string room_id;
   protocol::RoundEndReason reason = protocol::RoundEndReason::kInvalid;  // 线枚举（§1.3.1）
-  protocol::WireMode mode = protocol::WireMode::kClassic;                // 线枚举（lobby 落库时在边界翻回词表）
-  std::vector<SettledSeat> seats;                                        // always kSeatCount entries, in seat order
+  // Which game was played, as the game's own stable id ("classic" / "riichi" / ...). It is the
+  // DB `mode` column verbatim: the lobby used to translate a protocol::WireMode here, but the
+  // contract is game-neutral and a future game has no wire mode to translate.
+  std::string game_id;
+  std::vector<SettledSeat> seats;  // always kSeatCount entries, in seat order
   bool match_over = false;  // true = the match_end has been/will be broadcast (§5.15)
   // ---- 场终快照（match_over 时有效；lobby 据此写 match_results）----
   int hands_played = 0;                         // 实际计入局数（D2 口径）

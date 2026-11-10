@@ -376,7 +376,9 @@ void RoomActor::NotifyFinished(const Settlement& settlement) {
   GameSettlement finished;
   finished.room_id = room_id_;
   finished.reason = settlement.reason;
-  finished.mode = ToWire(mode_);
+  // 与 room_actor.cc 的 ReportResult 同义：settlement 现在带玩法自己的稳定 id，DB 的 mode 列
+  // 直接就是它（"classic" / "riichi"），lobby 不再翻译。
+  finished.game_id = mode_ == GameMode::kRiichi ? "riichi" : "classic";
   // C10：match_over = 「本场到此为止」（match_end 已/即将下发）；lobby 只据此 arm 回收。
   finished.match_over = !settlement.match_will_continue;
   // B3：场终快照随 match_over 的那次通知带出，lobby 据此写 match_results。

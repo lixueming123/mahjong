@@ -296,7 +296,7 @@ stdexec::task<void> LobbyActor::OnRoomFinished(GameSettlement settlement) {
                                                           .reason = std::string(protocol::NameOf(settlement.reason)),
                                                           .delta_score = seat.delta_score,
                                                           .win = seat.winner,
-                                                          .mode = std::string(protocol::NameOf(settlement.mode))}));
+                                                          .mode = settlement.game_id}));
     }
   }
   // ACCOUNT_DESIGN.md v1.3 §4 item 7: the match summary is written ONCE per match (at
@@ -311,7 +311,7 @@ stdexec::task<void> LobbyActor::OnRoomFinished(GameSettlement settlement) {
       MatchResultRecord result;
       result.account_id = seat.player.account_id;
       result.room_id = settlement.room_id;
-      result.mode = std::string(protocol::NameOf(settlement.mode));
+      result.mode = settlement.game_id;
       result.hands_played = settlement.hands_played;
       result.dealer_hands = settlement.dealer_hands[seat_index];
       result.final_score = settlement.totals[seat_index];

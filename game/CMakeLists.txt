@@ -71,6 +71,15 @@ if(MAHJONG_MYSQL_FOUND)
   target_link_libraries(mahjong_db PUBLIC ${MYSQL_LIBRARY})
 endif()
 
+# 通用房间外壳：座位/端点/分发/一次性截止/投递/结算回传/断线重连，不含任何玩法知识
+# （room_actor.h 顶部写清了边界）。玩法是插件（game.h），绑定见 room_actor_for.h。
+# 现在只有 room_actor.cc，JSON/协议/定时器的实现由使用方提供——大厅切到 RoomActorFor
+# 之后由 mahjong_server 直接链接，不重复一份 json.cc/protocol.cc。
+add_library(mahjong_room_shell STATIC server/room_actor.cc)
+target_include_directories(mahjong_room_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(mahjong_room_shell PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_link_libraries(mahjong_room_shell PUBLIC ex_actor)
+
 # 麻将服务端（t3：TCP JSON 网关 + 服务器骨架；t4：RoomActor 状态机 / 回合驱动 / 超时 / 结算；
 # 账号与战绩：注册/登录 + 战绩存档，见 game/docs/ACCOUNT_DESIGN.md）
 add_executable(
