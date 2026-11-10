@@ -1,3 +1,9 @@
+// ============================================================================================
+// FROZEN — 这个测试跟着 LegacyRoomActor（room.h / room.cc）一起冻住了：不在 all 目标里、
+// 不注册 ctest、ctest 不会跑它。语义覆盖已经搬到
+// `mahjong_classic_game_test` / `mahjong_riichi_game_test`（golden 转录逐字节比对）。
+// 要单独跑：cmake --build build --target mahjong_room_test && ./game/mahjong_room_test
+// ============================================================================================
 // t4 unit tests for the LegacyRoomActor state machine.
 //
 // The suite drives the actor directly (it is a plain class; every public method runs to

@@ -1,17 +1,28 @@
-// LegacyRoomActor: the monolith this refactor is dismantling.
+// ============================================================================================
+// FROZEN — 已冻结。LegacyRoomActor 是这次重构拆掉的那座单体。它作为**历史参照**留在库里，
+// 但已经完全脱离构建与测试：
+//   * 不在任何 `all` 目标里（`EXCLUDE_FROM_ALL`），`make` / `cmake --build` 不编译它；
+//   * 不注册 ctest，`ctest` 不跑它的两个测试；
+//   * **不再开发**：不修 bug、不加功能、不为它适配接口变更。它编译不过了也不必管。
+// 想看它一眼的话，手动指定目标即可（会连着编译两个测试二进制）：
+//     cmake --build build --target mahjong_room_test riichi_room_test
+// 现役实现是 room_actor.h（外壳）+ classic/ 与 riichi/ 两个 Game 插件；语义用例在
+// `mahjong_classic_game_test` / `mahjong_riichi_game_test`（golden 转录逐字节比对）。
+// ============================================================================================
 //
-// **No production code uses this any more.** Both games now run on the generic shell
-// (room_actor.h) as `RoomActorFor<GameT>`:
+// LegacyRoomActor: the monolith this refactor dismantled. Kept as a historical reference only —
+// no build target depends on it, no test runs it, and it is not maintained.
+//
+// Both games now run on the generic shell (room_actor.h) as `RoomActorFor<GameT>`:
 //   * classic -> `RoomActorFor<ClassicMahjongGame>`  (games_registry row since S3)
 //   * riichi  -> `RoomActorFor<RiichiMahjongGame>`   (since S4)
-// lobby.cc never names it, `mahjong_server` and `mahjong_lobby_test` no longer even compile
+// lobby.cc never names it, `mahjong_server` and `mahjong_lobby_test` do not even compile
 // room.cc, and `room_bench.cc` benches the shell instead.
 //
-// Two test files still drive it directly — `mahjong_room_test.cc` and `riichi_room_test.cc` —
-// because they read room *state* from outside (`remaining()`, `hand_of()`, `SetPointsForTest`).
-// That is exactly what the plugin split removed: game state now lives behind the actor, so a
-// room-level test can only observe frames. Converting them is the last step of the plan; until
-// then this stays as their scaffolding and nothing else. **Nothing new goes in here.**
+// The two test files that still drive it directly — `mahjong_room_test.cc` and
+// `riichi_room_test.cc` — read room *state* from outside (`remaining()`, `hand_of()`,
+// `SetPointsForTest`), which is exactly what the plugin split removed: game state now lives
+// behind the actor, so a room-level test can only observe frames. They are frozen with it.
 //
 // It was renamed from `RoomActor` when both implementations had to coexist in one binary: two
 // distinct classes with the same fully-qualified name is an ODR violation the linker would only

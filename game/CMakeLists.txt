@@ -26,17 +26,20 @@ target_link_libraries(riichi_rules_test PRIVATE riichi_rules GTest::gtest_main
 add_test(NAME riichi_rules_test COMMAND riichi_rules_test)
 set_tests_properties(riichi_rules_test PROPERTIES TIMEOUT 60)
 
-# 日麻房间冒烟：王牌切分 / 持点 / 立直拒绝（算分由 riichi_rules_test 负责）。
-# ⚠️ 与 mahjong_room_test 一样，是 `server/room.cc`（LegacyRoomActor）的最后两个使用者：
-# 它们要从房间外面读状态，而玩法搬进插件后状态住在 actor 里、外面只能看帧。把它们改成
-# 纯帧断言 + 把语义用例交给 mahjong_riichi_game_test / mahjong_classic_game_test 之后，
-# room.h / room.cc 就能删掉。
-add_executable(riichi_room_test server/riichi_room_test.cc server/room.cc server/timer.cc
+# ---- 已冻结（FROZEN）：LegacyRoomActor 的两个测试 -------------------------------------------------
+# 这两个二进制驱动的是 `server/room.cc`（LegacyRoomActor），也就是插件化之前那座单体。
+# 它现在只作历史参照：**不参与 all 构建、不注册 ctest、不再维护**。
+# 语义覆盖已经由 mahjong_classic_game_test / mahjong_riichi_game_test 接手（golden 转录比对）。
+# 需要时手动构建：cmake --build build --target mahjong_room_test riichi_room_test
+add_executable(riichi_room_test EXCLUDE_FROM_ALL server/riichi_room_test.cc server/room.cc server/timer.cc
                                server/json.cc server/protocol.cc)
 target_link_libraries(riichi_room_test PRIVATE ex_actor mahjong_rules riichi_rules GTest::gtest_main
                                                 GTest::gmock)
-add_test(NAME riichi_room_test COMMAND riichi_room_test)
-set_tests_properties(riichi_room_test PROPERTIES TIMEOUT 60)
+
+add_executable(mahjong_room_test EXCLUDE_FROM_ALL server/mahjong_room_test.cc server/room.cc server/timer.cc
+                                server/json.cc server/protocol.cc)
+target_link_libraries(mahjong_room_test PRIVATE ex_actor mahjong_rules riichi_rules GTest::gmock)
+# ---- 冻结区结束 --------------------------------------------------------------------------------
 
 
 # 账号存储（ACCOUNT_DESIGN.md §2）：用系统装的 libmysqlclient，不走 CPM
@@ -200,16 +203,6 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/protocol_enums_consistency_test.py)
 endif()
-
-# t4：外壳状态机单测（回合驱动 / seq 作废 / 非法操作 / AI / 结算零和）。
-# ⚠️ 仍在驱动 LegacyRoomActor（见上面 riichi_room_test 的说明）——这是它剩下的最后一点用处。
-add_executable(mahjong_room_test server/mahjong_room_test.cc server/room.cc server/timer.cc
-                                server/json.cc server/protocol.cc)
-target_link_libraries(mahjong_room_test PRIVATE ex_actor mahjong_rules riichi_rules GTest::gmock)
-add_test(NAME mahjong_room_test COMMAND mahjong_room_test)
-# 240s：整套已经要 ~100s，GoldenTranscriptIsFrozen 又加了 6 场完整对局（两种玩法 × 三种子，
-# 四座位全接线）。它是重构护栏，不能因为超时变成偶发红。
-set_tests_properties(mahjong_room_test PROPERTIES TIMEOUT 240)
 
 # RoomActor 压测：真 actor 运行时、真实座位投递（每个座位是一个真实端点 actor），无 socket。
 # 量的是「一局游戏要多少 CPU」和「一个核能带几张桌」，不是通过/失败，所以不注册成 ctest。
