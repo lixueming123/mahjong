@@ -1,7 +1,7 @@
 // Unit tests for LobbyActor's post-game reclaim (PROTOCOL.md §1.4.5).
 //
 // The test runs the real stack — a spawned LobbyActor, a real WindowTimer and a real
-// LegacyRoomActor — with the window length and the reclaim delay shrunk, so a whole game auto-plays
+// the room shell — with the window length and the reclaim delay shrunk, so a whole game auto-plays
 // through the frozen timeout path (every human window times out at once) and the reclaim is
 // observable in well under a second. No socket is involved: the connection is a real
 // Connection over an invalid fd, which is enough to carry the outbox and the close request.
@@ -27,7 +27,9 @@
 #include "json.h"
 #include "player.h"
 #include "player_actor.h"
-#include "room.h"
+#include "classic/classic_mahjong_game.h"
+#include "game_registry.h"
+#include "room_actor_for.h"
 #include "timer.h"
 
 namespace mahjong {
@@ -424,18 +426,29 @@ TEST(RoomPerf, ConcurrentRooms) {
   };
 
   auto play = [&](int rooms) {
-    std::vector<ex_actor::ActorRef<LegacyRoomActor>> actors;
+    // 房间每**局**都会上报一条结算，只有最后一条的 match_over 才是「本场结束」——
+    // 大厅回收房间挂的正是它（§1.4.5），所以这里也只数它。
+    std::atomic<int> finished {0};
+    std::vector<ex_actor::ActorRef<RoomEndpoint>> actors;
     actors.reserve(static_cast<size_t>(rooms));
     for (int i = 0; i < rooms; ++i) {
-      actors.push_back(WaitValue(ex_actor::Spawn<LegacyRoomActor>("r-" + std::to_string(i), static_cast<uint64_t>(i + 1),
-                                                            /*action_timeout_ms=*/15000, make_seats(i), nullptr,
-                                                            /*ai_delay_ms=*/0)));
+      ex_actor::ActorRef<RoomActorFor<ClassicMahjongGame>> spawned =
+          WaitValue(ex_actor::Spawn<RoomActorFor<ClassicMahjongGame>>(
+              "r-" + std::to_string(i), std::string("classic"), std::string(), static_cast<uint64_t>(i + 1),
+              /*action_timeout_ms=*/15000, /*ai_delay_ms=*/0, /*inter_hand_delay_ms=*/-1, make_seats(i), nullptr,
+              ex_actor::ActorRef<RoomOwner> {}, TimeoutScheduler {},
+              RoomFinishedCallback([&finished](const GameSettlement& settlement) {
+                if (settlement.match_over) {
+                  finished.fetch_add(1);
+                }
+              })));
+      actors.push_back(spawned);
       // v1.6：**不装**调度器 —— 本基准的座位全部自动化，局间推进走"无调度器即 inline"回退
       // （B2 C6），一场 4..8 局在同一消息内打完；装了丢弃型调度器反而会让推进令牌石沉大海。
       PlayerInfo player;
       player.player_id = "p-" + std::to_string(i);
       player.name = "n";
-      stdexec::sync_wait(actors.back().Send<&LegacyRoomActor::Dispatch>(RoomEnvelope::Ready(std::move(player))));
+      stdexec::sync_wait(actors.back().Send<&RoomEndpoint::Dispatch>(RoomEnvelope::Ready(std::move(player))));
     }
 
     const auto started = std::chrono::steady_clock::now();
@@ -444,20 +457,17 @@ TEST(RoomPerf, ConcurrentRooms) {
       PlayerInfo player;
       player.player_id = "p-" + std::to_string(i);
       player.name = "n";
-      games.spawn(actors[static_cast<size_t>(i)].Send<&LegacyRoomActor::Dispatch>(
+      games.spawn(actors[static_cast<size_t>(i)].Send<&RoomEndpoint::Dispatch>(
           RoomEnvelope::PlayerDisconnected(std::move(player), /*conn=*/ {})));
     }
     stdexec::sync_wait(games.on_empty());
     const auto us =
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count();
 
-    uint64_t seq_sum = 0;
-    for (const ex_actor::ActorRef<LegacyRoomActor>& room : actors) {
-      ASSERT_TRUE(WaitValue(room.Send<&LegacyRoomActor::game_finished>()));
-      seq_sum += WaitValue(room.Send<&LegacyRoomActor::seq>());
-    }
+    // 每一场都必须真的打完并已上报（否则这次「并发」基准量的是空转）。
+    EXPECT_EQ(finished.load(), rooms);
     std::cout << "BENCH " << rooms << " rooms on " << kPool << " workers: " << us << " us (" << (us / rooms)
-              << " us/room, mean seq " << (seq_sum / static_cast<uint64_t>(rooms)) << ")\n";
+              << " us/room)\n";
   };
 
   play(1);

@@ -1,11 +1,17 @@
-// LegacyRoomActor: the authoritative state machine of one room (t4).
+// LegacyRoomActor: the monolith this refactor is dismantling.
 //
-// **On its way out.** This is the 2700-line monolith that held both rule systems behind 63
-// `mode_` branches. It has been replaced by the generic shell (room_actor.h) plus one `Game` per
-// ruleset (game.h, classic/classic_mahjong_game.h), and the classic half already runs there — the
-// lobby spawns `RoomActorFor<ClassicMahjongGame>` for it. What is left is the riichi half, still
-// served from here through a temporary registry row (game_registry.cc); that row goes away with
-// this file once RiichiMahjongGame lands. Nothing new should be added here.
+// **No production code uses this any more.** Both games now run on the generic shell
+// (room_actor.h) as `RoomActorFor<GameT>`:
+//   * classic -> `RoomActorFor<ClassicMahjongGame>`  (games_registry row since S3)
+//   * riichi  -> `RoomActorFor<RiichiMahjongGame>`   (since S4)
+// lobby.cc never names it, `mahjong_server` and `mahjong_lobby_test` no longer even compile
+// room.cc, and `room_bench.cc` benches the shell instead.
+//
+// Two test files still drive it directly — `mahjong_room_test.cc` and `riichi_room_test.cc` —
+// because they read room *state* from outside (`remaining()`, `hand_of()`, `SetPointsForTest`).
+// That is exactly what the plugin split removed: game state now lives behind the actor, so a
+// room-level test can only observe frames. Converting them is the last step of the plan; until
+// then this stays as their scaffolding and nothing else. **Nothing new goes in here.**
 //
 // It was renamed from `RoomActor` when both implementations had to coexist in one binary: two
 // distinct classes with the same fully-qualified name is an ODR violation the linker would only

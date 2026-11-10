@@ -26,7 +26,11 @@ target_link_libraries(riichi_rules_test PRIVATE riichi_rules GTest::gtest_main
 add_test(NAME riichi_rules_test COMMAND riichi_rules_test)
 set_tests_properties(riichi_rules_test PROPERTIES TIMEOUT 60)
 
-# 日麻房间冒烟：模式分派 / 王牌切分 / 持点 / 立直拒绝（算分由 riichi_rules_test 负责）
+# 日麻房间冒烟：王牌切分 / 持点 / 立直拒绝（算分由 riichi_rules_test 负责）。
+# ⚠️ 与 mahjong_room_test 一样，是 `server/room.cc`（LegacyRoomActor）的最后两个使用者：
+# 它们要从房间外面读状态，而玩法搬进插件后状态住在 actor 里、外面只能看帧。把它们改成
+# 纯帧断言 + 把语义用例交给 mahjong_riichi_game_test / mahjong_classic_game_test 之后，
+# room.h / room.cc 就能删掉。
 add_executable(riichi_room_test server/riichi_room_test.cc server/room.cc server/timer.cc
                                server/json.cc server/protocol.cc)
 target_link_libraries(riichi_room_test PRIVATE ex_actor mahjong_rules riichi_rules GTest::gtest_main
@@ -73,8 +77,8 @@ endif()
 
 # 通用房间外壳：座位/端点/分发/一次性截止/投递/结算回传/断线重连，不含任何玩法知识
 # （room_actor.h 顶部写清了边界）。玩法是插件（game.h），绑定见 room_actor_for.h。
-# 现在只有 room_actor.cc，JSON/协议/定时器的实现由使用方提供——大厅切到 RoomActorFor
-# 之后由 mahjong_server 直接链接，不重复一份 json.cc/protocol.cc。
+# 实现只有 room_actor.cc；JSON/协议/定时器的实现由使用方提供（mahjong_server 已经这样链接，
+# 不重复一份 json.cc/protocol.cc）。
 add_library(mahjong_room_shell STATIC server/room_actor.cc)
 target_include_directories(mahjong_room_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(mahjong_room_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server)
@@ -133,7 +137,6 @@ add_executable(
   server/frame_parser.cc
   server/lobby.cc
   server/game_registry.cc
-  server/room.cc
   server/timer.cc
   server/gateway.cc)
 target_link_libraries(mahjong_server PRIVATE ex_actor mahjong_rules riichi_rules mahjong_db mahjong_room_shell
@@ -198,7 +201,8 @@ if(Python3_Interpreter_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/protocol_enums_consistency_test.py)
 endif()
 
-# t4：RoomActor 状态机单测（回合驱动 / seq 作废 / 非法操作 / AI / 结算零和）
+# t4：外壳状态机单测（回合驱动 / seq 作废 / 非法操作 / AI / 结算零和）。
+# ⚠️ 仍在驱动 LegacyRoomActor（见上面 riichi_room_test 的说明）——这是它剩下的最后一点用处。
 add_executable(mahjong_room_test server/mahjong_room_test.cc server/room.cc server/timer.cc
                                 server/json.cc server/protocol.cc)
 target_link_libraries(mahjong_room_test PRIVATE ex_actor mahjong_rules riichi_rules GTest::gmock)
@@ -209,9 +213,9 @@ set_tests_properties(mahjong_room_test PROPERTIES TIMEOUT 240)
 
 # RoomActor 压测：真 actor 运行时、真实座位投递（每个座位是一个真实端点 actor），无 socket。
 # 量的是「一局游戏要多少 CPU」和「一个核能带几张桌」，不是通过/失败，所以不注册成 ctest。
-add_executable(mahjong_room_bench server/room_bench.cc server/room.cc server/timer.cc server/json.cc
-                                 server/protocol.cc)
-target_link_libraries(mahjong_room_bench PRIVATE ex_actor mahjong_rules riichi_rules)
+add_executable(mahjong_room_bench server/room_bench.cc server/timer.cc server/json.cc server/protocol.cc)
+target_link_libraries(mahjong_room_bench PRIVATE ex_actor mahjong_rules riichi_rules mahjong_room_shell
+                                               mahjong_classic_game)
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   # The tree is configured Debug; a load test at -O0 measures the build type, not the room. This
   # optimizes only this target's own sources (the framework's static lib stays as configured).
@@ -219,7 +223,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 endif()
 
 # t3：LobbyActor 的房间登记与 game_end 后回收（PROTOCOL.md §1.4.5）
-add_executable(mahjong_lobby_test server/lobby_test.cc server/lobby.cc server/game_registry.cc server/room.cc server/connection.cc
+add_executable(mahjong_lobby_test server/lobby_test.cc server/lobby.cc server/game_registry.cc server/connection.cc
                                   server/player_actor.cc server/player_session_agent.cc server/player_lobby_agent.cc server/player_room_agent.cc server/frame_parser.cc server/net.cc server/timer.cc
                                   server/json.cc server/protocol.cc)
 target_link_libraries(mahjong_lobby_test PRIVATE ex_actor mahjong_rules riichi_rules mahjong_db mahjong_room_shell
