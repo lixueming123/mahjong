@@ -1,4 +1,4 @@
-// t4 unit tests for the RoomActor state machine.
+// t4 unit tests for the LegacyRoomActor state machine.
 //
 // The suite drives the actor directly (it is a plain class; every public method runs to
 // completion inside one "message"), with a capturing seat sink instead of a socket and a
@@ -267,17 +267,17 @@ class TestRoom {
     if (install_scheduler) {
       scheduler = [this](int64_t delay_ms, uint64_t window_seq) { scheduled_.emplace_back(delay_ms, window_seq); };
     }
-    room_ = std::make_unique<RoomActor>("r-0001", seed, action_timeout_ms, std::move(seats), nullptr, ai_delay_ms,
+    room_ = std::make_unique<LegacyRoomActor>("r-0001", seed, action_timeout_ms, std::move(seats), nullptr, ai_delay_ms,
                                         inter_hand_delay_ms, ex_actor::ActorRef<RoomOwner> {}, std::move(scheduler),
                                         RoomFinishedCallback {}, mode, length);
   }
 
-  RoomActor* room() { return room_.get(); }
+  LegacyRoomActor* room() { return room_.get(); }
   CapturingSink* sink() { return human_sink_.get(); }
   // Per-seat sink; only the |all_human| shape wires more than seat 0.
   CapturingSink* sink_of(int seat) { return sinks_[static_cast<size_t>(seat)].get(); }
 
-  // RoomActor::Dispatch is a coroutine (it takes the actor's gate), so a direct caller has to
+  // LegacyRoomActor::Dispatch is a coroutine (it takes the actor's gate), so a direct caller has to
   // drive it: the fixture never has anything else in flight, so sync_wait runs it to completion
   // on this thread — the same synchronous behaviour the old direct handler call had.
   void Send(RoomEnvelope envelope) { stdexec::sync_wait(room_->Dispatch(std::move(envelope))); }
@@ -559,7 +559,7 @@ class TestRoom {
   PlayerInfo human_;
   std::shared_ptr<CapturingSink> human_sink_;
   std::array<std::shared_ptr<CapturingSink>, kSeatCount> sinks_;
-  std::unique_ptr<RoomActor> room_;
+  std::unique_ptr<LegacyRoomActor> room_;
   std::vector<std::pair<int64_t, uint64_t>> scheduled_;
   std::optional<Tile> drawn_;
   std::vector<json::Value> history_;
@@ -675,7 +675,7 @@ TEST_F(RoomActorTest, AiClaimGateRejectsAPongThatWorsensTheHand) {
   ASSERT_TRUE(after.has_value());
   ASSERT_GT(*after, before) << "fixture must be harmful, got " << before << " -> " << *after;
 
-  const Option answer = RoomActor::ChooseClaimAnswer(hand, {}, options, claimed);
+  const Option answer = LegacyRoomActor::ChooseClaimAnswer(hand, {}, options, claimed);
   EXPECT_EQ(answer.action, protocol::Action::kPass) << "an AI must not break its hand for a pong";
   EXPECT_TRUE(answer.tiles.empty());
 }
@@ -692,7 +692,7 @@ TEST_F(RoomActorTest, AiClaimGateAcceptsAPongThatImprovesTheHand) {
   ASSERT_TRUE(after.has_value());
   ASSERT_LT(*after, before) << "fixture must be beneficial, got " << before << " -> " << *after;
 
-  const Option answer = RoomActor::ChooseClaimAnswer(hand, {}, options, claimed);
+  const Option answer = LegacyRoomActor::ChooseClaimAnswer(hand, {}, options, claimed);
   EXPECT_EQ(answer.action, protocol::Action::kPong);
   ASSERT_EQ(answer.tiles.size(), 1u);
   EXPECT_EQ(FaceOf(answer.tiles[0]), FaceOf(claimed));
@@ -711,7 +711,7 @@ TEST_F(RoomActorTest, AiClaimGateGatesEveryChowCombination) {
   ASSERT_GT(*harmful_after, harmful_before) << "fixture must be harmful";
   const std::vector<Option> harmful_options = {Option {.action = protocol::Action::kChow, .tiles = harmful_pair},
                                                Option {.action = protocol::Action::kPass, .tiles = {}}};
-  EXPECT_EQ(RoomActor::ChooseClaimAnswer(harmful, {}, harmful_options, claimed_six_m).action, protocol::Action::kPass);
+  EXPECT_EQ(LegacyRoomActor::ChooseClaimAnswer(harmful, {}, harmful_options, claimed_six_m).action, protocol::Action::kPass);
 
   // (b) two non-worsening combinations: the lowest shanten wins and ties keep the frozen order
   const std::vector<Tile> tie = HandOf({"3m", "4m", "4m", "6m", "1p", "1p", "2p", "2p", "3p", "8s", "6z", "6z", "7z"});
@@ -727,7 +727,7 @@ TEST_F(RoomActorTest, AiClaimGateGatesEveryChowCombination) {
   const std::vector<Option> tie_options = {Option {.action = protocol::Action::kChow, .tiles = pair_a},
                                            Option {.action = protocol::Action::kChow, .tiles = pair_b},
                                            Option {.action = protocol::Action::kPass, .tiles = {}}};
-  const Option answer = RoomActor::ChooseClaimAnswer(tie, {}, tie_options, claimed_five_m);
+  const Option answer = LegacyRoomActor::ChooseClaimAnswer(tie, {}, tie_options, claimed_five_m);
   EXPECT_EQ(answer.action, protocol::Action::kChow);
   ASSERT_EQ(answer.tiles.size(), pair_a.size());
   const Option& expected = (*after_a <= *after_b) ? tie_options[0] : tie_options[1];
@@ -894,7 +894,7 @@ TEST_F(RoomActorTest, RoomsOfOneServerDealDifferentHandsAndStayReproducible) {
       seats.front().endpoint = seat0;
       // Exactly what LobbyActor does: room index -> derived wall seed.
       // Deal-only fixture: keep the pre-t31 synchronous path (ai_delay 0).
-      RoomActor room("r-" + std::to_string(index + 1), DeriveRoomSeed(base, index), kDefaultTimeoutMs, std::move(seats),
+      LegacyRoomActor room("r-" + std::to_string(index + 1), DeriveRoomSeed(base, index), kDefaultTimeoutMs, std::move(seats),
                      nullptr, /*ai_delay_ms=*/0);
       // Dispatch is a coroutine (it takes the room gate), so drive it like the actor world would.
       stdexec::sync_wait(room.Dispatch(RoomEnvelope::Ready(PlayerInfo {.player_id = "p-human", .name = "Human"})));
@@ -1806,7 +1806,7 @@ TEST_F(RoomActorTest, FullGamesSatisfyProtocolInvariants) {
 // 连庄场（dealer 不变，只有 hand_index 在变）是这一层最容易漏的情形，必须覆盖到；
 // 轮庄场也一并覆盖。
 namespace {
-uint64_t WallFingerprint(const RoomActor& room) {
+uint64_t WallFingerprint(const LegacyRoomActor& room) {
   // FNV-1a over the dealt wall (post-deal remnant; identical walls ⇒ identical fingerprints).
   uint64_t hash = 1469598103934665603ull;
   for (Tile tile : room.wall_of()) {
@@ -1819,7 +1819,7 @@ uint64_t WallFingerprint(const RoomActor& room) {
   return hash;
 }
 
-std::string HandsSignature(const RoomActor& room) {
+std::string HandsSignature(const LegacyRoomActor& room) {
   std::string signature;
   for (int seat = 0; seat < kSeatCount; ++seat) {
     for (Tile tile : SortedTiles(room.hand_of(seat))) {
@@ -1951,7 +1951,7 @@ TEST_F(RoomActorTest, GameEndCarriesInterludeAndMatchEndWaitsForIt) {
 
 // ---------------------------------------------------------------------------
 // R11（A1_ACCEPTANCE §七）：`remaining == 0`（本局最后一张）时，打牌/鸣牌窗口都**不得**
-// 出现任何杠选项（ankan/kakan/kong）——RoomActor 接线层的守卫，规则库签名不动。
+// 出现任何杠选项（ankan/kakan/kong）——LegacyRoomActor 接线层的守卫，规则库签名不动。
 // 做法：整场驱动，凡人类窗口打开时 `room->remaining() == 0` 即断言无杠选项；
 // 最后一张恰好发到人类座位的情形随 40 场必然出现（≈每局 25%）。
 TEST_F(RoomActorTest, NoKongOptionsWhenWallExhausted) {
@@ -2444,7 +2444,7 @@ TEST_F(RoomActorTest, SameSeedReplaysTheWholeMatchFrameForFrame) {
 
 // v2.4（重构护栏）：两种玩法 × 三个种子的「整场、四座位、逐帧」转录 hash 冻结。
 //
-// 为什么需要它：接下来要把 room.cc（2721 行、63 处 mode_ 分支）拆成「通用 RoomActor +
+// 为什么需要它：接下来要把 room.cc（2721 行、63 处 mode_ 分支）拆成「通用 LegacyRoomActor +
 // 每个玩法一份 Game」。拆分本身**不允许**改变任何线上行为，而语义断言（「和牌分数对」）挡不住
 // 「帧里少一个字段」「action_request 的收件人换了」这类漂移。这个用例把一整场的产物压成一个
 // 数字，拆分前后必须逐位相同，是 S2/S3/S4 每一步的唯一硬门槛。

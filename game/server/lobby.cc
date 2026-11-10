@@ -9,11 +9,8 @@
 #include <spdlog/spdlog.h>
 
 #include "actor_scope.h"
+#include "game_registry.h"
 #include "protocol.h"
-// The lobby is the one place that still names a concrete room: `Spawn<RoomActor>` needs the
-// complete type. Everything the lobby *uses* afterwards goes through RoomEndpoint, so this
-// include is the only remaining coupling to a specific game (and the factory in S2 replaces it).
-#include "room.h"
 
 namespace ex = stdexec;
 
@@ -193,7 +190,10 @@ stdexec::task<void> LobbyActor::CreateRoomWithMode(ex_actor::ActorRef<SeatEndpoi
   std::vector<RoomSeat> seats;
   std::shared_ptr<WindowTimer> timer;
   ex_actor::ActorRef<LobbyActor> self;
-  enum class Reject { kNone, kAlready, kNoSelf };
+  // Which game was asked for. Looked up before anything is reserved: an unregistered selector must
+  // not leave a reservation (or a spawned room) behind.
+  const GameEntry* game = FindGame(mode);
+  enum class Reject { kNone, kAlready, kNoSelf, kNoGame };
   Reject reject = Reject::kNone;
   const PlayerState* state = FindPlayer(player.player_id);
   if ((state != nullptr && !state->room_id.empty()) || creating_.contains(player.player_id)) {
@@ -203,6 +203,8 @@ stdexec::task<void> LobbyActor::CreateRoomWithMode(ex_actor::ActorRef<SeatEndpoi
     // Send would throw on the timer thread. main() always installs the ref before the
     // gateway starts, so this only fires in a misconfigured process.
     reject = Reject::kNoSelf;
+  } else if (game == nullptr) {
+    reject = Reject::kNoGame;
   } else {
     // Every room gets its own wall: the server-level seed alone would deal the very same
     // hand in every room of this process. The derivation stays a pure function of (base
@@ -224,16 +226,31 @@ stdexec::task<void> LobbyActor::CreateRoomWithMode(ex_actor::ActorRef<SeatEndpoi
     co_await ReplyError(conn, protocol::ErrorCode::kInternal, "failed to create room");
     co_return;
   }
+  if (reject == Reject::kNoGame) {
+    // Reachable only if a mode is retired from the registry while clients still ask for it (the
+    // wire parser rejects unknown integers first), so the message stays about the selector.
+    spdlog::error("lobby: no game registered for mode {}, refusing a room for {}", static_cast<int>(mode),
+                  player.player_id);
+    co_await ReplyError(conn, protocol::ErrorCode::kBadRequest, "unknown game mode");
+    co_return;
+  }
 
-  // The concrete room is spawned by name (Spawn's template argument), then narrowed to the
-  // interface the lobby actually uses: everything below holds `ActorRef<RoomEndpoint>`.
+  // The registry owns the only place a concrete room type is named; what comes back is already
+  // narrowed to the interface the lobby uses: everything below holds `ActorRef<RoomEndpoint>`.
   ex_actor::ActorRef<RoomEndpoint> room;
   std::string spawn_error;
   try {
     // The room gets the lobby's ref up front: it reports finished rounds by message, and it
-    // installs its own timeout scheduler in ExActorOnSpawned (nothing serializable to send).
-    room = co_await ex_actor::Spawn<RoomActor>(room_id, room_seed, action_timeout_ms_, seats, timer, -1, -1, self,
-                                               TimeoutScheduler {}, RoomFinishedCallback {}, mode, length);
+    // installs its own timeout scheduler when the framework hands it its own ref (nothing
+    // serializable to send).
+    RoomLaunch launch;
+    launch.room_id = room_id;
+    launch.seed = room_seed;
+    launch.action_timeout_ms = action_timeout_ms_;
+    launch.seats = seats;
+    launch.timer = timer;
+    launch.owner = self;
+    room = co_await LaunchRoom(*game, std::move(launch), length);
   } catch (const std::exception& e) {
     // Answering happens below: a `co_await` is not allowed inside a catch handler.
     spawn_error = e.what();

@@ -249,17 +249,7 @@ constexpr int kMaxPumpSteps = 20000;  // safety net against a stuck state machin
 
 }  // namespace
 
-int& AiDelayStorage() {
-  static int value = kDefaultAiDelayMs;
-  return value;
-}
-
-int& InterHandDelayStorage() {
-  static int value = kDefaultInterHandDelayMs;
-  return value;
-}
-
-RoomActor::RoomActor(std::string room_id, uint64_t seed, int action_timeout_ms, std::vector<RoomSeat> seats,
+LegacyRoomActor::LegacyRoomActor(std::string room_id, uint64_t seed, int action_timeout_ms, std::vector<RoomSeat> seats,
                      std::shared_ptr<WindowTimer> timer, int ai_delay_ms, int inter_hand_delay_ms,
                      ex_actor::ActorRef<RoomOwner> owner, TimeoutScheduler timeout_scheduler,
                      RoomFinishedCallback finished_for_test, GameMode mode, GameLength length)
@@ -273,8 +263,12 @@ RoomActor::RoomActor(std::string room_id, uint64_t seed, int action_timeout_ms, 
       finished_for_test_(std::move(finished_for_test)),
       owner_(std::move(owner)),
       timer_(std::move(timer)),
-      ai_delay_ms_(ai_delay_ms < 0 ? AiActionDelayMs() : ai_delay_ms),
-      inter_hand_delay_ms_(inter_hand_delay_ms < 0 ? InterHandDelayMs() : inter_hand_delay_ms) {
+      // -1 means "not passed": fall back to the compile-time default. It used to read the
+      // process-wide knob instead, but that knob belongs to the launch path now (game_registry.h)
+      // and every remaining caller passes the value explicitly — the lobby through the registry,
+      // the tests through this constructor.
+      ai_delay_ms_(ai_delay_ms < 0 ? kDefaultAiDelayMs : ai_delay_ms),
+      inter_hand_delay_ms_(inter_hand_delay_ms < 0 ? kDefaultInterHandDelayMs : inter_hand_delay_ms) {
   // Seat number == index everywhere in this class; make that true even if the caller handed
   // the seats over in another order.
   std::sort(seats_.begin(), seats_.end(), [](const RoomSeat& lhs, const RoomSeat& rhs) { return lhs.seat < rhs.seat; });
@@ -285,7 +279,7 @@ RoomActor::RoomActor(std::string room_id, uint64_t seed, int action_timeout_ms, 
   assert(static_cast<void*>(static_cast<RoomEndpoint*>(this)) == static_cast<void*>(this));
 }
 
-void RoomActor::ExActorOnSpawned(const ex_actor::ActorRuntimeInfo<RoomActor>& info) {
+void LegacyRoomActor::ExActorOnSpawned(const ex_actor::ActorRuntimeInfo<LegacyRoomActor>& info) {
   self_ref_ = info.self_actor_ref;
   // PROTOCOL.md §0.5: the production scheduler is the window timer plus the room's own ref.
   // A room without a timer (the unit test) keeps whatever scheduler it was constructed with.
@@ -293,23 +287,15 @@ void RoomActor::ExActorOnSpawned(const ex_actor::ActorRuntimeInfo<RoomActor>& in
     return;
   }
   std::shared_ptr<WindowTimer> timer = timer_;
-  ex_actor::ActorRef<RoomActor> self = self_ref_;
+  ex_actor::ActorRef<LegacyRoomActor> self = self_ref_;
   timeout_scheduler_ = [timer, self](int64_t delay_ms, uint64_t window_seq) {
     timer->Schedule(delay_ms, [self, window_seq]() {
-      ActorSendScope().spawn(self.Send<&RoomActor::Dispatch>(RoomEnvelope::WindowTimeout(window_seq)));
+      ActorSendScope().spawn(self.Send<&LegacyRoomActor::Dispatch>(RoomEnvelope::WindowTimeout(window_seq)));
     });
   };
 }
 
-void SetAiActionDelayMs(int delay_ms) { AiDelayStorage() = delay_ms; }
-
-int AiActionDelayMs() { return AiDelayStorage(); }
-
-void SetInterHandDelayMs(int delay_ms) { InterHandDelayStorage() = delay_ms; }
-
-int InterHandDelayMs() { return InterHandDelayStorage(); }
-
-int RoomActor::SeatOf(const std::string& player_id) const {
+int LegacyRoomActor::SeatOf(const std::string& player_id) const {
   for (const RoomSeat& seat : seats_) {
     if (!seat.is_bot && seat.player.player_id == player_id) {
       return seat.seat;
@@ -326,7 +312,7 @@ int RoomActor::SeatOf(const std::string& player_id) const {
 // The visitor returns the task Dispatch awaits rather than being a coroutine itself: a coroutine
 // per arm would allocate a frame for every message, and the handlers already are the coroutines
 // — this is what `co_await Handler(...)` did before, at the same frame count.
-stdexec::task<void> RoomActor::Dispatch(RoomEnvelope envelope) {
+stdexec::task<void> LegacyRoomActor::Dispatch(RoomEnvelope envelope) {
   AsyncGate::Guard guard = co_await gate_.Acquire();
   co_await std::visit(
       overloaded {
@@ -347,12 +333,12 @@ stdexec::task<void> RoomActor::Dispatch(RoomEnvelope envelope) {
 
 // The second public entry (the request/response counterpart of the removed TakeSeat message):
 // it takes the same gate, so a seat change can never interleave with a deal.
-stdexec::task<bool> RoomActor::TakeSeat(RoomSeat seat) {
+stdexec::task<bool> LegacyRoomActor::TakeSeat(RoomSeat seat) {
   AsyncGate::Guard guard = co_await gate_.Acquire();
   co_return TakeSeatLocked(std::move(seat));
 }
 
-bool RoomActor::TakeSeatLocked(RoomSeat seat) {
+bool LegacyRoomActor::TakeSeatLocked(RoomSeat seat) {
   if (game_started_ || seat.seat < 0 || seat.seat >= kSeatCount) {
     return false;
   }
@@ -365,7 +351,7 @@ bool RoomActor::TakeSeatLocked(RoomSeat seat) {
   return true;
 }
 
-void RoomActor::NotifyFinished(const Settlement& settlement) {
+void LegacyRoomActor::NotifyFinished(const Settlement& settlement) {
   if (!finished_for_test_ && owner_.IsEmpty()) {
     return;
   }
@@ -410,7 +396,7 @@ void RoomActor::NotifyFinished(const Settlement& settlement) {
   ActorSendScope().spawn(owner_.Send<&RoomOwner::OnRoomFinished>(std::move(finished)));
 }
 
-bool RoomActor::ScheduleAiAction(int64_t delay_ms) {
+bool LegacyRoomActor::ScheduleAiAction(int64_t delay_ms) {
   if (!timeout_scheduler_) {
     spdlog::error(
         "room {}: no window timeout scheduler installed for the AI delay; "
@@ -425,7 +411,7 @@ bool RoomActor::ScheduleAiAction(int64_t delay_ms) {
   return true;
 }
 
-stdexec::task<bool> RoomActor::BotDeclaresTsumo(int seat) {
+stdexec::task<bool> LegacyRoomActor::BotDeclaresTsumo(int seat) {
   if (!discard_window_win_check_) {
     co_return false;
   }
@@ -443,7 +429,7 @@ stdexec::task<bool> RoomActor::BotDeclaresTsumo(int seat) {
   co_return true;
 }
 
-stdexec::task<bool> RoomActor::PlayAutomatedDiscard() {
+stdexec::task<bool> LegacyRoomActor::PlayAutomatedDiscard() {
   const int seat = current_seat_;
   ai_discard_pending_ = false;
   if (!discard_window_open_ || NeedsPlayerReply(seat)) {
@@ -494,7 +480,7 @@ stdexec::task<bool> RoomActor::PlayAutomatedDiscard() {
   co_return true;
 }
 
-void RoomActor::ResolveAutomatedClaimAnswers() {
+void LegacyRoomActor::ResolveAutomatedClaimAnswers() {
   ai_claim_pending_ = false;
   for (int seat = 0; seat < kSeatCount; ++seat) {
     if (!claim_recipient_[static_cast<size_t>(seat)] || claim_answers_[static_cast<size_t>(seat)].answered ||
@@ -518,7 +504,7 @@ void RoomActor::ResolveAutomatedClaimAnswers() {
   }
 }
 
-bool RoomActor::HasPendingHumanWin() const {
+bool LegacyRoomActor::HasPendingHumanWin() const {
   for (int seat = 0; seat < kSeatCount; ++seat) {
     const ClaimAnswer& answer = claim_answers_[static_cast<size_t>(seat)];
     if (answer.answered && answer.action == protocol::Action::kWin && !seats_[static_cast<size_t>(seat)].is_bot) {
@@ -528,7 +514,7 @@ bool RoomActor::HasPendingHumanWin() const {
   return false;
 }
 
-bool RoomActor::IsAutomated(int seat) const {
+bool LegacyRoomActor::IsAutomated(int seat) const {
   // Only a bot (or a seat with no wire, checked by NeedsPlayerReply) acts inside the message
   // that opens its window. A disconnected human is still waiting for its countdown: the
   // reconnect path relies on that window staying unanswered until the deadline.
@@ -539,7 +525,7 @@ bool RoomActor::IsAutomated(int seat) const {
 // Outbound delivery
 // ---------------------------------------------------------------------------------------
 
-stdexec::task<void> RoomActor::Deliver(std::array<std::string, kSeatCount> frames) {
+stdexec::task<void> LegacyRoomActor::Deliver(std::array<std::string, kSeatCount> frames) {
   // PROTOCOL.md §5.12 asks for a parallel broadcast: a slow seat must not delay the other three,
   // and the room must not move on until every seat has been told. Each seat is a PlayerActor
   // message now, so this really awaits four sends at once — the fixed arity is deliberate,
@@ -548,7 +534,7 @@ stdexec::task<void> RoomActor::Deliver(std::array<std::string, kSeatCount> frame
                              DeliverSeat(2, std::move(frames[2])), DeliverSeat(3, std::move(frames[3])));
 }
 
-stdexec::task<void> RoomActor::DeliverSeat(int seat, std::string frame) {
+stdexec::task<void> LegacyRoomActor::DeliverSeat(int seat, std::string frame) {
   const RoomSeat& room_seat = seats_[static_cast<size_t>(seat)];
   if (frame.empty() || room_seat.endpoint.IsEmpty()) {
     co_return;  // a bot, or a seat with no wire
@@ -556,13 +542,13 @@ stdexec::task<void> RoomActor::DeliverSeat(int seat, std::string frame) {
   co_await room_seat.endpoint.Send<&SeatEndpoint::Dispatch>(PlayerEnvelope::SeatFrame(std::move(frame)));
 }
 
-stdexec::task<void> RoomActor::ReplyFrame(int seat, std::string frame) {
+stdexec::task<void> LegacyRoomActor::ReplyFrame(int seat, std::string frame) {
   std::array<std::string, kSeatCount> frames;
   frames[static_cast<size_t>(seat)] = std::move(frame);
   co_await Deliver(std::move(frames));
 }
 
-stdexec::task<void> RoomActor::ReplyError(int seat, protocol::ErrorCode code, std::string_view message) {
+stdexec::task<void> LegacyRoomActor::ReplyError(int seat, protocol::ErrorCode code, std::string_view message) {
   // PROTOCOL §7.2: the disconnect quota counts every error answered to a connection, so a
   // rejected room-level action is accounted too. The frame and the quota travel in ONE message,
   // which is what keeps "the frame is already queued" true before a quota can ask for a close.
@@ -582,7 +568,7 @@ stdexec::task<void> RoomActor::ReplyError(int seat, protocol::ErrorCode code, st
       PlayerEnvelope::SeatError(protocol::ErrorFrame(code, message), quota));
 }
 
-std::array<std::string, kSeatCount> RoomActor::StateSyncFrames() const {
+std::array<std::string, kSeatCount> LegacyRoomActor::StateSyncFrames() const {
   // v1.6（N1 两版缓存）：共享**打码版**（他家 ankan.tiles = []）；仅暗杠持有者额外渲染一份
   // 替换其自身项（额外次数 = 持有者数，实战 ≤2；无暗杠退化 1 份）。禁止每座位重建 4 份，
   // 禁止对所有人下发真实牌面。此循环无 await，渲染期间状态不可变（原 hoist 注释仍成立）。
@@ -608,7 +594,7 @@ std::array<std::string, kSeatCount> RoomActor::StateSyncFrames() const {
   return frames;
 }
 
-std::array<std::string, kSeatCount> RoomActor::StateSyncFramesRevealed() const {
+std::array<std::string, kSeatCount> LegacyRoomActor::StateSyncFramesRevealed() const {
   // v1.6（§5.9 局终揭示）：game_end 前最后一份 state_sync，把**所有** ankan 补全为 4 张真实牌面，
   // 供结算页画完整手牌。复用既有帧，不新增帧、不新增字段。
   std::array<std::string, kSeatCount> frames;
@@ -622,14 +608,14 @@ std::array<std::string, kSeatCount> RoomActor::StateSyncFramesRevealed() const {
   return frames;
 }
 
-bool RoomActor::SeatHoldsAnkan(int seat) const {
+bool LegacyRoomActor::SeatHoldsAnkan(int seat) const {
   for (const Meld& meld : melds_[static_cast<size_t>(seat)]) {
     if (meld.type == MeldType::kAnkan) return true;
   }
   return false;
 }
 
-json::Value RoomActor::BuildSeatsArray(int viewer) const {
+json::Value LegacyRoomActor::BuildSeatsArray(int viewer) const {
   json::Value seat_array = json::Value::Arr(kSeatCount);
   for (const RoomSeat& room_seat : seats_) {
     // 日麻多一个公开字段 riichi（立直状态是公开信息：牌桌上立直棒人人可见）
@@ -663,11 +649,11 @@ json::Value RoomActor::BuildSeatsArray(int viewer) const {
   return seat_array;
 }
 
-std::string RoomActor::BuildStateSync(int for_seat) const {
+std::string LegacyRoomActor::BuildStateSync(int for_seat) const {
   return BuildStateSync(for_seat, BuildSeatsArray(for_seat).Dump());
 }
 
-std::string RoomActor::BuildStateSync(int for_seat, const std::string& seats_json) const {
+std::string LegacyRoomActor::BuildStateSync(int for_seat, const std::string& seats_json) const {
   // PROTOCOL v1.7 §5.16 裁决：听牌数据走**独立的 `tenpai` 帧**（仅本家、不塞 state_sync），
   // 因此 state_sync 的字段集与 v1.6 完全一致（§11.2 的「state_sync.waits」是同一文档里的
   // 过期草案，§5.16/§8.1/§11.3 与客户端契约均以 tenpai 帧为准）。
@@ -698,7 +684,7 @@ std::string RoomActor::BuildStateSync(int for_seat, const std::string& seats_jso
 //   * `waits[]`：§2.2 牌序、同面至多一条；`is_tenpai == false` 时恒为 `[]`（MUST 下发清空信号）；
 //   * `waits[].remaining` = **可见枚数** = 4 −（本家手牌 + 四家牌河 + 四家副露）中该牌面的张数，
 //     **他家暗杠的 4 张不扣减**（扣了就能反推出暗杠牌面，§5.16 冻结口径）；**牌山真值永不入帧**。
-json::Value RoomActor::BuildTenpaiFrame(int seat) const {
+json::Value LegacyRoomActor::BuildTenpaiFrame(int seat) const {
   const std::vector<Tile>& concealed = hands_[static_cast<size_t>(seat)];
   const std::vector<Meld>& melds = melds_[static_cast<size_t>(seat)];
   json::Value waits = json::Value::Arr(0);
@@ -760,7 +746,7 @@ json::Value RoomActor::BuildTenpaiFrame(int seat) const {
 
 // §5.16 下发（T1 打牌后 / T2 副露后 / T3 sync 补发）：只发本家、一份；bot 无 wire 不发。
 // PB-2：构建耗时超 300µs 打一次 warn（日志巡检；纯测量、不进任何帧字段）。
-stdexec::task<void> RoomActor::DeliverTenpai(int seat) {
+stdexec::task<void> LegacyRoomActor::DeliverTenpai(int seat) {
   if (seat < 0 || seat >= kSeatCount || seats_[static_cast<size_t>(seat)].endpoint.IsEmpty()) {
     co_return;
   }
@@ -779,12 +765,12 @@ stdexec::task<void> RoomActor::DeliverTenpai(int seat) {
   co_await Deliver(std::move(frames));
 }
 
-std::string RoomActor::BuildGameStart(int for_seat) const {
+std::string LegacyRoomActor::BuildGameStart(int for_seat) const {
   return BuildGameStartFrame(for_seat, dealer_, round_index_, round_count_, hands_[static_cast<size_t>(for_seat)],
                              mode_, points_, dora_indicators_, round_wind_, match_totals_, renchan_count_);
 }
 
-std::string RoomActor::BuildMatchEnd() const {
+std::string LegacyRoomActor::BuildMatchEnd() const {
   // PROTOCOL v1.6 §5.15：场终帧，无 seq。rank = 1 + 严格大于本座位分数的人数（并列跳号）；
   // 排序 final_score 降序、同分 seat 升序。
   struct Ranked {
@@ -830,7 +816,7 @@ std::string RoomActor::BuildMatchEnd() const {
   return frame.Dump();
 }
 
-std::string RoomActor::BuildGameEnd(const Settlement& settlement) const {
+std::string LegacyRoomActor::BuildGameEnd(const Settlement& settlement) const {
   const bool riichi_mode = mode_ == GameMode::kRiichi;
   json::Value frame =
       json::Value::Obj(riichi_mode ? 11 : 9);  // type, reason, round_index, dealer,
@@ -953,7 +939,7 @@ std::string RoomActor::BuildGameEnd(const Settlement& settlement) const {
   return frame.Dump();
 }
 
-stdexec::task<void> RoomActor::BroadcastSettlement(const Settlement& settlement) {
+stdexec::task<void> LegacyRoomActor::BroadcastSettlement(const Settlement& settlement) {
   // PROTOCOL v2.2 §8.5: keep the last settlement so a reconnect during kRoundEnd/kMatchEnd can
   // replay the same game_end the other seats already received.
   last_settlement_ = settlement;
@@ -971,14 +957,14 @@ stdexec::task<void> RoomActor::BroadcastSettlement(const Settlement& settlement)
 // Turn driving
 // ---------------------------------------------------------------------------------------
 
-uint64_t RoomActor::Transition() {
+uint64_t LegacyRoomActor::Transition() {
   // PROTOCOL.md §6.2 / GAME_DESIGN §4.3: seq advances once per window transition, and a
   // window opened by this transition carries the new value.
   ++seq_;
   return seq_;
 }
 
-stdexec::task<void> RoomActor::StartMatch() {
+stdexec::task<void> LegacyRoomActor::StartMatch() {
   // v1.6（C2）：一场一次。这里只动**场次**状态；局内状态全部归 StartRound（C3 清单）。
   game_started_ = true;
   round_index_ = 0;
@@ -1002,7 +988,7 @@ stdexec::task<void> RoomActor::StartMatch() {
   co_await StartRound();
 }
 
-stdexec::task<void> RoomActor::StartRound() {
+stdexec::task<void> LegacyRoomActor::StartRound() {
   // v1.6（C3）：每局一次的重置清单。**禁止重置**：seq_（跨局单调，§6.2）、room_id_、seats_、
   // match_totals_、round_index_/renchan_count_/hands_played_（由局终推进逻辑维护）。
   melds_ = {};
@@ -1078,7 +1064,7 @@ stdexec::task<void> RoomActor::StartRound() {
   co_await Pump();
 }
 
-stdexec::task<void> RoomActor::Pump() {
+stdexec::task<void> LegacyRoomActor::Pump() {
   for (int step = 0; step < kMaxPumpSteps; ++step) {
     switch (phase_) {
       case Phase::kIdle:
@@ -1142,7 +1128,7 @@ stdexec::task<void> RoomActor::Pump() {
   spdlog::error("room {}: pump step limit reached (phase={})", room_id_, static_cast<int>(phase_));
 }
 
-stdexec::task<void> RoomActor::DrawForCurrentSeat() {
+stdexec::task<void> LegacyRoomActor::DrawForCurrentSeat() {
   const int seat = current_seat_;
   if (mode_ == GameMode::kRiichi) {
     // 立直后跨过「下一摸」：这一摸仍然可以一发，打完这张就失效
@@ -1167,7 +1153,7 @@ stdexec::task<void> RoomActor::DrawForCurrentSeat() {
   phase_ = Phase::kDiscardWindow;
 }
 
-stdexec::task<void> RoomActor::OpenDiscardWindow(bool win_check, std::optional<Tile> drawn_tile) {
+stdexec::task<void> LegacyRoomActor::OpenDiscardWindow(bool win_check, std::optional<Tile> drawn_tile) {
   drawn_tile_ = drawn_tile;
   discard_window_open_ = true;
   ai_discard_pending_ = false;  // a fresh window schedules its own pacing message
@@ -1202,7 +1188,7 @@ stdexec::task<void> RoomActor::OpenDiscardWindow(bool win_check, std::optional<T
   OpenWindowTimer();
 }
 
-stdexec::task<void> RoomActor::ApplyDiscard(int seat, Tile tile) {
+stdexec::task<void> LegacyRoomActor::ApplyDiscard(int seat, Tile tile) {
   const uint64_t old_seq = seq_;
   if (mode_ == GameMode::kRiichi && ippatsu_[static_cast<size_t>(seat)] && !ippatsu_armed_[static_cast<size_t>(seat)] &&
       drawn_tile_.has_value()) {
@@ -1263,7 +1249,7 @@ stdexec::task<void> RoomActor::ApplyDiscard(int seat, Tile tile) {
   co_await OpenClaimWindow(seat, tile, recipients, options);
 }
 
-stdexec::task<void> RoomActor::OpenClaimWindow(int from_seat, Tile tile, const std::array<bool, kSeatCount>& recipients,
+stdexec::task<void> LegacyRoomActor::OpenClaimWindow(int from_seat, Tile tile, const std::array<bool, kSeatCount>& recipients,
                                                const std::array<std::vector<Option>, kSeatCount>& options,
                                                bool chankan) {
   claim_open_ = true;
@@ -1336,7 +1322,7 @@ stdexec::task<void> RoomActor::OpenClaimWindow(int from_seat, Tile tile, const s
   }
 }
 
-Option RoomActor::ChooseClaimAnswer(const std::vector<Tile>& hand, const std::vector<Meld>& melds,
+Option LegacyRoomActor::ChooseClaimAnswer(const std::vector<Tile>& hand, const std::vector<Meld>& melds,
                                     const std::vector<Option>& options, Tile claimed) {
   Option pass;
   if (const Option* declared = FindOption(options, protocol::Action::kPass); declared != nullptr) {
@@ -1380,7 +1366,7 @@ Option RoomActor::ChooseClaimAnswer(const std::vector<Tile>& hand, const std::ve
   return best != nullptr ? *best : pass;
 }
 
-void RoomActor::ResetClaimWindow() {
+void LegacyRoomActor::ResetClaimWindow() {
   claim_open_ = false;
   ai_claim_pending_ = false;
   claim_from_seat_ = -1;
@@ -1391,7 +1377,7 @@ void RoomActor::ResetClaimWindow() {
   claim_chankan_ = false;
 }
 
-stdexec::task<void> RoomActor::ResolveClaimWindow() {
+stdexec::task<void> LegacyRoomActor::ResolveClaimWindow() {
   int best_seat = -1;
   int best_priority = -1;
   int best_distance = kSeatCount;
@@ -1464,7 +1450,7 @@ stdexec::task<void> RoomActor::ResolveClaimWindow() {
   co_await ApplyMeld(best_seat, best_action, best_tiles, from_seat, tile);
 }
 
-stdexec::task<void> RoomActor::ApplyMeld(int seat, protocol::Action action, const std::vector<Tile>& client_tiles,
+stdexec::task<void> LegacyRoomActor::ApplyMeld(int seat, protocol::Action action, const std::vector<Tile>& client_tiles,
                                          int from_seat, Tile claimed_tile) {
   const Face claimed_face = FaceOf(claimed_tile);
   Meld meld;
@@ -1542,7 +1528,7 @@ stdexec::task<void> RoomActor::ApplyMeld(int seat, protocol::Action action, cons
 
 // 抢杠窗口（v1.15）：加杠者之外的三家各拿一份「和 / 过」。只有真能和的家才收窗，
 // 否则每一次加杠都要等三家把「过」点完（人类玩家会白等 15 s 超时）。
-stdexec::task<void> RoomActor::OpenChankanWindow(int kan_seat, Tile tile) {
+stdexec::task<void> LegacyRoomActor::OpenChankanWindow(int kan_seat, Tile tile) {
   std::array<bool, kSeatCount> recipients {};
   std::array<std::vector<Option>, kSeatCount> options {};
   bool any_can_rob = false;
@@ -1571,7 +1557,7 @@ stdexec::task<void> RoomActor::OpenChankanWindow(int kan_seat, Tile tile) {
 // v1.6 自理杠（ankan / kakan，PROTOCOL §4.6）：仅本家打牌窗口可触发（HandleAction 已重算合法性）。
 // 张数公式逐字不变：一个杠在 melds 里仍是 1 组、账面 3 张，第 4 张由 kans 单独补回 ——
 // 三个杠的差别只在「第 4 张从哪来」，本函数只负责把它放进去并补摸 1 张。
-stdexec::task<void> RoomActor::ApplySelfKan(int seat, protocol::Action action, const std::vector<Tile>& client_tiles) {
+stdexec::task<void> LegacyRoomActor::ApplySelfKan(int seat, protocol::Action action, const std::vector<Tile>& client_tiles) {
   const Face face = FaceOf(client_tiles.front());
   std::optional<KongResult> result;
   if (action == protocol::Action::kAnkan) {
@@ -1644,7 +1630,7 @@ stdexec::task<void> RoomActor::ApplySelfKan(int seat, protocol::Action action, c
 // 日麻（mode == kRiichi）。classic 路径不经过这里，行为与之前逐字节一致。
 // ---------------------------------------------------------------------------------------
 
-Tile RoomActor::DrawReplacementTile() {
+Tile LegacyRoomActor::DrawReplacementTile() {
   // 岭上补牌：日麻从王牌头部取一张，并用牌山山顶牌补满王牌（王牌恒 14 张）。
   // 王牌 0..3 是岭上牌，翻出 4 张之后退回普通摸牌路径（不越界到宝牌指示牌）。
   if (mode_ != GameMode::kRiichi || dead_wall_.size() < 14 || dead_draw_index_ >= 4 || next_index_ >= drawable_end_) {
@@ -1662,7 +1648,7 @@ Tile RoomActor::DrawReplacementTile() {
   return drawn;
 }
 
-void RoomActor::FlipDoraIndicator() {
+void LegacyRoomActor::FlipDoraIndicator() {
   if (mode_ != GameMode::kRiichi || dead_wall_.size() < 14) {
     return;
   }
@@ -1673,7 +1659,7 @@ void RoomActor::FlipDoraIndicator() {
   dora_indicators_.push_back(dead_wall_[index]);
 }
 
-std::vector<Tile> RoomActor::RiichiDiscardTilesFor(int seat) const {
+std::vector<Tile> LegacyRoomActor::RiichiDiscardTilesFor(int seat) const {
   std::vector<Tile> candidates;
   if (mode_ != GameMode::kRiichi || RiichiDeclared(seat)) {
     return candidates;
@@ -1701,7 +1687,7 @@ std::vector<Tile> RoomActor::RiichiDiscardTilesFor(int seat) const {
   return candidates;
 }
 
-std::vector<Option> RoomActor::DiscardOptionsFor(int seat, std::vector<Tile>* riichi_tiles) const {
+std::vector<Option> LegacyRoomActor::DiscardOptionsFor(int seat, std::vector<Tile>* riichi_tiles) const {
   const std::vector<Tile>& hand = hands_[static_cast<size_t>(seat)];
   const std::vector<Meld>& melds = melds_[static_cast<size_t>(seat)];
   if (mode_ != GameMode::kRiichi) {
@@ -1732,7 +1718,7 @@ std::vector<Option> RoomActor::DiscardOptionsFor(int seat, std::vector<Tile>* ri
   return options;
 }
 
-std::vector<Option> RoomActor::ClaimOptionsFor(int seat, Tile tile, bool is_next_player, int from_seat) const {
+std::vector<Option> LegacyRoomActor::ClaimOptionsFor(int seat, Tile tile, bool is_next_player, int from_seat) const {
   const std::vector<Tile>& hand = hands_[static_cast<size_t>(seat)];
   const std::vector<Meld>& melds = melds_[static_cast<size_t>(seat)];
   if (mode_ != GameMode::kRiichi) {
@@ -1757,7 +1743,7 @@ std::vector<Option> RoomActor::ClaimOptionsFor(int seat, Tile tile, bool is_next
   return options;
 }
 
-bool RoomActor::HasYakuForWin(int seat, Tile winning_tile, bool tsumo, int from_seat, bool is_chankan) const {
+bool LegacyRoomActor::HasYakuForWin(int seat, Tile winning_tile, bool tsumo, int from_seat, bool is_chankan) const {
   if (mode_ != GameMode::kRiichi) {
     return true;
   }
@@ -1770,7 +1756,7 @@ bool RoomActor::HasYakuForWin(int seat, Tile winning_tile, bool tsumo, int from_
   return !riichi::DetectYaku(hand, melds_[static_cast<size_t>(seat)], winning_tile, ctx).empty();
 }
 
-bool RoomActor::IsWinShape(const std::vector<Tile>& concealed, const std::vector<Meld>& melds, Tile winning_tile,
+bool LegacyRoomActor::IsWinShape(const std::vector<Tile>& concealed, const std::vector<Meld>& melds, Tile winning_tile,
                            bool tsumo) const {
   if (mode_ == GameMode::kRiichi) {
     return riichi::IsRiichiWinningHand(concealed, melds, winning_tile, tsumo);
@@ -1778,7 +1764,7 @@ bool RoomActor::IsWinShape(const std::vector<Tile>& concealed, const std::vector
   return IsWinningHand(concealed, melds, winning_tile, tsumo);
 }
 
-bool RoomActor::IsFuriten(int seat) const {
+bool LegacyRoomActor::IsFuriten(int seat) const {
   if (mode_ != GameMode::kRiichi) {
     return false;
   }
@@ -1789,7 +1775,7 @@ bool RoomActor::IsFuriten(int seat) const {
                                     discards_[static_cast<size_t>(seat)]);
 }
 
-bool RoomActor::CanDeclareRiichiNow(int seat, Tile discard) const {
+bool LegacyRoomActor::CanDeclareRiichiNow(int seat, Tile discard) const {
   if (mode_ != GameMode::kRiichi || RiichiDeclared(seat)) {
     return false;
   }
@@ -1821,7 +1807,7 @@ bool RoomActor::CanDeclareRiichiNow(int seat, Tile discard) const {
   return !riichi::IsPermanentFuriten(rest, melds, discards_[static_cast<size_t>(seat)]);
 }
 
-stdexec::task<void> RoomActor::DeclareRiichi(int seat) {
+stdexec::task<void> LegacyRoomActor::DeclareRiichi(int seat) {
   riichi_[static_cast<size_t>(seat)] = true;
   ippatsu_[static_cast<size_t>(seat)] = true;        // 一发窗口：下一次摸牌前有效，鸣牌即清
   ippatsu_armed_[static_cast<size_t>(seat)] = true;  // 本次打牌不算「跨过下一摸」
@@ -1842,7 +1828,7 @@ stdexec::task<void> RoomActor::DeclareRiichi(int seat) {
   co_return;
 }
 
-bool RoomActor::BotShouldRiichi(int seat) const {
+bool LegacyRoomActor::BotShouldRiichi(int seat) const {
   if (mode_ != GameMode::kRiichi || RiichiDeclared(seat)) {
     return false;
   }
@@ -1853,7 +1839,7 @@ bool RoomActor::BotShouldRiichi(int seat) const {
   return points_[static_cast<size_t>(seat)] >= riichi::kRiichiStickPoints;
 }
 
-riichi::WinContext RoomActor::BuildRiichiContext(int winner_seat, int from_seat, bool tsumo, Tile winning_tile,
+riichi::WinContext LegacyRoomActor::BuildRiichiContext(int winner_seat, int from_seat, bool tsumo, Tile winning_tile,
                                                  bool is_chankan) const {
   riichi::WinContext ctx;
   ctx.winner_seat = winner_seat;
@@ -1892,7 +1878,7 @@ riichi::WinContext RoomActor::BuildRiichiContext(int winner_seat, int from_seat,
   return ctx;
 }
 
-void RoomActor::ApplyDeltaToPoints(const std::array<int, kSeatCount>& delta) {
+void LegacyRoomActor::ApplyDeltaToPoints(const std::array<int, kSeatCount>& delta) {
   if (mode_ != GameMode::kRiichi) {
     return;
   }
@@ -1901,11 +1887,11 @@ void RoomActor::ApplyDeltaToPoints(const std::array<int, kSeatCount>& delta) {
   }
 }
 
-std::optional<Tile> RoomActor::DefaultDiscardFor(int seat) const {
+std::optional<Tile> LegacyRoomActor::DefaultDiscardFor(int seat) const {
   return DefaultDiscard(hands_[static_cast<size_t>(seat)], drawn_tile_);
 }
 
-Tile RoomActor::TsumoWinningTile(int seat) const {
+Tile LegacyRoomActor::TsumoWinningTile(int seat) const {
   const std::vector<Tile>& hand = hands_[static_cast<size_t>(seat)];
   if (drawn_tile_.has_value()) {
     return *drawn_tile_;
@@ -1914,7 +1900,7 @@ Tile RoomActor::TsumoWinningTile(int seat) const {
   return sorted.empty() ? Tile {} : sorted.back();
 }
 
-stdexec::task<void> RoomActor::EndRoundWithWin(int winner_seat, int from_seat, Tile winning_tile, bool tsumo,
+stdexec::task<void> LegacyRoomActor::EndRoundWithWin(int winner_seat, int from_seat, Tile winning_tile, bool tsumo,
                                                bool is_chankan) {
   const uint64_t old_seq = seq_;
   if (!tsumo) {
@@ -2045,7 +2031,7 @@ stdexec::task<void> RoomActor::EndRoundWithWin(int winner_seat, int from_seat, T
   co_await AdvanceAfterRound(settlement, score);
 }
 
-stdexec::task<void> RoomActor::EndRoundWithDraw() {
+stdexec::task<void> LegacyRoomActor::EndRoundWithDraw() {
   Transition();
   phase_ = Phase::kRoundEnd;
   claim_open_ = false;
@@ -2094,7 +2080,7 @@ stdexec::task<void> RoomActor::EndRoundWithDraw() {
 // v1.6（C7 局终 → 场终的推进）：荒庄也无条件累加（+0）、逐局 RecordMatch（C10）、
 // NextDealer + ClassifyRound 判定连庄/轮庄（荒庄一律连庄）、C15 双闸、场终 match_end、
 // 否则 kRoundEnd + 武装 C6 推进令牌（C5：本函数 co_return，推进由定时消息触发）。
-stdexec::task<void> RoomActor::AdvanceAfterRound(Settlement& settlement, const ScoreResult& score) {
+stdexec::task<void> LegacyRoomActor::AdvanceAfterRound(Settlement& settlement, const ScoreResult& score) {
   // C7：荒庄也 +0 无条件累加；match_total 含本局。B3：坐庄手数每局 +1（含连庄的额外手）。
   for (int seat = 0; seat < kSeatCount; ++seat) {
     match_totals_[static_cast<size_t>(seat)] += settlement.delta[static_cast<size_t>(seat)];
@@ -2212,7 +2198,7 @@ stdexec::task<void> RoomActor::AdvanceAfterRound(Settlement& settlement, const S
   co_await FinishMatch();
 }
 
-stdexec::task<void> RoomActor::FinishMatch() {
+stdexec::task<void> LegacyRoomActor::FinishMatch() {
   // v1.6（C7 场终）：match_end 广播 + kMatchEnd；之后只剩 §1.4.5 的 30s 回收（C10）。
   phase_ = Phase::kMatchEnd;
   round_advance_pending_ = false;
@@ -2230,7 +2216,7 @@ stdexec::task<void> RoomActor::FinishMatch() {
 }
 
 // match_end.rankings 的 rank（并列跳号）；D2/B3：场终快照与 match_end 必须同源，故独立成函数。
-std::array<int, kSeatCount> RoomActor::ComputeFinalRanks() const {
+std::array<int, kSeatCount> LegacyRoomActor::ComputeFinalRanks() const {
   // classic：按累计得失分；日麻：按终局持点（25000 起，不可与零和得失分混排）
   const std::array<int, kSeatCount>& source = mode_ == GameMode::kRiichi ? points_ : match_totals_;
   std::array<int, kSeatCount> ranks {};
@@ -2248,7 +2234,7 @@ std::array<int, kSeatCount> RoomActor::ComputeFinalRanks() const {
 // Windows, timers, client frames
 // ---------------------------------------------------------------------------------------
 
-void RoomActor::OpenWindowTimer() {
+void LegacyRoomActor::OpenWindowTimer() {
   if (!timeout_scheduler_) {
     spdlog::error("room {}: no window timeout scheduler installed", room_id_);
     return;
@@ -2258,7 +2244,7 @@ void RoomActor::OpenWindowTimer() {
   timeout_scheduler_(action_timeout_ms_, seq_);
 }
 
-stdexec::task<void> RoomActor::OnWindowTimeout(uint64_t token) {
+stdexec::task<void> LegacyRoomActor::OnWindowTimeout(uint64_t token) {
   // Three kinds of scheduled messages arrive here: a real window deadline (plain envelope seq),
   // an AI pacing deadline (kAiPacingTokenBit), and the v1.6 round-advance deadline
   // (kRoundAdvanceTokenBit). **判据顺序固定（C6，不得调换）**：
@@ -2356,7 +2342,7 @@ stdexec::task<void> RoomActor::OnWindowTimeout(uint64_t token) {
   }
 }
 
-stdexec::task<void> RoomActor::Ready(PlayerInfo player) {
+stdexec::task<void> LegacyRoomActor::Ready(PlayerInfo player) {
   if (SeatOf(player.player_id) < 0) {
     co_return;
   }
@@ -2367,7 +2353,7 @@ stdexec::task<void> RoomActor::Ready(PlayerInfo player) {
   co_await StartMatch();
 }
 
-stdexec::task<void> RoomActor::Sync(PlayerInfo player) {
+stdexec::task<void> LegacyRoomActor::Sync(PlayerInfo player) {
   const int seat = SeatOf(player.player_id);
   if (seat < 0) {
     co_return;
@@ -2382,7 +2368,7 @@ stdexec::task<void> RoomActor::Sync(PlayerInfo player) {
   co_await DeliverTenpai(seat);
 }
 
-stdexec::task<void> RoomActor::OnPlayerDisconnected(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> conn) {
+stdexec::task<void> LegacyRoomActor::OnPlayerDisconnected(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> conn) {
   const int seat = SeatOf(player.player_id);
   if (seat < 0 || seats_[static_cast<size_t>(seat)].disconnected) {
     co_return;
@@ -2399,11 +2385,11 @@ stdexec::task<void> RoomActor::OnPlayerDisconnected(PlayerInfo player, ex_actor:
   // the countdown still owns the decision. There is nothing to pump here.
 }
 
-stdexec::task<void> RoomActor::OnIdleTimeout(PlayerInfo player) {
+stdexec::task<void> LegacyRoomActor::OnIdleTimeout(PlayerInfo player) {
   co_await OnPlayerDisconnected(std::move(player), /*conn=*/ {});
 }
 
-stdexec::task<void> RoomActor::OnReconnected(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> endpoint) {
+stdexec::task<void> LegacyRoomActor::OnReconnected(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> endpoint) {
   const int seat = SeatOf(player.player_id);
   if (seat < 0) {
     co_return;
@@ -2456,7 +2442,7 @@ stdexec::task<void> RoomActor::OnReconnected(PlayerInfo player, ex_actor::ActorR
   }
 }
 
-stdexec::task<void> RoomActor::HandleGameFrame(PlayerInfo player, json::Value frame) {
+stdexec::task<void> LegacyRoomActor::HandleGameFrame(PlayerInfo player, json::Value frame) {
   const int seat = SeatOf(player.player_id);
   if (seat < 0 || !game_started_) {
     co_return;
@@ -2491,7 +2477,7 @@ stdexec::task<void> RoomActor::HandleGameFrame(PlayerInfo player, json::Value fr
   }
 }
 
-stdexec::task<void> RoomActor::HandleDiscard(int seat, json::Value frame) {
+stdexec::task<void> LegacyRoomActor::HandleDiscard(int seat, json::Value frame) {
   const json::Value* tile_value = frame.Find("tile");
   if (phase_ != Phase::kDiscardWindow || !discard_window_open_ || seat != current_seat_) {
     co_await ReplyError(seat, protocol::ErrorCode::kNotYourTurn, "there is no discard window for you");
@@ -2524,7 +2510,7 @@ stdexec::task<void> RoomActor::HandleDiscard(int seat, json::Value frame) {
   co_await Pump();
 }
 
-stdexec::task<void> RoomActor::HandleAction(int seat, json::Value frame) {
+stdexec::task<void> LegacyRoomActor::HandleAction(int seat, json::Value frame) {
   const json::Value* action_value = frame.Find("action");
   const json::Value* tiles_value = frame.Find("tiles");
   if (action_value == nullptr || !action_value->IsInteger() || tiles_value == nullptr || !tiles_value->IsArray()) {

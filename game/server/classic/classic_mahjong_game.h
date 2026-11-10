@@ -29,6 +29,7 @@
 #include "json.h"
 #include "mahjong_rules.h"
 #include "room_contract.h"
+#include "tokens.h"
 
 namespace mahjong {
 
@@ -43,34 +44,8 @@ constexpr int kClassicMaxAiDelayMs = 5000;
 constexpr int kClassicDefaultInterHandDelayMs = 12000;
 constexpr int kClassicMaxInterHandDelayMs = 60000;
 
-// Encoding of a scheduled-message token. A window deadline carries the plain envelope seq; an
-// AI pacing deadline carries the same seq with kAiPacingTokenBit set, so one handler can serve
-// both while the seq stays the invalidation key (PROTOCOL.md §0.5). Envelope seqs are small,
-// so the top bits can never appear naturally.
-constexpr uint64_t kAiPacingTokenBit = 1ull << 63;
-inline uint64_t MakeAiPacingToken(uint64_t window_seq) { return window_seq | kAiPacingTokenBit; }
-inline bool IsAiPacingToken(uint64_t token) { return (token & kAiPacingTokenBit) != 0; }
-
-// v1.6（C6 局间推进令牌）: the round-to-round advance deadline carries the seq the round ended
-// on, tagged with its own bit. It MUST be armed AFTER the round-end Transition(), so the token
-// holds the brand-new seq: the last window's timeout (armed pre-transition, plain tag) fails
-// the first criterion, the advance token passes it — the two never collide, and that is only
-// true because of the arm-after-transition ordering.
-constexpr uint64_t kRoundAdvanceTokenBit = 1ull << 62;
-inline uint64_t MakeRoundAdvanceToken(uint64_t window_seq) { return window_seq | kRoundAdvanceTokenBit; }
-inline bool IsRoundAdvanceToken(uint64_t token) { return (token & kRoundAdvanceTokenBit) != 0; }
-
-// v1.8（SETTLEMENT_BROADCAST_RULINGS §2.1 / C8）: the **match-end** deadline carries its own bit.
-// The round-advance bit cannot be reused: its handler requires `phase_ == kRoundEnd &&
-// round_advance_pending_` and only starts the next round — a match-end delay armed on that bit
-// would silently do nothing (the "静默失效" trap). Same arm-after-Transition() ordering applies:
-// the token must hold the post-round seq so the last window's timeout cannot collide with it.
-constexpr uint64_t kMatchEndTokenBit = 1ull << 61;
-inline uint64_t MakeMatchEndToken(uint64_t window_seq) { return window_seq | kMatchEndTokenBit; }
-inline bool IsMatchEndToken(uint64_t token) { return (token & kMatchEndTokenBit) != 0; }
-inline uint64_t WindowSeqOfToken(uint64_t token) {
-  return token & ~(kAiPacingTokenBit | kRoundAdvanceTokenBit | kMatchEndTokenBit);
-}
+// The deadline-token encoding (kAiPacingTokenBit / MakeRoundAdvanceToken / ...) is shared with
+// every other game and lives in tokens.h.
 
 class ClassicMahjongGame final : public Game {
  public:

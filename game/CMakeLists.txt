@@ -77,7 +77,7 @@ endif()
 # 之后由 mahjong_server 直接链接，不重复一份 json.cc/protocol.cc。
 add_library(mahjong_room_shell STATIC server/room_actor.cc)
 target_include_directories(mahjong_room_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_include_directories(mahjong_room_shell PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_include_directories(mahjong_room_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server)
 target_link_libraries(mahjong_room_shell PUBLIC ex_actor)
 
 # 玩法插件：classic（番数制）。只依赖规则库与共享契约——不认识 actor、端点、定时器
@@ -87,7 +87,7 @@ target_link_libraries(mahjong_room_shell PUBLIC ex_actor)
 # 一部分，玩法本身不 include 任何 actor 头。
 add_library(mahjong_classic_game STATIC server/classic/classic_mahjong_game.cc)
 target_include_directories(mahjong_classic_game PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_include_directories(mahjong_classic_game PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_include_directories(mahjong_classic_game PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server)
 target_link_libraries(mahjong_classic_game PUBLIC mahjong_rules spdlog::spdlog ex_actor)
 
 # 玩法单测：直接驱动 ClassicMahjongGame，不建房间、不建 actor、不开 socket。
@@ -115,10 +115,12 @@ add_executable(
   server/player_room_agent.cc
   server/frame_parser.cc
   server/lobby.cc
+  server/game_registry.cc
   server/room.cc
   server/timer.cc
   server/gateway.cc)
-target_link_libraries(mahjong_server PRIVATE ex_actor mahjong_rules riichi_rules mahjong_db)
+target_link_libraries(mahjong_server PRIVATE ex_actor mahjong_rules riichi_rules mahjong_db mahjong_room_shell
+                                          mahjong_classic_game)
 if(MAHJONG_MYSQL_FOUND)
   # libmysqlclient's install name is @rpath/libmysqlclient.<n>.dylib, so without this the
   # binary links but fails to launch with "Library not loaded". Its own OpenSSL is resolved
@@ -200,10 +202,11 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 endif()
 
 # t3：LobbyActor 的房间登记与 game_end 后回收（PROTOCOL.md §1.4.5）
-add_executable(mahjong_lobby_test server/lobby_test.cc server/lobby.cc server/room.cc server/connection.cc
+add_executable(mahjong_lobby_test server/lobby_test.cc server/lobby.cc server/game_registry.cc server/room.cc server/connection.cc
                                   server/player_actor.cc server/player_session_agent.cc server/player_lobby_agent.cc server/player_room_agent.cc server/frame_parser.cc server/net.cc server/timer.cc
                                   server/json.cc server/protocol.cc)
-target_link_libraries(mahjong_lobby_test PRIVATE ex_actor mahjong_rules riichi_rules mahjong_db GTest::gtest_main GTest::gmock)
+target_link_libraries(mahjong_lobby_test PRIVATE ex_actor mahjong_rules riichi_rules mahjong_db mahjong_room_shell
+                                                mahjong_classic_game GTest::gtest_main GTest::gmock)
 add_test(NAME mahjong_lobby_test COMMAND mahjong_lobby_test)
 set_tests_properties(mahjong_lobby_test PROPERTIES TIMEOUT 60)
 

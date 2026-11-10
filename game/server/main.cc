@@ -26,9 +26,9 @@
 #include "lobby.h"
 #include "player.h"
 #include "protocol.h"
-// The bot pacing knobs (kDefaultAiDelayMs / SetAiActionDelayMs ...) are the room's, so main
-// needs the concrete room header — not just the RoomEndpoint surface the lobby uses.
-#include "room.h"
+// The bot pacing knobs (kDefaultAiDelayMs / SetAiActionDelayMs ...) are part of "how a room is
+// launched", so main reads them from the registry — not from the room it is about to stop naming.
+#include "game_registry.h"
 #include "timer.h"
 
 namespace {

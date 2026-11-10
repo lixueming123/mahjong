@@ -1,7 +1,7 @@
 // Unit tests for LobbyActor's post-game reclaim (PROTOCOL.md §1.4.5).
 //
 // The test runs the real stack — a spawned LobbyActor, a real WindowTimer and a real
-// RoomActor — with the window length and the reclaim delay shrunk, so a whole game auto-plays
+// LegacyRoomActor — with the window length and the reclaim delay shrunk, so a whole game auto-plays
 // through the frozen timeout path (every human window times out at once) and the reclaim is
 // observable in well under a second. No socket is involved: the connection is a real
 // Connection over an invalid fd, which is enough to carry the outbox and the close request.
@@ -424,10 +424,10 @@ TEST(RoomPerf, ConcurrentRooms) {
   };
 
   auto play = [&](int rooms) {
-    std::vector<ex_actor::ActorRef<RoomActor>> actors;
+    std::vector<ex_actor::ActorRef<LegacyRoomActor>> actors;
     actors.reserve(static_cast<size_t>(rooms));
     for (int i = 0; i < rooms; ++i) {
-      actors.push_back(WaitValue(ex_actor::Spawn<RoomActor>("r-" + std::to_string(i), static_cast<uint64_t>(i + 1),
+      actors.push_back(WaitValue(ex_actor::Spawn<LegacyRoomActor>("r-" + std::to_string(i), static_cast<uint64_t>(i + 1),
                                                             /*action_timeout_ms=*/15000, make_seats(i), nullptr,
                                                             /*ai_delay_ms=*/0)));
       // v1.6：**不装**调度器 —— 本基准的座位全部自动化，局间推进走"无调度器即 inline"回退
@@ -435,7 +435,7 @@ TEST(RoomPerf, ConcurrentRooms) {
       PlayerInfo player;
       player.player_id = "p-" + std::to_string(i);
       player.name = "n";
-      stdexec::sync_wait(actors.back().Send<&RoomActor::Dispatch>(RoomEnvelope::Ready(std::move(player))));
+      stdexec::sync_wait(actors.back().Send<&LegacyRoomActor::Dispatch>(RoomEnvelope::Ready(std::move(player))));
     }
 
     const auto started = std::chrono::steady_clock::now();
@@ -444,7 +444,7 @@ TEST(RoomPerf, ConcurrentRooms) {
       PlayerInfo player;
       player.player_id = "p-" + std::to_string(i);
       player.name = "n";
-      games.spawn(actors[static_cast<size_t>(i)].Send<&RoomActor::Dispatch>(
+      games.spawn(actors[static_cast<size_t>(i)].Send<&LegacyRoomActor::Dispatch>(
           RoomEnvelope::PlayerDisconnected(std::move(player), /*conn=*/ {})));
     }
     stdexec::sync_wait(games.on_empty());
@@ -452,9 +452,9 @@ TEST(RoomPerf, ConcurrentRooms) {
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count();
 
     uint64_t seq_sum = 0;
-    for (const ex_actor::ActorRef<RoomActor>& room : actors) {
-      ASSERT_TRUE(WaitValue(room.Send<&RoomActor::game_finished>()));
-      seq_sum += WaitValue(room.Send<&RoomActor::seq>());
+    for (const ex_actor::ActorRef<LegacyRoomActor>& room : actors) {
+      ASSERT_TRUE(WaitValue(room.Send<&LegacyRoomActor::game_finished>()));
+      seq_sum += WaitValue(room.Send<&LegacyRoomActor::seq>());
     }
     std::cout << "BENCH " << rooms << " rooms on " << kPool << " workers: " << us << " us (" << (us / rooms)
               << " us/room, mean seq " << (seq_sum / static_cast<uint64_t>(rooms)) << ")\n";

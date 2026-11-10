@@ -1,4 +1,15 @@
-// RoomActor: the authoritative state machine of one room (t4).
+// LegacyRoomActor: the authoritative state machine of one room (t4).
+//
+// **On its way out.** This is the 2700-line monolith that held both rule systems behind 63
+// `mode_` branches. It has been replaced by the generic shell (room_actor.h) plus one `Game` per
+// ruleset (game.h, classic/classic_mahjong_game.h), and the classic half already runs there — the
+// lobby spawns `RoomActorFor<ClassicMahjongGame>` for it. What is left is the riichi half, still
+// served from here through a temporary registry row (game_registry.cc); that row goes away with
+// this file once RiichiMahjongGame lands. Nothing new should be added here.
+//
+// It was renamed from `RoomActor` when both implementations had to coexist in one binary: two
+// distinct classes with the same fully-qualified name is an ODR violation the linker would only
+// report as a duplicate symbol, and only if it happened to pull both objects in.
 //
 // Responsibilities:
 //   * single source of truth: wall, four hands, discards, melds, current seat and seq;
@@ -30,6 +41,7 @@
 
 #include "async_gate.h"
 #include "ex_actor/api.h"
+#include "game_registry.h"
 #include "json.h"
 #include "json_rfl.h"
 #include "mahjong_rules.h"
@@ -39,6 +51,7 @@
 #include "room_endpoint.h"
 #include "seat_endpoint.h"
 #include "timer.h"
+#include "tokens.h"
 
 namespace mahjong {
 
@@ -64,62 +77,21 @@ inline protocol::WireLimit ToWire(riichi::Limit limit) {
 int RoundCountOf(GameMode mode, GameLength length);
 
 // Derives one room's wall seed from the server-level seed and the room's 0-based creation
-// index (RoomActor's caller, LobbyActor, passes exactly this). Moved to room_contract.h so a
+// index (LegacyRoomActor's caller, LobbyActor, passes exactly this). Moved to room_contract.h so a
 // game implementation can use it without depending on the room: see DeriveRoomSeed there.
 
 // v1.6（一场四局 · 局种子）：DeriveRoundSeed also lives in room_contract.h.
 
-// GAME_DESIGN v1.4 §5.4: a bot's own decision (discard / meld / self-draw win) is executed
-// ai_delay_ms after its window opened, so a human can follow the table. 0 disables the
-// pacing and restores the fully synchronous decision path.
-constexpr int kDefaultAiDelayMs = 900;
-constexpr int kMaxAiDelayMs = 5000;
+// The pacing knobs (kDefaultAiDelayMs / SetAiActionDelayMs / ...) moved to game_registry.h: they
+// are "how a room is launched", which is exactly what the registry builds. It is included from the
+// top of this file rather than re-declared here, so an onlooker does not have to guess which
+// header still owns them.
 
-// v1.6（一场四局）: the pause between two rounds of one match (game_end -> next game_start).
-// v1.8（SETTLEMENT_BROADCAST_RULINGS §2.1 / C2）: 5000 -> **12000** = 播报窗 10500 + 阅读窗 1500.
-// The same value gates the *last* round too: `FinishMatch()` (match_end) is armed on the same
-// delay, so the final settlement gets the same broadcast window as every other round.
-constexpr int kDefaultInterHandDelayMs = 12000;
-constexpr int kMaxInterHandDelayMs = 60000;
+// The deadline-token encoding (kAiPacingTokenBit / MakeRoundAdvanceToken / ...) moved to
+// tokens.h for the same reason: the classic Game needs it too, and two copies in one translation
+// unit are a redefinition. See the comment there.
 
-// Encoding of a scheduled-message token. A window deadline carries the plain envelope seq; an
-// AI pacing deadline carries the same seq with kAiPacingTokenBit set, so one handler can serve
-// both while the seq stays the invalidation key (PROTOCOL.md §0.5). Envelope seqs are small,
-// so the top bits can never appear naturally.
-constexpr uint64_t kAiPacingTokenBit = 1ull << 63;
-inline uint64_t MakeAiPacingToken(uint64_t window_seq) { return window_seq | kAiPacingTokenBit; }
-inline bool IsAiPacingToken(uint64_t token) { return (token & kAiPacingTokenBit) != 0; }
-
-// v1.6（C6 局间推进令牌）: the round-to-round advance deadline carries the seq the round ended
-// on, tagged with its own bit. It MUST be armed AFTER the round-end Transition(), so the token
-// holds the brand-new seq: the last window's timeout (armed pre-transition, plain tag) fails
-// the first criterion, the advance token passes it — the two never collide, and that is only
-// true because of the arm-after-transition ordering.
-constexpr uint64_t kRoundAdvanceTokenBit = 1ull << 62;
-inline uint64_t MakeRoundAdvanceToken(uint64_t window_seq) { return window_seq | kRoundAdvanceTokenBit; }
-inline bool IsRoundAdvanceToken(uint64_t token) { return (token & kRoundAdvanceTokenBit) != 0; }
-
-// v1.8（SETTLEMENT_BROADCAST_RULINGS §2.1 / C8）: the **match-end** deadline carries its own bit.
-// The round-advance bit cannot be reused: its handler requires `phase_ == kRoundEnd &&
-// round_advance_pending_` and only starts the next round — a match-end delay armed on that bit
-// would silently do nothing (the "静默失效" trap). Same arm-after-Transition() ordering applies:
-// the token must hold the post-round seq so the last window's timeout cannot collide with it.
-constexpr uint64_t kMatchEndTokenBit = 1ull << 61;
-inline uint64_t MakeMatchEndToken(uint64_t window_seq) { return window_seq | kMatchEndTokenBit; }
-inline bool IsMatchEndToken(uint64_t token) { return (token & kMatchEndTokenBit) != 0; }
-inline uint64_t WindowSeqOfToken(uint64_t token) {
-  return token & ~(kAiPacingTokenBit | kRoundAdvanceTokenBit | kMatchEndTokenBit);
-}
-
-// Process-wide pacing values, set once by main() from --ai-delay-ms / --inter-hand-delay-ms.
-// RoomActor reads them when the value is not passed explicitly (LobbyActor spawns rooms without
-// carrying them, and lobby.* is outside this change); tests pass the delay to the constructor.
-void SetAiActionDelayMs(int delay_ms);
-int AiActionDelayMs();
-void SetInterHandDelayMs(int delay_ms);
-int InterHandDelayMs();
-
-class RoomActor final : public RoomEndpoint {
+class LegacyRoomActor final : public RoomEndpoint {
  public:
   // |ai_delay_ms| < 0 means "use the process-wide value" (AiActionDelayMs()); the same applies
   // to |inter_hand_delay_ms| (InterHandDelayMs()).
@@ -129,7 +101,7 @@ class RoomActor final : public RoomEndpoint {
   // passes |finished_for_test| instead. The two "for test" seams exist because a scheduler and
   // a capture callback are process-local behavior — they cannot be part of a serializable
   // message (the production scheduler is installed by ExActorOnSpawned from |timer|).
-  RoomActor(std::string room_id, uint64_t seed, int action_timeout_ms, std::vector<RoomSeat> seats,
+  LegacyRoomActor(std::string room_id, uint64_t seed, int action_timeout_ms, std::vector<RoomSeat> seats,
             std::shared_ptr<WindowTimer> timer, int ai_delay_ms = -1, int inter_hand_delay_ms = -1,
             ex_actor::ActorRef<RoomOwner> owner = {}, TimeoutScheduler timeout_scheduler = {},
             RoomFinishedCallback finished_for_test = {}, GameMode mode = GameMode::kClassic,
@@ -138,7 +110,7 @@ class RoomActor final : public RoomEndpoint {
   // ex_actor hands every actor its own ref right after construction. The room needs it to post
   // the frozen window timeout back to itself, so it installs the production scheduler here
   // instead of receiving a std::function through a message (which could never be serialized).
-  void ExActorOnSpawned(const ex_actor::ActorRuntimeInfo<RoomActor>& info);
+  void ExActorOnSpawned(const ex_actor::ActorRuntimeInfo<LegacyRoomActor>& info);
 
   // The room's only message entry point, and the only place the gate is taken for messages.
   // Every handler below is private, so no caller can reach room state without passing the gate
@@ -157,7 +129,7 @@ class RoomActor final : public RoomEndpoint {
   void SetFinishedCallbackForTest(RoomFinishedCallback callback) { finished_for_test_ = std::move(callback); }
 
   // Pure claim policy of an automated seat (exposed so it can be unit-tested directly with
-  // crafted hands; RoomActor::OpenClaimWindow calls exactly this function for bots, and
+  // crafted hands; LegacyRoomActor::OpenClaimWindow calls exactly this function for bots, and
   // OnPlayerDisconnected / OnIdleTimeout seats are driven by the same path).
   //   win                            -> always taken
   //   pong / every chow combination  -> taken only when the shanten after the meld (and its
@@ -507,7 +479,7 @@ class RoomActor final : public RoomEndpoint {
   // The lobby that spawned this room (empty in the unit test).
   ex_actor::ActorRef<RoomOwner> owner_;
   // Filled by ExActorOnSpawned; the scheduler posts timeouts through it.
-  ex_actor::ActorRef<RoomActor> self_ref_;
+  ex_actor::ActorRef<LegacyRoomActor> self_ref_;
 
   std::shared_ptr<WindowTimer> timer_;
   // AI pacing (GAME_DESIGN v1.4 §5.4). A pending flag means a decision of this window is

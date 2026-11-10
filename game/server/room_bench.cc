@@ -1,4 +1,4 @@
-// room_bench.cc — a load test for RoomActor: what one game costs, and how many rooms one core
+// room_bench.cc — a load test for LegacyRoomActor: what one game costs, and how many rooms one core
 // can carry.
 //
 // Why it exists: the room is where the game's own CPU time is spent, so every capacity question
@@ -168,7 +168,7 @@ class AutoClient : public mj::SeatEndpoint {
   }
 
   // The room's ref, delivered after both actors exist (PlayerActor has the same handshake).
-  void SetRoom(ex_actor::ActorRef<mj::RoomActor> room) { room_ = std::move(room); }
+  void SetRoom(ex_actor::ActorRef<mj::LegacyRoomActor> room) { room_ = std::move(room); }
 
   stdexec::task<void> Dispatch(mj::PlayerEnvelope envelope) override {
     // A room only ever delivers a seat frame or a seat error (seat_endpoint.h); the connection's
@@ -253,14 +253,14 @@ class AutoClient : public mj::SeatEndpoint {
     }
     // Fire-and-forget, never awaited: see the file comment.
     mj::ActorSendScope().spawn(
-        room_.Send<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::GameFrame(player_, std::move(*frame))));
+        room_.Send<&mj::LegacyRoomActor::Dispatch>(mj::RoomEnvelope::GameFrame(player_, std::move(*frame))));
     co_return;
   }
 
  private:
   std::shared_ptr<ClientStats> stats_;
   mj::PlayerInfo player_;
-  ex_actor::ActorRef<mj::RoomActor> room_;
+  ex_actor::ActorRef<mj::LegacyRoomActor> room_;
   std::string drawn_;       // the last tile this seat drew
   std::string first_tile_;  // the head of the dealt hand (dealer's first discard only)
   int64_t discard_probe_ns_ = 0;
@@ -340,7 +340,7 @@ std::atomic<bool> g_poker_stop {false};
 bool g_poke_rooms = false;
 ex_actor::ActorRef<CounterActor> g_poker;
 std::mutex g_rooms_mutex;
-std::vector<ex_actor::ActorRef<mj::RoomActor>> g_rooms;
+std::vector<ex_actor::ActorRef<mj::LegacyRoomActor>> g_rooms;
 
 void StartPoker() {
   g_poker_stop.store(false);
@@ -354,11 +354,11 @@ void StartPoker() {
       mj::ActorSendScope().spawn(g_poker.Send<&CounterActor::Bump>());
       if (g_poke_rooms) {
         std::lock_guard<std::mutex> lock(g_rooms_mutex);
-        for (const ex_actor::ActorRef<mj::RoomActor>& room : g_rooms) {
+        for (const ex_actor::ActorRef<mj::LegacyRoomActor>& room : g_rooms) {
           // A seat the room does not know: SeatOf() returns -1 and the handler returns without
           // touching any state. A pure "is the room still running messages" probe.
           mj::ActorSendScope().spawn(
-              room.Send<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::PlayerDisconnected(nobody, /*conn=*/ {})));
+              room.Send<&mj::LegacyRoomActor::Dispatch>(mj::RoomEnvelope::PlayerDisconnected(nobody, /*conn=*/ {})));
         }
       }
     }
@@ -396,7 +396,7 @@ int WiredSeats(Shape shape) {
 }
 
 struct RoomRun {
-  ex_actor::ActorRef<mj::RoomActor> room;
+  ex_actor::ActorRef<mj::LegacyRoomActor> room;
   mj::PlayerInfo ready_player;  // seat 0, the seat that starts the game
   std::vector<mj::PlayerInfo> wired_players;
   std::vector<std::shared_ptr<ClientStats>> stats;
@@ -412,7 +412,7 @@ void DumpStalled(const std::vector<RoomRun>& runs, const Batch& batch) {
   for (const RoomRun& run : runs) {
     before.push_back(run.stats.empty() ? 0 : run.stats.front()->frames.load(std::memory_order_relaxed));
     for (const mj::PlayerInfo& player : run.wired_players) {
-      mj::ActorSendScope().spawn(run.room.Send<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::Sync(player)));
+      mj::ActorSendScope().spawn(run.room.Send<&mj::LegacyRoomActor::Dispatch>(mj::RoomEnvelope::Sync(player)));
     }
   }
   std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -497,7 +497,7 @@ RoomRun SpawnRoom(const std::string& room_id, uint64_t seed, Shape shape, std::s
     fprintf(stderr, "    spawn room\n");
   }
   run.room = std::get<0>(
-      ex::sync_wait(ex_actor::Spawn<mj::RoomActor>(
+      ex::sync_wait(ex_actor::Spawn<mj::LegacyRoomActor>(
                         room_id, seed, action_timeout_ms, std::move(seats), nullptr, 0, -1,
                         ex_actor::ActorRef<mj::RoomOwner> {}, mj::TimeoutScheduler([](int64_t, uint64_t) {}),
                         mj::RoomFinishedCallback([batch](const mj::GameSettlement&) { batch->OnFinished(); })))
@@ -553,7 +553,7 @@ std::optional<RunResult> RunRound(Shape shape, int rooms, uint64_t base_seed, in
     }
   }
   for (const RoomRun& run : runs) {
-    mj::ActorSendScope().spawn(run.room.Send<&mj::RoomActor::Dispatch>(mj::RoomEnvelope::Ready(run.ready_player)));
+    mj::ActorSendScope().spawn(run.room.Send<&mj::LegacyRoomActor::Dispatch>(mj::RoomEnvelope::Ready(run.ready_player)));
   }
   // A game takes tens of milliseconds at ai_delay 0, so a quarter of a minute is ~300x the
   // expected time: if it has not finished by then it never will, and the dump below is the
@@ -782,7 +782,7 @@ int main(int argc, char** argv) {
   spdlog::set_level(spdlog::level::off);
   ex_actor::Init(kThreadPoolSize);
 
-  printf("room_bench: mahjong RoomActor load test (pool=%u, seed=%llu, ai_delay=0)\n", kThreadPoolSize,
+  printf("room_bench: mahjong LegacyRoomActor load test (pool=%u, seed=%llu, ai_delay=0)\n", kThreadPoolSize,
          static_cast<unsigned long long>(kBaseSeed));
   auto count = std::make_shared<std::atomic<int64_t>>(0);
   g_poker = std::get<0>(ex::sync_wait(ex_actor::Spawn<CounterActor>(count)).value());

@@ -136,7 +136,7 @@ class RiichiRoomTest : public ::testing::Test {
           std::get<0>(stdexec::sync_wait(ex_actor::Spawn<CapturingSeat>(sink_)).value());
       seats.front().endpoint = endpoint;
     }
-    room_ = std::make_unique<RoomActor>("r-riichi", seed, protocol::kDefaultActionTimeoutMs, std::move(seats), nullptr,
+    room_ = std::make_unique<LegacyRoomActor>("r-riichi", seed, protocol::kDefaultActionTimeoutMs, std::move(seats), nullptr,
                                         /*ai_delay_ms=*/0, /*inter_hand_delay_ms=*/0, ex_actor::ActorRef<RoomOwner> {},
                                         TimeoutScheduler {}, RoomFinishedCallback {}, mode, length);
   }
@@ -155,7 +155,7 @@ class RiichiRoomTest : public ::testing::Test {
     return start;
   }
 
-  std::unique_ptr<RoomActor> room_;
+  std::unique_ptr<LegacyRoomActor> room_;
   std::shared_ptr<FrameSink> sink_;
   PlayerInfo human_;
 };
