@@ -1,4 +1,10 @@
-// Frame helpers shared by the classic game's tests. Test-only; nothing in the server includes it.
+// Frame helpers shared by the **game** tests (classic and riichi alike). Test-only; nothing in
+// the server includes it.
+//
+// It lives next to game.h rather than under classic/ because none of it knows about any rules:
+// it reads JSON frames, pulls tiles out of them, and folds a byte stream into an FNV-1a hash.
+// Both games' transcripts are hashed with the same function, which is what makes the two
+// goldens comparable rather than merely self-consistent.
 
 #pragma once
 
@@ -12,7 +18,7 @@
 #include "mahjong_rules.h"
 #include "protocol.h"
 
-namespace mahjong::classic_test {
+namespace mahjong::game_test {
 
 inline protocol::FrameType TypeOf(const json::Value& frame) {
   const json::Value* type = frame.Find("type");
@@ -69,4 +75,4 @@ inline uint64_t Fnv1a64(std::string_view text) {
   return hash;
 }
 
-}  // namespace mahjong::classic_test
+}  // namespace mahjong::game_test

@@ -100,6 +100,23 @@ target_link_libraries(mahjong_classic_game_test PRIVATE mahjong_classic_game GTe
 add_test(NAME mahjong_classic_game_test COMMAND mahjong_classic_game_test)
 set_tests_properties(mahjong_classic_game_test PROPERTIES TIMEOUT 120)
 
+# 玩法插件：riichi（日麻）。与 classic 是**两份互不相识的代码**——不共享房间、不共享帧，
+# 只在规则原语（mahjong_rules 的牌张/拆法/听牌）与契约（game.h / room_contract.h）处相接。
+add_library(mahjong_riichi_game STATIC server/riichi/riichi_mahjong_game.cc)
+target_include_directories(mahjong_riichi_game PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(mahjong_riichi_game PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_link_libraries(mahjong_riichi_game PUBLIC mahjong_rules riichi_rules spdlog::spdlog ex_actor)
+
+# 玩法单测：直接驱动 RiichiMahjongGame，不建房间、不建 actor、不开 socket。
+# 三个 hash 是拆分前 room.cc 冻结的那三个日麻值（tonpu）。
+add_executable(mahjong_riichi_game_test server/riichi/riichi_mahjong_game_test.cc server/json.cc
+                                       server/protocol.cc)
+target_include_directories(mahjong_riichi_game_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_link_libraries(mahjong_riichi_game_test PRIVATE mahjong_riichi_game GTest::gtest_main
+                                                     GTest::gmock)
+add_test(NAME mahjong_riichi_game_test COMMAND mahjong_riichi_game_test)
+set_tests_properties(mahjong_riichi_game_test PROPERTIES TIMEOUT 120)
+
 # 麻将服务端（t3：TCP JSON 网关 + 服务器骨架；t4：RoomActor 状态机 / 回合驱动 / 超时 / 结算；
 # 账号与战绩：注册/登录 + 战绩存档，见 game/docs/ACCOUNT_DESIGN.md）
 add_executable(
@@ -120,7 +137,7 @@ add_executable(
   server/timer.cc
   server/gateway.cc)
 target_link_libraries(mahjong_server PRIVATE ex_actor mahjong_rules riichi_rules mahjong_db mahjong_room_shell
-                                          mahjong_classic_game)
+                                          mahjong_classic_game mahjong_riichi_game)
 if(MAHJONG_MYSQL_FOUND)
   # libmysqlclient's install name is @rpath/libmysqlclient.<n>.dylib, so without this the
   # binary links but fails to launch with "Library not loaded". Its own OpenSSL is resolved
@@ -206,7 +223,7 @@ add_executable(mahjong_lobby_test server/lobby_test.cc server/lobby.cc server/ga
                                   server/player_actor.cc server/player_session_agent.cc server/player_lobby_agent.cc server/player_room_agent.cc server/frame_parser.cc server/net.cc server/timer.cc
                                   server/json.cc server/protocol.cc)
 target_link_libraries(mahjong_lobby_test PRIVATE ex_actor mahjong_rules riichi_rules mahjong_db mahjong_room_shell
-                                                mahjong_classic_game GTest::gtest_main GTest::gmock)
+                                                mahjong_classic_game mahjong_riichi_game GTest::gtest_main GTest::gmock)
 add_test(NAME mahjong_lobby_test COMMAND mahjong_lobby_test)
 set_tests_properties(mahjong_lobby_test PROPERTIES TIMEOUT 60)
 

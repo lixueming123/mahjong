@@ -3,8 +3,7 @@
 #include <utility>
 
 #include "classic/classic_mahjong_game.h"
-// 临时：日麻还没有搬进 Game 插件（S4），它的注册项仍然指向老房间。
-#include "room.h"
+#include "riichi/riichi_mahjong_game.h"
 #include "room_actor_for.h"
 
 namespace mahjong {
@@ -36,15 +35,18 @@ stdexec::task<ex_actor::ActorRef<RoomEndpoint>> SpawnClassicRoom(RoomPlan plan) 
   co_return room;
 }
 
-// S4 之前日麻仍由老房间提供：这一项只是把启动信息翻译成它的构造参数，等
-// RiichiMahjongGame 落地就换成 RoomActorFor<RiichiMahjongGame> 并删掉老文件。
-std::string LegacyRiichiOptions(GameLength length) { return std::string(); }
+// 日麻把「打几局」编码进启动选项：GameLength 的枚举值**就是**线上 `length` 字段的整数
+// （kTonpu = 0 / kHanchan = 1），玩法侧再用 RiichiRoundCountOf 翻成 4 / 8 局。
+std::string RiichiOptions(GameLength length) {
+  return std::string("{\"length\":") + std::to_string(static_cast<int>(length)) + "}";
+}
 
-stdexec::task<ex_actor::ActorRef<RoomEndpoint>> SpawnLegacyRiichiRoom(RoomPlan plan) {
-  ex_actor::ActorRef<LegacyRoomActor> room = co_await ex_actor::Spawn<LegacyRoomActor>(
-      std::move(plan.launch.room_id), plan.launch.seed, plan.launch.action_timeout_ms, std::move(plan.launch.seats),
-      std::move(plan.launch.timer), plan.ai_delay_ms, plan.inter_hand_delay_ms, std::move(plan.launch.owner),
-      TimeoutScheduler {}, RoomFinishedCallback {}, GameMode::kRiichi, plan.length);
+stdexec::task<ex_actor::ActorRef<RoomEndpoint>> SpawnRiichiRoom(RoomPlan plan) {
+  ex_actor::ActorRef<RoomActorFor<RiichiMahjongGame>> room =
+      co_await ex_actor::Spawn<RoomActorFor<RiichiMahjongGame>>(
+          std::move(plan.launch.room_id), std::move(plan.game_id), std::move(plan.options_json), plan.launch.seed,
+          plan.launch.action_timeout_ms, plan.ai_delay_ms, plan.inter_hand_delay_ms, std::move(plan.launch.seats),
+          std::move(plan.launch.timer), std::move(plan.launch.owner), TimeoutScheduler {}, RoomFinishedCallback {});
   co_return room;
 }
 
@@ -52,7 +54,7 @@ stdexec::task<ex_actor::ActorRef<RoomEndpoint>> SpawnLegacyRiichiRoom(RoomPlan p
 // server names it.
 constexpr GameEntry kGames[] = {
     {.mode = GameMode::kClassic, .id = "classic", .options = &ClassicOptions, .spawn = &SpawnClassicRoom},
-    {.mode = GameMode::kRiichi, .id = "riichi", .options = &LegacyRiichiOptions, .spawn = &SpawnLegacyRiichiRoom},
+    {.mode = GameMode::kRiichi, .id = "riichi", .options = &RiichiOptions, .spawn = &SpawnRiichiRoom},
 };
 
 }  // namespace

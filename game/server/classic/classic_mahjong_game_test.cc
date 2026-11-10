@@ -26,18 +26,18 @@
 #include <vector>
 
 #include "classic/classic_mahjong_game.h"
-#include "classic/classic_test_support.h"
+#include "game_test_support.h"
 #include "protocol.h"
 
 namespace mahjong {
 namespace {
 
-using classic_test::Fnv1a64;
-using classic_test::IntOf;
-using classic_test::OptionOf;
-using classic_test::StrOf;
-using classic_test::TilesOf;
-using classic_test::TypeOf;
+using game_test::Fnv1a64;
+using game_test::IntOf;
+using game_test::OptionOf;
+using game_test::StrOf;
+using game_test::TilesOf;
+using game_test::TypeOf;
 
 constexpr int kSeat0 = 0;
 constexpr int kActionTimeoutMs = 15000;
