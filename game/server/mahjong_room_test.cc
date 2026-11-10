@@ -15,6 +15,7 @@
 #include <regex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <variant>
@@ -217,9 +218,15 @@ class TestRoom {
   // only shape that exercises the multi-recipient broadcast path — four state_sync frames per
   // broadcast, four-way fan-out of discard_event/action_event. With a single wired human those
   // loops build exactly one frame, so whatever they share is invisible to the rest of this file.
+  // |wire_bot_seats| wires the bot seats too, keeping them bots. It exists for the golden
+  // transcript below: a bot seat's frames are built either way, but with no endpoint they are
+  // dropped in DeliverSeat, so only four wires can freeze what the other three seats would see.
+  // |mode| / |length| select the rule system (room.h); the default keeps every pre-existing
+  // fixture on classic/tonpu.
   explicit TestRoom(uint64_t seed, int action_timeout_ms = kDefaultTimeoutMs, int ai_delay_ms = 0,
                     bool smart_discard = false, bool install_scheduler = true, bool all_human = false,
-                    int inter_hand_delay_ms = 0) {
+                    int inter_hand_delay_ms = 0, bool wire_bot_seats = false, GameMode mode = GameMode::kClassic,
+                    GameLength length = GameLength::kTonpu) {
     smart_discard_ = smart_discard;
     human_sink_ = std::make_shared<CapturingSink>();
     std::vector<RoomSeat> seats;
@@ -238,7 +245,7 @@ class TestRoom {
       }
       seats.push_back(std::move(slot));
     }
-    if (all_human) {
+    if (all_human || wire_bot_seats) {
       for (int seat = 0; seat < kSeatCount; ++seat) {
         sinks_[static_cast<size_t>(seat)] = std::make_shared<CapturingSink>();
         seats[static_cast<size_t>(seat)].endpoint = std::get<0>(
@@ -261,7 +268,8 @@ class TestRoom {
       scheduler = [this](int64_t delay_ms, uint64_t window_seq) { scheduled_.emplace_back(delay_ms, window_seq); };
     }
     room_ = std::make_unique<RoomActor>("r-0001", seed, action_timeout_ms, std::move(seats), nullptr, ai_delay_ms,
-                                        inter_hand_delay_ms, ex_actor::ActorRef<RoomOwner> {}, std::move(scheduler));
+                                        inter_hand_delay_ms, ex_actor::ActorRef<RoomOwner> {}, std::move(scheduler),
+                                        RoomFinishedCallback {}, mode, length);
   }
 
   RoomActor* room() { return room_.get(); }
@@ -569,6 +577,48 @@ std::vector<const json::Value*> FramesOfType(const std::vector<json::Value>& fra
 
 int CountOfType(const std::vector<json::Value>& frames, protocol::FrameType type) {
   return static_cast<int>(FramesOfType(frames, type).size());
+}
+
+// FNV-1a 64. Chosen over std::hash because the value must be stable across runs, builds and
+// standard libraries — it is a frozen number checked into this file, not a hash-table bucket.
+uint64_t Fnv1a64(std::string_view text) {
+  uint64_t hash = 0xcbf29ce484222325ull;
+  for (const char byte : text) {
+    hash ^= static_cast<unsigned char>(byte);
+    hash *= 0x100000001b3ull;
+  }
+  return hash;
+}
+
+// One whole match's outbound frames, folded into the text the golden hash covers.
+//
+// Four seats, not one: the room builds a *different* frame per seat (hand masking, private
+// action windows, tenpai), so a seat-0-only transcript would miss three quarters of what the
+// protocol promises. `TestRoom(..., wire_bot_seats=true)` keeps seats 1..3 automated but wired,
+// so their frames are built and captured instead of being dropped in DeliverSeat.
+//
+// Order is seat-major, and that is sound rather than sloppy: the driver is single-threaded and
+// resolves exactly one window per step, so the cross-seat interleaving is fixed by the step
+// loop, not by frame content. If any seat's stream is identical the interleaving is too.
+//
+// `action_request.deadline_ms` is the only field carrying a real clock (PROTOCOL §5.7), so it is
+// zeroed before hashing — otherwise the golden would depend on how long the test machine took.
+std::string TranscriptOf(TestRoom& test_room) {
+  std::string dump;
+  for (const json::Value& frame : test_room.history()) {
+    dump += "0\t";
+    dump += frame.Dump();
+    dump += '\n';
+  }
+  for (int seat = 1; seat < kSeatCount; ++seat) {
+    for (const json::Value& frame : test_room.sink_of(seat)->Drain()) {
+      dump += std::to_string(seat);
+      dump += '\t';
+      dump += frame.Dump();
+      dump += '\n';
+    }
+  }
+  return std::regex_replace(dump, std::regex("\"deadline_ms\":[0-9]+"), "\"deadline_ms\":0");
 }
 
 // ---------------------------------------------------------------------------------------
@@ -2389,6 +2439,55 @@ TEST_F(RoomActorTest, SameSeedReplaysTheWholeMatchFrameForFrame) {
     const std::string first = PlayAndDump(seed);
     const std::string second = PlayAndDump(seed);
     EXPECT_EQ(first, second) << "seed " << seed << ": 同 seed 的整场帧序列必须一致";
+  }
+}
+
+// v2.4（重构护栏）：两种玩法 × 三个种子的「整场、四座位、逐帧」转录 hash 冻结。
+//
+// 为什么需要它：接下来要把 room.cc（2721 行、63 处 mode_ 分支）拆成「通用 RoomActor +
+// 每个玩法一份 Game」。拆分本身**不允许**改变任何线上行为，而语义断言（「和牌分数对」）挡不住
+// 「帧里少一个字段」「action_request 的收件人换了」这类漂移。这个用例把一整场的产物压成一个
+// 数字，拆分前后必须逐位相同，是 S2/S3/S4 每一步的唯一硬门槛。
+//
+// 变红时怎么办：先确认这是**你想要**的行为变化（并同步 PROTOCOL.md），再跑
+//
+//   ./build/game/mahjong_room_test --gtest_filter='*GoldenTranscriptIsFrozen*'
+//
+// 用例会把每条的 frame 数与新 hash 打出来，把它们回填到下表的 `expected`。
+TEST_F(RoomActorTest, GoldenTranscriptIsFrozen) {
+  struct Golden {
+    GameMode mode;
+    GameLength length;
+    uint64_t seed;
+    const char* name;
+    uint64_t expected;
+  };
+  // 三种子固定（与 SameSeedReplaysTheWholeMatchFrameForFrame 同族），一个数字代表一整个
+  // 4 局场次、四座位、全部下行帧。
+  const Golden cases[] = {
+      {GameMode::kClassic, GameLength::kTonpu, 20251005, "classic/seed-20251005", 0x006adf6ea1e90542ull},
+      {GameMode::kClassic, GameLength::kTonpu, 7, "classic/seed-7", 0xd1920094dbc4dbd0ull},
+      {GameMode::kClassic, GameLength::kTonpu, 424242, "classic/seed-424242", 0xdc74452076937cbcull},
+      {GameMode::kRiichi, GameLength::kTonpu, 20251005, "riichi/seed-20251005", 0xf0a019a1abcb98acull},
+      {GameMode::kRiichi, GameLength::kTonpu, 7, "riichi/seed-7", 0xa97f495a097f5634ull},
+      {GameMode::kRiichi, GameLength::kTonpu, 424242, "riichi/seed-424242", 0xf905a3d9c4067481ull},
+  };
+  for (const Golden& golden : cases) {
+    // 一人 + 三 bot，四个座位全部接线：bot 的决策（鸣牌/立直/自摸）是玩法行为的一部分，
+    // 而只有接了线它们的帧才会真的被构造出来（DeliverSeat 对空端点直接丢弃）。
+    TestRoom test_room(golden.seed, kDefaultTimeoutMs, /*ai_delay_ms=*/0, /*smart_discard=*/true,
+                       /*install_scheduler=*/true, /*all_human=*/false, /*inter_hand_delay_ms=*/0,
+                       /*wire_bot_seats=*/true, golden.mode, golden.length);
+    test_room.Ready();
+    test_room.PlayFullGame();
+    ASSERT_TRUE(test_room.room()->game_finished()) << golden.name << " 未能打完一整场";
+    const std::string transcript = TranscriptOf(test_room);
+    const uint64_t hash = Fnv1a64(transcript);
+    const size_t frames =
+        static_cast<size_t>(std::count(transcript.begin(), transcript.end(), '\n'));
+    std::printf("[golden] %-22s frames=%5zu hash=0x%016llx\n", golden.name, frames,
+                static_cast<unsigned long long>(hash));
+    EXPECT_EQ(hash, golden.expected) << golden.name << "（frames=" << frames << "）";
   }
 }
 

@@ -155,7 +155,9 @@ add_executable(mahjong_room_test server/mahjong_room_test.cc server/room.cc serv
                                 server/json.cc server/protocol.cc)
 target_link_libraries(mahjong_room_test PRIVATE ex_actor mahjong_rules riichi_rules GTest::gmock)
 add_test(NAME mahjong_room_test COMMAND mahjong_room_test)
-set_tests_properties(mahjong_room_test PROPERTIES TIMEOUT 120)
+# 240s：整套已经要 ~100s，GoldenTranscriptIsFrozen 又加了 6 场完整对局（两种玩法 × 三种子，
+# 四座位全接线）。它是重构护栏，不能因为超时变成偶发红。
+set_tests_properties(mahjong_room_test PROPERTIES TIMEOUT 240)
 
 # RoomActor 压测：真 actor 运行时、真实座位投递（每个座位是一个真实端点 actor），无 socket。
 # 量的是「一局游戏要多少 CPU」和「一个核能带几张桌」，不是通过/失败，所以不注册成 ctest。
