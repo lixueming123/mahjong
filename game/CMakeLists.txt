@@ -41,6 +41,23 @@ add_executable(mahjong_room_test EXCLUDE_FROM_ALL server/mahjong_room_test.cc se
 target_link_libraries(mahjong_room_test PRIVATE ex_actor mahjong_rules riichi_rules GTest::gmock)
 # ---- 冻结区结束 --------------------------------------------------------------------------------
 
+# 对照基线压测（冻结）：**同一份** bench 源码（-DMAHJONG_BENCH_LEGACY_ROOM 选房间），
+# 只把房间换回 LegacyRoomActor，用来量「外壳化之后到底快了多少」。必须和
+# mahjong_room_bench 同口径：
+#   * bench 自己的 TU（驱动、AutoClient、帧解析）给 -O2，两边一致；
+#   * 被测量的房间代码保持 Debug（room.cc 走静态库继承全局 -O0，新外壳的 room_actor.cc
+#     也在 -O0 的 mahjong_room_shell 里）。否则比的就不是房间而是编译选项。
+add_library(legacy_room_only STATIC EXCLUDE_FROM_ALL server/room.cc)
+target_link_libraries(legacy_room_only PUBLIC ex_actor mahjong_rules riichi_rules spdlog::spdlog)
+target_include_directories(legacy_room_only PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server)
+add_executable(room_bench_legacy EXCLUDE_FROM_ALL server/room_bench.cc server/timer.cc
+                                 server/json.cc server/protocol.cc)
+target_link_libraries(room_bench_legacy PRIVATE legacy_room_only ex_actor mahjong_rules riichi_rules)
+target_compile_definitions(room_bench_legacy PRIVATE MAHJONG_BENCH_LEGACY_ROOM=1)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  target_compile_options(room_bench_legacy PRIVATE -O2)
+endif()
+
 
 # 账号存储（ACCOUNT_DESIGN.md §2）：用系统装的 libmysqlclient，不走 CPM
 # （CPM 在配置期要联网拉源码，而 MySQL 客户端本来就是本机的一个库）。
