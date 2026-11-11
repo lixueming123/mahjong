@@ -157,14 +157,20 @@ stdexec::task<void> RoomActor::Deliver(const std::vector<Outbound>& outbounds) {
   // four seats at once (when_all, or an async_scope) makes a full table *2.2x slower* here
   // (2.07 -> 4.60 ms/game on the table4 shape).
   //
-  // The combinator is not what costs: a 4-way `when_all` over empty tasks adds 74 ns to a 129 ns
-  // sequential loop, an `async_scope` adds 375 ns — nothing against 960 frames a game. What
-  // costs is the fan-out itself. One seat's frame is ~0.5 us of work, which is less than the
-  // wake-up a pool thread needs, so four seats racing four cores lose to four seats taking
-  // turns. The legacy room shows it from the other side: its parallel broadcast burned 1.3
-  // cores (7.25 ms cpu) to spend 5.52 ms of wall time, where this loop spends 2.09 ms cpu in
-  // 2.07 ms of wall time. Sequential also keeps the delivery order, and therefore a golden
-  // transcript, trivially deterministic.
+  // The combinator is not what costs: a 4-way `when_all` over empty tasks adds 86 ns to a 129 ns
+  // sequential loop, an `async_scope` 395 ns — nothing against 960 frames a game. (And those
+  // 395 ns are not the scope's bookkeeping. Against a plain receiver, nest+start is 16 ns and a
+  // join 11 ns; swapping the scope's four std::mutex for a spinlock saves 18 ns on a join and
+  // 25 ns of a spawn's 36. It is the await: the scope's senders answer no completion-behavior
+  // query, so a task cannot prove they complete inline and takes the generic affine path, which
+  // against its type-erased start scheduler resolves at run time — ~226 ns a go. A hand-rolled
+  // sender that does nothing but call set_value measured the same 227 ns; the same sender
+  // carrying just()'s attrs measured 2 ns.) What costs is the fan-out itself. One seat's frame
+  // is ~0.5 us of work, which is less than the wake-up a pool thread needs, so four seats
+  // racing four cores lose to four seats taking turns. The legacy room shows it from the other
+  // side: its parallel broadcast burned 1.3 cores (7.25 ms cpu) to spend 5.52 ms of wall time,
+  // where this loop spends 2.09 ms cpu in 2.07 ms of wall time. Sequential also keeps the
+  // delivery order, and therefore a golden transcript, trivially deterministic.
   for (const Outbound& outbound : outbounds) {
     if (outbound.recipients.empty()) {
       // "everyone with a wire".
