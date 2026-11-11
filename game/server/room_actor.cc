@@ -155,11 +155,16 @@ stdexec::task<void> RoomActor::Run(GameStep step) {
 stdexec::task<void> RoomActor::Deliver(const std::vector<Outbound>& outbounds) {
   // Sequential on purpose, and measured rather than assumed: fanning a step's frames out to the
   // four seats at once (when_all, or an async_scope) makes a full table *2.2x slower* here
-  // (2.09 -> 4.6 ms/game on the table4 shape), because the combinator's own cost — a coroutine
-  // frame plus a heap block and an atomic count per seat — is larger than the round trip it
-  // saves. The seats are local actors: one `Send` is a mailbox push and a short wait, not a
-  // network hop. Sequential also keeps the delivery order, and therefore a golden transcript,
-  // trivially deterministic.
+  // (2.07 -> 4.60 ms/game on the table4 shape).
+  //
+  // The combinator is not what costs: a 4-way `when_all` over empty tasks adds 74 ns to a 129 ns
+  // sequential loop, an `async_scope` adds 375 ns — nothing against 960 frames a game. What
+  // costs is the fan-out itself. One seat's frame is ~0.5 us of work, which is less than the
+  // wake-up a pool thread needs, so four seats racing four cores lose to four seats taking
+  // turns. The legacy room shows it from the other side: its parallel broadcast burned 1.3
+  // cores (7.25 ms cpu) to spend 5.52 ms of wall time, where this loop spends 2.09 ms cpu in
+  // 2.07 ms of wall time. Sequential also keeps the delivery order, and therefore a golden
+  // transcript, trivially deterministic.
   for (const Outbound& outbound : outbounds) {
     if (outbound.recipients.empty()) {
       // "everyone with a wire".
