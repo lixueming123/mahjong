@@ -269,7 +269,8 @@ export function createState() {
       const afterDiscard = 13 - 3 * ownMelds;
       // 服务端按 §2.2 排序下发；但「刚摸到的那张」要留在最右（雀魂口径），
       // 等这一次打出之后才归位，否则每摸一张牌都会窜进牌列中间。
-      state.hands[0] = keepDrawnLast(hand, state.hands[0], afterDiscard);
+      // 杠后的补牌同理：那次 sync 的手牌比杠前少了几张，只能靠 draw 帧记下的牌面认出来。
+      state.hands[0] = keepDrawnLast(hand, state.hands[0], afterDiscard, state.drawn);
       state.handCounts[0] = state.hands[0].length;
       state.drawn = state.hands[0].length > afterDiscard
         ? state.hands[0][state.hands[0].length - 1]
@@ -625,11 +626,15 @@ export function reasonLabel(reason) {
  * 服务端每次 state_sync 都按 §2.2 排序下发，若直接采用，刚摸的牌就会窜进牌列中间。
  * 这里从旧手牌末尾把那张取回来，再从新的有序手牌里摘掉一份、接在末尾；
  * 张数没多出来（已经打完了 / 本来就没摸）时原样返回。
+ *
+ * 杠的补牌也走这条路：杠吃掉了几张手牌，sync 的张数和杠前对不上，
+ * 此时只认 draw 帧记下的 `pendingDrawn`（那一帧必在 sync 之前到），不靠张数反推。
  */
-function keepDrawnLast(sorted, prev, afterDiscard) {
-  if (!Array.isArray(prev) || prev.length !== sorted.length) return sorted;
+function keepDrawnLast(sorted, prev, afterDiscard, pendingDrawn) {
   if (sorted.length <= afterDiscard) return sorted;
-  const drawn = prev[prev.length - 1];
+  // 丢帧/重连时没有 pendingDrawn，退回旧手牌末张——但它只在张数没变时可信
+  const drawn = pendingDrawn
+    || (Array.isArray(prev) && prev.length === sorted.length ? prev[prev.length - 1] : null);
   if (!drawn) return sorted;
   const out = [...sorted];
   let index = out.lastIndexOf(drawn);
