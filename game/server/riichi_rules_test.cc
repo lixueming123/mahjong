@@ -792,8 +792,10 @@ TEST(RiichiPerf, TenpaiFrameCostBreakdown) {
     hands.push_back(std::move(hand));
   }
 
-  // 计时助手：`asm volatile` 空约束把每轮结果钉在寄存器里。只写 `(void)fn()` 或往普通变量里累加，
-  // 纯标量调用会被编译器整段提到循环外——实测会得到恒定 0.1 µs 的假数（踩过坑）。
+  // 计时助手：用 `asm volatile` 空约束消费每轮结果，避免单轮被合并。
+  // 注：跨 TU 的调用（`Shanten` / `CanWinExact` 都编在 libmahjong_rules 里）编译器既不能内联
+  // 也不能当作无副作用消除，所以屏障并非「数字可信」的前提。曾经把这批数判成假数，
+  // 真因是静态库归档里堆了 7 份同名 .o、链接器取了旧的那份（见 CMakeLists.txt 的 rcs 说明）。
   auto keep = [](long long value) { asm volatile("" : : "r,m"(value) : "memory"); };
   auto time_us = [&keep](int iters, auto&& body) {
     long long acc = 0;
@@ -811,9 +813,8 @@ TEST(RiichiPerf, TenpaiFrameCostBreakdown) {
   };
 
   // A = 单次 RiichiWaitingTiles（帧里原来被调两次 ⇒ 2A）。
-  // 注意：这里只保留「会分配内存」的调用作为计时对象。`Shanten` / `CanWinExact` 这类
-  // 纯标量调用即使加 asm 屏障，在同一副固定手牌上仍会给出与整体对不上的数（实测
-  // 与 RiichiWaitingTiles 的差额差一个量级），不足以支撑结论，故不作为断言依据。
+  // 2026-11-12：去掉 `WaitingTiles` 内的 Shanten 门控后，A 从 76 µs 降到 6 µs。
+  // 门控在重叠手牌上要跑 77–170 µs 的 DFS，只为省掉 4.7 µs 的 34 次 CanWinExact。
   const double a_us = time_us(200, [&] {
     return static_cast<long long>(RiichiWaitingTiles(concealed, melds).size());
   });

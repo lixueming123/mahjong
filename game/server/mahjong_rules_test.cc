@@ -1901,8 +1901,11 @@ TEST(MahjongRules, WaitingTilesPerfBudget) {
   std::sort(samples.begin(), samples.end());
   const double p99 = samples[static_cast<size_t>(samples.size() * 0.99)];
   std::printf("WaitingTiles: mean=%.1f us, p99=%.1f us\n", mean, p99);
-  EXPECT_LT(mean, 200.0) << "PB-1：WaitingTiles 均值必须 ≤ 200µs";
-  EXPECT_LT(p99, 400.0) << "PB-1：WaitingTiles p99 必须 ≤ 400µs";
+  // 这道用例用的正是让 DFS 最慢的手牌（九面重叠），所以门槛同时充当「不退回门控」的守卫：
+  // 去掉门控后 Release 5.6 / Debug 79.6 us；一旦有人把 Shanten 门控加回来，
+  // Debug 会立刻回到 480 us 量级，这里直接失败。留 ~1.5x 余量给慢机器。
+  EXPECT_LT(mean, 120.0) << "PB-1：WaitingTiles 均值必须 ≤ 120µs";
+  EXPECT_LT(p99, 200.0) << "PB-1：WaitingTiles p99 必须 ≤ 200µs";
 }
 
 // F-SORT-01c（身份不变量）：排序**不得改变任何一张牌的 copy 身份**——打乱 1000 次后排序，
