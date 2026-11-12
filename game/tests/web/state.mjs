@@ -94,5 +94,26 @@ check('game_start 恢复场次累计分', s.matchTotal, [-8, 8, 0, 0]);
 check('经典场分数用累计分', s.scores, [-8, 8, 0, 0]);
 check('game_start 恢复连庄数', s.honba, 2);
 
+// 10. 杠后补牌：与普通摸牌同口径（补牌留在最右，打出后才归位排序）
+app.startRound({ seat: 0, dealer: 0, round_index: 0, round_count: 4,
+  hand: ['1m', '2m', '3m', '2s', '3s', '4s', '6s', '7s', '8s', '9s', '5z', '5z', '5z', '5p'] });
+s.drawn = '5p';
+app.applyActionEvent({ seat: 0, action: ACTION.KAKAN, tiles: ['5p'], seq: 30 });
+app.drawTile({ tile: '5s', seat: 0, seq: 31 });
+// 服务端 state_sync 按 §2.2 排序下发，补牌 5s 会挤在 4s 和 6s 之间
+app.applySync({ seq: 32, remaining: 60, current_seat: 0,
+  hand: ['1m', '2m', '3m', '2s', '3s', '4s', '5s', '6s', '7s', '8s', '9s'],
+  melds: [{ type: MELD_TYPE.KAKAN, tiles: ['5p', '5p', '5p', '5p'] }],
+  seats: [
+    { seat: 0, name: '我', is_bot: false, hand_count: 11, discards: [], melds: [], disconnected: false },
+    { seat: 1, name: 'AI-1', is_bot: true, hand_count: 13, discards: [], melds: [], disconnected: false },
+    { seat: 2, name: 'AI-2', is_bot: true, hand_count: 13, discards: [], melds: [], disconnected: false },
+    { seat: 3, name: 'AI-3', is_bot: true, hand_count: 13, discards: [], melds: [], disconnected: false },
+  ] });
+check('杠后补牌留在最右', s.hands[0][s.hands[0].length - 1], '5s');
+check('杠后补牌仍是待打张', { drawn: s.drawn, len: s.hands[0].length }, { drawn: '5s', len: 11 });
+app.discardTile({ seat: 0, tile: '1m', seq: 33 });
+check('杠后打出才归位排序', s.hands[0], ['2m', '3m', '2s', '3s', '4s', '5s', '6s', '7s', '8s', '9s']);
+
 console.log(`\n状态归约：${fail ? 'FAILED' : 'ALL PASS'}  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
