@@ -793,9 +793,8 @@ TEST(RiichiPerf, TenpaiFrameCostBreakdown) {
   }
 
   // 计时助手：用 `asm volatile` 空约束消费每轮结果，避免单轮被合并。
-  // 注：跨 TU 的调用（`Shanten` / `CanWinExact` 都编在 libmahjong_rules 里）编译器既不能内联
-  // 也不能当作无副作用消除，所以屏障并非「数字可信」的前提。曾经把这批数判成假数，
-  // 真因是静态库归档里堆了 7 份同名 .o、链接器取了旧的那份（见 CMakeLists.txt 的 rcs 说明）。
+  // 跨 TU 的调用（`Shanten` / `CanWinExact` 都编在 libmahjong_rules 里）编译器既不能内联，
+  // 也不能当作无副作用消除，所以屏障不是「数字可信」的前提，只是让计时范围更明确。
   auto keep = [](long long value) { asm volatile("" : : "r,m"(value) : "memory"); };
   auto time_us = [&keep](int iters, auto&& body) {
     long long acc = 0;
