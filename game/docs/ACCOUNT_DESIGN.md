@@ -104,9 +104,41 @@ CREATE TABLE IF NOT EXISTS match_results (
 | 情形 | 服务端行为 |
 | --- | --- |
 | 启动时连不上 / 建表失败 | 记一条 error 日志说明原因，账号功能标记为不可用；**服务端照常启动**（游客登录与整局游戏完全不受影响） |
-| 运行中查询失败 | 该次操作按失败处理，并尝试在下一个任务前重连；连续失败不致命 |
+| 运行中查询失败 | 连接级错误（2006/2013/2014/1927/1053）立即关闭连接，下一次请求重连；连续 `failure_threshold` 次失败后进入冷却窗口（`min(500ms·2^k, 30s)`），窗口内账号帧**毫秒级**返回 `code:11`（不再吃一个连接超时），到期做一次 half-open 探测。连续失败不致命 |
 | 账号相关帧（`register` / 带凭据的 `login` / `stats_request`） | `error{code:11, message:"account service unavailable"}`，连接保持；**不计入任何配额**（这是服务端故障，不是客户端错误） |
 | 战绩落库 | fire-and-forget；失败只记日志，**绝不影响 `game_end` 的广播**（客户端必须照常收到结算） |
+
+### 2.4 连接池与故障治理（v1.6）
+
+**形态**：进程内一个 `DbPool`（`db_pool.h`），N 个槽位，`N = kDbShardCount = db 线程数`。**一个槽位只属于一个线程**——`MYSQL*` 同一时刻只能被一个线程使用，且 `mysql_thread_init/end` 是线程作用域的，所以 `BindCurrentThread(i)` 之后 `Acquire()` 走 `thread_local` 指针，热路径无锁（与 MySQL Connector/C++ 官方 `ConnectionPool` 的 thread-id 语义一致）。**不做跨线程借还**：在同步阻塞 API 下，连接数超过线程数没有收益，反而要额外论证跨线程顺序使用。
+
+**与 FIFO 的关系**：顺序由 shard 内单线程串行保证，**不由"同一条连接"保证**。因此连接可以在两次请求之间被 ping、轮换或重建，`match record` → `stats` 的顺序不受影响。
+
+**连接生命周期**：惰性建连（首次 `Acquire`）→ 复用前若空闲超过 `ping_after_idle_ms`（默认 5s）做一次 `mysql_ping`，失败即重建 → 超过 `max_lifetime`（默认 30min）或 `idle_timeout`（默认 10min）在下次使用前关闭重开 → `Stop()` 在 shard 自己的线程上 `mysql_close` + `mysql_thread_end`。**冷启动补建**：启动时 MySQL 不可用、稍后恢复时，首个成功 `Acquire` 会补跑 `EnsureSchema`，不需要重启（旧实现会一直 1146 到重启）。
+
+**错误分类**（`db_policy.h`）：
+
+| errno | 分类 | 处置 |
+| --- | --- | --- |
+| 2006 / 2013 / 2014 / 1927 / 1053 | `kConnectionLost` | 关连接 + 计一次失败 |
+| 2002 / 2003 / 2005 | `kConnectFailed` | 计一次失败 |
+| 1044 / 1045 / 1049 | `kConfig` | 计失败 + ERROR（重试无意义） |
+| 1062 | `kDuplicate` | 不计失败、不关连接（`Register` → `USERNAME_TAKEN`；重复场次 WARN 后忽略） |
+| 其它 | `kQueryError` | 不计失败、不关连接 |
+
+**熔断**（每槽一个 `FailureBudget`）：连续失败达到 `failure_threshold`（默认 2）→ 开闸，冷却 `clamp(start·2^(n-threshold), ≤ max)`，其中 `start = max(--mysql-cooldown-ms, --mysql-timeout-ms)`（默认 `max(500ms, 3000ms) = 3s`）、`max` 默认 30s。**这条 floor 是实测逼出来的**：冷却若短于一次尝试本身的代价，闸等于没开——下一个请求到来时冷却已过期，又要吃满一次 3s。静默端口（accept 后不说话）实测：48 并发注册，无熔断（threshold=100）20.0s、52 次真连、中位 19.0s；开熔断 6.0s、12 次真连（每槽 2 次）、其中 40 个请求在 1ms 内被拒。冷却内 `Acquire` 直接失败、不碰 socket；到期只放**一个** half-open 探测，成功则复位，失败则冷却翻倍。快速失败的典型值：端口拒绝（connect 立即失败）时 0.2–0.4ms/请求。无随机抖动（状态机要保持可确定性单测）。失败跃迁打一条 WARN（`circuit opened for Xms`），探测与恢复各一条 INFO。
+
+**不重试语句**：`matches` 无唯一键，重放 INSERT 会写出重复战绩。重连只发生在 `Acquire()` 内部，`mysql_query` 失败一律不重放。
+
+**指标**：每槽一组 `memory_order_relaxed` 原子计数（acquires / failures / fast_fails / connects / connect_failures / pings / ping_failures / recycled_* / closed_broken / open_connections / worst_streak），只在关停时由 `main()` 打一条 INFO 汇总，无后台线程、无锁。
+
+**关停**：`stop_db()` 逐 shard `Send<Stop>()`（排空邮箱 + 各线程关自己的连接）→ 打印池统计 → `DbPool::Drain()`（只做泄漏自检，**绝不跨线程 close**）→ `DbLibraryShutdown()` → `ex_actor::Shutdown()`。
+
+**配置**：5 个 `--mysql-*` 参数见 §6.5。
+
+**实现落点（三处，缺一不可）**：① `db.h` —— `DbActor` 换成员（`shared_ptr<DbPool>` + `slot_index`）、`kActorMethods` 不变；② `db_mysql.cc` —— 真实 `DbPool`/`DbLease` 实现 + 各 job 走 `AcquireReadyLease()`；③ `db_stub.cc` —— 空实现（`Acquire` 恒 `kNotBound`）。纯策略（分类/熔断/槽位归属）在 `db_policy.h`，由 `mahjong_db_policy_test` 覆盖，不依赖 libmysqlclient。
+
+**演进（不在 v1.6 范围）**：运行时 `--mysql-shards`（需把 `SchedulerUnion` 扩到 `kMaxDbShards+1` 个 alternative，模板实例化成本明显上升）；`mysql_real_query_start/cont` 非阻塞 API 做单线程多连接 reactor；读写分离/多数据源。
 
 ## 3. 协议增补（对 `PROTOCOL.md` 的增补，编号沿用其章节）
 
@@ -249,10 +281,12 @@ C→S stats_request → S→C stats{...}
 
 1. **DB 访问绝不发生在 actor 的 handler 里**：理由是**阻塞**——handler 内不得阻塞，会占住调度线程。因此所有查询走**独立的后台线程池**，结果以**消息**投回 actor（与 `WindowTimer` 同一模式）；`PlayerActor` 的登录/注册/战绩 handler 只负责「校验 → 提交 → 立即返回」。
    （v1.2 更正论据：原文另举「handler 一旦挂起就不再持有 mailbox」为理由。自 v1.2 起每个 actor 的 handler 在 `AsyncGate` 保护下互斥（见 `GAME_DESIGN.md` §0.3），**挂起本身已不再破坏原子性**；DB 仍留在 actor 之外，只因为它会阻塞。实现形状不变。）
+   （v1.6 实现更正：「独立的后台线程池」具体化为**每 shard 一个专用单线程池**（`SchedulerUnion` 的 `scheduler_index = i+1`），连接由 `DbPool` 按槽位线程亲和地持有；约束本身——DB 访问不落在游戏池上——不变。）
 2. **状态变更只发生在消息 handler 里**：`logged_in_` / `player_id_` / `name_` / 在线表登记只在 `OnLoginResult` / `OnRegisterResult` 这类消息中修改。
 3. **迟到结果**：若结果到达时连接已关闭，**不登记在线表、不发帧**（`SendFrame` 在关闭后本就是 no-op，但在线表必须显式释放）。
 4. **关停顺序**：`gateway.Stop()` → `WindowTimer::Stop()` → **DB 工作线程 `Stop()`（join）** → `ex_actor::Shutdown()`。DB 线程的回调会往 actor 投消息，必须早于 actor world 拆除，与既有定时器同理。
 5. 启动参数（`main.cc`）：`--mysql-host` / `--mysql-port` / `--mysql-user` / `--mysql-password`（缺省读环境变量 `MAHJONG_MYSQL_PASSWORD`）/ `--mysql-db`；源码内不含任何默认口令。
+   v1.6 增补（§2.4）：`--mysql-timeout-ms`（connect/read/write 共用，100..60000，默认 3000）、`--mysql-idle-timeout-s`（0..86400，默认 600，0=关）、`--mysql-max-lifetime-s`（0..86400，默认 1800，0=关）、`--mysql-failure-threshold`（1..100，默认 2）、`--mysql-cooldown-ms`（首次冷却，10..60000，默认 500，实际取 `max(该值, --mysql-timeout-ms)`、上限 30000）。全部有默认值，既有 e2e 脚本无需改动。
 
 ## 7. 验收
 
@@ -261,13 +295,15 @@ C→S stats_request → S→C stats{...}
    - **v1.5 重连**：`reconnect_e2e_test.py` 覆盖——对局中断开 → 同账号重新登录（`ALREADY_ONLINE` 短重试）→ `login_ok{in_room:true}` + 同 `room_id`/`seat` + `game_start`（含 `match_total`/`renchan_count`）+ `state_sync` + `sync` 仍答同座位；`resume:false` 脱离旧房后可建新房；等待页刷新 `in_room:false`。
    - **v1.3 补充**：`match_results` 的验收 = 同一 `room_id` 恰好 4 行、各行 `final_score` 之和为 0、`final_rank` 与最后一份 `match_end.rankings[]` 逐座位一致、同账号重跑一场后该表行数 +4。
 3. **持久性**：重启服务端后同一账号 `player_id` 不变、战绩仍在。
-4. **降级**：`--mysql-port 1` 起动 → 游客登录与整局照常，账号帧回 `INTERNAL`，服务端不崩。
-5. `./scripts/format.sh` 无新增格式问题。
+4. **降级**：`--mysql-port 1` 起动 → 游客登录与整局照常，账号帧回 `INTERNAL`，服务端不崩；且熔断开闸后，**后续账号帧的往返应 <50ms**（不再每次吃满一个连接超时）。
+5. `mahjong_db_policy_test` 常绿（错误分类 / 熔断状态机 / 槽位归属；**不链接 `mahjong_db`，无 MySQL 的机器上也跑**）。
+6. `./scripts/format.sh` 无新增格式问题。
 
 ## 8. 修订记录
 
 | 版本 | 修订内容 | 来源 | 是否改动冻结数值 |
 | --- | --- | --- | --- |
+| **v1.6** | **连接池与故障治理**：新增 `DbPool`（`db_pool.h`，线程亲和槽位池，槽位数 = db 线程数）+ `DbLease` RAII + `db_policy.h`（错误分类 / 熔断状态机 / 槽位归属）；`DbActor` 不再持有裸 `MYSQL*`，六个 job 改走 `AcquireReadyLease()`；补 `mysql_ping`、`max_lifetime`/`idle_timeout` 轮换、指数退避 + 熔断快速失败（冷却下限 = connect 超时）、池指标、**冷启动补建 schema**；增 5 个 `--mysql-*` 参数与 `mahjong_db_policy_test`（不依赖 libmysqlclient）。表结构、协议帧、错误码、配额**全部未动** | 用户需求（MySQL 挂掉时每请求吃满 3s；连接无治理） | **否**（账号模型、口令口径、身份映射、错误码与配额、`matches`/`match_results` 结构与写入时机、`stats` 帧形状全部不变；仅连接生命周期与降级时延改变） |
 | **v1.5** | **账号登录时查房 + 刷新重连（仅账号玩家，无令牌）**：§3.1 `login` 增可选 `resume`、`login_ok` 增 `in_room`；Lobby 认证后按 `player_id` 查房，命中重放当前相位快照，未命中/等待页/`resume:false` 进大厅。§1.3 明确**不接管旧连接**，`ALREADY_ONLINE` 由客户端同连接短重试；游客不参与。验收补 `reconnect_e2e_test.py`。线协议见 `PROTOCOL.md` v2.2 | 用户需求（Web 刷新后看不到原对局）；方案定稿：仅账号、无令牌 | **否**（账号模型、口令散列、身份映射、一账号一连接、错误码、降级语义、`matches`/`match_results` 全部未动；仅登录成功后的查房/快照与两个字段） |
 | **v1.4** | §5 增第 7 条**客户端本地记住登录**：账号登录成功且勾着「记住密码」时，把账号名与口令存本机 `~/.ex_actor_mahjong/login.json`（目录 `0700` / 文件 `0600`，**明文**，按 `host:port` 分条），冷启动预填并默认自动登录一次，取消勾选即删档；实现落点 `game/client/login_store.py` + `app.py`，验收 `game/tests/login_memory_test.py`。**服务端与线协议零改动**（复用既有 `login{username,password}`，无新增帧/错误码） | 用户需求（「每次都要重新输入账号密码」） | **否**（账号模型、口令散列口径、身份映射、错误码、降级语义、`matches` / `match_results` **全部未动**；新增的只是客户端本机便利文件） |
 | **v1.3（口径修正）** | 同版内修正：`match_results.hands_played` 由「本场计入局数的局数（= `round_count`，恒 4；不含连庄额外手）」改为「**本场实际手数（= `game_end` 下发次数，4..8，含连庄额外手）**」；`dealer_hands` 补「恒 `<= hands_played`」。与 `PROTOCOL.md` §5.15 的 D2 终裁同批，表结构与既有字段**未动**，代码侧同一快照 | captain 裁决（D2 终裁，第三次裁决） | **否**（仅字段口径措辞，无表结构/字段/类型变化） |
