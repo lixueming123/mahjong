@@ -169,6 +169,12 @@ std::vector<Option> ClaimOptions(const std::vector<Tile>& hand, const std::vecto
 std::vector<Tile> WinningWaits(const std::vector<Tile>& concealed, const std::vector<Meld>& melds,
                                const WinContext& ctx);
 
+// 重载：`waits` 由调用方传入（通常来自 `RiichiWaitingTiles`）。
+// tenpai 帧里「等待张」已经被算过一次，本重载让它不必再算第二遍；语义与上面完全一致，
+// 前提是 `waits` 必须等于 `RiichiWaitingTiles(concealed, melds)`。
+std::vector<Tile> WinningWaits(const std::vector<Tile>& concealed, const std::vector<Meld>& melds,
+                               const WinContext& ctx, const std::vector<Tile>& waits);
+
 // 抢杠窗口的可选项（v1.15）：只有 **win / pass** —— 别人加杠的那张牌不能被吃/碰/大明杠。
 // 抢杠本身是 1 番役，所以「无役」的手牌也能抢；因此判役时必须把 `is_chankan` 算进去
 // （本函数内部强制置位，调用方的 ctx 只提供场风/自风/立直等状态）。

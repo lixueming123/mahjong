@@ -2258,7 +2258,9 @@ json::Value RiichiMahjongGame::BuildTenpaiFrame(int seat) const {
   if (!faces.empty()) {
     const riichi::WinContext hint_ctx =
         BuildRiichiContext(seat, (seat + 1) % kSeatCount, /*tsumo=*/false, faces.front());
-    winning = riichi::WinningWaits(concealed, melds, hint_ctx);
+    // `faces` 已经算过等待张，传进去让 `WinningWaits` 不必再跑一遍 `RiichiWaitingTiles`
+    //（实测：九面听下一遍就是 79 µs Release / 472 µs Debug，占整帧的一半）。
+    winning = riichi::WinningWaits(concealed, melds, hint_ctx, faces);
     no_yaku = winning.empty();
   }
   if (!faces.empty()) {

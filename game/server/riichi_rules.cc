@@ -1086,14 +1086,22 @@ std::vector<Tile> WinningWaits(const std::vector<Tile>& concealed, const std::ve
   if (concealed.size() + 3 * melds.size() != 13) {
     return {};  // 非等待态：没有「等待张」可谈
   }
+  return WinningWaits(concealed, melds, ctx, RiichiWaitingTiles(concealed, melds));
+}
+
+std::vector<Tile> WinningWaits(const std::vector<Tile>& concealed, const std::vector<Meld>& melds,
+                               const WinContext& ctx, const std::vector<Tile>& waits) {
+  if (concealed.size() + 3 * melds.size() != 13) {
+    return {};  // 非等待态：没有「等待张」可谈
+  }
   if (ctx.is_riichi) {
     // 立直本身就是役：全部等待张都能荣和（免掉逐张判番，这是「立直治无役」的实现口径）。
-    return RiichiWaitingTiles(concealed, melds);
+    return waits;
   }
   std::vector<Tile> result;
   // 荣和口径：放炮者是谁不影响判番，取一个与和牌者不同的座位即可（`from_seat >= 0` ⇒ 非自摸）。
   const int any_other = (ctx.winner_seat + 1) % 4;
-  for (Tile wait : RiichiWaitingTiles(concealed, melds)) {
+  for (Tile wait : waits) {
     std::vector<Tile> hand = concealed;
     hand.push_back(wait);
     SortTiles(hand);
