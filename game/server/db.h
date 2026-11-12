@@ -1,4 +1,4 @@
-// DbActor: the only part of the server that talks to MySQL.
+// DbActor: the only part of the server that talks to MySQL, and the front of the connection pool.
 //
 // ACCOUNT_DESIGN.md §6.1 says an actor handler must never block the actor world's threads.
 // MySQL *blocks* (a password check is a round trip), so these actors do not live on the game
@@ -7,15 +7,20 @@
 // of the handlers therefore parks exactly one thread, which nobody else is scheduled on, and the
 // handler runs to completion before the next message starts.
 //
+// Since v1.6 the connection itself lives in `DbPool` (db_pool.h, §2.4): a handler takes a
+// `DbLease`, runs its statements on it, and the lease's destructor gives the connection back. The
+// pool owns connect/reconnect, the idle ping, rotation, the circuit breaker and the counters.
+//
 // Three consequences shape the interface:
 //   * A shard's single thread is also its FIFO guarantee (§4.1): a match record is submitted
 //     before the client can ask for the stats that must include it, and one mailbox drained in
 //     order preserves that for free — *within* a shard. DbService is what makes two requests for
 //     one account land on the same shard in the first place.
 //   * The MySQL connection is per-thread (mysql_thread_init/mysql_thread_end are thread
-//     scoped), so it is opened by `Initialize()` — which runs *on the shard's thread* — and never
-//     in the constructor, which the framework runs on the spawning thread. It also means the
-//     shard count and the thread count are the same number by construction.
+//     scoped), so the pool binds one slot to one thread and the slot count equals the thread
+//     count by construction. A connection may therefore be rotated or rebuilt between two
+//     requests without disturbing the ordering above: what serializes them is the mailbox, not
+//     the socket.
 //   * The client library itself is process-wide (DbLibraryInit/DbLibraryShutdown), owned by
 //     main(), because mysql_library_init is not thread safe and must not be torn down while
 //     another shard's thread is still using it.
@@ -26,13 +31,12 @@
 // `co_await`.
 //
 // Two implementations exist and CMake picks exactly one, so no #ifdef leaks into the code:
-//   * db_mysql.cc — the real one, linked against libmysqlclient
+//   * db_mysql.cc — the real one, linked against libmysqlclient (and the real DbPool)
 //   * db_stub.cc  — used with -DMAHJONG_WITH_MYSQL=OFF; everything reports "unavailable",
 //                   which is the same degraded behaviour as a MySQL that is down (§2.3).
 
 #pragma once
 
-#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -44,12 +48,17 @@
 
 #include <exec/task.hpp>
 
+#include "db_policy.h"
 #include "ex_actor/api.h"
 #include "protocol.h"
 
 namespace mahjong {
 
 class PlayerActor;
+// Forward declared on purpose: this header must stay usable in a build without <mysql.h>, and
+// both types hide every libmysqlclient detail behind db_pool.h.
+class DbLease;
+class DbPool;
 
 struct DbConfig {
   std::string host = "127.0.0.1";
@@ -113,12 +122,13 @@ struct StatsOutcome {
 
 class DbActor {
  public:
-  // Defined by whichever of db_mysql.cc / db_stub.cc is compiled in.
-  explicit DbActor(DbConfig config);
+  // Defined by whichever of db_mysql.cc / db_stub.cc is compiled in. |pool| is the process-wide
+  // pool shared by every shard; |slot_index| is the slot this shard's thread will claim.
+  DbActor(std::shared_ptr<DbPool> pool, DbConfig config, size_t slot_index);
 
-  // Opens the connection and creates the schema. Runs on db_pool, so the connect's blocking
-  // resolve/TCP/auth never touches the game pools. Returns whether accounts are usable; the
-  // server starts either way (§2.3).
+  // Binds the shard's thread to its pool slot and probes MySQL through a lease. Runs on db_pool,
+  // so the connect's blocking resolve/TCP/auth never touches the game pools. Returns whether
+  // accounts are usable; the server starts either way (§2.3).
   stdexec::task<bool> Initialize();
 
   // Login/Register/FetchStats answer by posting OnLoginResult/OnRegisterResult/OnStatsResult
@@ -126,7 +136,7 @@ class DbActor {
   stdexec::task<void> Login(std::string username, std::string password, ex_actor::ActorRef<PlayerActor> reply);
   // `nickname` empty means "use the username" (§3.2).
   stdexec::task<void> Register(std::string username, std::string password, std::string nickname,
-                            ex_actor::ActorRef<PlayerActor> reply);
+                               ex_actor::ActorRef<PlayerActor> reply);
   stdexec::task<void> FetchStats(uint64_t account_id, ex_actor::ActorRef<PlayerActor> reply);
   // Fire and forget: a failed write is logged and never propagates to the game (§2.3, §4.6).
   stdexec::task<void> RecordMatch(MatchRecord record);
@@ -134,12 +144,9 @@ class DbActor {
   // A duplicate (room_id, account_id) is logged as a WARN and ignored — never retried.
   stdexec::task<void> RecordMatchResult(MatchResultRecord record);
 
-  // Closes the connection and releases the client library. Runs on db_pool (the library is
-  // thread scoped, so opening and closing must happen on the same thread); idempotent.
+  // Releases the slot: closes the connection and unregisters the thread. Runs on db_pool (the
+  // library is thread scoped, so opening and closing must happen on the same thread); idempotent.
   stdexec::task<void> Stop();
-
-  // Introspection for main()'s startup log; written only by Initialize()/Stop() on db_pool.
-  bool available() const { return available_.load(std::memory_order_relaxed); }
 
   // The method list ex_actor needs to resolve `Send<&DbActor::X>` (reflect.h). It sits
   // after the declarations because a static data member's initializer is not a complete-class
@@ -149,24 +156,26 @@ class DbActor {
                       &DbActor::RecordMatch, &DbActor::RecordMatchResult, &DbActor::Stop);
 
  private:
-  // Everything below runs on db_pool's single thread, so no two of them ever overlap and the
-  // connection needs no lock (the old worker thread made the same promise).
-  bool EnsureConnected();
-  bool EnsureSchema();
-  void Disconnect();
+  // Acquire plus the schema bootstrap: a cold start may find MySQL down, and the tables have to
+  // be created on the first lease that actually reaches the server, not only at startup.
+  DbLease AcquireReadyLease();
+  // Creates the database and the tables. Returns kNone on success, otherwise the classification
+  // the caller must charge to the pool.
+  DbFailureClass EnsureSchema(void* mysql_handle);
   // Escapes a value for the single-quoted literal it will sit in (§2.2). The inputs are
   // already charset-validated, so this is the second line of defence, not the first.
-  std::string Escape(const std::string& value);
+  std::string Escape(const DbLease& lease, const std::string& value);
   AuthOutcome LoginJob(const std::string& username, const std::string& password);
   AuthOutcome RegisterJob(const std::string& username, const std::string& password, const std::string& nickname);
   StatsOutcome StatsJob(uint64_t account_id);
   void RecordJob(const MatchRecord& record);
   void RecordMatchResultJob(const MatchResultRecord& record);
 
+  std::shared_ptr<DbPool> pool_;
   DbConfig config_;
-  // Opaque so db.h need not include <mysql.h>. Owned by the db_pool thread alone.
-  void* mysql_ = nullptr;
-  std::atomic<bool> available_ {false};
+  size_t slot_index_ = 0;
+  // True once this shard has created the schema; set on the shard's thread only.
+  bool schema_ready_ = false;
 };
 
 // ---- process-level client-library lifetime -------------------------------------------------
@@ -197,8 +206,7 @@ class DbService {
   size_t shard_count() const { return shards_.size(); }
   const std::vector<ex_actor::ActorRef<DbActor>>& shards() const { return shards_; }
 
-  [[nodiscard]] auto Login(std::string username, std::string password,
-                           ex_actor::ActorRef<PlayerActor> reply) const {
+  [[nodiscard]] auto Login(std::string username, std::string password, ex_actor::ActorRef<PlayerActor> reply) const {
     // `target` is evaluated before the arguments, so moving `username` into the call is safe.
     const ex_actor::ActorRef<DbActor> target = PickByString(username);
     return target.Send<&DbActor::Login>(std::move(username), std::move(password), std::move(reply));

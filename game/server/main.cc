@@ -3,6 +3,7 @@
 //
 // Usage: mahjong_server [--port N] [--seed N] [--action-timeout-ms N] [--ai-delay-ms N]
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <csignal>
@@ -21,6 +22,7 @@
 #include "actor_scope.h"
 #include "clock.h"
 #include "db.h"
+#include "db_pool.h"
 #include "ex_actor/api.h"
 #include "gateway.h"
 #include "lobby.h"
@@ -61,6 +63,8 @@ struct Options {
   // ACCOUNT_DESIGN.md §6.5: never a password in the source — the empty default is filled from
   // the environment (or --mysql-password) so it stays out of the argv of the process table.
   mahjong::DbConfig db;
+  // Connection governance for the pool (§2.4). slot_count is filled from kDbShardCount below.
+  mahjong::DbPoolOptions db_pool;
   bool show_help = false;
 };
 
@@ -68,6 +72,8 @@ void PrintUsage(const char* program) {
   std::fprintf(stderr,
                "usage: %s [--port N] [--seed N] [--action-timeout-ms N] [--ai-delay-ms N]\n"
                "          [--mysql-host H] [--mysql-port N] [--mysql-user U] [--mysql-password P] [--mysql-db D]\n"
+               "          [--mysql-timeout-ms N] [--mysql-idle-timeout-s N] [--mysql-max-lifetime-s N]\n"
+               "          [--mysql-failure-threshold N] [--mysql-cooldown-ms N]\n"
                "  --port N               listen port (default %u)\n"
                "  --seed N               wall shuffle seed (default: derived from the clock)\n"
                "  --action-timeout-ms N  action window length, %d..%d (default %d)\n"
@@ -78,13 +84,24 @@ void PrintUsage(const char* program) {
                "  --mysql-user U         MySQL user (default %s)\n"
                "  --mysql-password P     MySQL password (default: $MAHJONG_MYSQL_PASSWORD)\n"
                "  --mysql-db D           database, created if missing (default %s)\n"
+               "  --mysql-timeout-ms N   connect/read/write timeout, 100..60000 (default %d)\n"
+               "  --mysql-idle-timeout-s N   recycle a connection idle this long, 0..86400 (default %d; 0 = off)\n"
+               "  --mysql-max-lifetime-s N   recycle a connection this old, 0..86400 (default %d; 0 = off)\n"
+               "  --mysql-failure-threshold N  consecutive failures before fast-failing, 1..100 (default %u)\n"
+               "  --mysql-cooldown-ms N  first cooldown after the circuit opens, 10..60000 (default %lld;\n"
+               "                          raised to --mysql-timeout-ms when smaller, so an open circuit\n"
+               "                          always outlasts the attempt that opened it)\n"
                "  accounts are optional: if MySQL is unreachable the server starts anyway and only\n"
                "  the account frames report an error (the game itself is unaffected)\n",
                program, mahjong::protocol::kDefaultPort, mahjong::protocol::kMinActionTimeoutMs,
                mahjong::protocol::kMaxActionTimeoutMs, mahjong::protocol::kDefaultActionTimeoutMs,
                mahjong::kMaxAiDelayMs, mahjong::kDefaultAiDelayMs, mahjong::kMaxInterHandDelayMs,
-               mahjong::kDefaultInterHandDelayMs, mahjong::DbConfig {}.host.c_str(),
-               mahjong::DbConfig {}.port, mahjong::DbConfig {}.user.c_str(), mahjong::DbConfig {}.db.c_str());
+               mahjong::kDefaultInterHandDelayMs, mahjong::DbConfig {}.host.c_str(), mahjong::DbConfig {}.port,
+               mahjong::DbConfig {}.user.c_str(), mahjong::DbConfig {}.db.c_str(),
+               mahjong::DbPoolOptions {}.connect_timeout_ms, mahjong::DbPoolOptions {}.idle_timeout_ms / 1000,
+               mahjong::DbPoolOptions {}.max_lifetime_ms / 1000,
+               static_cast<unsigned int>(mahjong::DbPoolOptions {}.failure_budget.failure_threshold),
+               static_cast<long long>(mahjong::DbPoolOptions {}.failure_budget.cooldown_base_ms));
 }
 
 // Splits "--key=value" into its two halves.
@@ -118,9 +135,10 @@ bool ParseInt64(const std::string& text, int64_t* out) {
 
 bool IsKnownOption(const std::string& key) {
   return key == "--port" || key == "--seed" || key == "--action-timeout-ms" || key == "--ai-delay-ms" ||
-         key == "--inter-hand-delay-ms" ||
-         key == "--mysql-host" || key == "--mysql-port" || key == "--mysql-user" || key == "--mysql-password" ||
-         key == "--mysql-db";
+         key == "--inter-hand-delay-ms" || key == "--mysql-host" || key == "--mysql-port" || key == "--mysql-user" ||
+         key == "--mysql-password" || key == "--mysql-db" || key == "--mysql-timeout-ms" ||
+         key == "--mysql-idle-timeout-s" || key == "--mysql-max-lifetime-s" || key == "--mysql-failure-threshold" ||
+         key == "--mysql-cooldown-ms";
 }
 
 std::optional<Options> ParseOptions(int argc, char** argv, std::string* error) {
@@ -200,6 +218,42 @@ std::optional<Options> ParseOptions(int argc, char** argv, std::string* error) {
         return std::nullopt;
       }
       options.db.port = static_cast<int>(number);
+    } else if (key == "--mysql-timeout-ms") {
+      if (number < 100 || number > 60000) {
+        *error = "--mysql-timeout-ms must be within 100..60000, got: " + value;
+        return std::nullopt;
+      }
+      // One knob for all three: separate connect/read/write budgets are not worth a flag yet
+      // (§2.3 only ever had one 3s constant).
+      options.db_pool.connect_timeout_ms = static_cast<int>(number);
+      options.db_pool.read_timeout_ms = static_cast<int>(number);
+      options.db_pool.write_timeout_ms = static_cast<int>(number);
+    } else if (key == "--mysql-idle-timeout-s") {
+      if (number < 0 || number > 86400) {
+        *error = "--mysql-idle-timeout-s must be within 0..86400, got: " + value;
+        return std::nullopt;
+      }
+      options.db_pool.idle_timeout_ms = static_cast<int>(number) * 1000;
+    } else if (key == "--mysql-max-lifetime-s") {
+      if (number < 0 || number > 86400) {
+        *error = "--mysql-max-lifetime-s must be within 0..86400, got: " + value;
+        return std::nullopt;
+      }
+      options.db_pool.max_lifetime_ms = static_cast<int>(number) * 1000;
+    } else if (key == "--mysql-failure-threshold") {
+      if (number < 1 || number > 100) {
+        *error = "--mysql-failure-threshold must be within 1..100, got: " + value;
+        return std::nullopt;
+      }
+      options.db_pool.failure_budget.failure_threshold = static_cast<uint32_t>(number);
+    } else if (key == "--mysql-cooldown-ms") {
+      if (number < 10 || number > 60000) {
+        *error = "--mysql-cooldown-ms must be within 10..60000, got: " + value;
+        return std::nullopt;
+      }
+      options.db_pool.failure_budget.cooldown_base_ms = number;
+      // The cap follows the base so raising the base can never silently disable the growth.
+      options.db_pool.failure_budget.cooldown_max_ms = std::max<int64_t>(30000, number);
     } else if (key == "--inter-hand-delay-ms") {  // v1.6（C7）：局间停顿
       if (number < 0 || number > mahjong::kMaxInterHandDelayMs) {
         *error = "--inter-hand-delay-ms must be within 0.." + std::to_string(mahjong::kMaxInterHandDelayMs) +
@@ -219,6 +273,9 @@ std::optional<Options> ParseOptions(int argc, char** argv, std::string* error) {
     // Derived from the clock so every run differs unless --seed is given (§1.8).
     options.seed = static_cast<uint64_t>(mahjong::clock::EpochMs()) ^ 0x5DEECE66Dull;
   }
+  // One slot per db thread, by construction (db_pool.h): the pool can never have more connections
+  // than the shards that own them, and never fewer.
+  options.db_pool.slot_count = static_cast<size_t>(kDbShardCount);
   return options;
 }
 
@@ -241,8 +298,12 @@ int main(int argc, char** argv) {
   std::signal(SIGPIPE, SIG_IGN);
   ex_actor::ConfigureLogging();
   spdlog::info(
-      "mahjong_server: starting (port={}, seed={}, action_timeout_ms={}, ai_delay_ms={}, thread_pool={}, db_shards={})",
-      options->port, options->seed, options->action_timeout_ms, options->ai_delay_ms, kThreadPoolSize, kDbShardCount);
+      "mahjong_server: starting (port={}, seed={}, action_timeout_ms={}, ai_delay_ms={}, thread_pool={}, db_shards={}, "
+      "db_timeout_ms={}, db_idle_timeout_s={}, db_max_lifetime_s={}, db_failure_threshold={}, db_cooldown_ms={})",
+      options->port, options->seed, options->action_timeout_ms, options->ai_delay_ms, kThreadPoolSize, kDbShardCount,
+      options->db_pool.connect_timeout_ms, options->db_pool.idle_timeout_ms / 1000,
+      options->db_pool.max_lifetime_ms / 1000, options->db_pool.failure_budget.failure_threshold,
+      options->db_pool.failure_budget.cooldown_base_ms);
 
   // ex_actor must be initialized explicitly and shut down before main returns.
   // GAME_DESIGN v1.4 §5.4: rooms read the AI pacing from the process-wide setting (the
@@ -262,26 +323,30 @@ int main(int argc, char** argv) {
   constexpr size_t kSchedulerCount = static_cast<size_t>(kDbShardCount) + 1;
   std::array<ShardScheduler, kSchedulerCount> schedulers {};
   schedulers[0] = game_pool->GetScheduler();
-  std::vector<std::unique_ptr<ex_actor::WorkSharingThreadPool>> db_pools;
+  std::vector<std::unique_ptr<ex_actor::WorkSharingThreadPool>> db_thread_pools;
   for (int i = 0; i < kDbShardCount; ++i) {
-    db_pools.push_back(std::make_unique<ex_actor::WorkSharingThreadPool>(1));
-    schedulers[static_cast<size_t>(i) + 1] = db_pools.back()->GetScheduler();
+    db_thread_pools.push_back(std::make_unique<ex_actor::WorkSharingThreadPool>(1));
+    schedulers[static_cast<size_t>(i) + 1] = db_thread_pools.back()->GetScheduler();
   }
   using PoolUnion = typename ShardSchedulerUnion<ShardScheduler, kSchedulerCount>::Type;
-  auto pool_union = std::apply(
-      [](auto... shard_schedulers) { return std::make_unique<PoolUnion>(shard_schedulers...); }, schedulers);
+  auto pool_union =
+      std::apply([](auto... shard_schedulers) { return std::make_unique<PoolUnion>(shard_schedulers...); }, schedulers);
 
   ex_actor::Init(pool_union->GetScheduler());
   // The registry holds the scheduler by raw pointers, so the pools and the union must outlive it.
   ex_actor::HoldResource(std::move(game_pool));
-  for (auto& db_pool : db_pools) {
-    ex_actor::HoldResource(std::move(db_pool));
+  for (auto& thread_pool : db_thread_pools) {
+    ex_actor::HoldResource(std::move(thread_pool));
   }
   ex_actor::HoldResource(std::move(pool_union));
 
   // mysql_library_init is process-wide and not thread safe, so it happens once, here, before any
   // db thread exists. Each db thread registers itself separately in DbActor::Initialize.
   static_cast<void>(mahjong::DbLibraryInit());
+
+  // One pool for the whole process, one slot per shard (db_pool.h): the shard binds its slot on
+  // its own thread and every Acquire from then on is lock free.
+  auto db_pool = std::make_shared<mahjong::DbPool>(options->db, options->db_pool);
 
   // Everything that needs to be spawned, and the startup probe, runs in one coroutine so the
   // DbActor refs exist before the lobby and the gateway are built. The probes are sequential, so
@@ -291,7 +356,9 @@ int main(int argc, char** argv) {
     auto startup = [&]() -> stdexec::task<void> {
       for (int i = 0; i < kDbShardCount; ++i) {
         ex_actor::ActorConfig config {.scheduler_index = static_cast<size_t>(i) + 1};
-        db.AddShard(co_await ex_actor::Spawn<mahjong::DbActor>(options->db).WithConfig(config));
+        db.AddShard(
+            co_await ex_actor::Spawn<mahjong::DbActor>(db_pool, options->db, /*slot_index=*/static_cast<size_t>(i))
+                .WithConfig(config));
       }
       // Probe on the shard's own thread — that thread owns its connection (db.h). A dead MySQL
       // is not fatal: the server starts and only the account frames answer INTERNAL (§2.3).
@@ -303,10 +370,20 @@ int main(int argc, char** argv) {
     stdexec::sync_wait(startup());
   }
   // Drains every shard's mailbox before the world goes away: the writes §4.1 ordered must land.
-  auto stop_db = [&db] {
+  // Each Stop() also closes that shard's connection on its own thread, which is the only moment a
+  // mysql_close is legal; what is left afterwards is a leak, and Drain() names it.
+  auto stop_db = [&db, &db_pool] {
     for (const auto& shard : db.shards()) {
       stdexec::sync_wait(shard.Send<&mahjong::DbActor::Stop>());
     }
+    const mahjong::PoolStatsSnapshot stats = db_pool->Stats();
+    spdlog::info(
+        "db: pool acquires={} failures={} fast_fails={} connects={} connect_failures={} pings={} ping_failures={} "
+        "recycled_lifetime={} recycled_idle={} broken={} open={} bound={} worst_streak={}",
+        stats.acquires, stats.acquire_failures, stats.circuit_fast_fails, stats.connects, stats.connect_failures,
+        stats.pings, stats.ping_failures, stats.recycled_lifetime, stats.recycled_idle, stats.closed_broken,
+        stats.open_connections, stats.bound_slots, stats.consecutive_failures);
+    db_pool->Drain();
   };
 
   // Window timers: the delayed, seq-carrying timeout messages (PROTOCOL.md §0.5).
@@ -320,8 +397,8 @@ int main(int argc, char** argv) {
     stop_db();
     stdexec::sync_wait(mahjong::ActorSendScope().on_empty());
     // Every db thread has unregistered itself in DbActor::Stop, so the library can go away now.
-  mahjong::DbLibraryShutdown();
-  ex_actor::Shutdown();
+    mahjong::DbLibraryShutdown();
+    ex_actor::Shutdown();
     return 1;
   }
   ex_actor::ActorRef<mahjong::LobbyActor> lobby = std::get<0>(*lobby_result);
@@ -341,8 +418,8 @@ int main(int argc, char** argv) {
     stop_db();
     stdexec::sync_wait(mahjong::ActorSendScope().on_empty());
     // Every db thread has unregistered itself in DbActor::Stop, so the library can go away now.
-  mahjong::DbLibraryShutdown();
-  ex_actor::Shutdown();
+    mahjong::DbLibraryShutdown();
+    ex_actor::Shutdown();
     return 1;
   }
   mahjong::InstallGatewaySignalHandlers(gateway.wake_write_fd());
