@@ -4,6 +4,8 @@
 
 #include "riichi_rules.h"
 
+#include <chrono>
+#include <cstdio>
 #include <optional>
 #include <string>
 #include <vector>
@@ -754,6 +756,96 @@ TEST(RiichiKyoutakuAward, LeftoverSticksGoToFirstPlace) {
   const KyoutakuAward busted = AwardLeftoverKyoutaku({-9000, 40000, 35000, 34000}, 1);
   EXPECT_EQ(busted.seat, 1);
   EXPECT_EQ(busted.points, 1000);
+}
+
+// ---------------------------------------------------------------------------
+// tenpai 帧成本分解（PB-2 现场）
+//
+// `BuildTenpaiFrame` 的等待态路径原来把「等待张」算了两遍：
+// `riichi_mahjong_game.cc:2251` 一次，`WinningWaits` 内部再一次（输入完全相同）；
+// 之后才对每张等待牌跑一次 `DetectYaku`（只用来判 `!empty()`）。
+//
+// 本用例量「重复的那一遍」值多少钱，并给出帧的成本构成：
+//   A  = 一次 RiichiWaitingTiles
+//   9B = 逐张判番总耗时
+// 改后帧 = A + WinningWaits(waits)。
+//
+// 手牌与 `MahjongRules.WaitingTilesPerfBudget` 同款：九面听 1112345678999m（13 张门前）。
+// 2026-11-12 基线（Release）：A ≈ 78 µs，WinningWaits 旧 ≈ 97 µs / 新 ≈ 5 µs，9B ≈ 3 µs。
+// 结论：**判役不是瓶颈**（3 µs 级别），重复的 A 才是——去掉后帧成本减半。
+// ---------------------------------------------------------------------------
+TEST(RiichiPerf, TenpaiFrameCostBreakdown) {
+  const std::vector<Tile> concealed =
+      Tiles({"1m", "1m", "1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "9m", "9m"});
+  const std::vector<Meld> melds;
+  const std::vector<Tile> waits = RiichiWaitingTiles(concealed, melds);
+  ASSERT_GE(waits.size(), 8u) << "九面听的手牌必须真的多面听";
+  const WinContext ron = Ron(2);
+
+  // 每张等待牌补一张后的 14 张手牌（与 WinningWaits 内部构造完全一致）
+  std::vector<std::vector<Tile>> hands;
+  hands.reserve(waits.size());
+  for (Tile wait : waits) {
+    std::vector<Tile> hand = concealed;
+    hand.push_back(wait);
+    SortTiles(hand);
+    hands.push_back(std::move(hand));
+  }
+
+  // 计时助手：`asm volatile` 空约束把每轮结果钉在寄存器里。只写 `(void)fn()` 或往普通变量里累加，
+  // 纯标量调用会被编译器整段提到循环外——实测会得到恒定 0.1 µs 的假数（踩过坑）。
+  auto keep = [](long long value) { asm volatile("" : : "r,m"(value) : "memory"); };
+  auto time_us = [&keep](int iters, auto&& body) {
+    long long acc = 0;
+    for (int i = 0; i < 10; ++i) {
+      acc += body();
+      keep(acc);  // 预热
+    }
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < iters; ++i) {
+      acc += body();
+      keep(acc);
+    }
+    const auto end = std::chrono::steady_clock::now();
+    return std::chrono::duration<double, std::micro>(end - start).count() / iters;
+  };
+
+  // A = 单次 RiichiWaitingTiles（帧里原来被调两次 ⇒ 2A）。
+  // 注意：这里只保留「会分配内存」的调用作为计时对象。`Shanten` / `CanWinExact` 这类
+  // 纯标量调用即使加 asm 屏障，在同一副固定手牌上仍会给出与整体对不上的数（实测
+  // 与 RiichiWaitingTiles 的差额差一个量级），不足以支撑结论，故不作为断言依据。
+  const double a_us = time_us(200, [&] {
+    return static_cast<long long>(RiichiWaitingTiles(concealed, melds).size());
+  });
+  // 9B = 帧里逐张判番的总和（每轮把全部等待张过一遍，除以张数得单次）
+  const double nine_b_us = time_us(50, [&] {
+    long long total = 0;
+    for (size_t i = 0; i < hands.size(); ++i) {
+      total += static_cast<long long>(DetectYaku(hands[i], melds, waits[i], ron).size());
+    }
+    return total;
+  });
+  const double b_us = nine_b_us / static_cast<double>(hands.size());
+  // 实测 WinningWaits：旧签名内部会再算一遍 RiichiWaitingTiles，新签名直接吃 waits
+  const double winning_us = time_us(50, [&] {
+    return static_cast<long long>(WinningWaits(concealed, melds, ron).size());
+  });
+  const double winning_reuse_us = time_us(50, [&] {
+    return static_cast<long long>(WinningWaits(concealed, melds, ron, waits).size());
+  });
+
+  // 帧的实际形态（改后）：RiichiWaitingTiles 一次 + WinningWaits(waits)
+  const double frame_model_us = a_us + winning_reuse_us;
+  std::printf(
+      "[perf] tenpai 分解（%zu 面听）: A(RiichiWaitingTiles)=%.1f us | B(DetectYaku)=%.1f us/张 | "
+      "9B=%.1f us |\n"
+      "       WinningWaits(旧,重算 waits)=%.1f us | WinningWaits(新,复用 waits)=%.1f us | 帧模型 A+WW=%.1f us\n",
+      waits.size(), a_us, b_us, nine_b_us, winning_us, winning_reuse_us, frame_model_us);
+  std::printf("[perf] 占比（帧模型口径）: 等待张 A = %.0f%% | 逐张判番 9B = %.0f%%\n",
+              100.0 * a_us / frame_model_us, 100.0 * nine_b_us / frame_model_us);
+
+  // 门禁：Debug(-O0) 实测见上方输出，按它留余量，只兜住「翻倍级」回归。
+  EXPECT_LT(frame_model_us, 200.0) << "tenpai 帧主导成本回归（Release 目标 < 20µs）";
 }
 
 }  // namespace
