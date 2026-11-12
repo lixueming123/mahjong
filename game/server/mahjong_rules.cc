@@ -495,11 +495,11 @@ std::vector<Tile> WaitingTiles(const std::vector<Tile>& concealed, const std::ve
   if (concealed.size() + 3 * melds.size() != 13) {
     return waits;
   }
-  // PB-1：先用 Shanten 门控——非听牌手牌一次向听计算就返回，避免 34 次 CanWinExact。
-  // 等待态的 13 张不可能是和牌形，故 Shanten == 0 等价于「听牌」。
-  if (Shanten(concealed, melds) != 0) {
-    return waits;
-  }
+  // 不设 Shanten 门控：34 次 CanWinExact 是常数级（Release 实测 4.7 us 中位、5.3 us 上界），
+  // 而 Shanten 在「接近听牌、牌面重叠」的手牌上会跑到 77–175 us（1112345678999m / 1122334455667m）。
+  // 门控只在散牌上便宜（0.09 us），却恰好在 WaitingTiles 最常被调用的场景
+  //（换牌后是否听牌，见 room.cc:454、riichi_mahjong_game.cc:1896）踩中最贵分支。
+  // 去掉后本函数成为有界操作：最坏 ≈ 常数级探测成本，与手牌形状无关。
   for (int face = 0; face < kFaceCount; ++face) {
     std::vector<Tile> with_win = concealed;
     with_win.push_back(MakeTileFromFace(static_cast<Face>(face)));
