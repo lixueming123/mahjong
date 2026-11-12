@@ -184,6 +184,14 @@ target_link_libraries(mahjong_account_test PRIVATE mahjong_rules GTest::gtest_ma
 add_test(NAME mahjong_account_test COMMAND mahjong_account_test)
 set_tests_properties(mahjong_account_test PROPERTIES TIMEOUT 60)
 
+# MySQL 连接池的策略层单测（错误分类 / 熔断状态机 / 槽位归属，db_policy.h）。
+# 与 mahjong_account_test 同理：不链接 mahjong_db，没装 libmysqlclient 的机器上也恒常可跑。
+add_executable(mahjong_db_policy_test server/db_policy_test.cc)
+target_include_directories(mahjong_db_policy_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_link_libraries(mahjong_db_policy_test PRIVATE GTest::gtest_main GTest::gmock)
+add_test(NAME mahjong_db_policy_test COMMAND mahjong_db_policy_test)
+set_tests_properties(mahjong_db_policy_test PROPERTIES TIMEOUT 60)
+
 # 帧解码层的纯逻辑单测（PROTOCOL §4 的字段规则 / 错误码 / §7.2 计量归属）。
 # 与 mahjong_account_test 同理：不链接 actor、不链接 socket，任何机器上恒常可跑。
 add_executable(mahjong_frame_parser_test server/frame_parser_test.cc server/frame_parser.cc
