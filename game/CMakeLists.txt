@@ -149,6 +149,7 @@ add_executable(
   server/json.cc
   server/protocol.cc
   server/net.cc
+  server/reactor.cc
   server/connection.cc
   server/player_actor.cc
   server/player_session_agent.cc

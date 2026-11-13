@@ -1,5 +1,6 @@
 #include "gateway.h"
 
+#include <poll.h>
 #include <signal.h>
 #include <unistd.h>
 
@@ -29,6 +30,16 @@ namespace mahjong {
 namespace {
 
 volatile sig_atomic_t g_stop_requested = 0;
+
+short EventsForFd(const std::vector<ReadyEvent>& ready, int fd) {
+  for (const ReadyEvent& event : ready) {
+    if (event.fd == fd) {
+      return event.events;
+    }
+  }
+  return 0;
+}
+
 volatile sig_atomic_t g_wake_write_fd = -1;
 
 void HandleStopSignal(int signal_number) {
@@ -62,7 +73,7 @@ void InstallGatewaySignalHandlers(int wake_write_fd) {
   struct sigaction action {};
   action.sa_handler = HandleStopSignal;
   sigemptyset(&action.sa_mask);
-  // No SA_RESTART: poll() must return EINTR so the loop notices the stop request.
+  // No SA_RESTART: epoll_wait/kevent must return EINTR so the loop notices the stop request.
   action.sa_flags = 0;
   sigaction(SIGINT, &action, nullptr);
   sigaction(SIGTERM, &action, nullptr);
@@ -99,6 +110,24 @@ bool Gateway::Start(std::string* error) {
     listen_fd_ = -1;
     return false;
   }
+  if (!reactor_.Open(error)) {
+    net::CloseFd(listen_fd_);
+    listen_fd_ = -1;
+    net::CloseFd(wake_fds_[0]);
+    net::CloseFd(wake_fds_[1]);
+    wake_fds_[0] = wake_fds_[1] = -1;
+    return false;
+  }
+  if (!reactor_.Add(listen_fd_, POLLIN) || !reactor_.Add(wake_fds_[0], POLLIN)) {
+    *error = std::string("reactor add failed: ") + std::strerror(errno);
+    reactor_.Close();
+    net::CloseFd(listen_fd_);
+    listen_fd_ = -1;
+    net::CloseFd(wake_fds_[0]);
+    net::CloseFd(wake_fds_[1]);
+    wake_fds_[0] = wake_fds_[1] = -1;
+    return false;
+  }
   running_ = true;
   spdlog::info("gateway: listening on {}:{}", protocol::kListenAddress, port_);
   return true;
@@ -108,13 +137,23 @@ void Gateway::Stop() {
   running_ = false;
   for (Client& client : clients_) {
     if (!client.dead) {
+      Unregister(client);
       client.dead = true;
       client.conn->MarkClosed();
     }
   }
   clients_.clear();
+  if (reactor_.is_open()) {
+    if (listen_fd_ >= 0) {
+      reactor_.Del(listen_fd_, POLLIN);
+    }
+    if (wake_fds_[0] >= 0) {
+      reactor_.Del(wake_fds_[0], POLLIN);
+    }
+  }
   net::CloseFd(listen_fd_);
   listen_fd_ = -1;
+  reactor_.Close();
 }
 
 void Gateway::Run() {
@@ -124,60 +163,118 @@ void Gateway::Run() {
     return;
   }
   running_ = true;
-  std::vector<pollfd> poll_fds;
-  std::vector<size_t> poll_clients;
+  std::vector<ReadyEvent> ready;
   while (!StopRequested() && running_) {
-    poll_fds.clear();
-    poll_clients.clear();
-    poll_fds.push_back(pollfd {.fd = listen_fd_, .events = POLLIN, .revents = 0});
-    poll_fds.push_back(pollfd {.fd = wake_fds_[0], .events = POLLIN, .revents = 0});
-    for (size_t index = 0; index < clients_.size(); ++index) {
-      Client& client = clients_[index];
-      if (client.dead) {
-        continue;
+    // Drop the wake flag only after SyncInterest has seen every outbox queued while the flag
+    // was set. A SendFrame that arrives after test() observes false writes a pipe byte, so
+    // Wait cannot sleep through it. Clearing earlier lets a sender skip the write and leaves
+    // the frame sitting until the idle timeout.
+    for (;;) {
+      SyncInterest();
+      if (!wake_flag_.flag.test(std::memory_order_acquire)) {
+        break;
       }
-      // Once a close is pending only the flush of the outbox still matters.
-      bool closing = client.close_pending || client.conn->close_requested();
-      short events = closing ? POLLOUT : POLLIN;
-      if (!closing && client.conn->HasPendingOutbox()) {
-        events |= POLLOUT;
-      }
-      poll_fds.push_back(pollfd {.fd = client.conn->fd(), .events = events, .revents = 0});
-      poll_clients.push_back(index);
+      wake_flag_.flag.clear(std::memory_order_release);
+      DrainWakePipe();
+    }
+    if (StopRequested() || !running_) {
+      break;
     }
 
-    int ready = ::poll(poll_fds.data(), static_cast<nfds_t>(poll_fds.size()), protocol::kPollTimeoutMs);
-    if (ready < 0) {
+    const int ready_count = reactor_.Wait(protocol::kPollTimeoutMs, &ready);
+    if (ready_count < 0) {
       if (errno == EINTR) {
         continue;  // stop flag is checked at the top of the loop
       }
-      spdlog::error("gateway: poll() failed: {}", std::strerror(errno));
+      spdlog::error("gateway: wait failed: {}", std::strerror(errno));
       continue;
     }
     if (StopRequested()) {
       break;
     }
-    if (ready > 0) {
-      if ((poll_fds[1].revents & POLLIN) != 0) {
+    if (ready_count > 0) {
+      bool wake = false;
+      bool accept = false;
+      for (const ReadyEvent& event : ready) {
+        if (event.fd == wake_fds_[0]) {
+          wake = true;
+        } else if (event.fd == listen_fd_ && (event.events & (POLLIN | POLLERR | POLLHUP)) != 0) {
+          accept = true;
+        }
+      }
+      if (wake) {
+        // The flag stays set. The next pass clears it after SyncInterest has looked at the
+        // outboxes this byte was waking us for.
         DrainWakePipe();
       }
-      if ((poll_fds[0].revents & (POLLIN | POLLERR | POLLHUP)) != 0) {
+      if (accept) {
         AcceptClients();
       }
-      for (size_t index = 0; index < poll_clients.size(); ++index) {
-        const pollfd& entry = poll_fds[2 + index];
-        if (entry.revents == 0) {
-          continue;
-        }
-        Client& client = clients_[poll_clients[index]];
+      for (Client& client : clients_) {
         if (client.dead) {
           continue;
         }
-        HandleClientEvents(client, entry.revents);
+        const short events = EventsForFd(ready, client.conn->fd());
+        if (events == 0) {
+          continue;
+        }
+        HandleClientEvents(client, events);
       }
     }
     CheckTimers();
     CompactClients();
+  }
+}
+
+short Gateway::DesiredEvents(const Client& client) const {
+  // Once a close is pending only the flush of the outbox still matters.
+  if (client.close_pending || client.conn->close_requested()) {
+    return POLLOUT;
+  }
+  short events = POLLIN;
+  if (client.conn->HasPendingOutbox()) {
+    events |= POLLOUT;
+  }
+  return events;
+}
+
+void Gateway::SyncInterest() {
+  for (Client& client : clients_) {
+    if (client.dead) {
+      continue;
+    }
+    const short desired = DesiredEvents(client);
+    if (desired == client.registered_events) {
+      continue;
+    }
+    const int fd = client.conn->fd();
+    bool updated = false;
+    if (client.registered_events == 0) {
+      updated = reactor_.Add(fd, desired);
+    } else {
+      updated = reactor_.Mod(fd, client.registered_events, desired);
+    }
+    if (!updated) {
+      spdlog::error("gateway: update interest for conn#{} failed: {}", client.conn->id(), std::strerror(errno));
+      CloseClient(client, "reactor update failed");
+      continue;
+    }
+    client.registered_events = desired;
+  }
+}
+
+void Gateway::Unregister(Client& client) {
+  if (client.registered_events == 0) {
+    return;
+  }
+  const short registered = client.registered_events;
+  client.registered_events = 0;
+  const int fd = client.conn->fd();
+  if (fd < 0) {
+    return;
+  }
+  if (!reactor_.Del(fd, registered)) {
+    spdlog::error("gateway: drop interest for conn#{} failed: {}", client.conn->id(), std::strerror(errno));
   }
 }
 
@@ -213,7 +310,7 @@ void Gateway::AcceptClients() {
     net::SetNoSigpipe(fd);
 
     int connection_id = next_client_id_++;
-    auto conn = std::make_shared<Connection>(fd, connection_id, wake_fds_[1]);
+    auto conn = std::make_shared<Connection>(fd, connection_id, wake_fds_[1], /*wake_flag=*/&wake_flag_.flag);
     ex_actor::ActorRef<PlayerActor> actor;
     try {
       std::optional<std::tuple<ex_actor::ActorRef<PlayerActor>>> spawned =
@@ -228,8 +325,8 @@ void Gateway::AcceptClients() {
       conn->MarkClosed();
       continue;
     }
-    // The address the actor needs for the asynchronous account results. The fd is not in the
-    // poll set yet (poll_fds is built before accept), so no frame can overtake this message.
+    // The address the actor needs for the asynchronous account results. The fd is not registered
+    // yet, so no frame can overtake this message: the next Wait is the first that can see it.
     ActorSendScope().spawn(actor.Send<&PlayerActor::Dispatch>(PlayerEnvelope::SetSelfRef(actor)));
 
     Client client;
@@ -238,6 +335,13 @@ void Gateway::AcceptClients() {
     client.last_inbound_ms = clock::MonotonicMs();
     client.idle_reported_for_inbound_ms = -1;  // nothing reported yet for this connection
     clients_.push_back(std::move(client));
+    Client& stored = clients_.back();
+    if (!reactor_.Add(stored.conn->fd(), POLLIN)) {
+      spdlog::error("gateway: failed to watch conn#{}: {}", connection_id, std::strerror(errno));
+      CloseClient(stored, "reactor add failed");
+      continue;
+    }
+    stored.registered_events = POLLIN;
     ++accepted_connections_;
     spdlog::info("gateway: accepted conn#{} from {}:{}", connection_id, inet_ntoa(address.sin_addr),
                  ntohs(address.sin_port));
@@ -480,6 +584,7 @@ void Gateway::CloseClient(Client& client, const std::string& reason) {
   if (client.dead) {
     return;
   }
+  Unregister(client);
   client.dead = true;
   client.conn->MarkClosed();
   try {

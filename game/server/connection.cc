@@ -8,16 +8,47 @@
 #include "net.h"
 
 namespace mahjong {
+namespace {
 
-Connection::Connection(int fd, int id, int wake_write_fd) : fd_(fd), id_(id), wake_write_fd_(wake_write_fd) {}
+// True when the byte is in the pipe or a previous byte is already waiting (EAGAIN).
+bool WriteWakeByte(int fd) {
+  const char kByte = 'w';
+  while (true) {
+    const ssize_t written = ::write(fd, &kByte, 1);
+    if (written >= 0) {
+      return true;
+    }
+    if (errno == EINTR) {
+      continue;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      return true;
+    }
+    return false;
+  }
+}
+
+}  // namespace
+
+Connection::Connection(int fd, int id, int wake_write_fd, std::atomic_flag* wake_flag)
+    : fd_(fd), id_(id), wake_write_fd_(wake_write_fd), wake_flag_(wake_flag) {}
 
 void Connection::Wake() {
   if (wake_write_fd_ < 0) {
     return;
   }
-  const char kByte = 'w';
-  ssize_t written = ::write(wake_write_fd_, &kByte, 1);
-  (void)written;  // EAGAIN means the loop already has a pending wakeup; nothing to do.
+  // The outbox mutex is already released. The flag only coalesces the pipe write: the first
+  // sender arms it and writes one byte, and everyone else returns without a syscall.
+  if (wake_flag_ == nullptr) {
+    static_cast<void>(WriteWakeByte(wake_write_fd_));
+    return;
+  }
+  if (wake_flag_->test_and_set(std::memory_order_acq_rel)) {
+    return;
+  }
+  if (!WriteWakeByte(wake_write_fd_)) {
+    wake_flag_->clear(std::memory_order_release);
+  }
 }
 
 void Connection::AppendFrameLocked(std::string_view frame) {

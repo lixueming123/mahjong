@@ -521,21 +521,21 @@ RoomRun SpawnRoom(const std::string& room_id, uint64_t seed, Shape shape, std::s
   // The concrete room type is named exactly once here; everything else holds the interface.
   // The legacy build feeds it the pre-refactor constructor (no game id / options json).
 #if defined(MAHJONG_BENCH_LEGACY_ROOM)
-  run.room = std::get<0>(ex::sync_wait(ex_actor::Spawn<mj::LegacyRoomActor>(
-      room_id, seed, action_timeout_ms, std::move(seats), nullptr,
-      /*ai_delay_ms=*/0, /*inter_hand_delay_ms=*/-1, ex_actor::ActorRef<mj::RoomOwner> {},
-      mj::TimeoutScheduler([](int64_t, uint64_t) {}),
-      mj::RoomFinishedCallback([batch](const mj::GameSettlement&) { batch->OnFinished(); })))
-                 .value());
+  run.room = std::get<0>(
+      ex::sync_wait(ex_actor::Spawn<mj::LegacyRoomActor>(
+                        room_id, seed, action_timeout_ms, std::move(seats), nullptr,
+                        /*ai_delay_ms=*/0, /*inter_hand_delay_ms=*/-1, ex_actor::ActorRef<mj::RoomOwner> {},
+                        mj::TimeoutScheduler([](int64_t, uint64_t) {}),
+                        mj::RoomFinishedCallback([batch](const mj::GameSettlement&) { batch->OnFinished(); })))
+          .value());
 #else
-  ex_actor::ActorRef<mj::RoomActorFor<mj::ClassicMahjongGame>> concrete =
-      std::get<0>(ex::sync_wait(ex_actor::Spawn<mj::RoomActorFor<mj::ClassicMahjongGame>>(
-                                    room_id, std::string("classic"), std::string(), seed, action_timeout_ms,
-                                    /*ai_delay_ms=*/0, /*inter_hand_delay_ms=*/-1, std::move(seats), nullptr,
-                                    ex_actor::ActorRef<mj::RoomOwner> {},
-                                    mj::TimeoutScheduler([](int64_t, uint64_t) {}),
-                                    mj::RoomFinishedCallback([batch](const mj::GameSettlement&) { batch->OnFinished(); })))
-                    .value());
+  ex_actor::ActorRef<mj::RoomActorFor<mj::ClassicMahjongGame>> concrete = std::get<0>(
+      ex::sync_wait(ex_actor::Spawn<mj::RoomActorFor<mj::ClassicMahjongGame>>(
+                        room_id, std::string("classic"), std::string(), seed, action_timeout_ms,
+                        /*ai_delay_ms=*/0, /*inter_hand_delay_ms=*/-1, std::move(seats), nullptr,
+                        ex_actor::ActorRef<mj::RoomOwner> {}, mj::TimeoutScheduler([](int64_t, uint64_t) {}),
+                        mj::RoomFinishedCallback([batch](const mj::GameSettlement&) { batch->OnFinished(); })))
+          .value());
   run.room = concrete;
 #endif
   for (const ex_actor::ActorRef<AutoClient>& client : clients) {
@@ -570,10 +570,16 @@ std::optional<RunResult> RunRound(Shape shape, int rooms, uint64_t base_seed, in
   auto batch = std::make_shared<Batch>(rooms);
   std::vector<RoomRun> runs;
   runs.reserve(static_cast<size_t>(rooms));
+  if (rooms >= 1000) {
+    printf("  spawning %d rooms\n", rooms);
+  }
   for (int index = 0; index < rooms; ++index) {
     const std::string room_id = "bench-" + std::to_string(index);
     runs.push_back(SpawnRoom(room_id, mj::DeriveRoomSeed(base_seed, static_cast<uint32_t>(index)), shape, batch,
                              action_timeout_ms));
+    if (rooms >= 1000 && (index + 1) % 1000 == 0) {
+      printf("  spawned %d/%d\n", index + 1, rooms);
+    }
   }
 
   RunResult result;
@@ -780,6 +786,7 @@ double PacedGameSeconds(const RunResult& result, int ai_delay_ms) {
 
 int main(int argc, char** argv) {
   int max_rooms = 16;
+  int exact_rooms = 0;  // >0: one batch of this many rooms, no power-of-two sweep
   int target_games = 8;
   bool scaling = true;
   bool detail = true;
@@ -790,6 +797,8 @@ int main(int argc, char** argv) {
     const std::string arg = argv[i];
     if (arg == "--max-rooms" && i + 1 < argc) {
       max_rooms = std::atoi(argv[++i]);
+    } else if (arg == "--rooms" && i + 1 < argc) {
+      exact_rooms = std::atoi(argv[++i]);
     } else if (arg == "--games" && i + 1 < argc) {
       target_games = std::atoi(argv[++i]);
     } else if (arg == "--shape" && i + 1 < argc) {
@@ -847,8 +856,12 @@ int main(int argc, char** argv) {
 
   if (scaling) {
     std::vector<int> room_counts;
-    for (int rooms = 1; rooms <= max_rooms; rooms *= 2) {
-      room_counts.push_back(rooms);
+    if (exact_rooms > 0) {
+      room_counts.push_back(exact_rooms);
+    } else {
+      for (int rooms = 1; rooms <= max_rooms; rooms *= 2) {
+        room_counts.push_back(rooms);
+      }
     }
     for (Shape shape : shapes) {
       PrintScaling(shape, room_counts, kBaseSeed, kActionTimeoutMs, target_games);

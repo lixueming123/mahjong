@@ -41,8 +41,10 @@ inline constexpr int kCloseFlushTimeoutMs = 300;
 
 // ---- §1.6 heartbeat -------------------------------------------------------------------
 inline constexpr int kIdleTimeoutMs = 20000;
+// How long the gateway waits for a socket event before it rechecks idle connections.
+// The name is from the old poll() loop; epoll_wait and kevent use the same value.
 inline constexpr int kPollTimeoutMs = 100;
-// Upper bound of bytes read from one socket per poll iteration, so a flooding client
+// Upper bound of bytes read from one socket per reactor iteration, so a flooding client
 // cannot stall the single-threaded loop.
 inline constexpr size_t kMaxReadBytesPerIteration = 256 * 1024;
 

@@ -60,6 +60,8 @@ struct Options {
   int ai_delay_ms = mahjong::kDefaultAiDelayMs;
   // v1.6（一场四局）: the pause between two rounds of one match.
   int inter_hand_delay_ms = mahjong::kDefaultInterHandDelayMs;
+  // Load runs log every accept and every discard; that log becomes the measurement.
+  bool quiet = false;
   // ACCOUNT_DESIGN.md §6.5: never a password in the source — the empty default is filled from
   // the environment (or --mysql-password) so it stays out of the argv of the process table.
   mahjong::DbConfig db;
@@ -70,7 +72,7 @@ struct Options {
 
 void PrintUsage(const char* program) {
   std::fprintf(stderr,
-               "usage: %s [--port N] [--seed N] [--action-timeout-ms N] [--ai-delay-ms N]\n"
+               "usage: %s [--port N] [--seed N] [--action-timeout-ms N] [--ai-delay-ms N] [--quiet]\n"
                "          [--mysql-host H] [--mysql-port N] [--mysql-user U] [--mysql-password P] [--mysql-db D]\n"
                "          [--mysql-timeout-ms N] [--mysql-idle-timeout-s N] [--mysql-max-lifetime-s N]\n"
                "          [--mysql-failure-threshold N] [--mysql-cooldown-ms N]\n"
@@ -155,6 +157,10 @@ std::optional<Options> ParseOptions(int argc, char** argv, std::string* error) {
     SplitArgument(argument, &key, &inline_value, &has_inline_value);
     if (key == "--help" || key == "-h") {
       options.show_help = true;
+      continue;
+    }
+    if (key == "--quiet") {
+      options.quiet = true;
       continue;
     }
     if (!IsKnownOption(key)) {
@@ -296,7 +302,13 @@ int main(int argc, char** argv) {
 
   // Ignore SIGPIPE up front: a peer that goes away must never kill the server.
   std::signal(SIGPIPE, SIG_IGN);
-  ex_actor::ConfigureLogging();
+  if (options->quiet) {
+    // Game code logs through spdlog's default logger; ex_actor has its own. Silence both.
+    spdlog::set_level(spdlog::level::err);
+    ex_actor::ConfigureLogging({.level = ex_actor::LogLevel::kError});
+  } else {
+    ex_actor::ConfigureLogging();
+  }
   spdlog::info(
       "mahjong_server: starting (port={}, seed={}, action_timeout_ms={}, ai_delay_ms={}, thread_pool={}, db_shards={}, "
       "db_timeout_ms={}, db_idle_timeout_s={}, db_max_lifetime_s={}, db_failure_threshold={}, db_cooldown_ms={})",

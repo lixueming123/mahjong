@@ -1,4 +1,4 @@
-// Gateway: single-threaded POSIX poll event loop that fronts the actor world.
+// Gateway: single-threaded epoll/kqueue event loop that fronts the actor world.
 //
 // Responsibilities (PROTOCOL.md §1): accept, NDJSON framing, UTF-8 validation, the 64 KB
 // frame limit, inbound rate limiting, heartbeat/idle handling — and nothing else. It knows no
@@ -8,8 +8,7 @@
 
 #pragma once
 
-#include <poll.h>
-
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -21,6 +20,7 @@
 #include "lobby.h"
 #include "player.h"
 #include "player_actor.h"
+#include "reactor.h"
 
 namespace mahjong {
 
@@ -78,9 +78,14 @@ class Gateway {
     int64_t limited_second = -1;
     int consecutive_limited_seconds = 0;
     int64_t rate_limit_reported_second = -1;
+    // Interest currently registered with the reactor. 0 means the fd is not registered.
+    short registered_events = 0;
   };
 
   void DrainWakePipe();
+  void SyncInterest();
+  void Unregister(Client& client);
+  short DesiredEvents(const Client& client) const;
   void AcceptClients();
   void HandleClientEvents(Client& client, short revents);
   void ReadClient(Client& client);
@@ -101,11 +106,18 @@ class Gateway {
   ex_actor::ActorRef<LobbyActor> lobby_;
   int listen_fd_ = -1;
   int wake_fds_[2] = {-1, -1};
+  Reactor reactor_;
   bool running_ = false;
   int next_client_id_ = 0;
   uint64_t accepted_connections_ = 0;
   uint64_t dispatched_frames_ = 0;
   std::vector<Client> clients_;
+  // Size is padded to a full cache line so actor threads bouncing the flag do not invalidate
+  // the fields above.
+  struct alignas(64) WakeFlag {
+    std::atomic_flag flag {};
+  };
+  WakeFlag wake_flag_;
 };
 
 }  // namespace mahjong

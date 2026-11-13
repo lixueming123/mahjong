@@ -1,14 +1,15 @@
 // Thread-safe handle of one client TCP connection.
 //
 // Ownership split (keeps the I/O loop single-threaded, see PROTOCOL.md §0.5):
-//   * the gateway poll loop owns the socket fd, the read path and the close path; it is
+//   * the gateway event loop owns the socket fd, the read path and the close path; it is
 //     the only thread calling read()/write()/close();
 //   * actors (PlayerActor / LobbyActor / RoomActor) push outbound frames with
-//     SendFrame(); frames land in an outbox that the loop flushes, and a self-pipe wakes
-//     the loop when new data arrives.
+//     SendFrame(); frames land in an outbox that the loop flushes. The first sender while
+//     the loop is asleep writes one byte to a self-pipe; later senders only set a shared flag.
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -20,7 +21,9 @@ namespace mahjong {
 
 class Connection {
  public:
-  Connection(int fd, int id, int wake_write_fd);
+  // |wake_flag| is shared by every connection of one gateway. Null skips coalescing and writes
+  // a wake byte on every call (tests pass a negative wake fd and never get that far).
+  Connection(int fd, int id, int wake_write_fd, std::atomic_flag* wake_flag = nullptr);
   Connection(const Connection&) = delete;
   Connection& operator=(const Connection&) = delete;
   ~Connection() = default;
@@ -85,6 +88,7 @@ class Connection {
   int fd_;
   int id_;
   int wake_write_fd_;
+  std::atomic_flag* wake_flag_ = nullptr;
   std::string outbox_;
   bool closed_ = false;
   bool close_requested_ = false;
