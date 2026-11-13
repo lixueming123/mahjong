@@ -17,10 +17,10 @@
 #include <vector>
 
 #include "connection.h"
-#include "player_actor.h"
 #include "ex_actor/api.h"
 #include "lobby.h"
 #include "player.h"
+#include "player_actor.h"
 
 namespace mahjong {
 
@@ -35,11 +35,10 @@ void InstallGatewaySignalHandlers(int wake_write_fd);
 
 class Gateway {
  public:
-  // |db| and |sessions| are handed to every PlayerActor: the first answers login,
-  // register and stats (ACCOUNT_DESIGN.md), the second enforces "one account, one live
-  // connection" (§1.3). |db| may be empty in a build without account support.
-  Gateway(uint16_t port, std::shared_ptr<PlayerIdAllocator> player_ids, DbService db,
-          std::shared_ptr<SessionRegistry> sessions, ex_actor::ActorRef<LobbyActor> lobby);
+  // |sessions| is handed to every PlayerActor and enforces "one account, one live connection"
+  // (§1.3). Login, register and stats go through GetDbService() (ACCOUNT_DESIGN.md).
+  Gateway(uint16_t port, std::shared_ptr<PlayerIdAllocator> player_ids, std::shared_ptr<SessionRegistry> sessions,
+          ex_actor::ActorRef<LobbyActor> lobby);
   Gateway(const Gateway&) = delete;
   Gateway& operator=(const Gateway&) = delete;
   ~Gateway();
@@ -98,7 +97,6 @@ class Gateway {
 
   uint16_t port_;
   std::shared_ptr<PlayerIdAllocator> player_ids_;
-  DbService db_;
   std::shared_ptr<SessionRegistry> sessions_;
   ex_actor::ActorRef<LobbyActor> lobby_;
   int listen_fd_ = -1;

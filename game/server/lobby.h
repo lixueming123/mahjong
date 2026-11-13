@@ -24,7 +24,6 @@
 #include <vector>
 
 #include "connection.h"
-#include "db.h"
 #include "ex_actor/api.h"
 #include "json.h"
 #include "player.h"
@@ -42,10 +41,10 @@ inline constexpr int kGameEndReclaimMs = 30000;
 // pointer to the base without a runtime adjustment (room_contract.h documents the rule).
 class LobbyActor : public RoomOwner {
  public:
-  // |db| may be empty (unit tests, or a server without account support): the game then simply
-  // records no match history (ACCOUNT_DESIGN.md §4).
+  // Match history goes through GetDbService() (ACCOUNT_DESIGN.md §4). An empty service — unit
+  // tests, or a server without account support — records nothing.
   LobbyActor(uint64_t seed, int action_timeout_ms, std::shared_ptr<WindowTimer> timer,
-             int game_end_reclaim_ms = kGameEndReclaimMs, DbService db = {});
+             int game_end_reclaim_ms = kGameEndReclaimMs);
 
   // Callers send straight to the method; there is no envelope switch in front of them.
 
@@ -143,8 +142,6 @@ class LobbyActor : public RoomOwner {
   // entrusted and the game keeps running (PROTOCOL.md §8.5).
   std::unordered_map<std::string, bool> room_started_;
   std::shared_ptr<WindowTimer> timer_;
-  // Match history (ACCOUNT_DESIGN.md §4). Empty when the server runs without accounts.
-  DbService db_;
   ex_actor::ActorRef<LobbyActor> self_ref_;
 };
 

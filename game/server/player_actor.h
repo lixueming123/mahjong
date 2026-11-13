@@ -54,7 +54,7 @@ namespace mahjong {
 
 class PlayerActor : public SeatEndpoint {
  public:
-  PlayerActor(std::shared_ptr<Connection> conn, std::shared_ptr<PlayerIdAllocator> player_ids, DbService db,
+  PlayerActor(std::shared_ptr<Connection> conn, std::shared_ptr<PlayerIdAllocator> player_ids,
               std::shared_ptr<SessionRegistry> sessions, ex_actor::ActorRef<LobbyActor> lobby);
 
   // The one public entry (seat_endpoint.h): gateway frames and socket events, account results,
@@ -123,9 +123,6 @@ class PlayerActor : public SeatEndpoint {
 
   std::shared_ptr<Connection> conn_;
   std::shared_ptr<PlayerIdAllocator> player_ids_;
-  // Empty in a build/test that has no database: the account frames then answer INTERNAL,
-  // which is the same degraded path as a MySQL that is down (§2.3).
-  DbService db_;
   std::shared_ptr<SessionRegistry> sessions_;
   ex_actor::ActorRef<LobbyActor> lobby_;
   ex_actor::ActorRef<PlayerActor> self_ref_;

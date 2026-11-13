@@ -22,13 +22,13 @@
 #include <spdlog/spdlog.h>
 
 #include "actor_scope.h"
+#include "classic/classic_mahjong_game.h"
 #include "connection.h"
 #include "ex_actor/api.h"
+#include "game_registry.h"
 #include "json.h"
 #include "player.h"
 #include "player_actor.h"
-#include "classic/classic_mahjong_game.h"
-#include "game_registry.h"
 #include "room_actor_for.h"
 #include "timer.h"
 
@@ -114,7 +114,7 @@ class LobbyTest : public ::testing::Test {
   ex_actor::ActorRef<SeatEndpoint> SpawnConnector(const std::shared_ptr<Connection>& conn,
                                                   ex_actor::ActorRef<LobbyActor> lobby) {
     ex_actor::ActorRef<PlayerActor> connector =
-        WaitValue(ex_actor::Spawn<PlayerActor>(conn, player_ids_, /*db=*/DbService {}, sessions_, lobby));
+        WaitValue(ex_actor::Spawn<PlayerActor>(conn, player_ids_, sessions_, lobby));
     stdexec::sync_wait(connector.Send<&PlayerActor::Dispatch>(PlayerEnvelope::SetSelfRef(connector)));
     return connector;
   }
@@ -326,7 +326,7 @@ TEST(LobbyPerf, RegistryLock) {
   auto spawn_connector = [&](int id, ex_actor::ActorRef<LobbyActor> lobby) {
     auto conn = std::make_shared<Connection>(/*fd=*/-1, id, /*wake_write_fd=*/-1);
     ex_actor::ActorRef<PlayerActor> connector =
-        WaitValue(ex_actor::Spawn<PlayerActor>(conn, player_ids, /*db=*/DbService {}, sessions, lobby));
+        WaitValue(ex_actor::Spawn<PlayerActor>(conn, player_ids, sessions, lobby));
     stdexec::sync_wait(connector.Send<&PlayerActor::Dispatch>(PlayerEnvelope::SetSelfRef(connector)));
     return connector;
   };

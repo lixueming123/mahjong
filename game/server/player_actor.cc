@@ -20,11 +20,10 @@ namespace ex = stdexec;
 
 namespace mahjong {
 
-PlayerActor::PlayerActor(std::shared_ptr<Connection> conn, std::shared_ptr<PlayerIdAllocator> player_ids, DbService db,
+PlayerActor::PlayerActor(std::shared_ptr<Connection> conn, std::shared_ptr<PlayerIdAllocator> player_ids,
                          std::shared_ptr<SessionRegistry> sessions, ex_actor::ActorRef<LobbyActor> lobby)
     : conn_(std::move(conn)),
       player_ids_(std::move(player_ids)),
-      db_(std::move(db)),
       sessions_(std::move(sessions)),
       lobby_(std::move(lobby)) {
   // The framework reaches this actor as `ActorRef<SeatEndpoint>` and invokes the method pointer
@@ -191,7 +190,8 @@ void PlayerActor::OnFrame(std::string line) {
 void PlayerActor::SendFrame(std::string frame) { conn_->SendFrame(frame); }
 
 void PlayerActor::BeginAccountLogin(std::string username, std::string password, bool resume) {
-  if (db_.IsEmpty() || self_ref_.IsEmpty()) {
+  DbService& db = GetDbService();
+  if (db.IsEmpty() || self_ref_.IsEmpty()) {
     AccountServiceUnavailable();
     return;
   }
@@ -199,7 +199,7 @@ void PlayerActor::BeginAccountLogin(std::string username, std::string password, 
   // which runs inside this actor's mailbox, is the only place the session identity changes.
   pending_resume_ = resume;
   session_.BeginAuth();
-  ActorSendScope().spawn(db_.Login(std::move(username), std::move(password), self_ref_));
+  ActorSendScope().spawn(db.Login(std::move(username), std::move(password), self_ref_));
 }
 
 void PlayerActor::LoginAsGuest(std::string name) {
@@ -210,14 +210,15 @@ void PlayerActor::LoginAsGuest(std::string name) {
 }
 
 void PlayerActor::BeginRegister(std::string username, std::string password, std::string nickname) {
-  if (db_.IsEmpty() || self_ref_.IsEmpty()) {
+  DbService& db = GetDbService();
+  if (db.IsEmpty() || self_ref_.IsEmpty()) {
     AccountServiceUnavailable();
     return;
   }
   // A brand-new account has no room to resume; the lobby will answer in_room:false.
   pending_resume_ = true;
   session_.BeginAuth();
-  ActorSendScope().spawn(db_.Register(std::move(username), std::move(password), std::move(nickname), self_ref_));
+  ActorSendScope().spawn(db.Register(std::move(username), std::move(password), std::move(nickname), self_ref_));
 }
 
 void PlayerActor::RequestStats() {
@@ -227,11 +228,12 @@ void PlayerActor::RequestStats() {
     conn_->SendFrame(protocol::StatsFrame(protocol::StatsSnapshot {}));
     return;
   }
-  if (db_.IsEmpty() || self_ref_.IsEmpty()) {
+  DbService& db = GetDbService();
+  if (db.IsEmpty() || self_ref_.IsEmpty()) {
     AccountServiceUnavailable();
     return;
   }
-  ActorSendScope().spawn(db_.FetchStats(session_.account_id(), self_ref_));
+  ActorSendScope().spawn(db.FetchStats(session_.account_id(), self_ref_));
 }
 
 // The two result handlers differ only in what a failure means, and both must leave the session

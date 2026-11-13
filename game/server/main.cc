@@ -351,7 +351,7 @@ int main(int argc, char** argv) {
   // Everything that needs to be spawned, and the startup probe, runs in one coroutine so the
   // DbActor refs exist before the lobby and the gateway are built. The probes are sequential, so
   // the schema DDL is never issued by two shards at once.
-  mahjong::DbService db;
+  mahjong::DbService& db = mahjong::GetDbService();
   {
     auto startup = [&]() -> stdexec::task<void> {
       for (int i = 0; i < kDbShardCount; ++i) {
@@ -390,7 +390,7 @@ int main(int argc, char** argv) {
   auto window_timer = std::make_shared<mahjong::WindowTimer>();
 
   auto lobby_result = stdexec::sync_wait(ex_actor::Spawn<mahjong::LobbyActor>(
-      options->seed, options->action_timeout_ms, window_timer, mahjong::kGameEndReclaimMs, db));
+      options->seed, options->action_timeout_ms, window_timer, mahjong::kGameEndReclaimMs));
   if (!lobby_result.has_value()) {
     spdlog::error("mahjong_server: failed to spawn LobbyActor");
     window_timer->Stop();
@@ -411,7 +411,7 @@ int main(int argc, char** argv) {
   // ACCOUNT_DESIGN.md §1.3: "one account, one live connection", enforced across all
   // connections of this process.
   auto sessions = std::make_shared<mahjong::SessionRegistry>();
-  mahjong::Gateway gateway(options->port, player_ids, db, sessions, lobby);
+  mahjong::Gateway gateway(options->port, player_ids, sessions, lobby);
   if (!gateway.Start(&error)) {
     spdlog::error("mahjong_server: {}", error);
     window_timer->Stop();

@@ -9,6 +9,7 @@
 #include <spdlog/spdlog.h>
 
 #include "actor_scope.h"
+#include "db.h"
 #include "game_registry.h"
 #include "protocol.h"
 
@@ -97,13 +98,12 @@ std::string BuildRoomJoinedFrame(const std::string& room_id, int seat, const std
 }
 
 LobbyActor::LobbyActor(uint64_t seed, int action_timeout_ms, std::shared_ptr<WindowTimer> timer,
-                       int game_end_reclaim_ms, DbService db)
+                       int game_end_reclaim_ms)
     : seed_(seed),
       action_timeout_ms_(action_timeout_ms),
       game_end_reclaim_ms_(game_end_reclaim_ms),
       room_tag_(DrawRoomTag()),
-      timer_(std::move(timer)),
-      db_(std::move(db)) {
+      timer_(std::move(timer)) {
   // The rooms hold this actor as ActorRef<RoomOwner> and the framework casts the instance
   // pointer to the method's class without checking, which is only correct while RoomOwner is
   // the first base (room.h). Fail loudly if a base is ever added in front of it.
@@ -302,24 +302,25 @@ stdexec::task<void> LobbyActor::OnRoomFinished(GameSettlement settlement) {
   // ACCOUNT_DESIGN.md §4.1: one row per account-backed human seat, posted to DbActor and then
   // forgotten. The room sends this exactly once per round, and it never retries, so a lost
   // write can only cost a row, not a duplicate.
-  if (!db_.IsEmpty()) {
+  DbService& db = GetDbService();
+  if (!db.IsEmpty()) {
     for (const SettledSeat& seat : settlement.seats) {
       if (seat.is_bot || seat.player.account_id == 0) {
         continue;  // guests and bots have no history to keep (§4.2)
       }
       // DB 落库仍是字符串词表（v2.0 只改线格式），在边界用 NameOf 翻译一次。
-      ActorSendScope().spawn(db_.RecordMatch(MatchRecord {.account_id = seat.player.account_id,
-                                                          .room_id = settlement.room_id,
-                                                          .reason = std::string(protocol::NameOf(settlement.reason)),
-                                                          .delta_score = seat.delta_score,
-                                                          .win = seat.winner,
-                                                          .mode = settlement.game_id}));
+      ActorSendScope().spawn(db.RecordMatch(MatchRecord {.account_id = seat.player.account_id,
+                                                         .room_id = settlement.room_id,
+                                                         .reason = std::string(protocol::NameOf(settlement.reason)),
+                                                         .delta_score = seat.delta_score,
+                                                         .win = seat.winner,
+                                                         .mode = settlement.game_id}));
     }
   }
   // ACCOUNT_DESIGN.md v1.3 §4 item 7: the match summary is written ONCE per match (at
   // match_over), one row per account-backed seat — bots and guests have no history to keep
   // (§4.2). Fire-and-forget; a lost row is never a game error.
-  if (settlement.match_over && !db_.IsEmpty()) {
+  if (settlement.match_over && !db.IsEmpty()) {
     for (size_t seat_index = 0; seat_index < settlement.seats.size(); ++seat_index) {
       const SettledSeat& seat = settlement.seats[seat_index];
       if (seat.is_bot || seat.player.account_id == 0) {
@@ -333,7 +334,7 @@ stdexec::task<void> LobbyActor::OnRoomFinished(GameSettlement settlement) {
       result.dealer_hands = settlement.dealer_hands[seat_index];
       result.final_score = settlement.totals[seat_index];
       result.final_rank = settlement.final_rank[seat_index];
-      ActorSendScope().spawn(db_.RecordMatchResult(std::move(result)));
+      ActorSendScope().spawn(db.RecordMatchResult(std::move(result)));
     }
   }
   // C10：局终（game_end）不回收；match_over（match_end 已下发）才 arm 30s 回收。

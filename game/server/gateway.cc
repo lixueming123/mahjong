@@ -69,13 +69,9 @@ void InstallGatewaySignalHandlers(int wake_write_fd) {
   ::signal(SIGPIPE, SIG_IGN);
 }
 
-Gateway::Gateway(uint16_t port, std::shared_ptr<PlayerIdAllocator> player_ids, DbService db,
+Gateway::Gateway(uint16_t port, std::shared_ptr<PlayerIdAllocator> player_ids,
                  std::shared_ptr<SessionRegistry> sessions, ex_actor::ActorRef<LobbyActor> lobby)
-    : port_(port),
-      player_ids_(std::move(player_ids)),
-      db_(std::move(db)),
-      sessions_(std::move(sessions)),
-      lobby_(std::move(lobby)) {}
+    : port_(port), player_ids_(std::move(player_ids)), sessions_(std::move(sessions)), lobby_(std::move(lobby)) {}
 
 Gateway::~Gateway() {
   Stop();
@@ -221,7 +217,7 @@ void Gateway::AcceptClients() {
     ex_actor::ActorRef<PlayerActor> actor;
     try {
       std::optional<std::tuple<ex_actor::ActorRef<PlayerActor>>> spawned =
-          stdexec::sync_wait(ex_actor::Spawn<PlayerActor>(conn, player_ids_, db_, sessions_, lobby_));
+          stdexec::sync_wait(ex_actor::Spawn<PlayerActor>(conn, player_ids_, sessions_, lobby_));
       if (!spawned.has_value()) {
         conn->MarkClosed();
         continue;

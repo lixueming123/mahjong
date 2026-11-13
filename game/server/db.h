@@ -25,10 +25,11 @@
 //     main(), because mysql_library_init is not thread safe and must not be torn down while
 //     another shard's thread is still using it.
 //
-// Callers reach these actors through `DbService` — a key-routed set of `ActorRef<DbActor>`, never
-// a pointer — and every request carries a `reply` ref for its result: PlayerActor's handlers
-// must not suspend, so the answer is a message back into its mailbox rather than something to
-// `co_await`.
+// Callers reach these actors through `GetDbService()` — one process-wide, key-routed set of
+// `ActorRef<DbActor>`. main() fills the shards before the lobby and the gateway exist; every
+// actor reads that same object, so a player does not keep a copy of the routing table. Every
+// request carries a `reply` ref for its result: PlayerActor's handlers must not suspend, so the
+// answer is a message back into its mailbox rather than something to `co_await`.
 //
 // Two implementations exist and CMake picks exactly one, so no #ifdef leaks into the code:
 //   * db_mysql.cc — the real one, linked against libmysqlclient (and the real DbPool)
@@ -252,5 +253,13 @@ class DbService {
 
   std::vector<ex_actor::ActorRef<DbActor>> shards_;
 };
+
+// The one router for the process. Empty until main() adds the shards, which is also the
+// degraded path a test or a build without MySQL runs on (§2.3): account frames answer INTERNAL
+// and the lobby writes no match history.
+inline DbService& GetDbService() {
+  static DbService service;
+  return service;
+}
 
 }  // namespace mahjong
