@@ -525,8 +525,10 @@ GameVerdict RiichiMahjongGame::ValidateAction(int seat, const json::Value& frame
       return GameVerdict::Refuse(protocol::ErrorCode::kIllegalAction, "win is not available in this window");
     }
     // H8: never trust the client — recompute with the rules library.
-    if (!IsWinningHand(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)], TsumoWinningTile(seat),
-                       /*is_tsumo=*/true)) {
+    // 用日麻的牌型口径（`IsWinShape`）：共享的 `IsWinningHand` 是番数制口径，认不出国士无双，
+    // 而窗口选项（`riichi::DiscardOptions`）已经把国士的 win 放进去了 —— 两处口径必须一致。
+    if (!IsWinShape(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)], TsumoWinningTile(seat),
+                    /*is_tsumo=*/true)) {
       return GameVerdict::Refuse(protocol::ErrorCode::kIllegalAction, "the hand is not a winning hand");
     }
     return GameVerdict::Accept();
@@ -549,7 +551,7 @@ GameVerdict RiichiMahjongGame::ValidateAction(int seat, const json::Value& frame
     if (!tiles.empty()) {
       return GameVerdict::Refuse(protocol::ErrorCode::kIllegalAction, "win must not carry tiles");
     }
-    if (!IsWinningHand(hand, melds, claim_tile_, /*is_tsumo=*/false)) {
+    if (!IsWinShape(hand, melds, claim_tile_, /*is_tsumo=*/false)) {
       return GameVerdict::Refuse(protocol::ErrorCode::kIllegalAction, "the hand is not a winning hand");
     }
   } else if (action == protocol::Action::kPong) {
@@ -1900,6 +1902,18 @@ std::optional<Tile> RiichiMahjongGame::DefaultDiscardFor(int seat) const {
   return DefaultDiscard(hands_[static_cast<size_t>(seat)], drawn_tile_);
 }
 
+std::optional<Tile> RiichiMahjongGame::ChooseAiDiscard(int seat) const {
+  const size_t index = static_cast<size_t>(seat);
+  // 立直能不能治无役，取决于点数/牌山/振听 —— 这些是房间状态，规则库不自己读。
+  const bool can_riichi = melds_[index].empty() && points_[index] >= riichi::kRiichiStickPoints &&
+                          remaining_ >= riichi::kMinRiichiWall && !furiten_ever_[index] && !riichi_declared(seat);
+  // 判役用得到的上下文：场风/自风/立直/宝牌指示牌。荣和口径（from_seat >= 0）——
+  // 「役」在这里要回答的是「别人打出来我能不能和」。
+  const riichi::WinContext ctx =
+      BuildRiichiContext(seat, (seat + 1) % kSeatCount, /*tsumo=*/false, TsumoWinningTile(seat));
+  return riichi::ChooseDiscard(hands_[index], melds_[index], discards_[index], ctx, can_riichi, drawn_tile_);
+}
+
 // The tile that completes the current seat's hand on its own draw (a tsumo). The dealer's
 // 天和 has no draw record, so the largest tile of the hand stands in for it.
 Tile RiichiMahjongGame::TsumoWinningTile(int seat) const {
@@ -1955,8 +1969,7 @@ bool RiichiMahjongGame::BotDeclaresTsumo(GameStep& step, int seat) {
   const std::vector<Meld>& melds = melds_[static_cast<size_t>(seat)];
   const std::vector<Option> options = DiscardOptionsFor(seat);
   const Tile winning = TsumoWinningTile(seat);
-  if (FindOption(options, protocol::Action::kWin) == nullptr ||
-      !IsWinningHand(hand, melds, winning, /*is_tsumo=*/true)) {
+  if (FindOption(options, protocol::Action::kWin) == nullptr || !IsWinShape(hand, melds, winning, /*is_tsumo=*/true)) {
     return false;
   }
   discard_window_open_ = false;
@@ -1977,27 +1990,34 @@ bool RiichiMahjongGame::PlayAutomatedDiscard(GameStep& step) {
     if (BotDeclaresTsumo(step, seat)) {
       return false;  // the game is over
     }
-    // 门清听牌且点数够 ⇒ 宣言立直（选择一张「打出后仍听牌」的牌，确定性取最小牌面）。
-    // 日麻独有的一段：classic 没有立直，所以这整块在那边不存在。
+    // 立直后手牌锁定：只能摸切（`ValidateDiscard` 对真人就是这么判的，但 AI 不走 Validate）。
+    // 少了这一条，机器人会在立直之后继续按牌效率换牌 —— 那是日麻不允许的，而且会和客户端
+    // 「立直后只剩摸切」的显示打架。
+    if (RiichiDeclared(seat) && drawn_tile_.has_value()) {
+      discard_window_open_ = false;
+      // 不手动清 `drawn_tile_`：ApplyDiscard 负责清它，并用它判一发是否失效。
+      ApplyDiscard(step, seat, *drawn_tile_);
+      return true;
+    }
+    // 门清听牌且点数够 ⇒ 宣言立直。宣言牌从 `RiichiDiscardTilesFor` 里取（它已经滤掉了
+    // 「打出去就振听」的牌面），不能只挑「打完仍听牌」的最小牌 —— 那张可能正好落振听，
+    // 白白放弃一次立直。
     if (BotShouldRiichi(seat)) {
       std::optional<Tile> riichi_discard;
-      for (const Tile& tile : SortedTiles(hands_[static_cast<size_t>(seat)])) {
-        std::vector<Tile> rest = hands_[static_cast<size_t>(seat)];
-        RemoveOneFace(&rest, FaceOf(tile));
-        if (!riichi::RiichiWaitingTiles(rest, melds_[static_cast<size_t>(seat)]).empty()) {
-          riichi_discard = tile;
+      for (Tile candidate : RiichiDiscardTilesFor(seat)) {
+        if (CanDeclareRiichiNow(seat, candidate)) {
+          riichi_discard = candidate;
           break;
         }
       }
-      if (riichi_discard.has_value() && CanDeclareRiichiNow(seat, *riichi_discard)) {
+      if (riichi_discard.has_value()) {
         discard_window_open_ = false;
         DeclareRiichi(step, seat);  // 先收棒、再打那张（宣言牌横置，打牌广播随后）
         ApplyDiscard(step, seat, *riichi_discard);
         return true;
       }
     }
-    std::optional<Tile> tile =
-        ChooseDiscard(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)], drawn_tile_);
+    std::optional<Tile> tile = ChooseAiDiscard(seat);
     if (!tile.has_value()) {
       EndRoundWithDraw(step);
       return false;

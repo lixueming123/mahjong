@@ -101,6 +101,12 @@ class RiichiMahjongGame final : public Game {
   // Test seam: 正常流程里持点只能由结算改写，测试要构造「已被打穿」或「恰好 0 点」这两种
   // 终局判定边界时没有别的入口。生产代码不得调用。
   void SetPointsForTest(const std::array<int, kSeatCount>& points) { points_ = points; }
+  // Test seam: 正常流程里手牌只由发牌与摸牌得到，而要覆盖「牌型门禁认不认国士无双」这一类
+  // 规则分支，必须能直接摆出一手牌（发牌靠种子撞不出来）。生产代码不得调用。
+  void SetHandForTest(int seat, std::vector<Tile> hand) {
+    hands_[static_cast<size_t>(seat)] = std::move(hand);
+    SortTiles(hands_[static_cast<size_t>(seat)]);
+  }
   // Test seam: 供托只会在立直宣言时由玩家投入，房间层没有别的入口能造出「场终还剩棒」
   // 这种局面（末局荒庄得靠发牌运气）。**不扣持点**，所以调用方算守恒时要把它加回去。
   void SetKyoutakuForTest(int sticks) { kyoutaku_ = sticks; }
@@ -232,6 +238,9 @@ class RiichiMahjongGame final : public Game {
   bool NeedsPlayerReply(int seat) const { return !PlaysWithAi(seat) && seats_[static_cast<size_t>(seat)].wired; }
   bool SeatPresent(int seat) const { return !disconnected_[static_cast<size_t>(seat)]; }
   std::optional<Tile> DefaultDiscardFor(int seat) const;
+  // 机器人的打牌选择：向听 + 牌效率（共享口径），并列处按「有没有役 / 振听」决胜
+  // （`riichi::ChooseDiscard`）。人类托管与超时不走这里 —— 它们用冻结的 `DefaultDiscardFor`。
+  std::optional<Tile> ChooseAiDiscard(int seat) const;
   // Takes the next tile off the live wall (a plain draw, no dead wall involved).
   Tile DrawFromWall();
   // 岭上补牌：从王牌头部取一张，并用牌山山顶牌补满王牌（王牌恒 14 张）。

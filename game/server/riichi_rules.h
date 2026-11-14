@@ -175,6 +175,26 @@ std::vector<Tile> WinningWaits(const std::vector<Tile>& concealed, const std::ve
 std::vector<Tile> WinningWaits(const std::vector<Tile>& concealed, const std::vector<Meld>& melds,
                                const WinContext& ctx, const std::vector<Tile>& waits);
 
+// ---- AI 弃牌（日麻版）----------------------------------------------------------------
+// 评分口径与共享的 `ChooseDiscard` **完全一致**（`BestShantenAfterDraw`，越小越好），只有
+// **并列时**的牌面选择不同：共享实现按冻结牌序取最小牌面，日麻这里按「这手听牌能不能和」
+// 决胜。原因：日麻有「无役不能和」，而向听数完全看不见役 —— 一个 1 向听的无役副露手比
+// 一个 2 向听的断幺手更「近」，但前者永远和不了。
+//
+// 决胜顺序（逐级只在上一步并列的候选里比较）：
+//   1. 等待张里**有役**的枚数（荣和口径，`WinningWaits` 同源）；
+//   2. 门清且能立直时，无役听牌也算活（立直本身就是役），按等待张数计；
+//   3. 仍未分出的，按「未振听优先」；
+//   4. 再并列 ⇒ 冻结牌序最小牌面（与共享实现一致，保证确定性）。
+//
+// `ctx` 只需场风/自风/立直/宝牌指示牌这类「判役用得到的状态」；`can_riichi` 由调用方按
+// 「门前 + 点数够 + 牌山够厚 + 未振听」算好（规则库不该自己去读房间的点数）。
+// `own_discards` 用来判「打这张会不会落舍て牌振听」—— 它属于房间的公开状态，同样由调用方给。
+// `drawn_tile` 只用于返回**同一张物理牌**（打摸牌语义），不影响选牌结果。
+std::optional<Tile> ChooseDiscard(const std::vector<Tile>& hand, const std::vector<Meld>& melds,
+                                  const std::vector<Tile>& own_discards, const WinContext& ctx, bool can_riichi,
+                                  std::optional<Tile> drawn_tile = std::nullopt);
+
 // 抢杠窗口的可选项（v1.15）：只有 **win / pass** —— 别人加杠的那张牌不能被吃/碰/大明杠。
 // 抢杠本身是 1 番役，所以「无役」的手牌也能抢；因此判役时必须把 `is_chankan` 算进去
 // （本函数内部强制置位，调用方的 ctx 只提供场风/自风/立直等状态）。

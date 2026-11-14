@@ -999,6 +999,93 @@ std::vector<Option> ClaimOptions(const std::vector<Tile>& hand, const std::vecto
   return options;
 }
 
+// 日麻 AI 弃牌：评分与共享 `ChooseDiscard` 同口径，只在并列处按「役 / 振听」决胜。
+std::optional<Tile> ChooseDiscard(const std::vector<Tile>& hand, const std::vector<Meld>& melds,
+                                  const std::vector<Tile>& own_discards, const WinContext& ctx, bool can_riichi,
+                                  std::optional<Tile> drawn_tile) {
+  if (hand.empty()) {
+    return std::nullopt;
+  }
+  // 每个去重牌面一个候选。评分沿用共享实现的 `BestShantenAfterDraw`；只有**评分并列**的候选
+  // 才需要判役 —— 判役比算向听贵得多（逐张 `DetectYaku`），不该为没希望的候选付这笔钱。
+  struct Candidate {
+    Face face;
+    int score;               // 打这张之后的最优向听（越小越好）
+    int yaku_waits = 0;      // 听牌张里有役的枚数（荣和口径）
+    bool furiten = false;    // 打完是否落舍て牌振听
+    std::vector<Tile> rest;  // 打出该面之后的门前手牌（判役时才用）
+  };
+  std::vector<Candidate> candidates;
+  for (Tile tile : hand) {
+    const Face face = FaceOf(tile);
+    bool seen = false;
+    for (const Candidate& candidate : candidates) {
+      if (candidate.face == face) {
+        seen = true;
+        break;
+      }
+    }
+    if (seen) {
+      continue;
+    }
+    Candidate candidate;
+    candidate.face = face;
+    candidate.rest = hand;
+    RemoveOneFaceIn(&candidate.rest, face);
+    candidate.score = BestShantenAfterDraw(candidate.rest, melds);
+    candidates.push_back(std::move(candidate));
+  }
+  // 第一关键字：向听评分。只留评分最优的那批进决胜。
+  int best_score = candidates.front().score;
+  for (const Candidate& candidate : candidates) {
+    best_score = std::min(best_score, candidate.score);
+  }
+  std::vector<size_t> finalists;
+  for (size_t index = 0; index < candidates.size(); ++index) {
+    if (candidates[index].score != best_score) {
+      continue;
+    }
+    finalists.push_back(index);
+  }
+  // 第二关键字：这一手听牌到底能不能和。只有并列者才判役。
+  for (size_t index : finalists) {
+    Candidate& candidate = candidates[index];
+    const std::vector<Tile> waits = RiichiWaitingTiles(candidate.rest, melds);
+    if (waits.empty()) {
+      continue;
+    }
+    const std::vector<Tile> live = WinningWaits(candidate.rest, melds, ctx, waits);
+    if (!live.empty()) {
+      candidate.yaku_waits = static_cast<int>(live.size());
+    } else if (can_riichi) {
+      // 无役但门清可立直：立直本身就是役，整手听牌都活了，只是不如「已经有役」稳。
+      candidate.yaku_waits = static_cast<int>(waits.size());
+    }
+    candidate.furiten = IsPermanentFuriten(candidate.rest, melds, own_discards);
+  }
+  // 决胜顺序固定：有役枚数多者优先 → 未振听优先 → 冻结牌序最小牌面（保证确定性）。
+  std::sort(finalists.begin(), finalists.end(), [&candidates](size_t lhs, size_t rhs) {
+    if (candidates[lhs].yaku_waits != candidates[rhs].yaku_waits) {
+      return candidates[lhs].yaku_waits > candidates[rhs].yaku_waits;
+    }
+    if (candidates[lhs].furiten != candidates[rhs].furiten) {
+      return !candidates[lhs].furiten;
+    }
+    return candidates[lhs].face < candidates[rhs].face;
+  });
+  const Face chosen = candidates[finalists.front()].face;
+  // 打摸牌语义：选中牌面正是刚摸到的，就把那**一张物理牌**打出去（赤 5 与普通 5 同面）。
+  if (drawn_tile.has_value() && FaceOf(*drawn_tile) == chosen) {
+    return *drawn_tile;
+  }
+  for (Tile tile : hand) {
+    if (FaceOf(tile) == chosen) {
+      return tile;
+    }
+  }
+  return hand.front();  // 理论不可达
+}
+
 std::array<int, 4> DrawPenalty(const std::array<bool, 4>& tenpai) {
   std::array<int, 4> delta {};
   int tenpai_count = 0;
