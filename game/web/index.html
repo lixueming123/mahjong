@@ -76,8 +76,18 @@
   <div class="side-bar side-left" style="left:0;top:420px"><span>理</span><span>和</span><span>鸣</span><span>切</span><em>▶</em></div>
   <div class="side-bar side-right" style="left:1858px;top:455px"><span>表</span><span>情</span></div>
 
-  <!-- 右下操作栏：只出现当前能操作的按钮，右缘固定，少几个就往右收 -->
+  <!-- 右下操作栏：只出现当前能操作的按钮，右缘固定，少几个就往右收。
+       这一组是同一个决策的整体，都挂在栏上（见 ui.css）：
+       环贴栏左沿、按钮在栏里、鸣牌提示条浮在按钮正上方。 -->
   <div class="action-bar" style="right:158px;top:762px">
+    <div id="claim-tip" class="claim-tip" hidden></div>
+    <div id="countdown" class="countdown" hidden>
+      <svg viewBox="0 0 100 100" class="cd-svg">
+        <circle class="cd-track" cx="50" cy="50" r="43"></circle>
+        <circle class="cd-bar" id="cd-bar" cx="50" cy="50" r="43"></circle>
+      </svg>
+      <span class="cd-num" id="cd-num">15</span>
+    </div>
     <button class="call-btn" hidden disabled>吃</button>
     <button class="call-btn" hidden disabled>碰</button>
     <button class="call-btn" hidden disabled>杠</button>
@@ -87,20 +97,8 @@
     <button class="call-btn primary" id="btn-discard" hidden disabled>打出</button>
   </div>
 
-  <!-- 鸣牌提示：这次到底吃/碰/和哪一张 -->
-  <div id="claim-tip" class="claim-tip" hidden></div>
-
   <!-- 多种吃法/杠法时的候选组合（牌面点选） -->
   <div id="claim-choices" class="claim-choices" hidden></div>
-
-  <!-- 出牌倒计时：环 + 秒数 -->
-  <div id="countdown" class="countdown" hidden>
-    <svg viewBox="0 0 100 100" class="cd-svg">
-      <circle class="cd-track" cx="50" cy="50" r="43"></circle>
-      <circle class="cd-bar" id="cd-bar" cx="50" cy="50" r="43"></circle>
-    </svg>
-    <span class="cd-num" id="cd-num">15</span>
-  </div>
 
   <!-- 听牌条（手牌正上方） -->
   <div id="tenpai-bar" class="tenpai-bar" hidden>

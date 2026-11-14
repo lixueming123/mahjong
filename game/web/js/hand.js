@@ -22,9 +22,12 @@ export class HandView {
     const candidates = new Set(
       (state.riichiArming ? state.riichiTiles || [] : []).map(normTile),
     );
+    // v2.5 §12.15：喰い替え禁止 —— 刚吃/碰完当巡打不出去的牌面（モロ + スジ），压暗 + 不可点。
+    const forbidden = new Set((state.forbiddenDiscards || []).map(normTile));
     state.hand.forEach((code, i) => {
       const tile = makeHandTile(code, i);
       const [x, y] = P(layout[i].x, layout[i].y);
+      const isForbidden = forbidden.has(normTile(code));
       const lifted = i === state.selected;
       tile.position.set(x, y + (lifted ? HAND.lift : 0), 0);
       if (lifted) {
@@ -52,11 +55,17 @@ export class HandView {
         bar.position.set(0, -HAND.h / 2 + 15, 0);
         tile.add(bar);
       }
-      // 只有牌面可拾取，阴影/高亮不参与 raycast
+      // 只有牌面可拾取，阴影/高亮不参与 raycast。喰い替え禁止的牌不进 pickables ——
+      // 点它既不能选中也不能打出，干脆不让它响应射线。
       const face = tile.children.find((c) => c.userData && c.userData.face);
-      if (face) {
+      if (face && !isForbidden) {
         face.userData.pick = { kind: 'hand', index: i };
         this.pickables.push(face);
+      }
+      if (isForbidden && !lifted) {
+        // 压暗：与立直模式的「打出去不听牌」同一种视觉（点不动）。
+        const dim = rectMesh(HAND.w - 2, HAND.h - 2, flat(0x060a12, .55), Z.HAND + 4);
+        tile.add(dim);
       }
       this.group.add(tile);
     });

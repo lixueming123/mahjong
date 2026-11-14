@@ -374,6 +374,11 @@ export class MahjongClient {
     }
     const tile = this.state.hands[0][this.state.selected];
     if (!tile) return false;
+    // v2.5 §12.15：刚吃/碰完当巡打不出去的牌（喰い替え）—— 服务端会回 ILLEGAL_ACTION，本地先拦。
+    if (this.window.forbiddenDiscards?.includes(normTile(tile))) {
+      this.hint('刚鸣牌：这张当巡不能打（喰い替え）');
+      return false;
+    }
     const seq = this.window.seq;
     if (!this.send({ type: FRAME_TYPE.DISCARD, tile, seq })) return false;
     this.markPending(`打牌 ${tile}`);
@@ -1030,6 +1035,17 @@ export class MahjongClient {
       if (!riichiTiles.includes(face)) riichiTiles.push(face);
     }
 
+    // v2.5 §12.15：喰い替え禁止 —— 刚吃/碰完当巡打不出去的牌面（モロ + スジ）。
+    const forbiddenDiscards = [];
+    for (const code of Array.isArray(frame.forbidden_discards) ? frame.forbidden_discards : []) {
+      if (!isValidTile(code)) {
+        console.warn('forbidden_discards 含非法牌码，已忽略', code);
+        continue;
+      }
+      const face = normTile(code);
+      if (!forbiddenDiscards.includes(face)) forbiddenDiscards.push(face);
+    }
+
     // §12.10：抢杠窗口必须带被抢的那张牌（它不在任何人的牌河里）
     let windowTile = null;
     if (frame.window === WINDOW.CHANKAN) {
@@ -1043,6 +1059,7 @@ export class MahjongClient {
       window: frame.window,
       options,
       riichiTiles,
+      forbiddenDiscards,
       tile: windowTile,
       totalMs: remaining,          // 倒计时环的分母（服务端剩余秒）
       remainingMs: remaining,
@@ -1054,6 +1071,7 @@ export class MahjongClient {
     this.state.riichiArming = false;
     this.expired = false;
     this.state.riichiTiles = riichiTiles;
+    this.state.forbiddenDiscards = forbiddenDiscards;
     this.state.windowTile = this.window.tile;
     // 鸣牌时在牌河里点亮被指的那张。打出者以 lastDiscard 为准：
     // 只有吃限定上家；碰/和可鸣任何一家刚打出的牌，随局轮转。
@@ -1103,6 +1121,7 @@ export class MahjongClient {
   clearWindow(releasePending = false) {
     this.window = null;
     this.state.riichiTiles = [];
+    this.state.forbiddenDiscards = [];
     this.state.windowTile = null;
     this.state.claimTarget = null;
     this.ui?.hideClaimTip?.();

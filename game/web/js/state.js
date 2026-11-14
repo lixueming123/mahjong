@@ -92,11 +92,12 @@ export function createState() {
     autoplay: [false, false, false, false],  // 真人交给 AI；与 isBot 无关，可取消
     riichi: [false, false, false, false],
     riichiTiles: [],                  // v1.21：立直宣言牌候选（当前打牌窗口）
+    forbiddenDiscards: [],            // v2.5：喰い替え禁止的牌面（刚吃/碰完当巡打不出去）
     riichiArming: false,              // 立直宣言模式：点候选牌才发帧（渲染层据此高亮）
     windowTile: null,                 // §12.10：抢杠窗口的被抢牌面（其余窗口为 null）
     lastDiscard: null,                // 最近一次 discard_event 的打出者 {seat, code}（碰/和可鸣任何一家）
     claimTarget: null,                // 鸣牌窗口：牌河里被指的那张 {seat, index}（渲染层据此打光）
-    tenpai: { isTenpai: false, waits: [], noYaku: false },
+    tenpai: { isTenpai: false, waits: [], noYaku: false, furiten: false },
     tenpaiSeq: null,                  // §5.16：独立的 tenpai_seq，不掺 room.seq
     tenpaiFlags: [],                  // §12.5：荒庄时四家是否听牌（game_end / state_sync 携带）
     mode: 'classic',                  // §5.4：帧里有 points ⇒ riichi
@@ -184,11 +185,12 @@ export function createState() {
     state.drawn = null;
     state.riichi = [false, false, false, false];
     state.riichiTiles = [];
+    state.forbiddenDiscards = [];
     state.riichiArming = false;
     state.windowTile = null;
     state.lastDiscard = null;
     state.claimTarget = null;
-    state.tenpai = { isTenpai: false, waits: [], noYaku: false };
+    state.tenpai = { isTenpai: false, waits: [], noYaku: false, furiten: false };
     state.tenpaiSeq = null;                       // 新场次：服务端计数器也不再生效（§5.16）
     state.tenpaiFlags = [];
     // PROTOCOL v2.2 §5.4：本局开始前的场次进度。刷新恢复时靠它把经典场累计分和连庄数
@@ -366,6 +368,7 @@ export function createState() {
     state.turn = (view + 1) % 4;
     state.lastDiscard = { seat: view, code: tile };   // 碰/和可鸣任何一家刚打的这张
     state.riichiTiles = [];
+    state.forbiddenDiscards = [];
     state.riichiArming = false;
     changed(`seat${view} 打出 ${tile}`);
     emit('discard', { code: tile, seat: view, from });
@@ -416,9 +419,10 @@ export function createState() {
     }
     // F-TP-11：和牌或任何副露生效 ⇒ 牌形已变，旧的听牌 waits 是脏数据
     if ([ACTION.WIN, ACTION.PONG, ACTION.CHOW, ACTION.KONG, ACTION.ANKAN, ACTION.KAKAN].includes(action)) {
-      state.tenpai = { isTenpai: false, waits: [], noYaku: false };
+      state.tenpai = { isTenpai: false, waits: [], noYaku: false, furiten: false };
     }
     state.riichiTiles = [];
+    state.forbiddenDiscards = [];
     state.riichiArming = false;
     state.lastAction = `${state.seatNames[view]} ${actionLabel(action)}`;
     changed();
@@ -453,11 +457,12 @@ export function createState() {
     state.selected = -1;
     state.drawn = null;
     state.riichiTiles = [];
+    state.forbiddenDiscards = [];
     state.riichiArming = false;
     state.windowTile = null;
     state.lastDiscard = null;
     state.claimTarget = null;
-    state.tenpai = { isTenpai: false, waits: [], noYaku: false };
+    state.tenpai = { isTenpai: false, waits: [], noYaku: false, furiten: false };
 
     // v4.5 摊牌（用户口径修订）：**只有和牌者**亮门前牌，其余三家保持牌背。
     // results[].hand 是四家扁平手牌（门前 + 副露，game_end 专属），扣掉该家
@@ -520,13 +525,16 @@ export function createState() {
         continue;
       }
       const remaining = Number.isInteger(item.remaining) ? Math.max(0, Math.min(4, item.remaining)) : 0;
-      waits.push({ tile: item.tile, remaining, yaku: item.yaku !== false });
+      waits.push({ tile: item.tile, remaining, yaku: item.yaku !== false, furiten: item.furiten === true });
     }
     const isTenpai = typeof frame.is_tenpai === 'boolean' ? frame.is_tenpai : waits.length > 0;
     state.tenpai = {
       isTenpai,
       waits: isTenpai ? waits : [],       // 双向一致：false ⇒ []
       noYaku: isTenpai ? !!frame.no_yaku : false,
+      // §12.14：整手是否振听。与 noYaku 是两个独立的否决位 —— 无役可以靠立直/自摸，
+      // 振听只能等它解除（自己摸牌或鸣牌）。
+      furiten: isTenpai ? !!frame.furiten : false,
     };
     emit('tenpai', state.tenpai);
     changed();
@@ -541,11 +549,12 @@ export function createState() {
     state.phase = 'ended';
     state.selected = -1;
     state.riichiTiles = [];
+    state.forbiddenDiscards = [];
     state.riichiArming = false;
     state.windowTile = null;
     state.lastDiscard = null;
     state.claimTarget = null;
-    state.tenpai = { isTenpai: false, waits: [], noYaku: false };
+    state.tenpai = { isTenpai: false, waits: [], noYaku: false, furiten: false };
     changed('场终');
   }
 
@@ -564,11 +573,12 @@ export function createState() {
     state.drawn = null;
     state.riichi = [false, false, false, false];
     state.riichiTiles = [];
+    state.forbiddenDiscards = [];
     state.riichiArming = false;
     state.windowTile = null;
     state.lastDiscard = null;
     state.claimTarget = null;
-    state.tenpai = { isTenpai: false, waits: [], noYaku: false };
+    state.tenpai = { isTenpai: false, waits: [], noYaku: false, furiten: false };
     state.tenpaiSeq = null;                       // 新场次：服务端计数器也不再生效（§5.16）
     state.tenpaiFlags = [];
     state.remaining = 0;

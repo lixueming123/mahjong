@@ -239,10 +239,17 @@ export class UI {
     const waits = Array.isArray(tenpai.waits) ? tenpai.waits : [];
     el.tenpaiWaits.innerHTML = waits.map((wait) => {
       const dead = !wait.remaining;
-      return `<span class="tp-wait${dead ? ' dead' : ''}">${esc(tileLabel(wait.tile))}`
+      // §12.14：振听的等待张**能摸到也不算荣和**，比「打空了」更该压暗 —— 两者都用 dead 的样式，
+      // 但只有振听会额外加一圈红边，好跟「枚数 0」区分开。
+      const furiten = wait.furiten === true;
+      return `<span class="tp-wait${dead ? ' dead' : ''}${furiten ? ' furiten' : ''}">${esc(tileLabel(wait.tile))}`
         + `<i>${dead ? '0' : wait.remaining}</i></span>`;
     }).join('');
-    el.tenpaiNote.textContent = tenpai.noYaku ? '无役，和不了' : '';
+    // 提示优先级：无役和振听是两个独立原因，同时成立时都报出来（各自都有自己的解法）。
+    const notes = [];
+    if (tenpai.noYaku) notes.push('无役');
+    if (tenpai.furiten) notes.push('振听');
+    el.tenpaiNote.textContent = notes.length ? `${notes.join(' · ')}，和不了` : '';
   }
 
   /** client.tick() 每 200 ms 调一次：倒计时环 + 结算页「下一局」秒数 */

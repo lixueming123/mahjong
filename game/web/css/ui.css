@@ -176,8 +176,17 @@ body { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-s
 }
 
 /* ---------- 鸣牌提示（吃/碰/杠/和 到底要哪一张） ---------- */
+/* 提示条浮在操作栏**正上方、右缘贴齐按钮带**：它说的就是下面这几个按钮要做的事，
+   两者必须一眼连成一组。之前钉死在 left:1180（按钮左沿 1604），中间隔了 270px 空桌布。
+   用绝对定位而不是当成 flex 项：多种吃法的选择条能到 436px 宽，塞进 flex 会把整条栏
+   往左顶，栏左沿越过倒计时环、提示条还会压到本家牌河末张。
+   right:56px 是实测出来的：右对齐到按钮右缘（1762）会压住下家手牌列
+   （y≈760 这条带上从 x≈1712 起），缩到 1706 正好留 6px 缝。
+   margin-bottom 26：环挂在栏中心（y742..838），提示条的底边正好落在环顶 742，
+   两者上下相接、不互相切。间距小于这个值时环的上半圈会被横着压过，
+   而吃法候选条能到 436px，比环宽得多。 */
 .claim-tip {
-  position: absolute; left: 1180px; top: 700px; height: 48px;
+  position: absolute; right: 56px; bottom: 100%; margin-bottom: 26px; height: 48px;
   display: flex; align-items: center; gap: 12px; padding: 0 18px 0 8px;
   background: linear-gradient(90deg, rgba(8,16,30,.96), rgba(12,26,46,.86));
   border: 1px solid rgba(230,180,90,.7); border-radius: 24px;
@@ -261,9 +270,14 @@ body { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-s
 
 [hidden] { display: none !important; }
 
-/* ---------- 出牌倒计时（操作栏左侧） ---------- */
+/* ---------- 出牌倒计时（贴着操作栏左沿，随栏一起移动） ---------- */
+/* 倒计时、鸣牌提示、按钮是同一个决策的三件事，必须聚成一组。环挂在操作栏上当
+   绝对定位项（不占 flex 空间，栏高仍由按钮决定），右缘离开栏左沿 14px、与按钮同
+   垂直中线。之前钉在 left:1046：只有两个按钮时离按钮左沿 460px，而且那个位置
+   正好压在本家牌河末两张上（x≤1174、y≤778）。 */
 .countdown {
-  position: absolute; left: 1046px; top: 754px; width: 96px; height: 96px;
+  position: absolute; right: calc(100% + 14px); top: 50%;
+  width: 96px; height: 96px; transform: translateY(-50%);
   display: grid; place-items: center;
   filter: drop-shadow(0 4px 12px rgba(0,0,0,.6));
 }
@@ -309,6 +323,13 @@ body { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-s
 }
 .tp-wait i { font-style: normal; font-size: 11px; font-weight: 700; color: #8a5a12; }
 .tp-wait.dead { opacity: .38; filter: grayscale(.6); }
+/* 振听（§12.14）：能摸到也不能荣和 —— 红边 + 压暗，与「枚数 0」区分开 */
+.tp-wait.furiten {
+  opacity: .5;
+  box-shadow: 0 2px 6px rgba(0,0,0,.45), 0 0 0 2px rgba(226,74,74,.85) inset;
+  color: #8c2b2b;
+}
+.tp-wait.furiten i { color: #b33; }
 .tp-note { font-size: 13px; color: #ffb4b4; }
 .tp-note:empty { display: none; }
 
