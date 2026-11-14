@@ -999,10 +999,50 @@ std::vector<Option> ClaimOptions(const std::vector<Tile>& hand, const std::vecto
   return options;
 }
 
+std::vector<Face> KuikaeForbiddenFaces(const std::vector<Tile>& from_hand, Tile claimed) {
+  std::vector<Face> faces;
+  const Face claimed_face = FaceOf(claimed);
+  faces.push_back(claimed_face);
+  if (from_hand.size() != 2) {
+    // 碰 / 大明杠（或异常入参）：只剩「被鸣的那张」这一条 —— 同面牌打出去就是モロ喰い替え。
+    return faces;
+  }
+  const Face first = FaceOf(from_hand[0]);
+  const Face second = FaceOf(from_hand[1]);
+  if (first == second || !IsNumberFace(first) || !IsNumberFace(second)) {
+    return faces;  // 碰（手牌两张同面）或字牌：只有モロ喰い替え
+  }
+  if (SuitOf(first) != SuitOf(second)) {
+    return faces;  // 不同花色配不成顺子（正常不会走到这里）
+  }
+  const int low = std::min(RankOf(first), RankOf(second));
+  const int high = std::max(RankOf(first), RankOf(second));
+  if (high - low != 1) {
+    return faces;  // 嵌张（差 2）：与被鸣牌同面这一条就够
+  }
+  // 两面 / 边张：被鸣牌必在顺子的一端，另一侧的邻张也是スジ喰い替え。
+  const uint8_t suit = SuitOf(first);
+  const int claimed_rank = RankOf(claimed_face);
+  int other = 0;
+  if (claimed_rank == high + 1) {
+    other = low - 1;  // 被鸣牌接在顺子上端（如 4m5m 吃 3m 后另一个 6m）
+  } else if (claimed_rank == low - 1) {
+    other = high + 1;  // 被鸣牌接在顺子下端
+  }
+  if (other >= 1 && other <= kRankCount) {
+    faces.push_back(static_cast<Face>(suit * kRankCount + (other - 1)));
+  }
+  std::sort(faces.begin(), faces.end());
+  faces.erase(std::unique(faces.begin(), faces.end()), faces.end());
+  return faces;
+}
+
 // 日麻 AI 弃牌：评分与共享 `ChooseDiscard` 同口径，只在并列处按「役 / 振听」决胜。
 std::optional<Tile> ChooseDiscard(const std::vector<Tile>& hand, const std::vector<Meld>& melds,
-                                  const std::vector<Tile>& own_discards, const WinContext& ctx, bool can_riichi,
-                                  std::optional<Tile> drawn_tile) {
+                                  const std::vector<Tile>& own_discards,
+                                  const std::array<bool, kFaceCount>& extra_furiten_faces, const WinContext& ctx,
+                                  bool can_riichi, std::optional<Tile> drawn_tile,
+                                  const std::vector<Face>& forbidden_faces) {
   if (hand.empty()) {
     return std::nullopt;
   }
@@ -1018,6 +1058,9 @@ std::optional<Tile> ChooseDiscard(const std::vector<Tile>& hand, const std::vect
   std::vector<Candidate> candidates;
   for (Tile tile : hand) {
     const Face face = FaceOf(tile);
+    if (std::find(forbidden_faces.begin(), forbidden_faces.end(), face) != forbidden_faces.end()) {
+      continue;  // 喰い替え禁止：这一面打出去必被拒，不进候选
+    }
     bool seen = false;
     for (const Candidate& candidate : candidates) {
       if (candidate.face == face) {
@@ -1034,6 +1077,11 @@ std::optional<Tile> ChooseDiscard(const std::vector<Tile>& hand, const std::vect
     RemoveOneFaceIn(&candidate.rest, face);
     candidate.score = BestShantenAfterDraw(candidate.rest, melds);
     candidates.push_back(std::move(candidate));
+  }
+  if (candidates.empty()) {
+    // 防御：整手都被禁（房间里不会发生 —— 房间层的 `KuikaeFacesFor` 会把这种情况放开）。
+    // 退回「打排序后最后一张同面」的确定性选择，绝不让 AI 卡死。
+    return mahjong::DefaultDiscard(hand, drawn_tile);
   }
   // 第一关键字：向听评分。只留评分最优的那批进决胜。
   int best_score = candidates.front().score;
@@ -1055,13 +1103,26 @@ std::optional<Tile> ChooseDiscard(const std::vector<Tile>& hand, const std::vect
       continue;
     }
     const std::vector<Tile> live = WinningWaits(candidate.rest, melds, ctx, waits);
-    if (!live.empty()) {
-      candidate.yaku_waits = static_cast<int>(live.size());
+    // 同巡振听（房间层的临时状态）：放过的牌面即使有役也荣和不了，按振听算。
+    int usable_waits = 0;
+    for (const Tile& wait : waits) {
+      if (!extra_furiten_faces[FaceOf(wait)]) {
+        ++usable_waits;
+      }
+    }
+    if (!live.empty() && usable_waits > 0) {
+      candidate.yaku_waits = usable_waits;
     } else if (can_riichi) {
       // 无役但门清可立直：立直本身就是役，整手听牌都活了，只是不如「已经有役」稳。
       candidate.yaku_waits = static_cast<int>(waits.size());
     }
     candidate.furiten = IsPermanentFuriten(candidate.rest, melds, own_discards);
+    for (const Tile& wait : waits) {
+      if (extra_furiten_faces[FaceOf(wait)]) {
+        candidate.furiten = true;  // 同巡振听也算「振听」，决胜时同样劣后
+        break;
+      }
+    }
   }
   // 决胜顺序固定：有役枚数多者优先 → 未振听优先 → 冻结牌序最小牌面（保证确定性）。
   std::sort(finalists.begin(), finalists.end(), [&candidates](size_t lhs, size_t rhs) {

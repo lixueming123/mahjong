@@ -159,6 +159,15 @@ bool CanDeclareRiichi(const std::vector<Tile>& concealed_with_winning_tile,
 std::vector<Option> ClaimOptions(const std::vector<Tile>& hand, const std::vector<Meld>& melds,
                                  Tile discarded, int remaining, bool is_next_player, bool furiten);
 
+// 喰い替え禁止（食替禁止）：**吃/碰之后当巡**不能打出的牌面（按牌面记，赤 5 与普通 5 同面）。
+// 口径逐字取自竞技规则（M リーグ）：「鸣牌所用的手牌 + 被鸣的那张牌，凡能与之组成面子的牌面都不许打」。
+//   * 碰（`from_hand` = 两张同面）⇒ 只剩「被鸣的那张」（モロ喰い替え）；
+//   * 两面吃（`from_hand` 是连张，如 4m5m 吃 3m）⇒ 被鸣的那张 **+ 另一侧邻张** 6m（スジ喰い替え）；
+//   * 边张吃（1s2s 吃 3s / 8s9s 吃 7s）与嵌张吃（7m9m 吃 8m）⇒ 只有被鸣的那张。
+// 大明杠没有「打牌」这一步（先补摸），因此 `from_hand` 为 3 张时只回被鸣的那张，调用方也用不上。
+// 返回牌面升序、去重；`from_hand` 为空时只回被鸣的那张（防御）。
+std::vector<Face> KuikaeForbiddenFaces(const std::vector<Tile>& from_hand, Tile claimed);
+
 // 有役的等待张：从 `WaitingTiles`（纯牌型口径）里筛出「按**荣和**至少有一个役」的牌面。
 // 口径说明：
 //   * 不含门前清自摸这类**自摸役** —— 提示语是「别人打出这张，我能荣和吗」；
@@ -190,10 +199,16 @@ std::vector<Tile> WinningWaits(const std::vector<Tile>& concealed, const std::ve
 // `ctx` 只需场风/自风/立直/宝牌指示牌这类「判役用得到的状态」；`can_riichi` 由调用方按
 // 「门前 + 点数够 + 牌山够厚 + 未振听」算好（规则库不该自己去读房间的点数）。
 // `own_discards` 用来判「打这张会不会落舍て牌振听」—— 它属于房间的公开状态，同样由调用方给。
+// `extra_furiten_faces` 是房间层的**额外**振听牌面（同巡振听）：这些牌面即使不在自家牌河里
+// 也荣和不了，决胜时按振听处理。传空的 `{}` 就等于「只看舍て牌振听」。
 // `drawn_tile` 只用于返回**同一张物理牌**（打摸牌语义），不影响选牌结果。
+// `forbidden_faces` 是喰い替え禁止（v2.5）的牌面：这些牌面**根本不进候选**，因此 AI 永远
+// 不会把一手牌打成一个必然被拒的非法操作。传 `{}` 等价于旧行为。
 std::optional<Tile> ChooseDiscard(const std::vector<Tile>& hand, const std::vector<Meld>& melds,
-                                  const std::vector<Tile>& own_discards, const WinContext& ctx, bool can_riichi,
-                                  std::optional<Tile> drawn_tile = std::nullopt);
+                                  const std::vector<Tile>& own_discards,
+                                  const std::array<bool, kFaceCount>& extra_furiten_faces, const WinContext& ctx,
+                                  bool can_riichi, std::optional<Tile> drawn_tile = std::nullopt,
+                                  const std::vector<Face>& forbidden_faces = {});
 
 // 抢杠窗口的可选项（v1.15）：只有 **win / pass** —— 别人加杠的那张牌不能被吃/碰/大明杠。
 // 抢杠本身是 1 番役，所以「无役」的手牌也能抢；因此判役时必须把 `is_chankan` 算进去

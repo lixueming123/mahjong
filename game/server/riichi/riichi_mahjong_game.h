@@ -110,6 +110,29 @@ class RiichiMahjongGame final : public Game {
   // Test seam: 供托只会在立直宣言时由玩家投入，房间层没有别的入口能造出「场终还剩棒」
   // 这种局面（末局荒庄得靠发牌运气）。**不扣持点**，所以调用方算守恒时要把它加回去。
   void SetKyoutakuForTest(int sticks) { kyoutaku_ = sticks; }
+  // 同巡振听的内省（v1.22）：哪些牌面正被「本巡放过」挡着。
+  bool TemporaryFuritenOf(int seat, Tile tile) const {
+    return temporary_furiten_[static_cast<size_t>(seat)][FaceOf(tile)];
+  }
+  // 整手是否因「同巡振听」而失去荣和资格（立直资格与 AI 弃牌的 `can_riichi` 用）。
+  bool HasTemporaryFuriten(int seat) const;
+  // 荣和过滤的内省（v1.22）：这张牌现在能不能荣和（含舍て牌 / 见逃 / 同巡三种振听）。
+  bool IsFuritenFor(int seat, Tile tile) const;
+  bool IsFuriten(int seat) const;
+  // Test seam: 同巡振听只由「放过和牌张」产生，靠发牌撞出这个局面既慢又不稳；
+  // 测试要单独验「挡荣和」「摸牌解除」「鸣牌解除」三条时需要一个直接入口。
+  void SetTemporaryFuritenForTest(int seat, Tile tile, bool on) {
+    temporary_furiten_[static_cast<size_t>(seat)][FaceOf(tile)] = on;
+  }
+  // Test seam: 喰い替え禁止由「刚鸣的那一组牌」算出，同样撞不出稳定局面；
+  // 要单独验「拒绝打」「整手被禁时放开」「打完即解除」需要一个直接入口。
+  void SetKuikaeForTest(int seat, std::vector<Face> faces) {
+    kuikae_faces_[static_cast<size_t>(seat)] = std::move(faces);
+  }
+  // 喰い替え禁止（v2.5）：本家刚鸣牌后、当巡不许打出的牌面（按牌面记，升序去重）。
+  // 空 = 当前没有限制。实现是 `kuikae_faces_` 的**生效口径** —— 如果手里每一张都被禁，
+  // 它返回空（放开限制），否则会死锁在一个打不出牌的窗口里。
+  std::vector<Face> forbidden_discards_of(int seat) const { return KuikaeFacesFor(seat); }
   // kInvalid when no window is open, otherwise the window wire enum (PROTOCOL v2.0 §1.3.1).
   protocol::Window CurrentWindow() const {
     if (discard_window_open_) return protocol::Window::kDiscard;
@@ -280,13 +303,16 @@ class RiichiMahjongGame final : public Game {
   // 立直宣言牌候选：打出去之后仍在听牌、且不落振听的牌面，升序去重。
   std::vector<Tile> RiichiDiscardTilesFor(int seat) const;
   std::vector<Option> ClaimOptionsFor(int seat, Tile tile, bool is_next_player, int from_seat) const;
+  // 喰い替え禁止（v2.5）：`kuikae_faces_` 的生效口径。手里每一张都被禁时返回空（放开），
+  // 否则那个打牌窗口将无牌可打 —— 规则不能把局面卡死。
+  std::vector<Face> KuikaeFacesFor(int seat) const;
+  bool IsKuikaeForbidden(int seat, Tile tile) const;
   // 没有役就不能和（宝牌不算役）。用**完整上下文**判，这样立直/一发/海底/杠上开花这类
   // 「状态役」也能算进去。
   bool HasYakuForWin(int seat, Tile winning_tile, bool tsumo, int from_seat, bool is_chankan = false) const;
   // 和牌形：日麻要额外认国士无双 —— 共享的 `IsWinningHand` 是番数制口径，没有这个役。
   bool IsWinShape(const std::vector<Tile>& concealed, const std::vector<Meld>& melds, Tile winning_tile,
                   bool tsumo) const;
-  bool IsFuriten(int seat) const;
   bool RiichiDeclared(int seat) const { return riichi_[static_cast<size_t>(seat)]; }
   // 立直宣言（与打牌同一条 action）：校验后扣 1000 供托、置位，再由调用方打出该牌。
   bool CanDeclareRiichiNow(int seat, Tile discard) const;
@@ -326,7 +352,13 @@ class RiichiMahjongGame final : public Game {
   std::array<bool, kSeatCount> riichi_ {};         // 本局已宣言立直
   std::array<bool, kSeatCount> ippatsu_ {};        // 一发仍然有效（鸣牌后清除）
   std::array<bool, kSeatCount> ippatsu_armed_ {};  // 宣言后尚未跨过「下一摸」
-  std::array<bool, kSeatCount> furiten_ever_ {};   // 见逃振听（本局内持久）
+  // 见逃振听（本局内持久）。**只对立直者成立** —— 立直后放过和牌张，整局都不能再荣和。
+  // 非立直者的见逃只是同巡振听，由 `temporary_furiten_` 表达。
+  std::array<bool, kSeatCount> furiten_ever_ {};
+  // 同巡振听（v1.22）：本巡放过的**牌面**，到自己下次摸牌时清空（`DrawForCurrentSeat`）。
+  // 与舍て牌振听的区别：它是临时的、且按牌面记 —— 放过 3m 只挡住 3m，不挡同一手的 6m。
+  // 立直者不写这里：立直后见逃是整局持久（`furiten_ever_`），比同巡更强。
+  std::array<std::array<bool, kFaceCount>, kSeatCount> temporary_furiten_ {};
   bool draw_dealer_tenpai_ = false;                // 荒庄时庄家是否听牌（决定连庄/轮庄）
   int dealer_ = 0;
   int current_seat_ = 0;
@@ -358,6 +390,9 @@ class RiichiMahjongGame final : public Game {
   // pong/chow, where the hand is not a complete 14-tile form). Set by OpenDiscardWindow.
   bool discard_window_win_check_ = false;
   std::optional<Tile> drawn_tile_;  // draw record of the current seat (timeout default)
+  // 喰い替え禁止（v2.5）：本家刚吃/碰后、**当巡**不许打出的牌面（按牌面记）。只对
+  // 「刚刚鸣牌、还没打牌」的那一家有值，打出一张、摸牌或换手时清空。
+  std::array<std::vector<Face>, kSeatCount> kuikae_faces_ {};
   // PROTOCOL v2.2 §8.5: the exact frame the reconnecting seat needs.
   std::vector<Option> discard_options_;
   std::vector<Tile> discard_riichi_tiles_;

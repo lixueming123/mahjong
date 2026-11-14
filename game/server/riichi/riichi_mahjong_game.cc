@@ -30,11 +30,19 @@ json::Value TilesToJson(const std::vector<Tile>& tiles) {
   return array;
 }
 
-// 牌面码（不带赤）：立直宣言牌的候选是**牌面**，赤 5 与普通 5 等价（v1.21 §4.4）。
+// 牌面码（不带赤）：立直宣言牌的候选 / 喰い替え禁止的牌面都是**牌面**，赤 5 与普通 5 等价。
 json::Value TilesToJsonFaces(const std::vector<Tile>& tiles) {
   json::Value array = json::Value::Arr(tiles.size());
   for (Tile tile : tiles) {
     array.Append(json::Value::Str(FormatTile(tile, /*red=*/false)));
+  }
+  return array;
+}
+
+json::Value FacesToJson(const std::vector<Face>& faces) {
+  json::Value array = json::Value::Arr(faces.size());
+  for (Face face : faces) {
+    array.Append(json::Value::Str(FormatTile(MakeTileFromFace(face), /*red=*/false)));
   }
   return array;
 }
@@ -134,9 +142,12 @@ std::string BuildDiscardEventFrame(int seat, Tile tile, uint64_t seq) {
 
 std::string BuildActionRequestFrame(uint64_t seq, int64_t deadline_ms, protocol::Window window,
                                     const std::vector<Option>& options, std::optional<Tile> claimed = std::nullopt,
-                                    const std::vector<Tile>& riichi_tiles = {}) {
+                                    const std::vector<Tile>& riichi_tiles = {},
+                                    const std::vector<Face>& forbidden_discards = {}) {
   const bool has_riichi_tiles = !riichi_tiles.empty();
-  json::Value frame = json::Value::Obj((claimed.has_value() ? 6 : 5) + (has_riichi_tiles ? 1 : 0));
+  const bool has_forbidden = window == protocol::Window::kDiscard && !forbidden_discards.empty();
+  json::Value frame =
+      json::Value::Obj((claimed.has_value() ? 6 : 5) + (has_riichi_tiles ? 1 : 0) + (has_forbidden ? 1 : 0));
   frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kActionRequest)));
   frame.Set("seq", json::Value::Int(static_cast<int64_t>(seq)));
   frame.Set("deadline_ms", json::Value::Int(deadline_ms));
@@ -150,6 +161,11 @@ std::string BuildActionRequestFrame(uint64_t seq, int64_t deadline_ms, protocol:
     // v1.21 §4.4：立直宣言牌的候选牌面（打出后仍听牌、且不落振听）。
     // 恒用普通牌面码（5m 而不是 0m）：候选是**牌面**，赤 5 与普通 5 作宣言牌等价。
     frame.Set("riichi_tiles", TilesToJsonFaces(riichi_tiles));
+  }
+  if (has_forbidden) {
+    // v2.5 §12.15：喰い替え禁止 —— 本窗口打不出去的牌面。只在打牌窗口、且确实有限制时出现，
+    // 空表**不写该键**（绝大多数窗口因此与 v2.4 逐字节一致）。
+    frame.Set("forbidden_discards", FacesToJson(forbidden_discards));
   }
   return frame.Dump();
 }
@@ -443,6 +459,11 @@ GameVerdict RiichiMahjongGame::ValidateDiscard(int seat, const json::Value& fram
     return GameVerdict::Refuse(protocol::ErrorCode::kIllegalAction,
                                "after riichi you may only discard the tile you drew");
   }
+  if (IsKuikaeForbidden(seat, *tile)) {
+    // 喰い替え禁止（v2.5）：刚吃/碰完的那一巡，不能打回刚鸣的牌，也不能打它的スジ。
+    return GameVerdict::Refuse(protocol::ErrorCode::kIllegalAction,
+                               "this tile cannot be discarded right after a claim (kuikae): " + tile_value->AsString());
+  }
   return GameVerdict::Accept();
 }
 
@@ -609,7 +630,7 @@ void RiichiMahjongGame::EmitOpenRequest(GameStep& step, int seat) {
   if (phase_ == Phase::kDiscardWindow && discard_window_open_ && current_seat_ == seat) {
     Emit(step, seat,
          BuildActionRequestFrame(seq_, window_deadline_ms_, protocol::Window::kDiscard, discard_options_, std::nullopt,
-                                 discard_riichi_tiles_));
+                                 discard_riichi_tiles_, KuikaeFacesFor(seat)));
   } else if (phase_ == Phase::kClaimWindow && claim_open_ && claim_recipient_[static_cast<size_t>(seat)] &&
              !claim_answers_[static_cast<size_t>(seat)].answered) {
     Emit(step, seat,
@@ -798,6 +819,9 @@ void RiichiMahjongGame::StartRound(GameStep& step) {
   kong_draw_tile_.reset();
   discard_options_.clear();
   discard_riichi_tiles_.clear();
+  for (auto& kuikae : kuikae_faces_) {
+    kuikae.clear();
+  }
   // 场风只由「打到第几局」决定：东场 0..3 ⇒ 东，南场 4..7 ⇒ 南。连庄不推进 round_index，
   // 因此续庄不会换场风。
   round_wind_ = riichi::RoundWindOf(round_index_);
@@ -806,6 +830,9 @@ void RiichiMahjongGame::StartRound(GameStep& step) {
   ippatsu_ = {};
   ippatsu_armed_ = {};
   furiten_ever_ = {};
+  for (auto& temporary : temporary_furiten_) {
+    temporary.fill(false);
+  }
   draw_dealer_tenpai_ = false;
 
   // v1.6 局种子：**房间种子只管「房间之间不同」，局种子管「局与局之间不同」，两者缺一不可**。
@@ -923,6 +950,8 @@ void RiichiMahjongGame::DrawForCurrentSeat(GameStep& step) {
   const int seat = current_seat_;
   // 立直后跨过「下一摸」：这一摸仍然可以一发，打完这张就失效
   ippatsu_armed_[static_cast<size_t>(seat)] = false;
+  // 同巡振听结束：摸牌即「跨过这一巡」，本巡放过的牌面重新可和。
+  temporary_furiten_[static_cast<size_t>(seat)].fill(false);
   Tile tile = wall_[static_cast<size_t>(next_index_)];
   ++next_index_;
   remaining_ = drawable_end_ - next_index_;
@@ -968,9 +997,11 @@ void RiichiMahjongGame::OpenDiscardWindow(GameStep& step, bool win_check, std::o
   discard_options_ = options;
   discard_riichi_tiles_ = riichi_tiles;
   if (SeatPresent(seat)) {
+    // 喰い替え禁止（v2.5）：刚吃/碰完的当巡，禁掉的牌面随帧下发，客户端据此压暗它们。
+    // 每次下发都现算（不进 replay 快照）：它是 `kuikae_faces_` 与手牌的纯函数，重放时同值。
     Emit(step, seat,
          BuildActionRequestFrame(seq_, window_deadline_ms_, protocol::Window::kDiscard, options, std::nullopt,
-                                 riichi_tiles));
+                                 riichi_tiles, KuikaeFacesFor(seat)));
   }
   OpenWindowTimer(step);
 }
@@ -986,6 +1017,8 @@ void RiichiMahjongGame::ApplyDiscard(GameStep& step, int seat, Tile tile) {
   const Tile discarded = RemoveOneTile(&hands_[static_cast<size_t>(seat)], tile).value_or(tile);
   tile = discarded;
   discards_[static_cast<size_t>(seat)].push_back(discarded);
+  // 喰い替え禁止只管「鸣牌后的那一张」：这张打出去，当巡的限制就用完了（PROTOCOL §12.15）。
+  kuikae_faces_[static_cast<size_t>(seat)].clear();
   drawn_tile_.reset();
   discard_window_open_ = false;
   discard_window_win_check_ = false;
@@ -1180,7 +1213,10 @@ void RiichiMahjongGame::ResolveClaimWindow(GameStep& step) {
     }
   }
 
-  // 见逃：窗口里给了 win 却没和（含超时未答）⇒ 本局内不可再荣和
+  // 见逃：窗口里给了 win 却没和（含超时未答）⇒ 振听。分两种（v1.22）：
+  //   * 已立直 ⇒ 见逃振听**整局持久**（`furiten_ever_`），立直后不认「同巡」这种临时豁免；
+  //   * 未立直 ⇒ **同巡振听**：只挡这一张的牌面，到自己下次摸牌为止（`temporary_furiten_`）。
+  //     按牌面记是关键：放过 3m 只该挡 3m，不该连带挡住同一手的 6m。
   for (int seat = 0; seat < kSeatCount; ++seat) {
     if (!claim_recipient_[static_cast<size_t>(seat)]) {
       continue;
@@ -1189,7 +1225,12 @@ void RiichiMahjongGame::ResolveClaimWindow(GameStep& step) {
       continue;
     }
     if (claim_answers_[static_cast<size_t>(seat)].action != protocol::Action::kWin) {
-      furiten_ever_[static_cast<size_t>(seat)] = true;
+      if (riichi_[static_cast<size_t>(seat)]) {
+        furiten_ever_[static_cast<size_t>(seat)] = true;
+      } else {
+        temporary_furiten_[static_cast<size_t>(seat)][FaceOf(claim_tile_)] = true;
+        spdlog::debug("room {}: seat {} enters temporary furiten on {}", room_id_, seat, FormatTile(claim_tile_));
+      }
     }
   }
 
@@ -1244,7 +1285,14 @@ void RiichiMahjongGame::ApplyMeld(GameStep& step, int seat, protocol::Action act
   meld.tiles.push_back(claimed_tile);
   SortTiles(meld.tiles);
   melds_[static_cast<size_t>(seat)].push_back(std::move(meld));
+  // 喰い替え禁止（v2.5）：吃/碰之后当巡不能打「与该组能组成面子的牌面」。
+  // 计算用的是**真正离手的那几张**（`from_hand`，赤 5 已按物理牌解析），但只按牌面记 ——
+  // 赤 5 与普通 5 同面，禁一张就是禁两面。
+  kuikae_faces_[static_cast<size_t>(seat)] = riichi::KuikaeForbiddenFaces(from_hand, claimed_tile);
   ippatsu_ = {};  // 任何鸣牌（吃/碰/明杠）都中断全场的一发
+  // 同巡振听解除（v1.22）：放过和牌张之后**自己鸣了牌**，本巡就已经翻页 —— 放过的牌面重新
+  // 可和。与「下次摸牌解除」同属「这一巡结束」的两种入口（吃碰杠后必然要打一张，见下）。
+  temporary_furiten_[static_cast<size_t>(seat)].fill(false);
   // FEEL_SPEC F-SORT-01b 触发点 ④：**每次鸣牌扣牌后**重排 `hands_[seat]`（pong/chow/kong 同源）。
   // 扣牌本身保序，此调用按规格显式声明该不变量，避免将来改动扣牌实现时静默破序。
   // 只排手牌：`discards_`（牌河顺序是信息）与 `melds_[].tiles`（组内序由 §4.8 冻结）一律不排。
@@ -1668,10 +1716,10 @@ std::vector<Option> RiichiMahjongGame::DiscardOptionsFor(int seat, std::vector<T
   return options;
 }
 
-std::vector<Option> RiichiMahjongGame::ClaimOptionsFor(int seat, Tile tile, bool is_next_player, int from_seat) const {
+std::vector<Option> RiichiMahjongGame::ClaimOptionsFor(int seat, Tile tile, bool is_next_player, int from_seat) const {  // 振听按**这张牌**判（`IsFuritenFor`），不是整手：同巡振听只挡住放过的那个牌面。
   std::vector<Option> options =
       riichi::ClaimOptions(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)], tile, remaining_,
-                           is_next_player, IsFuriten(seat));
+                           is_next_player, IsFuritenFor(seat, tile));
   if (RiichiDeclared(seat)) {
     // 立直后手牌锁定：吃/碰/杠一律不可（只保留 win / pass）
     options.erase(std::remove_if(options.begin(), options.end(),
@@ -1688,6 +1736,44 @@ std::vector<Option> RiichiMahjongGame::ClaimOptionsFor(int seat, Tile tile, bool
                   options.end());
   }
   return options;
+}
+
+// ---------------------------------------------------------------------------------------
+// 喰い替え禁止（v2.5，PROTOCOL §12.15）
+// ---------------------------------------------------------------------------------------
+
+// 生效口径：`kuikae_faces_` 与手牌取交集后再判「会不会把窗口卡死」——
+// 手里每一张都被禁时必须放开（否则那个打牌窗口永远等不到合法打牌，只能靠超时打出一张
+// 非法牌，规则库反过来又拒它）。这是日本网络麻将的通行处理（天凤：整手都被禁时不给鸣）。
+std::vector<Face> RiichiMahjongGame::KuikaeFacesFor(int seat) const {
+  const std::vector<Face>& banned = kuikae_faces_[static_cast<size_t>(seat)];
+  if (banned.empty()) {
+    return {};
+  }
+  const std::vector<Tile>& hand = hands_[static_cast<size_t>(seat)];
+  bool any_allowed = false;
+  for (Tile tile : hand) {
+    if (std::find(banned.begin(), banned.end(), FaceOf(tile)) == banned.end()) {
+      any_allowed = true;
+      break;
+    }
+  }
+  if (!any_allowed) {
+    return {};  // 整手都被禁 ⇒ 这条规则在此局面下无法执行，放开
+  }
+  std::vector<Face> faces;
+  for (Face face : banned) {
+    if (HandHasFace(hand, face)) {
+      faces.push_back(face);
+    }
+  }
+  std::sort(faces.begin(), faces.end());
+  return faces;
+}
+
+bool RiichiMahjongGame::IsKuikaeForbidden(int seat, Tile tile) const {
+  const std::vector<Face> faces = KuikaeFacesFor(seat);
+  return std::find(faces.begin(), faces.end(), FaceOf(tile)) != faces.end();
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1709,7 +1795,16 @@ std::vector<Tile> RiichiMahjongGame::RiichiDiscardTilesFor(int seat) const {
     return candidates;
   }
   if (furiten_ever_[static_cast<size_t>(seat)]) {
-    return candidates;  // 见逃振听：本局内不许立直（与 CanDeclareRiichiNow 一致）
+    return candidates;  // 立直后见逃：本局内不许再立直（与 CanDeclareRiichiNow 一致）
+  }
+  // 同巡振听同样不许立直（PROTOCOL §12.4「未处于振听」）。这里用整手口径：
+  // 只要本巡放过了任何一个等待张的牌面，这一手就处于振听。
+  const std::array<bool, kFaceCount>& temporary = temporary_furiten_[static_cast<size_t>(seat)];
+  const std::vector<Tile> current_waits = riichi::RiichiWaitingTiles(hand, melds);
+  for (const Tile& wait : current_waits) {
+    if (temporary[FaceOf(wait)]) {
+      return candidates;
+    }
   }
   for (Face face : riichi::RiichiDiscardFaces(hand, melds)) {
     std::vector<Tile> rest = hand;
@@ -1739,7 +1834,26 @@ bool RiichiMahjongGame::IsWinShape(const std::vector<Tile>& concealed, const std
 
 bool RiichiMahjongGame::IsFuriten(int seat) const {
   if (furiten_ever_[static_cast<size_t>(seat)]) {
-    return true;  // 见逃：本局内不可再荣和
+    return true;  // 立直后见逃：本局内不可再荣和
+  }
+  if (HasTemporaryFuriten(seat)) {
+    return true;  // 同巡振听
+  }
+  return riichi::IsPermanentFuriten(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)],
+                                    discards_[static_cast<size_t>(seat)]);
+}
+
+bool RiichiMahjongGame::HasTemporaryFuriten(int seat) const {
+  const std::array<bool, kFaceCount>& temporary = temporary_furiten_[static_cast<size_t>(seat)];
+  return std::any_of(temporary.begin(), temporary.end(), [](bool flag) { return flag; });
+}
+
+bool RiichiMahjongGame::IsFuritenFor(int seat, Tile tile) const {
+  if (furiten_ever_[static_cast<size_t>(seat)]) {
+    return true;  // 立直后见逃：整局都不能再荣和（任何牌面）
+  }
+  if (temporary_furiten_[static_cast<size_t>(seat)][FaceOf(tile)]) {
+    return true;  // 同巡振听：这一巡放过这个牌面，下一张同面也不能和
   }
   return riichi::IsPermanentFuriten(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)],
                                     discards_[static_cast<size_t>(seat)]);
@@ -1769,12 +1883,22 @@ bool RiichiMahjongGame::CanDeclareRiichiNow(int seat, Tile discard) const {
   if (riichi::RiichiWaitingTiles(rest, melds).empty()) {
     return false;
   }
-  // 振听状态不能宣言立直（舍て牌振听 / 见逃振听同罪）。判定要用**打完这张之后的 13 张**：
-  // 此刻手里是 14 张，`WaitingTiles` 口径不成立，直接算会把「听牌」判成「没听」。
+  // 振听状态不能宣言立直（舍て牌振听 / 见逃振听 / 同巡振听同罪）。判定要用**打完这张之后的
+  // 13 张**：此刻手里是 14 张，`WaitingTiles` 口径不成立，直接算会把「听牌」判成「没听」。
   if (furiten_ever_[static_cast<size_t>(seat)]) {
     return false;
   }
-  return !riichi::IsPermanentFuriten(rest, melds, discards_[static_cast<size_t>(seat)]);
+  if (riichi::IsPermanentFuriten(rest, melds, discards_[static_cast<size_t>(seat)])) {
+    return false;
+  }
+  // 同巡振听：本巡放过的那张若正是打完后的等待张，这一手就是振听，不许立直。
+  const std::array<bool, kFaceCount>& temporary = temporary_furiten_[static_cast<size_t>(seat)];
+  for (const Tile& wait : riichi::RiichiWaitingTiles(rest, melds)) {
+    if (temporary[FaceOf(wait)]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 void RiichiMahjongGame::DeclareRiichi(GameStep& step, int seat) {
@@ -1882,7 +2006,7 @@ void RiichiMahjongGame::OpenChankanWindow(GameStep& step, int kan_seat, Tile til
     }
     const riichi::WinContext ctx = BuildRiichiContext(seat, kan_seat, /*tsumo=*/false, tile);
     options[static_cast<size_t>(seat)] = riichi::ChankanOptions(
-        hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)], tile, ctx, IsFuriten(seat));
+        hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)], tile, ctx, IsFuritenFor(seat, tile));
     if (FindOption(options[static_cast<size_t>(seat)], protocol::Action::kWin) != nullptr) {
       recipients[static_cast<size_t>(seat)] = true;
       any_can_rob = true;
@@ -1899,19 +2023,35 @@ void RiichiMahjongGame::OpenChankanWindow(GameStep& step, int kan_seat, Tile til
 }
 
 std::optional<Tile> RiichiMahjongGame::DefaultDiscardFor(int seat) const {
-  return DefaultDiscard(hands_[static_cast<size_t>(seat)], drawn_tile_);
+  const std::vector<Tile>& hand = hands_[static_cast<size_t>(seat)];
+  const std::optional<Tile> fallback = DefaultDiscard(hand, drawn_tile_);
+  // 喰い替え禁止（v2.5）：冻结的默认动作**不因为新规则而变**，除非它正好落在禁区 ——
+  // 那时才按「排序后从大到小、跳过禁区」取第一张（确定性，规则库不参与）。
+  // 房间层的 `KuikaeFacesFor` 已保证不会整手都被禁，所以这里一定找得到一张。
+  if (!fallback.has_value() || !IsKuikaeForbidden(seat, *fallback)) {
+    return fallback;
+  }
+  const std::vector<Tile> sorted = SortedTiles(hand);
+  for (auto it = sorted.rbegin(); it != sorted.rend(); ++it) {
+    if (!IsKuikaeForbidden(seat, *it)) {
+      return *it;
+    }
+  }
+  return fallback;
 }
 
 std::optional<Tile> RiichiMahjongGame::ChooseAiDiscard(int seat) const {
   const size_t index = static_cast<size_t>(seat);
   // 立直能不能治无役，取决于点数/牌山/振听 —— 这些是房间状态，规则库不自己读。
+  // 振听用整手口径（`IsFuriten`），与 `CanDeclareRiichiNow` 一致。
   const bool can_riichi = melds_[index].empty() && points_[index] >= riichi::kRiichiStickPoints &&
-                          remaining_ >= riichi::kMinRiichiWall && !furiten_ever_[index] && !riichi_declared(seat);
+                          remaining_ >= riichi::kMinRiichiWall && !IsFuriten(seat) && !riichi_declared(seat);
   // 判役用得到的上下文：场风/自风/立直/宝牌指示牌。荣和口径（from_seat >= 0）——
   // 「役」在这里要回答的是「别人打出来我能不能和」。
   const riichi::WinContext ctx =
       BuildRiichiContext(seat, (seat + 1) % kSeatCount, /*tsumo=*/false, TsumoWinningTile(seat));
-  return riichi::ChooseDiscard(hands_[index], melds_[index], discards_[index], ctx, can_riichi, drawn_tile_);
+  return riichi::ChooseDiscard(hands_[index], melds_[index], discards_[index],
+                               temporary_furiten_[index], ctx, can_riichi, drawn_tile_, KuikaeFacesFor(seat));
 }
 
 // The tile that completes the current seat's hand on its own draw (a tsumo). The dealer's
@@ -2220,7 +2360,7 @@ GameStep RiichiMahjongGame::Reconnect(int seat) {
     // 就没有「哪几张可以作宣言牌」的提示了（v1.21 §4.4）。
     Emit(step, seat,
          BuildActionRequestFrame(seq_, window_deadline_ms_, protocol::Window::kDiscard, discard_options_, std::nullopt,
-                                 discard_riichi_tiles_));
+                                 discard_riichi_tiles_, KuikaeFacesFor(seat)));
   } else if (phase_ == Phase::kClaimWindow && claim_open_ && claim_recipient_[static_cast<size_t>(seat)] &&
              !claim_answers_[static_cast<size_t>(seat)].answered && window_deadline_ms_ > now) {
     // 抢杠窗口与普通鸣牌窗口是**两种 window**，重放时必须还原成原来那种，并且带上被抢的那张牌
@@ -2380,6 +2520,15 @@ json::Value RiichiMahjongGame::BuildTenpaiFrame(int seat) const {
     winning = riichi::WinningWaits(concealed, melds, hint_ctx, faces);
     no_yaku = winning.empty();
   }
+  // 整手是否振听（任一等待张被挡住）。`no_yaku` 与 `furiten` 是**两个独立的否决位**：
+  // 无役和振听都会让「形听」变成「和不了」，但原因不同、解法也不同（无役可立直/自摸，振听只能等解禁）。
+  bool furiten = false;
+  for (Tile face : faces) {
+    if (IsFuritenFor(seat, face)) {
+      furiten = true;
+      break;
+    }
+  }
   if (!faces.empty()) {
     FaceCounts visible {};
     visible.fill(0);
@@ -2395,21 +2544,28 @@ json::Value RiichiMahjongGame::BuildTenpaiFrame(int seat) const {
     for (Tile face : faces) {
       const int seen = visible[FaceOf(face)];
       const int left = seen >= kCopiesPerFace ? 0 : kCopiesPerFace - seen;
-      json::Value item = json::Value::Obj(3);  // tile, remaining, yaku
+      json::Value item = json::Value::Obj(4);  // tile, remaining, yaku, furiten
       item.Set("tile", json::Value::Str(FormatTile(face)));
       item.Set("remaining", json::Value::Int(left));
       const bool has_yaku = std::find(winning.begin(), winning.end(), face) != winning.end();
       item.Set("yaku", json::Value::Bool(has_yaku));  // 荣和成立（含已立直）；宝牌不算役
+      // v1.24 逐张振听：这张牌**现在**能不能荣和由振听决定（舍て牌 / 见逃 / 同巡）。
+      // 与 `yaku` 是**两个独立的否决位**：有役但振听 ⇒ 仍然和不了。
+      item.Set("furiten", json::Value::Bool(IsFuritenFor(seat, face)));
       waits.Append(std::move(item));
     }
   }
-  json::Value frame = json::Value::Obj(5);  // type, tenpai_seq, is_tenpai, waits, no_yaku
+  json::Value frame = json::Value::Obj(7);  // + furiten / waits[].furiten（v1.24）
   frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kTenpai)));
   frame.Set("tenpai_seq", json::Value::Int(static_cast<int64_t>(tenpai_seq_[static_cast<size_t>(seat)])));
   frame.Set("is_tenpai", json::Value::Bool(!faces.empty()));
   frame.Set("waits", std::move(waits));
   // true = 形听但**所有**等待张都荣和不了（副露无役 = 死听；门清则还有立直/自摸两条路）
   frame.Set("no_yaku", json::Value::Bool(no_yaku));
+  // v1.24：振听是**本家私有**信息（他家算不出来：同巡振听记的是「我放过了什么」，
+  // 而舍て牌振听要看的是「我自己的等待张 vs 我自己的牌河」），所以随这个仅本家的帧下发。
+  // `furiten` = 整手是否处于振听（舍て牌 / 见逃 / 同巡任一）；`waits[].furiten` 是逐张细口径。
+  frame.Set("furiten", json::Value::Bool(furiten));
   return frame;
 }
 
