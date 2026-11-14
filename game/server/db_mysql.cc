@@ -659,6 +659,15 @@ DbFailureClass DbActor::EnsureSchema(void* mysql_handle) {
       "  KEY idx_match_results_account (account_id, id),"
       "  UNIQUE KEY uk_match_results_room_account (room_id, account_id)"
       ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+      // v2.3 新增：回放索引。**只有索引，没有内容** —— 回放正文在 ReplayActor 的文件里
+      // （replay_store.h），这里一行只为让 stats.recent[] 能标出「这一局可以回放」。
+      // room_id 是主键：一场对局一份文件，写入是幂等的（局终前每局都覆写一次）。
+      "CREATE TABLE IF NOT EXISTS replays ("
+      "  room_id VARCHAR(16) NOT NULL,"
+      "  mode VARCHAR(16) NOT NULL DEFAULT 'classic',"
+      "  ended_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+      "  PRIMARY KEY (room_id)"
+      ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
   };
   for (const char* statement : kSchema) {
     if (mysql_query(mysql, statement) != 0) {
@@ -718,6 +727,13 @@ stdexec::task<void> DbActor::RecordMatch(MatchRecord record) {
 stdexec::task<void> DbActor::RecordMatchResult(MatchResultRecord record) {
   // Fire and forget (§4 item 7)：场终一次性写入；失败只记日志，绝不影响 match_end 的广播。
   RecordMatchResultJob(record);
+  co_return;
+}
+
+stdexec::task<void> DbActor::RecordReplay(ReplayRecord record) {
+  // Fire and forget, same contract: the replay file is already on disk (ReplayActor), so a lost
+  // index row only costs the "回放" button in the stats list, never the recording itself.
+  RecordReplayJob(record);
   co_return;
 }
 
@@ -850,11 +866,15 @@ StatsOutcome DbActor::StatsJob(uint64_t account_id) {
     }
     mysql_free_result(result);
 
-    // §3.4: the recent list is newest first and capped at kMaxRecentMatches.
+    // §3.4: the recent list is newest first and capped at kMaxRecentMatches. v2.3: LEFT JOIN so a
+    // row still appears when no recording was made (recording off, or a guest-only table), with
+    // has_replay = 0 — the client then simply shows no 回放 button.
     const std::string recent =
-        "SELECT room_id, reason, mode, delta_score, win, UNIX_TIMESTAMP(ended_at) FROM matches"
-        " WHERE account_id = " +
-        id + filter + " ORDER BY id DESC LIMIT " + std::to_string(protocol::kMaxRecentMatches);
+        "SELECT m.room_id, m.reason, m.mode, m.delta_score, m.win, UNIX_TIMESTAMP(m.ended_at),"
+        " r.room_id IS NOT NULL FROM matches m LEFT JOIN replays r ON r.room_id = m.room_id"
+        " WHERE m.account_id = " +
+        id + " AND m.mode = '" + std::string(mode) + "' ORDER BY m.id DESC LIMIT " +
+        std::to_string(protocol::kMaxRecentMatches);
     if (mysql_query(mysql, recent.c_str()) != 0) {
       const DbFailureClass reason = ClassifyOrQueryError(mysql);
       spdlog::error("db: recent matches query failed ({}): {}", ToString(reason), mysql_error(mysql));
@@ -882,6 +902,8 @@ StatsOutcome DbActor::StatsJob(uint64_t account_id) {
       item.delta_score = ParseInt(entry[3]);
       item.win = entry[4] != nullptr && std::strcmp(entry[4], "1") == 0;
       item.ended_at = static_cast<int64_t>(ParseUint(entry[5]));
+      // v2.3 §5.13: `1` when a replay file exists for this room (the LEFT JOIN above).
+      item.has_replay = entry[6] != nullptr && std::strcmp(entry[6], "0") != 0;
       summary->recent.push_back(std::move(item));
     }
     mysql_free_result(result);
@@ -939,6 +961,28 @@ void DbActor::RecordMatchResultJob(const MatchResultRecord& record) {
       return;
     }
     spdlog::error("db: recording the match result of room {} failed ({}): {}", record.room_id, ToString(reason),
+                  mysql_error(mysql));
+    lease.MarkBroken(reason);
+  }
+}
+
+void DbActor::RecordReplayJob(const ReplayRecord& record) {
+  DbLease lease = AcquireReadyLease();
+  if (!lease) {
+    spdlog::warn("db: dropping the replay index of room {} (slot {} unavailable: {})", record.room_id, slot_index_,
+                 ToString(lease.failure()));
+    return;
+  }
+  MYSQL* mysql = static_cast<MYSQL*>(lease.handle());
+  // ON DUPLICATE KEY: the room rewrites its replay once per settled round, so the row is created
+  // on the first round and refreshed on the last. Idempotent by construction, unlike the
+  // match_results insert which relies on its unique key to reject retries.
+  const std::string sql = "INSERT INTO replays (room_id, mode) VALUES ('" + Escape(lease, record.room_id) + "', '" +
+                          Escape(lease, record.mode) +
+                          "') ON DUPLICATE KEY UPDATE mode = VALUES(mode), ended_at = CURRENT_TIMESTAMP";
+  if (mysql_query(mysql, sql.c_str()) != 0) {
+    const DbFailureClass reason = ClassifyOrQueryError(mysql);
+    spdlog::error("db: recording the replay index of room {} failed ({}): {}", record.room_id, ToString(reason),
                   mysql_error(mysql));
     lease.MarkBroken(reason);
   }

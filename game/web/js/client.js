@@ -71,13 +71,19 @@ function collectButtons() {
 const sameTiles = (a, b) => a.length === b.length && a.every((tile, i) => normTile(tile) === normTile(b[i]));
 
 export class MahjongClient {
-  constructor({ app, ui, sfx, url, options = {} }) {
+  constructor({ app, ui, sfx, url, options = {}, offline = false }) {
     this.app = app;
     this.state = app.state;
     this.ui = ui;
     this.sfx = sfx;
     this.net = new Net(url);
     this.config = options;
+    /**
+     * 回放模式（replay.js）：帧来自文件而不是 socket，所以不绑网络事件、不跑会话计时器。
+     * 帧处理这条路径（handleFrame 及其状态归约）与联机时**完全相同** —— 这正是回放能
+     * 复用整套渲染与归约的原因；这里关掉的只是"帧从哪来"和"多久检查一次超时"。
+     */
+    this.offline = !!offline;
 
     /**
      * 会话凭据（游客 name / 账号 user+pass）。null = 还没登录过（等大厅提交）。
@@ -114,6 +120,10 @@ export class MahjongClient {
     this.loginTimeouts = 0;
     this.hasAccount = false;
     this.stats = null;
+    /** §5.18 未决的回放请求（同一连接同时只允许一个，见 requestReplay） */
+    this._replayPending = null;
+    /** 回放占用牌桌期间置位：会话仍然连着，但不再发任何状态帧（见 tick） */
+    this.pausedForReplay = false;
     this.rooms = [];
     this.illegalCount = 0;
     this.rateLimitedUntil = 0;
@@ -135,7 +145,7 @@ export class MahjongClient {
     this.bindNet();
     this.bindButtons();
     this.bindStore();
-    setInterval(() => this.tick(), 200);
+    if (!this.offline) setInterval(() => this.tick(), 200);
   }
 
   /**
@@ -187,6 +197,7 @@ export class MahjongClient {
   // ---------------------------------------------------------------- 连接
 
   bindNet() {
+    if (this.offline) return;  // 回放：帧由 replay.js 直接喂进 handleFrame
     this.net.on('open', () => {
       this.handshakeDone = false;
       this.window = null;
@@ -715,10 +726,14 @@ export class MahjongClient {
         this.logGameEnd(frame);
         if (!this.restoring) this.playEndVoice(frame);
         this.app.emit('game_end', frame);
-        // 先让「和 / 流局」播报落地，再弹结算；期间若已开下一局则不再弹（守 phase）
-        setTimeout(() => {
-          if (this.state.phase === 'ended') this.ui?.showResult?.(frame, this.state);
-        }, 900);
+        // 结算页由播放器按**播放位置**决定何时显示（replay.js 的 `atRoundEnd`）：回放暂停在
+        // 局终时应该看得到"这局怎么结束的"，而继续播/拖动时又要立刻收起。所以回放里这里
+        // 不弹 —— 一次 seek 会重放几十步，逐局排一个 900ms 的浮层等于刷屏。
+        if (!this.offline) {
+          setTimeout(() => {
+            if (this.state.phase === 'ended') this.ui?.showResult?.(frame, this.state);
+          }, 900);
+        }
         // 本局刚落库（ACCOUNT_DESIGN §4.1）：账号会话补拉一次累计战绩
         if (this.hasAccount) this.send({ type: FRAME_TYPE.STATS_REQUEST });
         break;
@@ -729,7 +744,8 @@ export class MahjongClient {
         this.stage = 'idle';
         this.app.applyMatchEnd?.(frame);
         this.app.emit('match_end', frame);
-        this.ui?.showFinal?.(this.state);
+        // 回放不弹场终浮层：播放器停在最后一步时牌桌本身就是结果，退出回放由控制条负责。
+        if (!this.offline) this.ui?.showFinal?.(this.state);
         console.info('[场终]', this.describeRankings(frame));
         break;
 
@@ -747,6 +763,10 @@ export class MahjongClient {
         this.app.emit('rooms', this.rooms);
         this.app.changed();
         console.debug('[房间列表]', this.rooms.length, '间');
+        break;
+
+      case FRAME_TYPE.REPLAY:
+        this.handleReplayFrame(frame);
         break;
 
       case FRAME_TYPE.ERROR:
@@ -896,6 +916,70 @@ export class MahjongClient {
   /** 主动查战绩（§4.10）；游客会拿到零值载荷，不是错误 */
   requestStats() {
     return this.send({ type: FRAME_TYPE.STATS_REQUEST });
+  }
+
+  /**
+   * 取回一份回放（§4.13）。返回 Promise：多片 `replay` 帧拼齐后 resolve 成文件对象。
+   *
+   * 为什么是 Promise 而不是回调：调用方只有两种用法 —— 打开播放器，或显示失败原因，
+   * 而这两种都是「拿到结果才能决定」。同一连接上只允许一个未决请求（§4.13 的最后一条），
+   * 所以后发的请求会先把前一个 reject 掉，不会串帧。
+   */
+  requestReplay(roomId) {
+    if (!this.net.connected) return Promise.reject(new Error('未连接，无法取回回放'));
+    if (this._replayPending) {
+      this._replayPending.reject(new Error('上一个回放请求还没结束'));
+      this._replayPending = null;
+    }
+    return new Promise((resolve, reject) => {
+      this._replayPending = { roomId, chunks: null, received: 0, resolve, reject };
+      if (!this.send({ type: FRAME_TYPE.REPLAY_REQUEST, room_id: roomId })) {
+        this._replayPending = null;
+        reject(new Error('回放请求发送失败'));
+      }
+    });
+  }
+
+  /** §5.18：分片拼装。失败帧带 `error`，成功帧带 `chunk/chunks/data`。 */
+  handleReplayFrame(frame) {
+    const pending = this._replayPending;
+    if (!pending) {
+      console.debug('未请求过的 replay 帧，已忽略', frame.room_id);
+      return;
+    }
+    if (typeof frame.room_id === 'string' && frame.room_id !== pending.roomId) {
+      console.debug('replay 帧的 room_id 与请求不符，已忽略', frame.room_id);
+      return;
+    }
+    const settle = (error, value) => {
+      if (this._replayPending !== pending) return;
+      this._replayPending = null;
+      if (error) pending.reject(error);
+      else pending.resolve(value);
+    };
+    if (Number.isInteger(frame.error)) {
+      settle(new Error(frame.error === ERROR_CODE.ROOM_NOT_FOUND
+        ? '这份对局没有回放（或不属于当前账号）'
+        : `回放请求失败（code ${frame.error}）`));
+      return;
+    }
+    if (!Array.isArray(pending.chunks)) {
+      const total = Number.isInteger(frame.chunks) && frame.chunks > 0 ? frame.chunks : 1;
+      pending.chunks = new Array(total).fill(null);
+    }
+    const index = Number.isInteger(frame.chunk) ? frame.chunk : -1;
+    if (index < 0 || index >= pending.chunks.length) {
+      settle(new Error('回放分片序号越界'));
+      return;
+    }
+    if (pending.chunks[index] === null) pending.received += 1;
+    pending.chunks[index] = String(frame.data || '');
+    if (pending.received < pending.chunks.length) return;
+    try {
+      settle(null, JSON.parse(pending.chunks.join('')));
+    } catch (err) {
+      settle(new Error(`回放文件损坏：${err.message}`));
+    }
   }
 
   /** 开局信号（§4.4）：重复调用不会再发（服务端会回 BAD_REQUEST） */
@@ -1139,6 +1223,14 @@ export class MahjongClient {
     const now = performance.now();
     this.checkStages(now);
     this.checkSilence(now);
+    // 回放把牌桌借走了：`ReplayPlayer` 复用同一个 `app.state`，`seekTo()` 会 reset 它，
+    // 于是这里会看到 phase=playing + 手牌为空/对不上，进而发出真实的 SYNC。服务端那边
+    // 这一局可能早已结束，回过来的就是 ROOM_NOT_FOUND（"房间不存在或已关闭"）——
+    // 一条和玩家操作毫无关系的错误。回放期间这条会话不参与任何轮询。
+    if (this.pausedForReplay) {
+      this.ui?.tick?.(this);
+      return;
+    }
     // 本地已知对不上（例如本家 discard_event 的牌不在手牌里）：补拉一次权威状态
     if (this.state.needsSync && this.requestSync()) this.state.needsSync = false;
     this.maybeSyncEmptyHand();

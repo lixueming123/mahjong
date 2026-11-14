@@ -21,9 +21,9 @@
 
 namespace mahjong::protocol {
 
-// ---- frame_type: C→S 1..11 plus autoplay=28, S→C 12..27 (§3.2 table order) ----------
-// kClientFrameTypeMax is the count of C→S types, not their largest wire value: autoplay
-// is appended after the S→C block so nothing already on the wire is renumbered.
+// ---- frame_type: C→S 1..11 plus autoplay=28, S→C 12..27, replay 29/30 (§3.2 table order) -----
+// kClientFrameTypeMax is the count of C→S types, not their largest wire value: autoplay and
+// replay_request are appended after the S→C block so nothing already on the wire is renumbered.
 enum class FrameType : uint8_t {
   kInvalid = 0,
   kLogin = 1,
@@ -54,22 +54,26 @@ enum class FrameType : uint8_t {
   kTenpai = 26,
   kRoomUpdate = 27,
   kAutoplay = 28,
+  kReplayRequest = 29,
+  kReplay = 30,
 };
-inline constexpr int kFrameTypeMax = 28;
-inline constexpr int kClientFrameTypeMax = 12;
+inline constexpr int kFrameTypeMax = 30;
+inline constexpr int kClientFrameTypeMax = 13;
 inline constexpr std::array<std::string_view, kFrameTypeMax + 1> kFrameTypeNames = {
     "INVALID",     "login",      "register",       "ping",          "stats_request",
     "list_rooms",  "create_room", "join_room",     "ready",         "sync",
     "discard",     "action",      "login_ok",      "error",         "room_joined",
     "game_start",  "draw",        "discard_event", "action_request", "action_event",
     "state_sync",  "game_end",    "pong",          "stats",         "room_list",
-    "match_end",   "tenpai",      "room_update",   "autoplay",
+    "match_end",   "tenpai",      "room_update",   "autoplay",      "replay_request",
+    "replay",
 };
 inline constexpr std::array<FrameType, kClientFrameTypeMax> kClientFrameTypes = {
     FrameType::kLogin,        FrameType::kRegister, FrameType::kPing,
     FrameType::kStatsRequest, FrameType::kListRooms, FrameType::kCreateRoom,
     FrameType::kJoinRoom,     FrameType::kReady,    FrameType::kSync,
     FrameType::kDiscard,      FrameType::kAction,   FrameType::kAutoplay,
+    FrameType::kReplayRequest,
 };
 
 // ---- action (§4.6 + 日麻 riichi) ---------------------------------------------------------
@@ -98,7 +102,10 @@ enum class Window : uint8_t {
 };
 inline constexpr int kWindowMax = 3;
 inline constexpr std::array<std::string_view, kWindowMax + 1> kWindowNames = {
-    "INVALID", "discard", "claim", "chankan",
+    "INVALID",
+    "discard",
+    "claim",
+    "chankan",
 };
 
 // ---- mode / length (§12.1) --------------------------------------------------------------
@@ -109,7 +116,9 @@ enum class WireMode : uint8_t {
 };
 inline constexpr int kModeMax = 2;
 inline constexpr std::array<std::string_view, kModeMax + 1> kModeNames = {
-    "INVALID", "classic", "riichi",
+    "INVALID",
+    "classic",
+    "riichi",
 };
 
 enum class WireLength : uint8_t {
@@ -119,7 +128,9 @@ enum class WireLength : uint8_t {
 };
 inline constexpr int kLengthMax = 2;
 inline constexpr std::array<std::string_view, kLengthMax + 1> kLengthNames = {
-    "INVALID", "tonpu", "hanchan",
+    "INVALID",
+    "tonpu",
+    "hanchan",
 };
 
 // ---- melds[].type (§5.9) ----------------------------------------------------------------
@@ -146,7 +157,10 @@ enum class RoundEndReason : uint8_t {
 };
 inline constexpr int kReasonMax = 3;
 inline constexpr std::array<std::string_view, kReasonMax + 1> kReasonNames = {
-    "INVALID", "win_ron", "win_tsumo", "draw_exhausted",
+    "INVALID",
+    "win_ron",
+    "win_tsumo",
+    "draw_exhausted",
 };
 
 // ---- error.code (§7.1, exactly 14; STALE_SEQ deliberately absent) ----------------------
@@ -169,10 +183,9 @@ enum class ErrorCode : uint8_t {
 };
 inline constexpr int kErrorCodeMax = 14;
 inline constexpr std::array<std::string_view, kErrorCodeMax + 1> kErrorCodeNames = {
-    "INVALID",         "INVALID_NAME",   "NOT_LOGGED_IN", "ROOM_NOT_FOUND",
-    "NOT_YOUR_TURN",   "NO_PENDING_ACTION", "ILLEGAL_ACTION", "UNKNOWN_TILE",
-    "BAD_REQUEST",     "FRAME_TOO_LARGE", "RATE_LIMITED",  "INTERNAL",
-    "AUTH_FAILED",     "USERNAME_TAKEN", "ALREADY_ONLINE",
+    "INVALID",           "INVALID_NAME",   "NOT_LOGGED_IN", "ROOM_NOT_FOUND", "NOT_YOUR_TURN",
+    "NO_PENDING_ACTION", "ILLEGAL_ACTION", "UNKNOWN_TILE",  "BAD_REQUEST",    "FRAME_TOO_LARGE",
+    "RATE_LIMITED",      "INTERNAL",       "AUTH_FAILED",   "USERNAME_TAKEN", "ALREADY_ONLINE",
 };
 
 // ---- win.yaku[].id / win.tags[] / results[].win_type[] (v2.1) ---------------------------
@@ -350,30 +363,14 @@ constexpr std::optional<E> FromName(std::string_view name) {
 }
 
 // Named wrappers keep call sites readable: ParseFrameType(v), ParseAction(v), ...
-constexpr std::optional<FrameType> ParseFrameType(int64_t value) {
-  return ParseWire<FrameType>(value);
-}
-constexpr std::optional<Action> ParseAction(int64_t value) {
-  return ParseWire<Action>(value);
-}
-constexpr std::optional<Window> ParseWindow(int64_t value) {
-  return ParseWire<Window>(value);
-}
-constexpr std::optional<WireMode> ParseWireMode(int64_t value) {
-  return ParseWire<WireMode>(value);
-}
-constexpr std::optional<WireLength> ParseWireLength(int64_t value) {
-  return ParseWire<WireLength>(value);
-}
-constexpr std::optional<WireMeldType> ParseWireMeldType(int64_t value) {
-  return ParseWire<WireMeldType>(value);
-}
-constexpr std::optional<RoundEndReason> ParseReason(int64_t value) {
-  return ParseWire<RoundEndReason>(value);
-}
-constexpr std::optional<ErrorCode> ParseErrorCode(int64_t value) {
-  return ParseWire<ErrorCode>(value);
-}
+constexpr std::optional<FrameType> ParseFrameType(int64_t value) { return ParseWire<FrameType>(value); }
+constexpr std::optional<Action> ParseAction(int64_t value) { return ParseWire<Action>(value); }
+constexpr std::optional<Window> ParseWindow(int64_t value) { return ParseWire<Window>(value); }
+constexpr std::optional<WireMode> ParseWireMode(int64_t value) { return ParseWire<WireMode>(value); }
+constexpr std::optional<WireLength> ParseWireLength(int64_t value) { return ParseWire<WireLength>(value); }
+constexpr std::optional<WireMeldType> ParseWireMeldType(int64_t value) { return ParseWire<WireMeldType>(value); }
+constexpr std::optional<RoundEndReason> ParseReason(int64_t value) { return ParseWire<RoundEndReason>(value); }
+constexpr std::optional<ErrorCode> ParseErrorCode(int64_t value) { return ParseWire<ErrorCode>(value); }
 constexpr std::optional<YakuId> ParseYakuId(int64_t value) { return ParseWire<YakuId>(value); }
 constexpr std::optional<WireLimit> ParseWireLimit(int64_t value) { return ParseWire<WireLimit>(value); }
 
@@ -403,7 +400,7 @@ static_assert(std::is_same_v<std::underlying_type_t<ErrorCode>, uint8_t>);
 static_assert(std::is_same_v<std::underlying_type_t<YakuId>, uint8_t>);
 static_assert(std::is_same_v<std::underlying_type_t<WireLimit>, uint8_t>);
 
-static_assert(WireOf(FrameType::kAutoplay) == kFrameTypeMax);
+static_assert(WireOf(FrameType::kReplay) == kFrameTypeMax);
 static_assert(WireOf(Action::kRiichi) == kActionMax);
 static_assert(WireOf(Window::kChankan) == kWindowMax);
 static_assert(WireOf(WireMode::kRiichi) == kModeMax);

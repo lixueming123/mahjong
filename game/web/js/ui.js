@@ -78,7 +78,7 @@ export class UI {
       discard: $('btn-discard'),
       draw: $('btn-draw'),
       pass: $('btn-pass'),
-      stats: $('stats'),
+      stats: $('hud-stats'),
       scores: [0, 1, 2, 3].map((i) => $(`seat-score-${i}`)),
       winds: [0, 1, 2, 3].map((i) => $(`seat-wind-${i}`)),
       tags: [0, 1, 2, 3].map((i) => $(`seat-tags-${i}`)),
@@ -381,8 +381,13 @@ export class UI {
 
   // ------------------------------------------------------------------ 结算
 
-  /** 局终（game_end）：四家收支 + 和牌明细 */
-  showResult(frame, state) {
+  /**
+   * 局终（game_end）：四家收支 + 和牌明细。
+   *
+   * |replay| 让底部按钮区变成「回放里没有倒计时」的措辞：回放的这个浮层只表示"现在停在
+   * 这一局的末尾"，点一下就继续，没有服务端在 12 秒后发下一局。
+   */
+  showResult(frame, state, { replay = false } = {}) {
     if (!frame || !this.el.result) return;
     const el = this.el;
     const win = frame.win;
@@ -432,7 +437,11 @@ export class UI {
     el.rsLobby.hidden = !!frame.match_will_continue;
     const interlude = Number.isFinite(frame.interlude_ms) ? frame.interlude_ms : 12000;
     this._nextTimer = el.rsNext;
-    if (frame.match_will_continue) {
+    if (replay) {
+      // 回放里没有服务端在倒计时，说「下一秒」是假话。这一局结束只是播放位置到了这里。
+      this._resultDeadline = 0;
+      el.rsNext.textContent = frame.match_will_continue ? '继续播放看下一局' : '本场结束';
+    } else if (frame.match_will_continue) {
       this._resultDeadline = performance.now() + Math.max(0, interlude);
       el.rsNext.textContent = `下一局 ${Math.ceil(interlude / 1000)} 秒后开始`;
     } else {
@@ -440,6 +449,8 @@ export class UI {
       el.rsNext.textContent = '本场结束，正在结算…';
     }
 
+    // 回放里改成"不压暗、不挡控制条"的布局（见 ui.css 的 .modal-layer.replay-result）
+    el.result.classList.toggle('replay-result', !!replay);
     el.result.hidden = false;
   }
 
@@ -542,7 +553,10 @@ export class UI {
   }
 
   hideResult() {
-    if (this.el.result) this.el.result.hidden = true;
+    if (this.el.result) {
+      this.el.result.hidden = true;
+      this.el.result.classList.remove('replay-result');
+    }
     this._resultDeadline = 0;
     this._nextTimer = null;
   }

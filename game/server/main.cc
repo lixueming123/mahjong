@@ -31,6 +31,7 @@
 // The bot pacing knobs (kDefaultAiDelayMs / SetAiActionDelayMs ...) are part of "how a room is
 // launched", so main reads them from the registry — not from the room it is about to stop naming.
 #include "game_registry.h"
+#include "replay_store.h"
 #include "timer.h"
 
 namespace {
@@ -62,6 +63,8 @@ struct Options {
   int inter_hand_delay_ms = mahjong::kDefaultInterHandDelayMs;
   // Load runs log every accept and every discard; that log becomes the measurement.
   bool quiet = false;
+  // Where rooms write their replay files (replay.h). Empty disables recording.
+  std::string replay_dir = "replays";
   // ACCOUNT_DESIGN.md §6.5: never a password in the source — the empty default is filled from
   // the environment (or --mysql-password) so it stays out of the argv of the process table.
   mahjong::DbConfig db;
@@ -81,6 +84,7 @@ void PrintUsage(const char* program) {
                "  --action-timeout-ms N  action window length, %d..%d (default %d)\n"
                "  --ai-delay-ms N        delay before an AI decision, 0..%d (default %d; 0 = immediate)\n"
                "  --inter-hand-delay-ms N pause between rounds of a match, 0..%d (default %d)\n"
+               "  --replay-dir D         directory for match replays (default \"replays\"; empty = off)\n"
                "  --mysql-host H         MySQL host for accounts (default %s)\n"
                "  --mysql-port N         MySQL port (default %d)\n"
                "  --mysql-user U         MySQL user (default %s)\n"
@@ -137,8 +141,8 @@ bool ParseInt64(const std::string& text, int64_t* out) {
 
 bool IsKnownOption(const std::string& key) {
   return key == "--port" || key == "--seed" || key == "--action-timeout-ms" || key == "--ai-delay-ms" ||
-         key == "--inter-hand-delay-ms" || key == "--mysql-host" || key == "--mysql-port" || key == "--mysql-user" ||
-         key == "--mysql-password" || key == "--mysql-db" || key == "--mysql-timeout-ms" ||
+         key == "--inter-hand-delay-ms" || key == "--replay-dir" || key == "--mysql-host" || key == "--mysql-port" ||
+         key == "--mysql-user" || key == "--mysql-password" || key == "--mysql-db" || key == "--mysql-timeout-ms" ||
          key == "--mysql-idle-timeout-s" || key == "--mysql-max-lifetime-s" || key == "--mysql-failure-threshold" ||
          key == "--mysql-cooldown-ms";
 }
@@ -179,6 +183,12 @@ std::optional<Options> ParseOptions(int argc, char** argv, std::string* error) {
     // The connection options are free-form strings; everything else is an integer.
     if (key == "--mysql-host") {
       options.db.host = value;
+      continue;
+    }
+    if (key == "--replay-dir") {
+      // Replay storage (replay.h). An empty value disables recording, which is what a build
+      // without a writable data directory wants.
+      options.replay_dir = value;
       continue;
     }
     if (key == "--mysql-user") {
@@ -332,7 +342,12 @@ int main(int argc, char** argv) {
   // same connection and stay ordered.
   auto game_pool = std::make_unique<ex_actor::WorkSharingThreadPool>(kThreadPoolSize);
   using ShardScheduler = ex_actor::WorkSharingThreadPool::Scheduler;
-  constexpr size_t kSchedulerCount = static_cast<size_t>(kDbShardCount) + 1;
+  // Slot 0 is the game pool, slots 1..kDbShardCount are the db shards, and the last slot is the
+  // replay store: replay I/O blocks on the filesystem, so it gets its own thread for the same
+  // reason MySQL does (ACCOUNT_DESIGN.md §6.1) — and one thread also keeps written files in the
+  // order the rooms reported them.
+  constexpr size_t kReplaySchedulerIndex = static_cast<size_t>(kDbShardCount) + 1;
+  constexpr size_t kSchedulerCount = kReplaySchedulerIndex + 1;
   std::array<ShardScheduler, kSchedulerCount> schedulers {};
   schedulers[0] = game_pool->GetScheduler();
   std::vector<std::unique_ptr<ex_actor::WorkSharingThreadPool>> db_thread_pools;
@@ -340,6 +355,8 @@ int main(int argc, char** argv) {
     db_thread_pools.push_back(std::make_unique<ex_actor::WorkSharingThreadPool>(1));
     schedulers[static_cast<size_t>(i) + 1] = db_thread_pools.back()->GetScheduler();
   }
+  auto replay_thread_pool = std::make_unique<ex_actor::WorkSharingThreadPool>(1);
+  schedulers[kReplaySchedulerIndex] = replay_thread_pool->GetScheduler();
   using PoolUnion = typename ShardSchedulerUnion<ShardScheduler, kSchedulerCount>::Type;
   auto pool_union =
       std::apply([](auto... shard_schedulers) { return std::make_unique<PoolUnion>(shard_schedulers...); }, schedulers);
@@ -350,6 +367,7 @@ int main(int argc, char** argv) {
   for (auto& thread_pool : db_thread_pools) {
     ex_actor::HoldResource(std::move(thread_pool));
   }
+  ex_actor::HoldResource(std::move(replay_thread_pool));
   ex_actor::HoldResource(std::move(pool_union));
 
   // mysql_library_init is process-wide and not thread safe, so it happens once, here, before any
@@ -400,6 +418,32 @@ int main(int argc, char** argv) {
 
   // Window timers: the delayed, seq-carrying timeout messages (PROTOCOL.md §0.5).
   auto window_timer = std::make_shared<mahjong::WindowTimer>();
+
+  // Replay storage: an independent single-thread actor, spawned unconditionally so that reads
+  // (§4.13) work even when the directory is empty (they simply answer ROOM_NOT_FOUND). Store()
+  // no-ops on an empty directory, which is the "recording off" switch.
+  //
+  // Two registrations, one actor: the write side (ReplaySink, replay.h) is what the room shell
+  // depends on, and the read side (ReplayService, replay_store.h) is what the player side does.
+  // Splitting them is what keeps a target that links the room shell from also needing the store.
+  {
+    ex_actor::ActorConfig config {.scheduler_index = kReplaySchedulerIndex};
+    auto replay_result =
+        stdexec::sync_wait(ex_actor::Spawn<mahjong::ReplayActor>(options->replay_dir).WithConfig(config));
+    if (!replay_result.has_value()) {
+      spdlog::error("mahjong_server: failed to spawn ReplayActor");
+      window_timer->Stop();
+      stop_db();
+      stdexec::sync_wait(mahjong::ActorSendScope().on_empty());
+      mahjong::DbLibraryShutdown();
+      ex_actor::Shutdown();
+      return 1;
+    }
+    ex_actor::ActorRef<mahjong::ReplayActor> replay_actor = std::get<0>(*replay_result);
+    mahjong::GetReplayService().SetSink(ex_actor::ActorRef<mahjong::ReplaySink>(replay_actor));
+    mahjong::GetReplayStore().SetActor(replay_actor);
+    spdlog::info("replay: store at {}", options->replay_dir.empty() ? "(disabled)" : options->replay_dir);
+  }
 
   auto lobby_result = stdexec::sync_wait(ex_actor::Spawn<mahjong::LobbyActor>(
       options->seed, options->action_timeout_ms, window_timer, mahjong::kGameEndReclaimMs));

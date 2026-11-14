@@ -107,6 +107,10 @@ stdexec::task<void> DbActor::RecordMatchResult(MatchResultRecord /*record*/) {
   co_return;  // nothing to write to (§2.3 降级语义与 RecordMatch 相同)
 }
 
+stdexec::task<void> DbActor::RecordReplay(ReplayRecord /*record*/) {
+  co_return;  // no index table without MySQL; the replay file itself is still written
+}
+
 stdexec::task<void> DbActor::Stop() { co_return; }
 
 }  // namespace mahjong

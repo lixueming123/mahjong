@@ -17,7 +17,11 @@ import { UI } from './ui.js';
 import { Lobby } from './lobby.js';
 import { Input } from './input.js';
 import { Sfx } from './audio.js';
+import { Net } from './net.js';
+import { FRAME_TYPE, ERROR_CODE } from './protocol_enums.js';
 import { MahjongClient } from './client.js';
+import { ReplayPlayer } from './replay.js';
+import { ReplayBar } from './replaybar.js';
 
 const canvas = document.getElementById('stage');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
@@ -56,6 +60,8 @@ scene.add(fill);
 
 let opponents = null;
 let tablePass = null;
+/** 回放时的播放器（联机为 null）。音效/飞行动画用它判断此刻该不该出手。 */
+let replayPlayer = null;
 
 function resize() {
   const w = window.innerWidth, h = window.innerHeight;
@@ -84,7 +90,8 @@ function socketUrl() {
 
 /** 联机参数全部走 URL，不新增界面元素：
  *  ?name=小明&mode=riichi&length=hanchan&room=r-xxxx
- *  账号：?user=alice&pass=secret（&register=1 走注册） */
+ *  账号：?user=alice&pass=secret（&register=1 走注册）
+ *  回放：?replay=r-xxxxxxxxxxxxx（或 &file=/path/replay.json 指定本地文件） */
 function clientOptions() {
   const params = new URLSearchParams(location.search);
   return {
@@ -95,7 +102,168 @@ function clientOptions() {
     user: params.get('user') || '',
     pass: params.get('pass') || '',
     register: params.get('register') === '1',
+    replay: params.get('replay') || '',
+    file: params.get('file') || '',
+    seat: Number.parseInt(params.get('seat') || '0', 10) || 0,
   };
+}
+
+/**
+ * 取回一份回放（PROTOCOL v2.3 §5.18）。
+ *
+ * 两种来源，都是「拿到一份文本」：
+ *   - `loadReplayFile`：直接读一个本地文件，用于开发与验收（不需要服务端、不需要账号）；
+ *   - `loadReplayFromServer`：借 Net 的收发能力发 `replay_request`，把多片 `replay` 帧拼起来。
+ *
+ * 后者刻意不经过 MahjongClient：大厅的会话是给对局用的，而回放只需要「登录、要一份文件、
+ * 断开」。用一条一次性连接，帧的语义也就在这一个函数里。
+ */
+async function loadReplayFile(path) {
+  const response = await fetch(path);
+  if (!response.ok) throw new Error(`无法读取回放文件 ${path}（HTTP ${response.status}）`);
+  return response.json();
+}
+
+async function loadReplayFromServer(options) {
+  const roomId = options.replay;
+  if (!roomId) throw new Error('缺少房间号');
+  return new Promise((resolve, reject) => {
+    const socket = new Net(socketUrl());
+    let chunks = null;
+    let received = 0;
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      socket.close('回放结束');
+      if (error) reject(error);
+      else resolve(value);
+    };
+    socket.on('open', () => {
+      // §4.1：`replay_request` 要求已登录（§4.13）。有账号就用账号，否则游客 ——
+      // 游客必然被服务端拒绝，但那是一条明确的错误，比"什么都不发生"好。
+      if (options.user) {
+        socket.send({ type: FRAME_TYPE.LOGIN, username: options.user, password: options.pass || '', resume: false });
+      } else {
+        socket.send({ type: FRAME_TYPE.LOGIN, name: options.name || '回放' });
+      }
+    });
+    socket.on('frame', (frame) => {
+      if (frame.type === FRAME_TYPE.LOGIN_OK) {
+        socket.send({ type: FRAME_TYPE.REPLAY_REQUEST, room_id: roomId });
+        return;
+      }
+      if (frame.type === FRAME_TYPE.ERROR) {
+        finish(new Error(frame.message || `回放请求失败（code ${frame.code}）`));
+        return;
+      }
+      if (frame.type !== FRAME_TYPE.REPLAY) return;
+      if (Number.isInteger(frame.error)) {
+        finish(new Error(frame.error === ERROR_CODE.ROOM_NOT_FOUND
+          ? '这份对局没有回放（或不属于当前账号）'
+          : `回放请求失败（code ${frame.error}）`));
+        return;
+      }
+      if (!Array.isArray(chunks)) {
+        chunks = new Array(Math.max(1, frame.chunks | 0)).fill(null);
+      }
+      if (Number.isInteger(frame.chunk) && frame.chunk >= 0 && frame.chunk < chunks.length) {
+        if (chunks[frame.chunk] === null) received += 1;
+        chunks[frame.chunk] = String(frame.data || '');
+      }
+      if (received === chunks.length) {
+        try {
+          finish(null, JSON.parse(chunks.join('')));
+        } catch (err) {
+          finish(new Error(`回放文件损坏：${err.message}`));
+        }
+      }
+    });
+    socket.on('close', () => finish(new Error('连接已断开，未能取回回放')));
+    socket.connect().catch((err) => finish(new Error(`无法连接服务器：${err.message}`)));
+  });
+}
+
+/**
+ * 进入回放：取文件 → 建播放器 → 挂控制条 → 开始播放。
+ *
+ * 两种来源：
+ *   - `?file=...`：直接读一个本地文件（开发/验收用，不需要服务端、不需要账号）；
+ *   - `?replay=r-xxxx`：先在本次页面里登录（URL 带账号就用账号，否则游客），再发
+ *     `replay_request`。刻意不复用大厅会话：回放要一条"只为取文件而存在"的连接，用完即关。
+ *
+ * 游客取不回任何回放（§4.13 要求请求者是该局参与者），所以 `?replay=` 只对账号有意义 ——
+ * 游客登录时服务端会回 ROOM_NOT_FOUND，这里如实显示。
+ *
+ * 取文件失败时把原因写回引导层，而不是静默黑屏。
+ */
+async function startReplay({ app, ui, sfx, options }) {
+  let replay = null;
+  try {
+    replay = options.file ? await loadReplayFile(options.file) : await loadReplayFromServer(options);
+  } catch (err) {
+    console.error('回放失败', err);
+    const boot = document.getElementById('boot');
+    if (boot) {
+      boot.textContent = `回放失败：${err.message}`;
+      boot.classList.add('error', 'ready');
+    }
+    return null;
+  }
+  return startReplayFrom(replay, { app, ui, sfx, seat: options.seat });
+}
+
+/**
+ * 已经拿到回放文本之后的那一半：建播放器、挂控制条。两个入口（URL 与大屏战绩列表）共用，
+ * 因为「文件在手」之后的步骤一模一样。
+ *
+ * |onExit| 决定退出回放时回到哪里：URL 入口换页重来（那是独立页面），大厅入口交回调用方
+ * （它要把大厅重新显示出来，而不是丢掉会话）。省略时按 URL 入口处理。
+ */
+async function startReplayFrom(replay, { app, ui, sfx, seat = 0, onExit = null }) {
+  let player = null;
+  try {
+    player = new ReplayPlayer({ app, ui, sfx, replay, seat });
+  } catch (err) {
+    console.error('回放失败', err);
+    ui?.toast?.(`无法打开回放：${err.message}`, 'error');
+    return null;
+  }
+
+  // 控制条：全部按钮都从播放器读状态，这里只负责「退出」。
+  const bar = new ReplayBar(player);
+  bar.onExit = () => {
+    player.dispose();
+    bar.dispose();
+    replayPlayer = null;
+    if (onExit) {
+      onExit();
+      return;
+    }
+    const url = new URL(location.href);
+    url.searchParams.delete('replay');
+    url.searchParams.delete('file');
+    location.href = url.toString();
+  };
+  bar.show();
+
+  // 局终结算页：回放里照常显示，但由**播放位置**决定去留（`atRoundEnd`），而不是像联机那样
+  // 900ms 后弹一下就再没人收。停在局终能看清"这局怎么结束的"，继续播/单步/拖动就自动收起。
+  player.onRoundEnd = (frame, { showing }) => {
+    if (!showing) {
+      ui?.hideResult?.();
+      return;
+    }
+    ui?.showResult?.(frame, app.state, { replay: true });
+  };
+
+  // 音效与手牌飞行动画由 boot() 里那两个 app.on 负责（回放走的是同一条渲染链），
+  // 播放器通过 `player.audible` 决定此刻该不该出声（见 boot 里的接线）。
+
+  player.seekTo(0);
+  player.play();
+  window.__mahjongReplay = { player, bar };
+  return player;
 }
 
 async function boot() {
@@ -127,20 +295,89 @@ async function boot() {
     ui.update(app.state);
   });
   app.on('discard', ({ code, from, seat }) => {
+    // 回放里只在实时播放时做飞行动画与音效：seek/单步会一次重放几百步，
+    // 每步都飞一张牌会把整局的动画糊成一次闪烁。
+    if (replayPlayer && !replayPlayer.audible) return;
     sfx.play('discard');
     if (seat === 0 && from) {
       hand.fly(code, from, rivers.slot(0, app.state.rivers[0].length - 1));
     }
   });
-  app.on('draw', ({ seat }) => { if (seat === 0) sfx.play('draw'); });
+  app.on('draw', ({ seat }) => {
+    if (replayPlayer && !replayPlayer.audible) return;
+    if (seat === 0) sfx.play('draw');
+  });
+
+  const options = clientOptions();
+
+  // ---- 渲染主循环 ----
+  // 放在回放/联机的分支**之前**：它是「把 state 画到 canvas 上」的唯一驱动，两条分支都需要。
+  // 曾经它在联机分支的末尾，于是回放那条提前 return 的路径从来没有启动过 rAF —— 状态机
+  // 一路推进（牌河、余牌都对），canvas 却一帧都没重画，看起来就是"数据不渲染"。
+  let frames = 0, last = performance.now();
+  function loop(now) {
+    requestAnimationFrame(loop);
+    hand.update(now);
+    renderer.render(scene, camera);
+    if (tablePass) tablePass.renderOverlay(renderer);
+    opponents.renderOverlay(renderer);   // 透视立牌叠加在 1:1 主桌之上
+    frames++;
+    if (now - last >= 1000) {
+      ui.stats({
+        calls: renderer.info.render.calls,
+        tris: renderer.info.render.triangles,
+        fps: Math.round(frames * 1000 / (now - last)),
+      });
+      frames = 0; last = now;
+    }
+  }
+  requestAnimationFrame(loop);
+
+  // 供自动化验收读取（回放分支也要，否则只能在联机会话下调试）
+  window.__mahjong = { app, client: null, lobby: null, table, opponents, rivers, melds, hand, ui, renderer, scene, camera };
+
+  // ---- 回放模式（PROTOCOL v2.3 §5.18）----
+  // 一条独立分支：不建大厅、不建会话客户端、连服务器都不连（除了取回文件那一次请求）。
+  // 牌桌的渲染链与联机完全一样，因为 ReplayPlayer 把帧喂给同一个 handleFrame。
+  if (options.replay || options.file) {
+    replayPlayer = await startReplay({ app, ui, sfx, options });
+    app.changed();
+    document.getElementById('boot')?.classList.add('ready');
+    return;
+  }
 
   // 协议层：一条 WS = 一条游戏连接；所有牌桌状态都来自服务端帧
-  const auto = !!(clientOptions().name || clientOptions().user);
-  const client = new MahjongClient({ app, ui, sfx, url: socketUrl(), options: clientOptions() });
+  const auto = !!(options.name || options.user);
+  const client = new MahjongClient({ app, ui, sfx, url: socketUrl(), options });
   const lobby = new Lobby({ app, client, auto });
+  // 战绩列表点「回放」：文件已经在手里了，原地进入播放器（不换页、不重建场景）。
+  lobby.onReplayReady = (replay) => {
+    lobby.hide();
+    // 回放借用同一个 app.state（seekTo 会 reset 它），会话侧的 tick 必须停手：
+    // 否则它会读到"phase=playing 且手牌为空"，发出真实的 SYNC，而那一局在服务端
+    // 早已结束，回来的就是 ROOM_NOT_FOUND（"房间不存在或已关闭"）。
+    client.pausedForReplay = true;
+    startReplayFrom(replay, {
+      app, ui, sfx, seat: options.seat,
+      // 退出时回到大厅（会话还在，战绩列表也还在），而不是换页重登。
+      onExit: () => {
+        client.pausedForReplay = false;
+        app.reset();
+        lobby.showHall();
+      },
+    }).then((player) => {
+      replayPlayer = player;
+      // 播放器没建起来（文件坏了）就别把会话一直挂着。
+      if (!player) client.pausedForReplay = false;
+    });
+  };
   ui.attach({ client, lobby });
   lobby.attachUI(ui);
   new Input({ canvas, camera, app, hand, sfx, ui, client });
+
+  // 联机分支把这两个补进调试对象（回放分支里它们是 null）
+  window.__mahjong.client = client;
+  window.__mahjong.lobby = lobby;
 
   if (auto) {
     // URL 直接带昵称/账号：跳过大厅（自动化验收与分享链接都走这条）
@@ -188,28 +425,7 @@ async function boot() {
     ui.toast('点牌选中，再点一次（或 Enter、或「打出」）出牌；空格 = 过；S = 同步；Esc = 取消；点「立直」后点高亮牌即宣言；「托管」让 AI 接手，再点一次取消', '', 6000);
   });
 
-  let frames = 0, last = performance.now();
-  function loop(now) {
-    requestAnimationFrame(loop);
-    hand.update(now);
-    renderer.render(scene, camera);
-    if (tablePass) tablePass.renderOverlay(renderer);
-    opponents.renderOverlay(renderer);   // 透视立牌叠加在 1:1 主桌之上
-    frames++;
-    if (now - last >= 1000) {
-      ui.stats({
-        calls: renderer.info.render.calls,
-        tris: renderer.info.render.triangles,
-        fps: Math.round(frames * 1000 / (now - last)),
-      });
-      frames = 0; last = now;
-    }
-  }
-  requestAnimationFrame(loop);
-
-  // 供自动化验收读取
-  window.__mahjong = { app, client, lobby, table, opponents, rivers, melds, hand, ui, renderer, scene, camera };
-  document.getElementById('boot').classList.add('ready');
+  document.getElementById('boot')?.classList.add('ready');
 }
 
 boot().catch((err) => {

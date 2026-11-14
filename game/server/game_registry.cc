@@ -42,11 +42,10 @@ std::string RiichiOptions(GameLength length) {
 }
 
 stdexec::task<ex_actor::ActorRef<RoomEndpoint>> SpawnRiichiRoom(RoomPlan plan) {
-  ex_actor::ActorRef<RoomActorFor<RiichiMahjongGame>> room =
-      co_await ex_actor::Spawn<RoomActorFor<RiichiMahjongGame>>(
-          std::move(plan.launch.room_id), std::move(plan.game_id), std::move(plan.options_json), plan.launch.seed,
-          plan.launch.action_timeout_ms, plan.ai_delay_ms, plan.inter_hand_delay_ms, std::move(plan.launch.seats),
-          std::move(plan.launch.timer), std::move(plan.launch.owner), TimeoutScheduler {}, RoomFinishedCallback {});
+  ex_actor::ActorRef<RoomActorFor<RiichiMahjongGame>> room = co_await ex_actor::Spawn<RoomActorFor<RiichiMahjongGame>>(
+      std::move(plan.launch.room_id), std::move(plan.game_id), std::move(plan.options_json), plan.launch.seed,
+      plan.launch.action_timeout_ms, plan.ai_delay_ms, plan.inter_hand_delay_ms, std::move(plan.launch.seats),
+      std::move(plan.launch.timer), std::move(plan.launch.owner), TimeoutScheduler {}, RoomFinishedCallback {});
   co_return room;
 }
 

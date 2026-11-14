@@ -135,6 +135,10 @@ bool RoomActor::TakeSeatLocked(RoomSeat seat) {
 // ---------------------------------------------------------------------------------------
 
 stdexec::task<void> RoomActor::Run(GameStep step) {
+  // Recorded before delivery, and serialized here rather than in the store: the bytes are already
+  // in hand, so this stays pure CPU on the room's own thread. Only the write itself is posted
+  // (ReplayActor), because a filesystem call would park the table behind the disk.
+  RecordStep(step);
   co_await Deliver(step.outbounds);
   for (const Deadline& deadline : step.deadlines) {
     if (timeout_scheduler_) {
@@ -152,6 +156,65 @@ stdexec::task<void> RoomActor::Run(GameStep step) {
   }
 }
 
+void RoomActor::RecordStep(const GameStep& step) {
+  // Whether to record is a process-level decision (ReplayService), read once per step rather than
+  // copied into the constructor: a room must never hold its own opinion of where data goes.
+  if (GetReplayService().IsEmpty()) {
+    return;  // recording is off: never call into the game for a god view
+  }
+  if (recorder_ == nullptr) {
+    // The recorder is built on the first step rather than in the constructor: Setup() is the
+    // first thing that reaches Run, and the metadata only needs what the constructor already
+    // has, so either place works — but this one keeps a room that never starts from allocating.
+    ReplayMeta meta;
+    meta.room_id = room_id_;
+    meta.game_id = game_id_;
+    meta.options_json = options_json_;
+    meta.seed = seed_;
+    replay_started_ms_ = clock::EpochMs();
+    meta.started_at_ms = replay_started_ms_;
+    for (const RoomSeat& seat : seats_) {
+      ReplaySeat& recorded = meta.seats[static_cast<size_t>(seat.seat)];
+      recorded.seat = seat.seat;
+      recorded.player_id = seat.player.player_id;
+      recorded.name = seat.player.name;
+      recorded.is_bot = seat.is_bot;
+      recorded.account_id = seat.player.account_id;
+    }
+    recorder_ = std::make_unique<ReplayRecorder>(std::move(meta));
+  }
+  // Only the hand snapshot is needed when the step actually re-renders the table. `state_sync` is
+  // the one frame that reports hands (per seat, privately), and comparing a short prefix is
+  // cheaper than serializing four hands on every deadline-only step. The prefix is exact, not a
+  // guess: every frame builder in both games writes `type` first, and the frozen golden hashes
+  // depend on that byte order (game_test_support.h).
+  constexpr std::string_view kStateSyncPrefix = R"({"type":20,)";  // §1.3.1: state_sync = 20
+  std::array<std::string, kSeatCount> hands;
+  const std::array<std::string, kSeatCount>* hand_track = nullptr;
+  for (const Outbound& outbound : step.outbounds) {
+    if (outbound.frame.rfind(kStateSyncPrefix, 0) == 0) {
+      hands = game().ReplayHands();
+      hand_track = &hands;
+      break;
+    }
+  }
+  recorder_->AddStep(clock::EpochMs() - replay_started_ms_, step.outbounds, hand_track);
+}
+
+void RoomActor::WriteReplay(const GameResult& result) {
+  if (recorder_ == nullptr) {
+    return;  // recording never started (no store, or no step ran)
+  }
+  recorder_->Finish(result);
+  ReplayService& store = GetReplayService();
+  if (store.IsEmpty()) {
+    return;  // the store went away; nothing to write to
+  }
+  // Serialized on this thread (pure CPU over data it already holds) and written on the store's.
+  // The Send is fire-and-forget for the same reason the settlement is: the round is over, the
+  // players have their result, and a failed write must not reach them.
+  ActorSendScope().spawn(store.Store(room_id_, recorder_->Serialize()));
+}
 stdexec::task<void> RoomActor::Deliver(const std::vector<Outbound>& outbounds) {
   // Sequential on purpose, and measured rather than assumed: fanning a step's frames out to the
   // four seats at once (when_all, or an async_scope) makes a full table *2.2x slower* here
@@ -220,6 +283,11 @@ stdexec::task<void> RoomActor::ReplyError(int seat, protocol::ErrorCode code, st
 }
 
 void RoomActor::ReportResult(const GameResult& result) {
+  // Record the round even in a room with no owner (the unit test): the replay is a property of
+  // the table, not of who is listening. Written here because this is the only point where a
+  // round's outcome is known, and rewriting the whole file per round means a crash mid-match
+  // still leaves every finished round readable.
+  WriteReplay(result);
   if (!finished_for_test_ && owner_.IsEmpty()) {
     return;
   }
@@ -311,9 +379,7 @@ stdexec::task<void> RoomActor::HandleGameFrame(PlayerInfo player, json::Value fr
   co_await Run(game().Apply(seat, frame));
 }
 
-stdexec::task<void> RoomActor::OnTimeout(uint64_t token) {
-  co_await Run(game().OnTimeout(token));
-}
+stdexec::task<void> RoomActor::OnTimeout(uint64_t token) { co_await Run(game().OnTimeout(token)); }
 
 stdexec::task<void> RoomActor::OnPlayerDisconnected(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> conn) {
   const int seat = SeatOf(player.player_id);

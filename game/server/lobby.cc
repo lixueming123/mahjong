@@ -12,6 +12,7 @@
 #include "db.h"
 #include "game_registry.h"
 #include "protocol.h"
+#include "replay.h"
 
 namespace ex = stdexec;
 
@@ -336,6 +337,12 @@ stdexec::task<void> LobbyActor::OnRoomFinished(GameSettlement settlement) {
       result.final_rank = settlement.final_rank[seat_index];
       ActorSendScope().spawn(db.RecordMatchResult(std::move(result)));
     }
+  }
+  // v2.3 §5.13: one `replays` row per match, so the stats list can mark rooms whose recording is
+  // still on disk. Only when a store exists — with recording off the file was never written, and
+  // an index row would offer a 回放 button that answers ROOM_NOT_FOUND.
+  if (settlement.match_over && !db.IsEmpty() && !GetReplayService().IsEmpty()) {
+    ActorSendScope().spawn(db.RecordReplay(ReplayRecord {.room_id = settlement.room_id, .mode = settlement.game_id}));
   }
   // C10：局终（game_end）不回收；match_over（match_end 已下发）才 arm 30s 回收。
   if (!settlement.match_over || timer_ == nullptr) {

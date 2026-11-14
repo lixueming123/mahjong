@@ -58,6 +58,7 @@ class RiichiMahjongGame final : public Game {
   GameStep Sync(int seat) override;
   GameStep Reconnect(int seat) override;
   void OnSeatPresence(int seat, bool present) override;
+  std::array<std::string, kSeatCount> ReplayHands() const override;
 
   // Pure claim policy of an automated seat (exposed so it can be unit-tested directly with
   // crafted hands; OpenClaimWindow calls exactly this function for bots, and a seat with no
@@ -359,7 +360,7 @@ class RiichiMahjongGame final : public Game {
   // 与舍て牌振听的区别：它是临时的、且按牌面记 —— 放过 3m 只挡住 3m，不挡同一手的 6m。
   // 立直者不写这里：立直后见逃是整局持久（`furiten_ever_`），比同巡更强。
   std::array<std::array<bool, kFaceCount>, kSeatCount> temporary_furiten_ {};
-  bool draw_dealer_tenpai_ = false;                // 荒庄时庄家是否听牌（决定连庄/轮庄）
+  bool draw_dealer_tenpai_ = false;  // 荒庄时庄家是否听牌（决定连庄/轮庄）
   int dealer_ = 0;
   int current_seat_ = 0;
   uint64_t seq_ = 0;

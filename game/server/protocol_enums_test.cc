@@ -66,14 +66,17 @@ TEST(ProtocolEnumsTest, LimitNoneIsARealValue) {
 }
 
 TEST(ProtocolEnumsTest, ClientFrameTypesCoverOneToEleven) {
-  // 1..11 stay contiguous. autoplay is appended at 28 so the S→C block is not renumbered.
+  // 1..11 stay contiguous. autoplay (28) and replay_request (29) are appended after the S→C
+  // block so nothing already on the wire is renumbered.
   EXPECT_EQ(kClientFrameTypes.size(), static_cast<size_t>(kClientFrameTypeMax));
   ASSERT_GE(kClientFrameTypes.size(), static_cast<size_t>(11));
   for (size_t index = 0; index < 11; ++index) {
     EXPECT_EQ(WireOf(kClientFrameTypes[index]), static_cast<int>(index) + 1);
   }
-  EXPECT_EQ(kClientFrameTypes.back(), FrameType::kAutoplay);
+  EXPECT_EQ(kClientFrameTypes[kClientFrameTypes.size() - 2], FrameType::kAutoplay);
+  EXPECT_EQ(kClientFrameTypes.back(), FrameType::kReplayRequest);
   EXPECT_EQ(WireOf(FrameType::kAutoplay), 28);
+  EXPECT_EQ(WireOf(FrameType::kReplay), 30);
   for (const FrameType type : kClientFrameTypes) {
     EXPECT_TRUE(IsClientFrameType(type));
     EXPECT_FALSE(IsServerFrameType(type));

@@ -156,6 +156,36 @@ std::optional<JoinRoom> ParseJoinRoom(const json::Value& frame, Error* error) {
   return JoinRoom {room_id->AsString()};
 }
 
+bool IsRoomIdShaped(std::string_view room_id) {
+  // `r-` + 13 lowercase base36 is the only shape lobby.cc mints (FormatRoomId). Anything else is
+  // refused rather than escaped, which is what makes a path traversal structurally impossible.
+  if (room_id.size() != 15 || room_id.substr(0, 2) != "r-") {
+    return false;
+  }
+  for (const char c : room_id.substr(2)) {
+    const bool base36 = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z');
+    if (!base36) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::optional<ReplayRequest> ParseReplayRequest(const json::Value& frame, Error* error) {
+  const json::Value* room_id = frame.Find("room_id");
+  if (room_id == nullptr || !room_id->IsString()) {
+    RejectBadRequest(error, "replay_request requires a string \"room_id\"");
+    return std::nullopt;
+  }
+  // Shape only. A well-shaped but unknown id is ROOM_NOT_FOUND from the store, not BAD_REQUEST:
+  // §4.13 collapses "no such room" and "not your game" into one answer.
+  if (!IsRoomIdShaped(room_id->AsString())) {
+    RejectBadRequest(error, "replay_request room_id must be \"r-\" + 13 lowercase base36");
+    return std::nullopt;
+  }
+  return ReplayRequest {room_id->AsString()};
+}
+
 bool ValidateDiscard(const json::Value& frame, Error* error) {
   const json::Value* tile = frame.Find("tile");
   const json::Value* seq = frame.Find("seq");

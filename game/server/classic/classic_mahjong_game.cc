@@ -294,6 +294,23 @@ void ClassicMahjongGame::OnSeatPresence(int seat, bool present) {
   disconnected_[static_cast<size_t>(seat)] = !present;
 }
 
+// The god view of a recording (replay.h): classic never deals red fives, so this is the same
+// spelling the seat's own `game_start.hand` uses (FormatTile's default), sorted as §2.2 asks.
+std::array<std::string, kSeatCount> ClassicMahjongGame::ReplayHands() const {
+  std::array<std::string, kSeatCount> hands;
+  for (size_t seat = 0; seat < hands.size(); ++seat) {
+    std::string& out = hands[seat];
+    const std::vector<Tile>& hand = hands_[seat];
+    for (size_t index = 0; index < hand.size(); ++index) {
+      if (index != 0) {
+        out.push_back(',');
+      }
+      out += FormatTile(hand[index]);
+    }
+  }
+  return hands;
+}
+
 // The room's gate (is this seat's turn, is the window still open, is that tile in hand) lives
 // here, and so does the §6.3 rule that a reply for a window which already moved on is dropped
 // *silently* while a well-formed action the rules refuse is answered. Nothing in this function

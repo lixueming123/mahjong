@@ -169,5 +169,28 @@ function makeClient(options = {}) {
   check('账号会话标记', client.hasAccount, true);
 }
 
+// ---------- 回放期间会话必须静默 ----------
+//
+// 回放复用同一个 `app.state`（`seekTo` 会 reset 它），大厅会话的 tick 会读到
+// "phase=playing 且本家手牌为空"，进而发一条真实的 SYNC。服务端那边那一局早已结束，
+// 于是回 ROOM_NOT_FOUND —— 玩家看到的是"房间不存在或已关闭"，与他的操作毫无关系
+// （现象：切回放视角时冒出来）。
+{
+  const { app, client, sent } = makeClient();
+  client.pausedForReplay = true;
+  app.state.phase = 'playing';
+  app.state.hands[0] = [];
+  app.state.needsSync = true;
+  sent.length = 0;
+  client.tick();
+  check('回放期间不发 SYNC（needsSync 也不清）', sent, []);
+  check('回放期间 needsSync 保持原样', app.state.needsSync, true);
+
+  // 退出回放后恢复：这条会话本来就该继续工作。
+  client.pausedForReplay = false;
+  client.tick();
+  check('退出回放后恢复同步', sent.map((f) => f.type), [FRAME_TYPE.SYNC]);
+}
+
 console.log(failed ? `\n失败 ${failed} 条` : `\n新增逻辑断言：ALL PASS  ${passed} passed, 0 failed`);
 process.exit(failed ? 1 : 0);

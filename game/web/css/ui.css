@@ -228,7 +228,7 @@ body { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-s
 /* 录像里没有「東2局│余57│手牌14│…」这行调试文字，它会横穿左家副露。
    必须放在上面那条 display:flex 之后，否则被层叠覆盖。
    DOM 与 JS 更新保留，只是不显示；渲染统计同理。 */
-.hud, #stats { display: none; }
+.hud, #hud-stats { display: none; }
 .hud b { color: var(--gold); font-weight: 700; }
 .hud .sep { color: rgba(255,255,255,.28); }
 .hud-right {
@@ -252,6 +252,67 @@ body { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-s
 .signal i:nth-child(2) { height: 10px; }
 .signal i:nth-child(3) { height: 15px; }
 .signal i:nth-child(4) { height: 21px; }
+
+/* ---------- 回放控制条（PROTOCOL v2.3 §5.18） ----------
+   放在牌河与手牌之间的空白带（设计 y≈840），而不是贴着窗口底部：
+   手牌占据 y922~1072，贴底会压住整排牌面。 */
+.replay-bar {
+  position: absolute; left: 50%; bottom: 214px; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 14px; border-radius: 14px;
+  border: 1px solid rgba(230,180,90,.42);
+  background: rgba(7,14,27,.9);
+  box-shadow: 0 6px 22px rgba(0,0,0,.55), inset 0 0 0 1px rgba(255,210,140,.1);
+  pointer-events: auto; white-space: nowrap;
+}
+.replay-bar[hidden] { display: none; }
+.rb-btn {
+  cursor: pointer; font-size: 13px; line-height: 1;
+  min-width: 34px; height: 30px; padding: 0 10px; border-radius: 9px;
+  border: 1px solid rgba(160,190,230,.4);
+  background: rgba(12,22,40,.85); color: #bcd2f0;
+  font-variant-numeric: tabular-nums;
+}
+.rb-btn:hover { border-color: var(--gold); color: #f7d79a; }
+.rb-btn.on { border-color: #e0b15a; color: #ffe3a3; background: rgba(80,52,12,.9); }
+.rb-btn.ghost { border-color: rgba(160,190,230,.22); color: #8b9ab0; }
+/* 进度条外壳：一条 range 上叠一层「局边界」分隔线。
+   range 本身没法画分段，所以分隔线是绝对定位的独立元素，pointer-events:none 让点击穿透。 */
+.rb-track {
+  position: relative; width: 320px; height: 14px;
+  display: flex; align-items: center;
+}
+.rb-progress {
+  width: 100%; height: 4px; cursor: pointer; accent-color: #e6b45a;
+  background: rgba(160,190,230,.2); border-radius: 3px;
+}
+/* 局边界：一道细竖线 + 上方的局号。位置按 stepIndex / totalSteps 百分比铺 */
+.rb-marks {
+  position: absolute; left: 0; right: 0; top: 0; bottom: 0;
+  pointer-events: none;
+}
+.rb-marks i {
+  position: absolute; top: 0; bottom: 0; width: 1px;
+  background: rgba(230,180,90,.55);
+}
+/* 局号标签：只给"够宽"的段画，否则 6 局挤在 320px 上会糊成一片。
+   ReplayBar 已经按可用宽度做了抽稀（见 replaybar.js 的 renderRoundMarks）。 */
+.rb-marks span {
+  position: absolute; transform: translateX(-50%);
+  top: -15px; font-size: 10px; color: #8fa1ba; letter-spacing: .5px;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+/* 第一段的标签贴左端，居中会把半个字挤到滑轨外 */
+.rb-marks span.first { transform: none; }
+/* 最后一段贴右端，居中同理 */
+.rb-marks span.last { transform: translateX(-100%); }
+.rb-pos { font-size: 12px; color: #9fb0c8; letter-spacing: 1px; font-variant-numeric: tabular-nums; }
+/* 战绩列表里的「回放」入口：与房间列表按钮同一形状，但更小 */
+.recent-item .replay-link {
+  cursor: pointer; padding: 2px 9px; border-radius: 7px; font-size: 12px;
+  border: 1px solid rgba(230,180,90,.6); background: rgba(230,180,90,.12); color: #f7d79a;
+}
+.recent-item .replay-link:hover { border-color: var(--gold); color: #ffe6ad; }
 
 /* ---------- 加载态 ---------- */
 #boot {
@@ -383,6 +444,27 @@ body { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-s
   display: flex; align-items: center; justify-content: center;
   background: radial-gradient(120% 90% at 50% 40%, rgba(6,12,22,.55), rgba(3,6,12,.88));
   pointer-events: auto;
+}
+/* 回放里的局终结算：不铺满全屏、不压暗牌桌、也不挡控制条 ——
+   它只是一块"这一局结束了"的说明，玩家还要接着播下一局。
+   `pointer-events:none` 让鼠标能点到下面的进度条。 */
+.modal-layer.replay-result {
+  /* 整屏居中。卡片高度随和牌明细变，用 flex 居中而不是写死坐标。
+     下沿与播放条的最小净空由 `max-height` 保证（见下），不需要靠 padding 上抬。 */
+  display: flex; align-items: center; justify-content: center;
+  background: none; pointer-events: none;
+}
+.modal-layer.replay-result .result-card {
+  pointer-events: auto;
+  /* 卡片必须是实底：它压在牌桌上，半透明会让牌面文字和结算文字互相干扰。 */
+  background: linear-gradient(180deg, #17243a, #0a1220 62%);
+  box-shadow: 0 24px 60px rgba(0,0,0,.86), inset 0 1px 0 rgba(255,235,190,.15);
+  /* 上界：控制条在设计坐标 bottom:214px、高约 40px ⇒ 其上沿在 826。卡片居中后下沿是
+     (1080+高)/2，要 ≤ 826 ⇒ 高 ≤ 572。留点余量取 520，超出的部分在卡片内滚动。
+     这样既保持整屏居中，又不会压住播放条。 */
+  max-height: 520px;
+  overflow-y: auto;
+  animation: none;   /* 回放里暂停/拖动频繁，入场动画会造成"闪一下"的错觉 */
 }
 .result-card {
   width: 820px; border-radius: 18px; overflow: hidden;
@@ -598,6 +680,11 @@ body { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-s
 .recent-item .up { color: #ff8a7a; }
 .recent-item .down { color: #7ed6a5; }
 .stats-sep { height: 1px; background: rgba(160,190,230,.14); margin: 4px 0; }
+/* 战绩栏按玩法分桶时的标题（日麻接入后两套统计并列，见 lobby.js renderStats） */
+.stats-bucket {
+  margin: 6px 0 4px; font-size: 12px; letter-spacing: 2px; color: #7f8fa6;
+}
+.stats-bucket:first-child { margin-top: 0; }
 
 /* ---------- 房间等待 ---------- */
 .room-code {

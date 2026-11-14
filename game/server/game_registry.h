@@ -78,7 +78,7 @@ using GameOptionsFn = std::string (*)(GameLength length);
 using RoomSpawnFn = stdexec::task<ex_actor::ActorRef<RoomEndpoint>> (*)(RoomPlan plan);
 
 struct GameEntry {
-  GameMode mode;  // the wire selector (create_room's "game" field)
+  GameMode mode;        // the wire selector (create_room's "game" field)
   std::string_view id;  // stable id: the DB `mode` column and the log tag
   GameOptionsFn options;
   RoomSpawnFn spawn;
@@ -90,6 +90,7 @@ const GameEntry* FindGame(GameMode mode);
 
 // Fills the plan's defaults and hands it to the entry's spawn function. The returned ref is
 // already narrowed to `RoomEndpoint` — the lobby never sees the concrete room type.
-stdexec::task<ex_actor::ActorRef<RoomEndpoint>> LaunchRoom(const GameEntry& entry, RoomLaunch launch, GameLength length);
+stdexec::task<ex_actor::ActorRef<RoomEndpoint>> LaunchRoom(const GameEntry& entry, RoomLaunch launch,
+                                                           GameLength length);
 
 }  // namespace mahjong

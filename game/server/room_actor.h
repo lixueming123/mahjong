@@ -29,9 +29,11 @@
 #include <vector>
 
 #include "async_gate.h"
+#include "clock.h"
 #include "ex_actor/api.h"
 #include "game.h"
 #include "json.h"
+#include "replay.h"
 #include "room_contract.h"
 #include "room_endpoint.h"
 #include "seat_endpoint.h"
@@ -50,10 +52,10 @@ class RoomActor : public RoomEndpoint {
   // never written match history by the room. Empty in the unit test, which passes
   // |finished_for_test| instead — a scheduler and a capture callback are process-local, so they
   // cannot travel in a message.
-  RoomActor(std::string room_id, std::string game_id, std::string options_json, uint64_t seed,
-            int action_timeout_ms, int ai_delay_ms, int inter_hand_delay_ms, std::vector<RoomSeat> seats,
-            std::shared_ptr<WindowTimer> timer, ex_actor::ActorRef<RoomOwner> owner = {},
-            TimeoutScheduler timeout_scheduler = {}, RoomFinishedCallback finished_for_test = {});
+  RoomActor(std::string room_id, std::string game_id, std::string options_json, uint64_t seed, int action_timeout_ms,
+            int ai_delay_ms, int inter_hand_delay_ms, std::vector<RoomSeat> seats, std::shared_ptr<WindowTimer> timer,
+            ex_actor::ActorRef<RoomOwner> owner = {}, TimeoutScheduler timeout_scheduler = {},
+            RoomFinishedCallback finished_for_test = {});
 
   stdexec::task<void> Dispatch(RoomEnvelope envelope) override;
   stdexec::task<bool> TakeSeat(RoomSeat seat) override;
@@ -105,6 +107,13 @@ class RoomActor : public RoomEndpoint {
   // room has held since the deal.
   void ReportResult(const GameResult& result);
 
+  // Replay recording (replay.h). One call before each delivery, so the file holds exactly the
+  // bytes that were sent, in the order the seats saw them.
+  void RecordStep(const GameStep& step);
+  // Serializes the file and posts it to ReplayActor, once per settled round. Serializing here is
+  // pure CPU over data this thread already holds; the disk is the store's, never the room's.
+  void WriteReplay(const GameResult& result);
+
   GameContext Context() const;
 
   std::string room_id_;
@@ -122,6 +131,13 @@ class RoomActor : public RoomEndpoint {
   ex_actor::ActorRef<RoomEndpoint> self_ref_;
   bool game_started_ = false;
   AsyncGate gate_;
+
+  // ---- replay recording (replay.h) ----
+  // Whether to record is whether a store exists (ReplayService), so there is nothing to copy in
+  // here. The write itself goes to ReplayActor (replay_store.h), never to this thread.
+  // |replay_started_ms_| anchors each step's `t` (pacing only, never correctness).
+  std::unique_ptr<ReplayRecorder> recorder_;
+  int64_t replay_started_ms_ = 0;
 };
 
 }  // namespace mahjong

@@ -216,6 +216,17 @@ class Game {
   // would be lost and is replayed on reconnect instead (§8.5). A disconnect never plays for the
   // seat: the open window keeps its countdown, and that is a rule, not an omission.
   virtual void OnSeatPresence(int seat, bool present) = 0;
+
+  // ---- replay recording (replay.h) ------------------------------------------------------
+  // Every seat's concealed hand, comma-joined tile codes ("1m,2m,0p"), in seat order. Recorded
+  // alongside the frames so a replay can offer a view no client ever saw: a bot has no endpoint,
+  // so its `state_sync` is never built, and no amount of recorded wire traffic can reconstruct
+  // it. Returns an empty array when the game has no such view — the recording then simply has no
+  // hand track, and the player shows backs like a live client would.
+  //
+  // Called only while a recorder is attached, once per step, so a game without replay enabled
+  // pays nothing; still, keep it cheap (the default does nothing at all).
+  virtual std::array<std::string, kSeatCount> ReplayHands() const { return {}; }
 };
 
 }  // namespace mahjong

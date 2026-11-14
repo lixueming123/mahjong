@@ -37,6 +37,8 @@ export const DOMAINS = Object.freeze({
     tenpai: 26,
     room_update: 27,
     autoplay: 28,
+    replay_request: 29,
+    replay: 30,
   }),
   action: Object.freeze({
     INVALID: 0,

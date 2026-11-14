@@ -106,7 +106,7 @@ export class Lobby {
       tip: $('hall-tip'),
       refresh: $('btn-refresh'),
       roomList: $('room-list'),
-      stats: $('stats'),
+      stats: $('stats-list'),
       statsKind: $('stats-kind'),
       joinInput: $('in-room'),
       joinButton: $('btn-join-room'),
@@ -161,6 +161,32 @@ export class Lobby {
       const button = e.target.closest('button[data-room]');
       if (button) this.joinRoom(button.dataset.room);
     });
+
+    // v2.3 §5.13：战绩列表里的「回放」入口。用事件委托，因为那一列是 innerHTML 重建的。
+    // 直接在当前连接上请求（`replay_request` 只要求已登录，与是否在房间里无关），
+    // 拿到文件后原地切到播放器：不换页，也就不必重建三条 WebGL 场景。
+    this.el.stats?.addEventListener('click', (e) => {
+      const button = e.target.closest('button[data-replay]');
+      if (!button) return;
+      const roomId = button.dataset.replay;
+      if (roomId) this.openReplay(roomId);
+    });
+  }
+
+  /** 打开一份回放（§4.13 → §5.18）。失败只在战绩栏里提示，不影响会话。 */
+  openReplay(roomId) {
+    if (this.busy) return;
+    this.busy = true;
+    this.setButtonsEnabled(false);
+    this.client.requestReplay(roomId)
+      .then((replay) => this.onReplayReady?.(replay, roomId))
+      .catch((err) => {
+        this.notify(`无法打开回放：${err.message}`);
+      })
+      .finally(() => {
+        this.busy = false;
+        this.setButtonsEnabled(true);
+      });
   }
 
   bindClient() {
@@ -634,32 +660,72 @@ export class Lobby {
     }).join('');
   }
 
+  /**
+   * 战绩栏（§5.13）。
+   *
+   * 帧的顶层四字段 + `recent` 只表示 **classic**（老客户端兼容层），日麻的完整统计在
+   * `stats.riichi` 子对象里（两套玩法的 net_score 语义不同，不能混算）。所以这里必须两个
+   * 桶都读：只读顶层的话，日麻玩家会看到一块空的战绩栏 —— 回放入口也就跟着消失了。
+   *
+   * 两套统计上下并列，各自带标题；回放按钮挂在合并后的 `recent` 上（按 room_id 去重，
+   * 因为一场对局的各局共享同一个 room_id，而回放是按整场存的）。
+   */
   renderStats(stats) {
     if (!this.el.stats) return;
     if (!stats) {
       this.el.stats.innerHTML = '<div class="empty">暂无战绩</div>';
       return;
     }
-    const games = stats.games | 0;
-    const wins = stats.wins | 0;
-    const draws = stats.draws | 0;
-    const net = stats.net_score | 0;
-    const rate = games ? `${Math.round((wins / games) * 100)}%` : '—';
-    const recent = Array.isArray(stats.recent) ? stats.recent : [];
-    this.el.stats.innerHTML = [
-      `<div class="stat-row"><span>对局</span><b>${games}</b></div>`,
-      `<div class="stat-row"><span>和牌</span><b>${wins}</b></div>`,
-      `<div class="stat-row"><span>荒庄</span><b>${draws}</b></div>`,
-      `<div class="stat-row"><span>和牌率</span><b>${rate}</b></div>`,
-      `<div class="stat-row"><span>累计得失</span><b>${signed(net)}</b></div>`,
-      recent.length ? '<div class="stats-sep"></div>' : '',
-      ...recent.slice(0, 6).map((item) => {
+    // 顶层是 classic 的兼容视图；`classic`/`riichi` 子对象是完整统计。没有子对象的旧帧
+    // 退化成「只有 classic」。
+    const buckets = [
+      { name: '经典', summary: stats.classic || stats },
+      { name: '日麻', summary: stats.riichi || null },
+    ].filter((bucket) => bucket.summary);
+
+    const replayable = new Set();
+    const sections = [];
+    for (const bucket of buckets) {
+      const summary = bucket.summary;
+      const games = summary.games | 0;
+      const wins = summary.wins | 0;
+      const draws = summary.draws | 0;
+      const net = summary.net_score | 0;
+      const rate = games ? `${Math.round((wins / games) * 100)}%` : '—';
+      const recent = Array.isArray(summary.recent) ? summary.recent : [];
+      // 一场比赛的各局共享 room_id，而回放是按 room_id 存的整场 ⇒ 同一个 room_id 只出一次
+      // 入口，保留最新的那条（recent 已是倒序）。
+      const rows = recent.slice(0, 6).map((item) => {
         const delta = item.delta_score | 0;
         const cls = delta > 0 ? 'up' : delta < 0 ? 'down' : '';
+        // v2.3 §5.13：`has_replay` 只在录制存在时下发（缺席 = 没有），别把缺省当成 true。
+        const roomId = typeof item.room_id === 'string' ? item.room_id : '';
+        const canReplay = item.has_replay === true && roomId && !replayable.has(roomId);
+        if (canReplay) replayable.add(roomId);
+        const link = canReplay
+          ? `<button class="replay-link" data-replay="${esc(roomId)}">回放</button>`
+          : '';
         return `<div class="recent-item"><span>${esc(ago(item.ended_at))}</span>`
-          + `<span class="${cls}">${signed(delta)}</span></div>`;
-      }),
-      games ? '' : '<div class="empty">还没有打完一局</div>',
+          + `<span class="${cls}">${signed(delta)}</span>${link}</div>`;
+      });
+      // 两套玩法都有数据时才显示标题，否则单玩法的玩家看不到多余的分隔。
+      if (buckets.length > 1) {
+        sections.push(`<div class="stats-bucket">${bucket.name}</div>`);
+      }
+      sections.push(
+        `<div class="stat-row"><span>对局</span><b>${games}</b></div>`,
+        `<div class="stat-row"><span>和牌</span><b>${wins}</b></div>`,
+        `<div class="stat-row"><span>荒庄</span><b>${draws}</b></div>`,
+        `<div class="stat-row"><span>和牌率</span><b>${rate}</b></div>`,
+        `<div class="stat-row"><span>累计得失</span><b>${signed(net)}</b></div>`,
+        rows.length ? '<div class="stats-sep"></div>' : '',
+        ...rows,
+      );
+    }
+    const anyGames = buckets.some((bucket) => (bucket.summary.games | 0) > 0);
+    this.el.stats.innerHTML = [
+      ...sections,
+      anyGames ? '' : '<div class="empty">还没有打完一局</div>',
     ].join('');
   }
 }

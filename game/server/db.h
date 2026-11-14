@@ -114,6 +114,14 @@ struct MatchResultRecord {
   int final_rank = 0;    // 1..4，并列跳号（PROTOCOL.md §5.15）
 };
 
+// One match's replay, as an index row in `replays` (PROTOCOL v2.3 §4.13 / §5.13). The file itself
+// is the store's (replay_store.h); this row exists only so `stats.recent[]` can say which rooms
+// still have a playable recording without touching the filesystem.
+struct ReplayRecord {
+  std::string room_id;
+  std::string mode = "classic";
+};
+
 // A zeroed summary is a legitimate answer for a guest (§3.3), so the caller cannot tell a
 // failure from "no games played" by the payload alone — hence the explicit flag.
 struct StatsOutcome {
@@ -144,6 +152,10 @@ class DbActor {
   // Fire and forget, v1.3 (§4 item 7): one `match_results` row per account at match end.
   // A duplicate (room_id, account_id) is logged as a WARN and ignored — never retried.
   stdexec::task<void> RecordMatchResult(MatchResultRecord record);
+  // Fire and forget, v2.3: one `replays` row per finished match, so the stats list can mark the
+  // rooms a replay exists for. A duplicate room_id is the ordinary "round finished before the
+  // match ended" rewrite, so it is logged at DEBUG and ignored.
+  stdexec::task<void> RecordReplay(ReplayRecord record);
 
   // Releases the slot: closes the connection and unregisters the thread. Runs on db_pool (the
   // library is thread scoped, so opening and closing must happen on the same thread); idempotent.
@@ -154,7 +166,7 @@ class DbActor {
   // context: naming the methods before they are declared does not compile.
   constexpr static auto kActorMethods =
       std::make_tuple(&DbActor::Initialize, &DbActor::Login, &DbActor::Register, &DbActor::FetchStats,
-                      &DbActor::RecordMatch, &DbActor::RecordMatchResult, &DbActor::Stop);
+                      &DbActor::RecordMatch, &DbActor::RecordMatchResult, &DbActor::RecordReplay, &DbActor::Stop);
 
  private:
   // Acquire plus the schema bootstrap: a cold start may find MySQL down, and the tables have to
@@ -171,6 +183,7 @@ class DbActor {
   StatsOutcome StatsJob(uint64_t account_id);
   void RecordJob(const MatchRecord& record);
   void RecordMatchResultJob(const MatchResultRecord& record);
+  void RecordReplayJob(const ReplayRecord& record);
 
   std::shared_ptr<DbPool> pool_;
   DbConfig config_;
@@ -233,6 +246,14 @@ class DbService {
   [[nodiscard]] auto RecordMatchResult(MatchResultRecord record) const {
     const ex_actor::ActorRef<DbActor> target = PickByAccount(record.account_id);
     return target.Send<&DbActor::RecordMatchResult>(std::move(record));
+  }
+
+  // v2.3: the replay index has no account (one row per match), so it goes to the first shard.
+  // Ordering does not matter: the row is only read by a later stats query, never in a race with
+  // the write that created it.
+  [[nodiscard]] auto RecordReplay(ReplayRecord record) const {
+    const ex_actor::ActorRef<DbActor> target = Pick(0);
+    return target.Send<&DbActor::RecordReplay>(std::move(record));
   }
 
  private:

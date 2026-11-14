@@ -129,9 +129,27 @@
   <div class="hud-right" style="left:1450px;top:878px">
     <button class="mini-btn" id="btn-autoplay" hidden title="让 AI 接手打牌，再点一次取消">托管</button>
     <button class="mini-btn" id="btn-sfx">♪ 音效开</button>
-    <span id="stats">— draw calls</span>
+    <span id="hud-stats">— draw calls</span>
   </div>
   <div class="signal" style="left:1876px;top:1020px"><i></i><i></i><i></i><i></i></div>
+
+  <!-- 回放控制条（PROTOCOL v2.3 §5.18）：仅在 ?replay= 或战绩点开时出现。
+       位置贴着底部 HUD 之上，不遮挡牌桌中心；播放/暂停、倍速、单步、进度、视角、透视。 -->
+  <div class="replay-bar" id="replay-bar" hidden>
+    <button class="rb-btn" id="rb-play" title="播放 / 暂停">▶</button>
+    <button class="rb-btn" id="rb-prev" title="上一步">‹</button>
+    <button class="rb-btn" id="rb-next" title="下一步">›</button>
+    <button class="rb-btn" id="rb-speed" title="倍速">1×</button>
+    <div class="rb-track">
+      <input class="rb-progress" id="rb-progress" type="range" min="0" max="1000" value="0" step="1" title="进度">
+      <!-- 局边界分隔线，由 ReplayBar 按 steps[] 里的 game_start 位置填充 -->
+      <div class="rb-marks" id="rb-marks"></div>
+    </div>
+    <span class="rb-pos" id="rb-pos">0 / 0</span>
+    <button class="rb-btn" id="rb-seat" title="切换视角">视角 0</button>
+    <button class="rb-btn" id="rb-god" title="透视四家手牌">透视</button>
+    <button class="rb-btn ghost" id="rb-exit" title="退出回放">退出</button>
+  </div>
 
   <!-- 局终 / 场终结算 -->
   <div id="result" class="modal-layer" hidden>
@@ -250,7 +268,7 @@
           </div>
           <div class="hall-col">
             <div class="col-head">战绩 <span class="mini-note" id="stats-kind"></span></div>
-            <div class="stats" id="stats"><div class="empty">游客不计战绩</div></div>
+            <div class="stats" id="stats-list"><div class="empty">游客不计战绩</div></div>
           </div>
         </div>
       </section>

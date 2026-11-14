@@ -379,6 +379,24 @@ void RiichiMahjongGame::OnSeatPresence(int seat, bool present) {
   disconnected_[static_cast<size_t>(seat)] = !present;
 }
 
+// The god view of a recording (replay.h). Red fives are spelled `0m`/`0p`/`0s`, exactly as the
+// seat's own `game_start.hand` does (this game's TilesToJson passes red=true), so the replay's
+// hand track and the framed hand agree after a `FormatTile` round trip.
+std::array<std::string, kSeatCount> RiichiMahjongGame::ReplayHands() const {
+  std::array<std::string, kSeatCount> replay_hands;
+  for (size_t seat = 0; seat < replay_hands.size(); ++seat) {
+    std::string& out = replay_hands[seat];
+    const std::vector<Tile>& concealed = hands_[seat];
+    for (size_t index = 0; index < concealed.size(); ++index) {
+      if (index != 0) {
+        out.push_back(',');
+      }
+      out += FormatTile(concealed[index], /*red_fives=*/true);
+    }
+  }
+  return replay_hands;
+}
+
 // The room's gate (is this seat's turn, is the window still open, is that tile in hand) lives
 // here, and so does the §6.3 rule that a reply for a window which already moved on is dropped
 // *silently* while a well-formed action the rules refuse is answered. Nothing in this function
@@ -1716,7 +1734,8 @@ std::vector<Option> RiichiMahjongGame::DiscardOptionsFor(int seat, std::vector<T
   return options;
 }
 
-std::vector<Option> RiichiMahjongGame::ClaimOptionsFor(int seat, Tile tile, bool is_next_player, int from_seat) const {  // 振听按**这张牌**判（`IsFuritenFor`），不是整手：同巡振听只挡住放过的那个牌面。
+std::vector<Option> RiichiMahjongGame::ClaimOptionsFor(int seat, Tile tile, bool is_next_player, int from_seat)
+    const {  // 振听按**这张牌**判（`IsFuritenFor`），不是整手：同巡振听只挡住放过的那个牌面。
   std::vector<Option> options =
       riichi::ClaimOptions(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)], tile, remaining_,
                            is_next_player, IsFuritenFor(seat, tile));
@@ -2050,8 +2069,8 @@ std::optional<Tile> RiichiMahjongGame::ChooseAiDiscard(int seat) const {
   // 「役」在这里要回答的是「别人打出来我能不能和」。
   const riichi::WinContext ctx =
       BuildRiichiContext(seat, (seat + 1) % kSeatCount, /*tsumo=*/false, TsumoWinningTile(seat));
-  return riichi::ChooseDiscard(hands_[index], melds_[index], discards_[index],
-                               temporary_furiten_[index], ctx, can_riichi, drawn_tile_, KuikaeFacesFor(seat));
+  return riichi::ChooseDiscard(hands_[index], melds_[index], discards_[index], temporary_furiten_[index], ctx,
+                               can_riichi, drawn_tile_, KuikaeFacesFor(seat));
 }
 
 // The tile that completes the current seat's hand on its own draw (a tsumo). The dealer's

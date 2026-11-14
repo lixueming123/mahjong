@@ -95,11 +95,19 @@ if(MAHJONG_MYSQL_FOUND)
   target_link_libraries(mahjong_db PUBLIC ${MYSQL_LIBRARY})
 endif()
 
+# 回放存储：ReplayActor 是**唯一**碰回放文件的 actor（写入与读取），跑在自己的单线程池上，
+# 理由与 DbActor 完全一致 —— 文件 I/O 会阻塞，不能落在游戏线程（ACCOUNT_DESIGN.md §6.1）。
+# 房间只负责序列化（纯 CPU）和投递消息，不碰磁盘。
+add_library(mahjong_replay_store STATIC server/replay_store.cc)
+target_include_directories(mahjong_replay_store PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(mahjong_replay_store PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_link_libraries(mahjong_replay_store PUBLIC ex_actor mahjong_room_shell spdlog::spdlog)
+
 # 通用房间外壳：座位/端点/分发/一次性截止/投递/结算回传/断线重连，不含任何玩法知识
 # （room_actor.h 顶部写清了边界）。玩法是插件（game.h），绑定见 room_actor_for.h。
 # 实现只有 room_actor.cc；JSON/协议/定时器的实现由使用方提供（mahjong_server 已经这样链接，
-# 不重复一份 json.cc/protocol.cc）。
-add_library(mahjong_room_shell STATIC server/room_actor.cc)
+# 不重复一份 json.cc/protocol.cc）。replay.cc 是录制器（纯数据结构 + 序列化，无 I/O）。
+add_library(mahjong_room_shell STATIC server/room_actor.cc server/replay.cc)
 target_include_directories(mahjong_room_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(mahjong_room_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server)
 target_link_libraries(mahjong_room_shell PUBLIC ex_actor)
@@ -114,8 +122,7 @@ target_include_directories(mahjong_classic_game PUBLIC ${CMAKE_CURRENT_SOURCE_DI
 target_include_directories(mahjong_classic_game PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server)
 target_link_libraries(mahjong_classic_game PUBLIC mahjong_rules spdlog::spdlog ex_actor)
 
-# 玩法单测：直接驱动 ClassicMahjongGame，不建房间、不建 actor、不开 socket。
-# 它同时是「端口逐字节兼容」的硬门槛：三个 hash 是拆分前 room.cc 冻结的那三个 classic 值。
+# 玩法单测：直接驱动 ClassicMahjongGame，不建房间、不建 actor、不开 socket。# 它同时是「端口逐字节兼容」的硬门槛：三个 hash 是拆分前 room.cc 冻结的那三个 classic 值。
 add_executable(mahjong_classic_game_test server/classic/classic_mahjong_game_test.cc server/json.cc
                                        server/protocol.cc)
 target_include_directories(mahjong_classic_game_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
@@ -123,6 +130,23 @@ target_link_libraries(mahjong_classic_game_test PRIVATE mahjong_classic_game GTe
                                                      GTest::gmock)
 add_test(NAME mahjong_classic_game_test COMMAND mahjong_classic_game_test)
 set_tests_properties(mahjong_classic_game_test PROPERTIES TIMEOUT 120)
+
+# 回放录制器单测（replay.h，纯数据结构 + 序列化）：直接驱动 ClassicMahjongGame，
+# 不建房间、不开 socket、不碰磁盘 —— 写盘是 ReplayActor 的事（replay_store.h）。
+add_executable(mahjong_replay_test server/replay_test.cc server/replay.cc server/json.cc server/protocol.cc)
+target_include_directories(mahjong_replay_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_link_libraries(mahjong_replay_test PRIVATE mahjong_classic_game GTest::gtest_main GTest::gmock)
+add_test(NAME mahjong_replay_test COMMAND mahjong_replay_test)
+set_tests_properties(mahjong_replay_test PROPERTIES TIMEOUT 120)
+
+# Game::ReplayHands()（回放的「透视」唯一数据源）：两种玩法各一份，验它确实是各家门前手牌，
+# 且日麻的赤 5 拼写与线上帧一致（0m/0p/0s）。与录制器分开，因为它测的是游戏侧契约。
+add_executable(mahjong_replay_hands_test server/replay_hands_test.cc server/json.cc server/protocol.cc)
+target_include_directories(mahjong_replay_hands_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_link_libraries(mahjong_replay_hands_test PRIVATE mahjong_classic_game mahjong_riichi_game
+                                                       GTest::gtest_main GTest::gmock)
+add_test(NAME mahjong_replay_hands_test COMMAND mahjong_replay_hands_test)
+set_tests_properties(mahjong_replay_hands_test PROPERTIES TIMEOUT 60)
 
 # 玩法插件：riichi（日麻）。与 classic 是**两份互不相识的代码**——不共享房间、不共享帧，
 # 只在规则原语（mahjong_rules 的牌张/拆法/听牌）与契约（game.h / room_contract.h）处相接。
@@ -155,13 +179,14 @@ add_executable(
   server/player_session_agent.cc
   server/player_lobby_agent.cc
   server/player_room_agent.cc
+  server/player_replay_agent.cc
   server/frame_parser.cc
   server/lobby.cc
   server/game_registry.cc
   server/timer.cc
   server/gateway.cc)
 target_link_libraries(mahjong_server PRIVATE ex_actor mahjong_rules riichi_rules mahjong_db mahjong_room_shell
-                                          mahjong_classic_game mahjong_riichi_game)
+                                          mahjong_replay_store mahjong_classic_game mahjong_riichi_game)
 if(MAHJONG_MYSQL_FOUND)
   # libmysqlclient's install name is @rpath/libmysqlclient.<n>.dylib, so without this the
   # binary links but fails to launch with "Library not loaded". Its own OpenSSL is resolved
@@ -243,10 +268,10 @@ endif()
 
 # t3：LobbyActor 的房间登记与 game_end 后回收（PROTOCOL.md §1.4.5）
 add_executable(mahjong_lobby_test server/lobby_test.cc server/lobby.cc server/game_registry.cc server/connection.cc
-                                  server/player_actor.cc server/player_session_agent.cc server/player_lobby_agent.cc server/player_room_agent.cc server/frame_parser.cc server/net.cc server/timer.cc
+                                  server/player_actor.cc server/player_session_agent.cc server/player_lobby_agent.cc server/player_room_agent.cc server/player_replay_agent.cc server/frame_parser.cc server/net.cc server/timer.cc
                                   server/json.cc server/protocol.cc)
 target_link_libraries(mahjong_lobby_test PRIVATE ex_actor mahjong_rules riichi_rules mahjong_db mahjong_room_shell
-                                                mahjong_classic_game mahjong_riichi_game GTest::gtest_main GTest::gmock)
+                                                mahjong_replay_store mahjong_classic_game mahjong_riichi_game GTest::gtest_main GTest::gmock)
 add_test(NAME mahjong_lobby_test COMMAND mahjong_lobby_test)
 set_tests_properties(mahjong_lobby_test PROPERTIES TIMEOUT 60)
 
@@ -291,4 +316,34 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/riichi_e2e_test.py
             --server-bin $<TARGET_FILE:mahjong_server>)
   set_tests_properties(riichi_e2e_test PROPERTIES TIMEOUT 180)
+endif()
+
+# 对局回放端到端（PROTOCOL v2.3 §4.13/§5.18）：真服务端 + --replay-dir 打完一局 →
+# 回放落盘 → 同账号取回并逐帧拼接 → 异账号被拒 → 重放结果与实时对局一致。
+# 取回要账号（鉴权按 seats[].account_id），所以没有 MySQL 时 77 = SKIP，不静默变绿。
+if(Python3_Interpreter_FOUND)
+  add_test(
+    NAME replay_e2e_test
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/replay_e2e_test.py
+            --server-bin $<TARGET_FILE:mahjong_server>)
+  set_tests_properties(replay_e2e_test PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
+endif()
+
+# 回放播放器的前端逻辑验收（node，无浏览器）：帧驱动 / 视角过滤 / 透视 / 批量推进。
+find_program(NODE_EXECUTABLE node)
+if(NODE_EXECUTABLE)
+  add_test(NAME web_replay_test
+           COMMAND ${NODE_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/web/replay.mjs)
+  set_tests_properties(web_replay_test PROPERTIES TIMEOUT 60)
+
+  # 回放控制条的进度条分段（纯函数）：局边界切分 + 标签抽稀。
+  add_test(NAME web_replaybar_test
+           COMMAND ${NODE_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/web/replaybar.mjs)
+  set_tests_properties(web_replaybar_test PROPERTIES TIMEOUT 30)
+
+  # index.html 的 id 契约：不重复，且大厅面板不会被 ui.css 的 id 选择器隐藏。
+  # `#stats` 曾同时是 HUD 计数器与战绩面板，被 `.hud, #stats { display: none }` 一起隐藏。
+  add_test(NAME web_dom_ids_test
+           COMMAND ${NODE_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/web/dom_ids.mjs)
+  set_tests_properties(web_dom_ids_test PROPERTIES TIMEOUT 30)
 endif()

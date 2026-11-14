@@ -1,7 +1,9 @@
 #include "protocol.h"
 
+#include <algorithm>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace mahjong::protocol {
 
@@ -53,6 +55,11 @@ json::Value RecentJson(const StatsSummary& summary) {
     item.Set("delta_score", json::Value::Int(entry.delta_score));
     item.Set("win", json::Value::Bool(entry.win));
     item.Set("ended_at", json::Value::Int(entry.ended_at));
+    // v2.3 §5.13: only written when true, so a client that predates replays sees the exact frame
+    // it saw before (this is the same "omit when false" rule state_sync uses for `autoplay`).
+    if (entry.has_replay) {
+      item.Set("has_replay", json::Value::Bool(true));
+    }
     recent.Append(std::move(item));
   }
   return recent;
@@ -90,6 +97,64 @@ std::string StatsFrame(const StatsSummary& summary) {
   StatsSnapshot snapshot;
   snapshot.classic = summary;
   return StatsFrame(snapshot);
+}
+
+// ---- §5.18 replay (v2.3) ---------------------------------------------------------------
+
+std::string ReplayFrame(std::string_view room_id, int chunk, int chunks, std::string_view data) {
+  json::Value frame = json::Value::Obj(5);
+  frame.Set("type", json::Value::Int(WireOf(FrameType::kReplay)));
+  frame.Set("room_id", json::Value::Str(std::string(room_id)));
+  frame.Set("chunk", json::Value::Int(chunk));
+  frame.Set("chunks", json::Value::Int(chunks));
+  frame.Set("data", json::Value::Str(std::string(data)));
+  return frame.Dump();
+}
+
+std::string ReplayErrorFrame(std::string_view room_id, ErrorCode code) {
+  // §5.18: the failure shape carries no chunk/chunks/data, so a client never has to guess
+  // whether an empty `data` means "failed" or "an empty file".
+  json::Value frame = json::Value::Obj(3);
+  frame.Set("type", json::Value::Int(WireOf(FrameType::kReplay)));
+  frame.Set("room_id", json::Value::Str(std::string(room_id)));
+  frame.Set("error", json::Value::Int(WireOf(code)));
+  return frame.Dump();
+}
+
+std::vector<std::string> SplitReplayFrames(std::string_view room_id, std::string_view data, size_t max_bytes) {
+  if (max_bytes == 0) {
+    max_bytes = kMaxReplayChunkBytes;
+  }
+  // Cut points are byte offsets, but a cut may only land on a UTF-8 lead byte: a frame whose
+  // `data` held half a character would make the whole NDJSON line invalid for the client, and the
+  // replay text contains player names.
+  std::vector<size_t> cuts {0};
+  size_t offset = 0;
+  while (offset < data.size()) {
+    size_t end = std::min(offset + max_bytes, data.size());
+    // Walk back to the start of the character |end| would land inside. A continuation byte has
+    // the top two bits 10; back up over at most three of them.
+    while (end < data.size() && end > offset && (static_cast<unsigned char>(data[end]) & 0xC0) == 0x80) {
+      --end;
+    }
+    if (end == offset) {
+      end = std::min(offset + max_bytes, data.size());  // pathological input: never loop forever
+      while (end < data.size() && (static_cast<unsigned char>(data[end]) & 0xC0) == 0x80) {
+        ++end;
+      }
+    }
+    cuts.push_back(end);
+    offset = end;
+  }
+  const int chunks = static_cast<int>(cuts.size());
+  std::vector<std::string> frames;
+  frames.reserve(cuts.size());
+  for (size_t index = 0; index < cuts.size(); ++index) {
+    const size_t begin = index == 0 ? 0 : cuts[index - 1];
+    const size_t end = cuts[index];
+    frames.push_back(ReplayFrame(room_id, static_cast<int>(index), chunks, data.substr(begin, end - begin)));
+  }
+  return frames;
 }
 
 }  // namespace mahjong::protocol

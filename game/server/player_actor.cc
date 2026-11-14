@@ -15,6 +15,7 @@
 #include "frame_parser.h"
 #include "overloaded.h"
 #include "protocol.h"
+#include "replay_store.h"
 
 namespace ex = stdexec;
 
@@ -46,6 +47,9 @@ stdexec::task<void> PlayerActor::Dispatch(PlayerEnvelope envelope) {
                  [this](PlayerEnvelope::OnLoginResultMsg&& m) { OnLoginResult(std::move(m.outcome)); },
                  [this](PlayerEnvelope::OnRegisterResultMsg&& m) { OnRegisterResult(std::move(m.outcome)); },
                  [this](PlayerEnvelope::OnStatsResultMsg&& m) { OnStatsResult(std::move(m.outcome)); },
+                 [this](PlayerEnvelope::OnReplayResultMsg&& m) {
+                   OnReplayResult(std::move(m.room_id), m.ok, std::move(m.data));
+                 },
                  [this](PlayerEnvelope::SetRoomMsg&& m) { SetRoom(std::move(m.room)); },
                  [this](PlayerEnvelope::SeatFrameMsg&& m) { SeatFrame(std::move(m.frame)); },
                  [this](PlayerEnvelope::SeatErrorMsg&& m) { SeatError(std::move(m.frame), m.quota); },
@@ -128,7 +132,7 @@ namespace {
 // here *and* a handler table per module, twenty-two rows for eleven frames, and the two could
 // drift apart without anything noticing.
 constexpr std::span<const FrameBinding> kFrameTables[] = {kSessionFrameBindings, kLobbyFrameBindings,
-                                                          kRoomFrameBindings};
+                                                          kRoomFrameBindings, kReplayFrameBindings};
 
 constexpr size_t CountBindings() {
   size_t total = 0;
@@ -236,6 +240,19 @@ void PlayerActor::RequestStats() {
   ActorSendScope().spawn(db.FetchStats(session_.account_id(), self_ref_));
 }
 
+void PlayerActor::RequestReplay(std::string room_id) {
+  ReplayStore& store = GetReplayStore();
+  if (store.IsEmpty() || self_ref_.IsEmpty()) {
+    // No store installed is the "recording disabled" build: answer the same ROOM_NOT_FOUND a
+    // missing file gets, so the client needs no second code path (§4.13).
+    conn_->SendFrame(protocol::ReplayErrorFrame(room_id, protocol::ErrorCode::kRoomNotFound));
+    return;
+  }
+  // Authorization is the store's job: it reads the file's seat table. A guest cannot pass it —
+  // account_id 0 never matches — which is why no check is needed here.
+  ActorSendScope().spawn(store.Load(std::move(room_id), session_.account_id(), self_ref_));
+}
+
 // The two result handlers differ only in what a failure means, and both must leave the session
 // retryable: a rejected login cannot strand the connection in kAuthPending, or the client could
 // never send a second one (§3.1: retry on a typo is the common case).
@@ -281,6 +298,20 @@ void PlayerActor::OnStatsResult(StatsOutcome outcome) {
     return;
   }
   conn_->SendFrame(protocol::StatsFrame(outcome.snapshot));
+}
+
+void PlayerActor::OnReplayResult(std::string room_id, bool ok, std::string data) {
+  // §4.13: one code for "no such recording" and "not yours" — a stranger must not be able to
+  // probe which room ids were played.
+  if (!ok) {
+    conn_->SendFrame(protocol::ReplayErrorFrame(room_id, protocol::ErrorCode::kRoomNotFound));
+    return;
+  }
+  // §5.18: split here rather than in the store, because the frame size limit is a property of the
+  // wire (Net drops any line over 64 KB, §1.2) and this actor is the one that owns the outbox.
+  for (std::string& frame : protocol::SplitReplayFrames(room_id, data)) {
+    conn_->SendFrame(std::move(frame));
+  }
 }
 
 bool PlayerActor::AcceptAccount(const AuthOutcome& outcome) {

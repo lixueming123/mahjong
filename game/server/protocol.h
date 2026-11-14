@@ -131,6 +131,9 @@ struct StatsEntry {
   int64_t ended_at = 0;  // Unix seconds
   // classic / riichi（日麻接入：两种玩法的分数不可比）。放最后：既有聚合初始化不动。
   WireMode mode = WireMode::kClassic;
+  // v2.3 §5.13: a replay file exists for this room, so the client may offer 回放. Only the recent
+  // list carries it — the aggregates have no room id to attach it to.
+  bool has_replay = false;
 };
 
 struct StatsSummary {
@@ -154,6 +157,21 @@ inline constexpr size_t kMaxRecentMatches = 10;
 std::string StatsFrame(const StatsSnapshot& snapshot);
 // 兼容重载：只填 classic 的调用（内部与单测）等价于「riichi 桶为空」。
 std::string StatsFrame(const StatsSummary& summary);
+
+// ---- §5.18 replay (v2.3) ---------------------------------------------------------------
+// One `replay` frame. |data| is a slice of the replay text; |chunk| is 0-based and |chunks| is
+// constant across the pieces of one answer.
+std::string ReplayFrame(std::string_view room_id, int chunk, int chunks, std::string_view data);
+// 失败帧：`{"type":30,"room_id":...,"error":<code>}`，没有 chunk/chunks/data（§5.18）。
+std::string ReplayErrorFrame(std::string_view room_id, ErrorCode code);
+// Splits one replay text into §5.18 frames, each within |max_bytes| of UTF-8 payload and never
+// cutting a multi-byte sequence. A caller sends the returned frames in order.
+//
+// Why splitting exists at all: the client's Net layer drops any line over 64 KB as a bad frame
+// (§1.2), and a full match replay is 60..120 KB. |max_bytes| is well under that on purpose.
+inline constexpr size_t kMaxReplayChunkBytes = 16 * 1024;
+std::vector<std::string> SplitReplayFrames(std::string_view room_id, std::string_view data,
+                                           size_t max_bytes = kMaxReplayChunkBytes);
 
 // ---- 内部枚举 ↔ 线枚举转换（v2.0）-------------------------------------------------------
 // mahjong_rules.h 的 MeldType 是**内部**枚举（0 基、无 INVALID）；线值用 protocol_enums.h 的

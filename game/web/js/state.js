@@ -65,6 +65,8 @@ function toViewMeld(viewSeat, meld, claimedTile = null) {
 
 export function createState() {
   const listeners = new Map();
+  // Nested batching depth (0 = render on every change). See suspendChanged/resumeChanged.
+  let batchDepth = 0;
   const state = {
     // ---- 桌面视图（渲染层读这些）----
     hands: [[], [], [], []],          // hands[0] 明牌，1..3 用 'back' 占位
@@ -149,7 +151,24 @@ export function createState() {
   }
   function changed(action) {
     if (action) state.lastAction = action;
+    // A replay seeks through hundreds of frames in one tick; letting each one rebuild the scene
+    // would make "jump to step 300" cost 300 full renders. Batching is opt-in and local: outside
+    // a batch (every live frame) this is exactly the old behaviour.
+    if (batchDepth > 0) return;
     emit('change', state);
+  }
+
+  /**
+   * 回放批量推进：期间所有 changed() 只累计，不触发渲染。
+   * 与 `resumeChanged()` 成对使用（try/finally），嵌套安全。
+   */
+  function suspendChanged() {
+    batchDepth += 1;
+  }
+
+  function resumeChanged() {
+    batchDepth = Math.max(0, batchDepth - 1);
+    if (batchDepth === 0) emit('change', state);
   }
 
   /** 协议 seat → 屏幕座位（本家恒 0） */
@@ -603,6 +622,7 @@ export function createState() {
 
   return {
     state, on, emit, changed, select, reset,
+    suspendChanged, resumeChanged,
     viewSeat, startRound, applySync, drawTile, discardTile, applyActionEvent, applyGameEnd,
     applyMatchEnd, applyTenpai,
     sortHand,

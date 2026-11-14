@@ -79,11 +79,22 @@ struct JoinRoom {
 };
 std::optional<JoinRoom> ParseJoinRoom(const json::Value& frame, Error* error);
 
+// §4.13: which recording to fetch. Authorization is not a parse concern — the store decides it
+// from the file's seat table.
+struct ReplayRequest {
+  std::string room_id;
+};
+
 // `discard` and `action` are forwarded to the room as-is (it re-reads the frame to run the
 // game-level checks of §4.5/§6.3), so these two only validate and return no intent: fields
 // nothing would ever read are just a second copy waiting to rot.
 bool ValidateDiscard(const json::Value& frame, Error* error);
 bool ValidateAction(const json::Value& frame, Error* error);
 bool ValidateAutoplay(const json::Value& frame, Error* error);
+
+// §4.13: `room_id` must have the shape lobby.cc mints (`r-` + 13 lowercase base36). Checked here
+// so a malformed id never reaches the filesystem, and the check is shared with read paths.
+bool IsRoomIdShaped(std::string_view room_id);
+std::optional<ReplayRequest> ParseReplayRequest(const json::Value& frame, Error* error);
 
 }  // namespace mahjong::frame_parser

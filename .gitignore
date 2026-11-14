@@ -22,6 +22,8 @@ vcpkg
 __pycache__/
 game/tests/artifacts/
 .run/
+# 对局回放（服务端运行时产物，见 game/server/replay.h）
+replays/
 
 # 视频/截图参考产物（非源码，体积大，不入库）
 game/docs/video-reference/

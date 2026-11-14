@@ -88,6 +88,10 @@ class PlayerActor : public SeatEndpoint {
   void LoginAsGuest(std::string name);
   void BeginRegister(std::string username, std::string password, std::string nickname);
   void RequestStats();
+  // PROTOCOL v2.3 §4.13/§5.18: fetch one recording and answer it as however many `replay` frames
+  // it takes. Like the account calls, this only submits and returns — the store's answer arrives
+  // later as OnReplayResult, so the no-suspension rule here still holds.
+  void RequestReplay(std::string room_id);
 
  private:
   void SetSelfRef(ex_actor::ActorRef<PlayerActor> self);
@@ -97,6 +101,7 @@ class PlayerActor : public SeatEndpoint {
   void OnLoginResult(AuthOutcome outcome);
   void OnRegisterResult(AuthOutcome outcome);
   void OnStatsResult(StatsOutcome outcome);
+  void OnReplayResult(std::string room_id, bool ok, std::string data);
   // The lobby tells this connection which room it plays in (PlayerEnvelope::SetRoom), so
   // gameplay frames no longer have to round-trip through the lobby.
   void SetRoom(ex_actor::ActorRef<RoomEndpoint> room);
