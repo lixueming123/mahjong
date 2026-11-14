@@ -5,6 +5,7 @@
 #   ./game/start_server.sh --seed 199             # 固定牌山种子（PROTOCOL.md §1.8 冻结参数）
 #   ./game/start_server.sh --port 19527            # 换端口（客户端要用 --port 对齐）
 #   ./game/start_server.sh --build                 # 先重新编译再启动
+#   ./game/start_server.sh --release               # 启动 release 版（build-release/，必要时先编译）
 #   ./game/start_server.sh --port 19527 -- --help  # `--` 之后的参数原样交给服务端
 #
 # 本脚本只做三件事：找到（必要时编译）mahjong_server、按本机开发习惯填好 MySQL 连接、
@@ -38,24 +39,50 @@ usage() {
 
 find_binary() {
   local rel
-  # 优先 build/（就是「刚编出来的那份」），再回退 build-release/ 与多配置生成器的子目录。
-  for rel in \
-    build/game/mahjong_server \
-    build-release/game/mahjong_server \
-    build/game/Release/mahjong_server \
-    build/game/Debug/mahjong_server \
-    build-release/game/Release/mahjong_server \
-    build-release/game/Debug/mahjong_server; do
-    if [[ -x "${REPO_ROOT}/${rel}" ]]; then
-      printf '%s\n' "${REPO_ROOT}/${rel}"
-      return 0
-    fi
-  done
+  # 默认优先 build/（就是「刚编出来的那份」），再回退 build-release/ 与多配置生成器的子目录。
+  # --release 时把两个顺序对调，优先取 build-release/ 里的那份。
+  if [[ "${RELEASE}" == "1" ]]; then
+    for rel in \
+      build-release/game/mahjong_server \
+      build-release/game/Release/mahjong_server \
+      build-release/game/Debug/mahjong_server \
+      build/game/mahjong_server \
+      build/game/Release/mahjong_server \
+      build/game/Debug/mahjong_server; do
+      if [[ -x "${REPO_ROOT}/${rel}" ]]; then
+        printf '%s\n' "${REPO_ROOT}/${rel}"
+        return 0
+      fi
+    done
+  else
+    for rel in \
+      build/game/mahjong_server \
+      build-release/game/mahjong_server \
+      build/game/Release/mahjong_server \
+      build/game/Debug/mahjong_server \
+      build-release/game/Release/mahjong_server \
+      build-release/game/Debug/mahjong_server; do
+      if [[ -x "${REPO_ROOT}/${rel}" ]]; then
+        printf '%s\n' "${REPO_ROOT}/${rel}"
+        return 0
+      fi
+    done
+  fi
   return 1
 }
 
+# --release 时默认编译到 build-release/，否则用常规的 build/；两者都能被 MAHJONG_* 环境变量覆盖。
+default_build_dir() {
+  if [[ "${RELEASE}" == "1" ]]; then
+    printf '%s\n' "${MAHJONG_BUILD_DIR:-${REPO_ROOT}/build-release}"
+  else
+    printf '%s\n' "${MAHJONG_BUILD_DIR:-${REPO_ROOT}/build}"
+  fi
+}
+
 build_binary() {
-  local build_dir="${MAHJONG_BUILD_DIR:-${REPO_ROOT}/build}"
+  local build_dir
+  build_dir="$(default_build_dir)"
   local config="${MAHJONG_BUILD_CONFIG:-Release}"
   if [[ ! -f "${build_dir}/CMakeCache.txt" ]]; then
     # 首次配置会拉 CPM 依赖（要联网）；生成器与 docs/contents/installation.md 一致。
@@ -73,10 +100,12 @@ build_binary() {
 }
 
 FORCE_BUILD=0
+RELEASE=0
 ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --build) FORCE_BUILD=1; shift ;;
+    --release) RELEASE=1; shift ;;
     -h | --help)
       usage
       exit 0
@@ -103,6 +132,12 @@ if [[ -n "${MAHJONG_SERVER_BIN:-}" ]]; then
   BIN="${MAHJONG_SERVER_BIN}"
 else
   BIN="$(find_binary || true)"
+  # --release 却没找到 build-release/ 里的那份时，先编一次，别悄悄退回 Debug。
+  if [[ "${RELEASE}" == "1" && -n "${BIN}" && "${BIN}" != *"/build-release/"* ]]; then
+    echo "[server] --release 但没找到 build-release/ 下的二进制，先编译"
+    build_binary
+    BIN=""
+  fi
   if [[ -z "${BIN}" || "${FORCE_BUILD}" == "1" ]]; then
     build_binary
     BIN="$(find_binary || true)"
