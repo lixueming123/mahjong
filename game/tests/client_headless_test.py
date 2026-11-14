@@ -713,6 +713,65 @@ def main() -> int:
     )
     check("不听牌" in riichi_app.toast_text, f"立直被拒：同时弹 toast = {riichi_app.toast_text!r}")
 
+    print("[3c] 喰い替え禁止（v2.5 §12.15）：压暗的牌点不动、不发帧")
+    # 刚碰完 1m 当巡：禁区 = {1m}，手牌里 index 0/1 都是 1m。
+    kuikae_app = make_app()
+    kuikae_app.state.apply(ROOM_JOINED)
+    kuikae_app.state.apply(GAME_START)
+    kuikae_app.state.apply({
+        "type": FRAME_TYPE.ACTION_REQUEST,
+        "seq": 12,
+        "deadline_ms": int(time.time() * 1000) + 15000,
+        "window": WINDOW.DISCARD,
+        "options": [{"action": ACTION.WIN, "tiles": []}],
+        # 服务端只写「牌面」，赤 5 也写 5m（与 riichi_tiles 同口径）
+        "forbidden_discards": ["1m", "0p"],
+    })
+    kuikae_app.now = time.monotonic()
+    window = kuikae_app.state.window
+    check(
+        window is not None and window.forbidden_discards == ["1m", "5p"],
+        f"解析 forbidden_discards（0p 归一为 5p）：{getattr(window, 'forbidden_discards', None)}",
+    )
+    hint_text, _, _ = actionbar._status_text(kuikae_app.state, kuikae_app.build_ui())
+    check("压暗" in hint_text, f"有禁区时的状态提示：{hint_text!r}")
+
+    sent: list[tuple[int, dict]] = []
+
+    def _record_send(kind, **kwargs):
+        sent.append((kind, kwargs))
+        return True
+
+    kuikae_app.send_frame = _record_send  # type: ignore[assignment]
+    rects = table_view.hand_layout(kuikae_app.state)
+    check(kuikae_app.state.hand[0] == "1m", f"测试手牌 index=0 应为 1m，实际 {kuikae_app.state.hand[0]}")
+    kuikae_app.toast_text = ""
+    kuikae_app._table_click((rects[0][0] + 2, rects[0][1] + 2))
+    check(
+        not sent and kuikae_app.state.selected_index is None and "喰い替え" in kuikae_app.toast_text,
+        f"点禁区牌只提示、不选中也不发帧：selected={kuikae_app.state.selected_index}",
+    )
+    # 数字键同口径。
+    kuikae_app.toast_text = ""
+    kuikae_app._table_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_1))
+    check(
+        kuikae_app.state.selected_index is None and "喰い替え" in kuikae_app.toast_text,
+        f"数字键选禁区牌同样被拦：{kuikae_app.toast_text!r}",
+    )
+    # 非禁区牌照常可选、可打。
+    kuikae_app.toast_text = ""
+    kuikae_app._table_click((rects[2][0] + 2, rects[2][1] + 2))
+    check(kuikae_app.state.selected_index == 2, f"非禁区牌照常选中：index={kuikae_app.state.selected_index}")
+    kuikae_app._table_click((rects[2][0] + 2, rects[2][1] + 2))
+    check(
+        bool(sent) and sent[0][0] == FRAME_TYPE.DISCARD and sent[0][1].get("tile") == kuikae_app.state.hand[2],
+        f"非禁区牌照常发出 discard：{sent[:1]}",
+    )
+    kuikae_png = os.path.join(ARTIFACTS, "client_kuikae_ban.png")
+    kuikae_app.now = time.monotonic()
+    pygame.image.save(kuikae_app.render_frame(present=False), kuikae_png)
+    check(os.path.getsize(kuikae_png) > 1000, f"喰い替え压暗产物：{kuikae_png}")
+
     print("[4] 结算界面渲染（不落盘）")
     app.state.apply(GAME_END)
     check(app.state.screen == SCREEN_RESULT, "game_end 后进入结算界面")
@@ -1996,6 +2055,26 @@ def main() -> int:
     tp_app.now = time.monotonic()
     tp_app.render_frame(present=False)
     check(True, "混合有役/无役的听牌条渲染不崩溃")
+
+    # --- v1.24 §12.14：振听（本家私有）也要进提示 ---
+    # 缺省：classic / 老服务端的帧没有 furiten 键 ⇒ 恒 False，渲染路径完全不变。
+    check(tp_app.state.tenpai_furiten is False, "帧里没有 furiten 键时按「未振听」处理")
+    tp_app.state.apply({"type": FRAME_TYPE.TENPAI, "tenpai_seq": 6, "is_tenpai": True, "no_yaku": False,
+                        "furiten": True,
+                        "waits": [{"tile": "6s", "remaining": 3, "yaku": True, "furiten": True},
+                                  {"tile": "9s", "remaining": 2, "yaku": True, "furiten": False}]})
+    check(tp_app.state.tenpai_furiten is True, "furiten=true ⇒ 振听提示置位")
+    check([w["furiten"] for w in tp_app.state.tenpai_waits] == [True, False],
+          "waits[].furiten 逐张解析（放过 6s 不挡 9s）")
+    check(tp_app.state.is_tenpai is True, "振听不改变 is_tenpai：形听照收罚符")
+    tp_app.now = time.monotonic()
+    tp_app.render_frame(present=False)   # 红边牌 + 尾巴渲染不崩溃
+    check(True, "振听听牌条渲染不崩溃")
+
+    # 双向一致：形听消失时 furiten 也要清掉，避免听牌条隐藏后残留提示状态。
+    tp_app.state.apply({"type": FRAME_TYPE.TENPAI, "tenpai_seq": 7, "is_tenpai": False, "furiten": True,
+                        "waits": []})
+    check(tp_app.state.tenpai_furiten is False, "is_tenpai=false ⇒ furiten 一并清零")
 
     # F-TP-11 硬列表：game_end / game_start / match_end / 本家副露 / win 均清零
     for name, frame in (

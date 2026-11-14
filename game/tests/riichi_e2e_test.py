@@ -35,6 +35,13 @@ START_POINTS = 25000
 TILE_RE = re.compile(r"^((0|[1-9])[mps]|[1-7]z)$")
 EXPECTED_FIRST_REMAINING = 69  # 136 − 52 − 14 王牌 = 70，再减庄家第一次摸牌 = 69
 
+#: 赤 5（`0m`/`0p`/`0s`）与普通 5 是同一**牌面**：禁区表恒写普通牌面码（PROTOCOL §12.15）。
+_RED_TO_FACE = {"0m": "5m", "0p": "5p", "0s": "5s"}
+
+
+def tile_face(code: str) -> str:
+    return _RED_TO_FACE.get(code, code)
+
 
 class TestFailure(RuntimeError):
     pass
@@ -148,6 +155,7 @@ def play_one_round(client: Client, length: str = "tonpu") -> dict:
         "game_end": None,
         "tenpai_frames": 0,
         "tenpai_no_yaku": 0,
+        "tenpai_furiten": 0,
         "tenpai_bad": [],
         "bad_tiles": [],
         "red_tiles": 0,
@@ -183,16 +191,27 @@ def play_one_round(client: Client, length: str = "tonpu") -> dict:
             if window == WINDOW.DISCARD:
                 if not my_hand:
                     raise TestFailure("discard window opened with an empty tracked hand")
-                client.send({"type": FRAME_TYPE.DISCARD, "tile": my_hand[0], "seq": seq})
+                # v2.5 §12.15：刚吃/碰完当巡有禁区（喰い替え），打进去会换来一条 ILLEGAL_ACTION。
+                forbidden = frame.get("forbidden_discards") or []
+                for code in forbidden:
+                    if not TILE_RE.match(code):
+                        raise TestFailure(f"forbidden_discards 含非法牌码：{code!r}")
+                    if code != tile_face(code):
+                        raise TestFailure(f"forbidden_discards 必须是普通牌面码（赤 5 写 5m）：{code!r}")
+                pick = next((code for code in my_hand if tile_face(code) not in forbidden), my_hand[0])
+                client.send({"type": FRAME_TYPE.DISCARD, "tile": pick, "seq": seq})
             else:
                 client.send({"type": FRAME_TYPE.ACTION, "action": ACTION.PASS, "tiles": [], "seq": seq})
             continue
         if kind == FRAME_TYPE.TENPAI:
             # v1.13 §12.8：日麻听牌帧必须逐张带 yaku，帧级 no_yaku 只在「全部无役」时为真
+            # v1.24 §12.14：另带 furiten（帧级 + 逐张），语义与 is_tenpai 独立
             observation["tenpai_frames"] += 1
             waits = frame.get("waits") or []
             flags = [w.get("yaku") for w in waits]
             no_yaku = frame.get("no_yaku")
+            furiten = frame.get("furiten")
+            furiten_flags = [w.get("furiten") for w in waits]
             problem = None
             if not isinstance(no_yaku, bool):
                 problem = f"no_yaku must be bool, got {no_yaku!r}"
@@ -202,10 +221,21 @@ def play_one_round(client: Client, length: str = "tonpu") -> dict:
                 problem = f"no_yaku={no_yaku} inconsistent with waits={flags!r}"
             elif not frame.get("is_tenpai") and (waits or no_yaku):
                 problem = f"not tenpai must carry empty waits and no_yaku=false: {frame!r}"
+            elif not isinstance(furiten, bool):
+                problem = f"furiten must be bool, got {furiten!r}"
+            elif any(not isinstance(f, bool) for f in furiten_flags):
+                problem = f"waits[].furiten must be bool[], got {furiten_flags!r}"
+            elif frame.get("is_tenpai") and furiten != any(furiten_flags):
+                # 帧级 furiten = 「至少一张等待张被振听挡住」
+                problem = f"furiten={furiten} inconsistent with waits[].furiten={furiten_flags!r}"
+            elif not frame.get("is_tenpai") and (furiten or any(furiten_flags)):
+                problem = f"not tenpai must carry furiten=false: {frame!r}"
             if problem:
                 observation["tenpai_bad"].append(problem)
             if no_yaku:
                 observation["tenpai_no_yaku"] += 1
+            if furiten:
+                observation["tenpai_furiten"] += 1
             continue
         if kind == FRAME_TYPE.GAME_END:
             observation["game_end"] = frame
@@ -279,7 +309,8 @@ def main() -> int:
 
     print(
         f"[riichi-e2e] OK syncs={observation['syncs']} remaining={observation['max_remaining']} "
-        f"tenpai={observation['tenpai_frames']}(no_yaku={observation['tenpai_no_yaku']}) "
+        f"tenpai={observation['tenpai_frames']}(no_yaku={observation['tenpai_no_yaku']}"
+        f"/furiten={observation['tenpai_furiten']}) "
         f"aka_seen={observation['red_tiles']} "
         f"reason={end.get('reason')} {detail}"
     )

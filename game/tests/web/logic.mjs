@@ -163,5 +163,26 @@ check('窗口关闭后按钮全灰', btn('过').disabled, true);
 client.handleFrame(window_(20, WINDOW.CLAIM, [{ action: ACTION.PASS, tiles: [] }]));
 check('过期 action_request 被丢弃', client.window, null);
 
+// 17. 喰い替え禁止（v2.5 §12.15）：禁区牌面归一化 + 打出去被本地拦下
+// 放宽到最后一节，是因为这里的 seq 必须比前面所有窗口都大（旧 seq 会被静默丢弃）。
+// §15 的 state_sync 把本家手牌清空了（hand: []），这里补回来才能选中牌。
+app.state.hand = ['0m', '1m', '2m', '4m'];
+client.pending = false;
+client.handleFrame(window_(30, WINDOW.DISCARD, [], { forbidden_discards: ['2m', '0p'] }));
+check('禁区归一为牌面', client.window.forbiddenDiscards, ['2m', '5p']);
+check('禁区写进 state（渲染层读它压暗）', client.state.forbiddenDiscards, ['2m', '5p']);
+app.select(2);                                   // 2m
+client.discardSelected();
+check('打禁区牌不发帧', take(), []);
+check('打禁区牌的提示', byId['log-text'].textContent.includes('喰い替え'), true);
+app.select(1);                                   // 1m，不在禁区
+client.discardSelected();
+check('非禁区牌照常发帧', take(), [{ type: FRAME_TYPE.DISCARD, tile: '1m', seq: 30 }]);
+
+// 18. 新窗口/窗口关闭都必须清掉禁区（否则压暗会残留到下一手）
+client.pending = false;
+client.handleFrame(window_(31, WINDOW.DISCARD, []));
+check('新窗口没带禁区 ⇒ 清空', client.state.forbiddenDiscards, []);
+
 console.log(`\n按钮/窗口：${fail ? 'FAILED' : 'ALL PASS'}  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

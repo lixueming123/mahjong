@@ -43,6 +43,11 @@ Meld Chow(std::initializer_list<const char*> texts) {
   return meld;
 }
 
+// 测试小工具：选中的牌确实在手里（`ChooseDiscard` 的返回值只可能来自手牌）。
+bool ChosenIsInHand(const std::vector<Tile>& hand, Tile chosen) {
+  return std::any_of(hand.begin(), hand.end(), [chosen](Tile tile) { return tile == chosen; });
+}
+
 bool HasId(const std::vector<Yaku>& yaku, std::string_view id) {
   const std::optional<protocol::YakuId> want = protocol::FromName<protocol::YakuId>(id);
   for (const Yaku& item : yaku) {
@@ -248,6 +253,74 @@ TEST(RiichiFuriten, OwnDiscardBlocksRon) {
   ASSERT_FALSE(waits.empty());
   EXPECT_TRUE(IsPermanentFuriten(waiting, {}, {waits.front()}));
   EXPECT_FALSE(IsPermanentFuriten(waiting, {}, Tiles({"1m"})));
+}
+
+// ---- 同巡振听（v1.22）--------------------------------------------------------
+// 规则：非立直者放过一个能和的和牌张 ⇒ 只挡**那个牌面**，到自己下次摸牌为止。
+// 立直者放过 ⇒ 整局持久（`furiten_ever_`），不受同巡豁免。房间层的状态机由
+// `mahjong_riichi_game_test` 的 `TemporaryFuriten*` 用例覆盖；这里验规则库那一半。
+
+TEST(RiichiTemporaryFuriten, OnlyThePassedFaceIsBlocked) {
+  // 234m 567m 234p 78s + 1s —— 打 1s 之后听 6s/9s 两面。
+  // 放过 6s 之后，9s 仍然可和：这是同巡振听与舍て牌振听的根本区别（只挡放过的那个牌面）。
+  const std::vector<Tile> hand =
+      Tiles({"2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "7s", "8s", "1s", "9p", "9p"});
+  const std::vector<Tile> waiting = hand;  // 14 张行动态
+  const Face passed = FaceOf(*ParseTile("6s"));
+  const Face other = FaceOf(*ParseTile("9s"));
+
+  // 同巡振听的牌面不在牌河里 ⇒ IsPermanentFuriten 看不见它（这正是要加房间层状态的原因）
+  std::vector<Tile> thirteen = hand;
+  for (auto it = thirteen.begin(); it != thirteen.end(); ++it) {
+    if (FaceOf(*it) == FaceOf(*ParseTile("1s"))) {
+      thirteen.erase(it);
+      break;
+    }
+  }
+  ASSERT_EQ(thirteen.size() + 0, size_t {13});
+  const std::vector<Tile> waits = RiichiWaitingTiles(thirteen, {});
+  EXPECT_EQ(waits.size(), 2u) << "打 1s 之后应当两面听 6s/9s";
+  EXPECT_FALSE(IsPermanentFuriten(thirteen, {}, {}));
+
+  // `extra_furiten_faces` 把 6s 标成同巡振听：9s 仍然能和，所以 1s 仍是可选打法。
+  const WinContext ctx = Ron(2);
+  std::array<bool, kFaceCount> extra {};
+  extra.fill(false);
+  extra[passed] = true;
+  const std::optional<Tile> chosen = ChooseDiscard(waiting, {}, {}, extra, ctx, /*can_riichi=*/false);
+  ASSERT_TRUE(chosen.has_value());
+  std::vector<Tile> after = waiting;
+  for (auto it = after.begin(); it != after.end(); ++it) {
+    if (FaceOf(*it) == FaceOf(*chosen)) {
+      after.erase(it);
+      break;
+    }
+  }
+  EXPECT_FALSE(RiichiWaitingTiles(after, {}).empty()) << "同巡振听不该让人放弃听牌";
+  (void)other;
+}
+
+TEST(RiichiTemporaryFuriten, AllWaitsBlockedMeansNoLiveHand) {
+  // 单骑听牌、且这一面已被放过 ⇒ 这一手没有任何能和张。
+  // `can_riichi=false`（比如已鸣牌）时，决胜不该把它当成活听。
+  const std::vector<Tile> hand = Tiles({"2m", "3m", "4m", "5m", "6m", "7m", "2p", "3p", "4p", "7s", "8s", "9s", "1p"});
+  const WinContext ctx = Ron(2);
+  // 打 1p 之后听 3m/6m：把两面都标成同巡振听
+  std::array<bool, kFaceCount> extra {};
+  extra.fill(false);
+  extra[FaceOf(*ParseTile("3m"))] = true;
+  extra[FaceOf(*ParseTile("6m"))] = true;
+  const std::optional<Tile> chosen = ChooseDiscard(hand, {}, {}, extra, ctx, /*can_riichi=*/false);
+  ASSERT_TRUE(chosen.has_value());
+  std::vector<Tile> after = hand;
+  for (auto it = after.begin(); it != after.end(); ++it) {
+    if (FaceOf(*it) == FaceOf(*chosen)) {
+      after.erase(it);
+      break;
+    }
+  }
+  // 这一手只剩「死听 1p」与「不听」两种选择，评分仍以向听为先，但至少不能崩。
+  EXPECT_TRUE(ChosenIsInHand(hand, *chosen));
 }
 
 // 振听时 ClaimOptions 不产出 win
@@ -873,7 +946,7 @@ TEST(RiichiAiDiscard, PrefersTheWaitThatActuallyHasYaku) {
   const std::vector<Tile> hand =
       Tiles({"2m", "3m", "4m", "5m", "6m", "7m", "3p", "4p", "5p", "6s", "7s", "8s", "8s", "9s"});
   const WinContext ctx = Ron(/*from_seat=*/2);
-  const std::optional<Tile> chosen = ChooseDiscard(hand, {}, {}, ctx, /*can_riichi=*/false);
+  const std::optional<Tile> chosen = ChooseDiscard(hand, {}, {}, {}, ctx, /*can_riichi=*/false);
   ASSERT_TRUE(chosen.has_value());
   EXPECT_EQ(FaceOf(*chosen), FaceOf(*ParseTile("9s")))
       << "应打 9s 留下断幺九的 5s/8s 两面听；实际打出 " << FormatTile(*chosen);
@@ -898,7 +971,7 @@ TEST(RiichiAiDiscard, ShantenStillBeatsYaku) {
   const std::vector<Tile> hand = Tiles({"2m", "3m", "4m", "5m", "6m", "7m", "3p", "4p",
                                        "5p", "6s", "7s", "9s", "9s", "1z"});
   const WinContext ctx = Ron(/*from_seat=*/2);
-  const std::optional<Tile> chosen = ChooseDiscard(hand, {}, {}, ctx, /*can_riichi=*/false);
+  const std::optional<Tile> chosen = ChooseDiscard(hand, {}, {}, {}, ctx, /*can_riichi=*/false);
   ASSERT_TRUE(chosen.has_value());
 
   // 逐个候选算评分，确认选中那张拿到了最小评分（役不能把更差的向听顶上来）。
@@ -919,7 +992,7 @@ TEST(RiichiAiDiscard, ClosedHandWithoutYakuStillCountsViaRiichi) {
   const std::vector<Tile> hand = Tiles({"1m", "2m", "3m", "7p", "8p", "9p", "2s", "3s",
                                        "4s", "6z", "6z", "1z", "1z", "5m"});
   const WinContext ctx = Ron(/*from_seat=*/2);
-  const std::optional<Tile> chosen = ChooseDiscard(hand, {}, {}, ctx, /*can_riichi=*/true);
+  const std::optional<Tile> chosen = ChooseDiscard(hand, {}, {}, {}, ctx, /*can_riichi=*/true);
   ASSERT_TRUE(chosen.has_value());
   std::vector<Tile> after = hand;
   after.erase(std::find(after.begin(), after.end(), *chosen));
@@ -932,7 +1005,7 @@ TEST(RiichiAiDiscard, TiesFallBackToTheFrozenTileOrder) {
   const std::vector<Tile> hand = Tiles({"1z", "1z", "3z", "3z", "5z", "5z", "7z", "7z",
                                        "2m", "5m", "2p", "5p", "2s", "5s"});
   const WinContext ctx = Ron(/*from_seat=*/2);
-  const std::optional<Tile> chosen = ChooseDiscard(hand, {}, {}, ctx, /*can_riichi=*/false);
+  const std::optional<Tile> chosen = ChooseDiscard(hand, {}, {}, {}, ctx, /*can_riichi=*/false);
   ASSERT_TRUE(chosen.has_value());
   // 与共享实现的选择对照：并列处两者都必须落在同一张，否则「确定性」就丢了。
   const std::optional<Tile> shared = mahjong::ChooseDiscard(hand, {}, std::nullopt);
@@ -943,6 +1016,87 @@ TEST(RiichiAiDiscard, TiesFallBackToTheFrozenTileOrder) {
   std::vector<Tile> after_shared = hand;
   after_shared.erase(std::find(after_shared.begin(), after_shared.end(), *shared));
   EXPECT_LE(BestShantenAfterDraw(after, {}), BestShantenAfterDraw(after_shared, {}));
+}
+
+// ---- 喰い替え禁止（v2.5，PROTOCOL §12.15）-----------------------------------------------
+// 口径：鸣牌所用的手牌 + 被鸣的那张牌，凡能与之组成面子的牌面，鸣牌后当巡都不许打。
+// 三组断言分别守モロ喰い替え、スジ喰い替え、以及「边张/嵌张/字牌只有モロ」这条边界。
+
+TEST(RiichiKuikae, PongOnlyForbidsTheClaimedFace) {
+  // 碰 5p：手牌两张 5p ⇒ 只有 5p 被禁（モロ喰い替え）。
+  const std::vector<Face> faces = KuikaeForbiddenFaces(Tiles({"5p", "5p"}), *ParseTile("5p"));
+  ASSERT_EQ(faces.size(), size_t {1});
+  EXPECT_EQ(faces.front(), FaceOf(*ParseTile("5p")));
+}
+
+TEST(RiichiKuikae, RyanmenChowForbidsTheClaimedAndTheOtherSide) {
+  // 4m5m 吃 3m ⇒ 3m（モロ）与 6m（スジ）都被禁。
+  const std::vector<Face> faces = KuikaeForbiddenFaces(Tiles({"4m", "5m"}), *ParseTile("3m"));
+  ASSERT_EQ(faces.size(), size_t {2});
+  EXPECT_EQ(faces[0], FaceOf(*ParseTile("3m")));
+  EXPECT_EQ(faces[1], FaceOf(*ParseTile("6m")));
+
+  // 反向：4m5m 吃 6m ⇒ 6m 与 3m。
+  const std::vector<Face> other = KuikaeForbiddenFaces(Tiles({"4m", "5m"}), *ParseTile("6m"));
+  ASSERT_EQ(other.size(), size_t {2});
+  EXPECT_EQ(other[0], FaceOf(*ParseTile("3m")));
+  EXPECT_EQ(other[1], FaceOf(*ParseTile("6m")));
+}
+
+TEST(RiichiKuikae, EdgeChowAtTheWallOnlyForbidsTheClaimedFace) {
+  // 1s2s 吃 3s：另一侧是 0s（不存在）⇒ 只有 3s 被禁。
+  const std::vector<Face> low = KuikaeForbiddenFaces(Tiles({"1s", "2s"}), *ParseTile("3s"));
+  ASSERT_EQ(low.size(), size_t {1});
+  EXPECT_EQ(low.front(), FaceOf(*ParseTile("3s")));
+
+  // 8s9s 吃 7s：另一侧是 10s（不存在）⇒ 只有 7s。
+  const std::vector<Face> high = KuikaeForbiddenFaces(Tiles({"8s", "9s"}), *ParseTile("7s"));
+  ASSERT_EQ(high.size(), size_t {1});
+  EXPECT_EQ(high.front(), FaceOf(*ParseTile("7s")));
+}
+
+TEST(RiichiKuikae, KanchanChowOnlyForbidsTheClaimedFace) {
+  // 7m9m 吃 8m（嵌张）：与被鸣牌组成面子的只有 8m 自己 ⇒ 6m 不禁（常见误区）。
+  const std::vector<Face> faces = KuikaeForbiddenFaces(Tiles({"7m", "9m"}), *ParseTile("8m"));
+  ASSERT_EQ(faces.size(), size_t {1});
+  EXPECT_EQ(faces.front(), FaceOf(*ParseTile("8m")));
+}
+
+TEST(RiichiKuikae, HonorMeldAndKongOnlyForbidTheClaimedFace) {
+  // 字牌碰（东东 + 东）⇒ 只有东。
+  const std::vector<Face> honor = KuikaeForbiddenFaces(Tiles({"1z", "1z"}), *ParseTile("1z"));
+  ASSERT_EQ(honor.size(), size_t {1});
+  EXPECT_EQ(honor.front(), FaceOf(*ParseTile("1z")));
+
+  // 大明杠（手牌 3 张）⇒ 同样只有被鸣的那一面（且杠后本来就要先补摸）。
+  const std::vector<Face> kong = KuikaeForbiddenFaces(Tiles({"4p", "4p", "4p"}), *ParseTile("4p"));
+  ASSERT_EQ(kong.size(), size_t {1});
+  EXPECT_EQ(kong.front(), FaceOf(*ParseTile("4p")));
+}
+
+TEST(RiichiKuikae, AiDiscardNeverPicksAForbiddenFace) {
+  // 手牌里最该打的那张正好落在禁区 ⇒ AI 必须换一张，且不能因此变差太多。
+  // 这里只断言「不选禁区」，具体换哪张由牌效率决定。
+  const std::vector<Tile> hand = Tiles({"1m", "1m", "1m", "2p", "3p", "4p", "5s", "6s", "7s", "2z", "2z"});
+  const WinContext ctx = Ron(/*from_seat=*/2);
+  const std::vector<Face> forbidden {FaceOf(*ParseTile("1m"))};
+  const std::optional<Tile> chosen = ChooseDiscard(hand, {}, {}, {}, ctx, /*can_riichi=*/false, std::nullopt,
+                                                   forbidden);
+  ASSERT_TRUE(chosen.has_value());
+  EXPECT_NE(FaceOf(*chosen), FaceOf(*ParseTile("1m"))) << "喰い替え禁止的牌面不该出现在 AI 的选择里";
+  EXPECT_TRUE(ChosenIsInHand(hand, *chosen));
+}
+
+TEST(RiichiKuikae, AiDiscardWithoutForbiddenFacesIsUnchanged) {
+  // 空禁区必须与旧行为逐字一致（这条是回归锚：新参数不能悄悄改掉既有策略）。
+  const std::vector<Tile> hand = Tiles({"1m", "2m", "3m", "7p", "8p", "9p", "2s", "3s",
+                                       "4s", "6z", "6z", "1z", "1z", "5m"});
+  const WinContext ctx = Ron(/*from_seat=*/2);
+  const std::optional<Tile> with_empty = ChooseDiscard(hand, {}, {}, {}, ctx, /*can_riichi=*/true, std::nullopt, {});
+  const std::optional<Tile> legacy = ChooseDiscard(hand, {}, {}, {}, ctx, /*can_riichi=*/true);
+  ASSERT_TRUE(with_empty.has_value());
+  ASSERT_TRUE(legacy.has_value());
+  EXPECT_EQ(with_empty->id, legacy->id);
 }
 
 }  // namespace

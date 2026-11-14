@@ -66,7 +66,7 @@ check('tenpai 生效', { isTenpai: s.tenpai.isTenpai, waits: s.tenpai.waits.leng
 app.applyTenpai({ tenpai_seq: 4, is_tenpai: true, waits: [{ tile: '9z', remaining: 4 }] });
 check('过期 tenpai 帧被丢弃', s.tenpai.waits[0].tile, '3m');
 app.applyTenpai({ tenpai_seq: 6, is_tenpai: false, waits: [{ tile: '9z', remaining: 4 }] });
-check('is_tenpai=false 清空 waits', s.tenpai, { isTenpai: false, waits: [], noYaku: false });
+check('is_tenpai=false 清空 waits', s.tenpai, { isTenpai: false, waits: [], noYaku: false, furiten: false });
 app.applyTenpai({ tenpai_seq: 7, is_tenpai: true, waits: [{ tile: '5m', remaining: 9 }] });
 check('waits.remaining 越界被夹到 4', s.tenpai.waits[0].remaining, 4);
 
