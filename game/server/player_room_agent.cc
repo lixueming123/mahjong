@@ -30,8 +30,8 @@ bool HasRoom(const PlayerServices& services) {
 }
 
 void ForwardToRoom(const PlayerServices& services, json::Value frame) {
-  ActorSendScope().spawn(services.room.Send<&RoomEndpoint::Dispatch>(
-      RoomEnvelope::GameFrame(services.session.Info(), std::move(frame))));
+  ActorSendScope().spawn(
+      services.room.Send<&RoomEndpoint::Dispatch>(RoomEnvelope::GameFrame(services.session.Info(), std::move(frame))));
 }
 
 }  // namespace
@@ -51,6 +51,18 @@ void HandleDiscard(const PlayerServices& services, json::Value frame) {
 void HandleAction(const PlayerServices& services, json::Value frame) {
   frame_parser::Error parse_error;
   if (!frame_parser::ValidateAction(frame, &parse_error)) {
+    services.player.ReplyParseError(parse_error);
+    return;
+  }
+  if (!HasRoom(services)) {
+    return;
+  }
+  ForwardToRoom(services, std::move(frame));
+}
+
+void HandleAutoplay(const PlayerServices& services, json::Value frame) {
+  frame_parser::Error parse_error;
+  if (!frame_parser::ValidateAutoplay(frame, &parse_error)) {
     services.player.ReplyParseError(parse_error);
     return;
   }

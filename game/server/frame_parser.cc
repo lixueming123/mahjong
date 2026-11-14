@@ -56,7 +56,7 @@ std::optional<Envelope> ParseEnvelope(std::string_view line, Error* error) {
     return std::nullopt;
   }
   const json::Value* type = parsed->Find("type");
-  // PROTOCOL v2.0 §1.3: "type" is an integer wire value (1..27, §1.3.1); 3.0 and strings are
+  // PROTOCOL v2.0 §1.3: "type" is an integer wire value (1..28, §1.3.1); 3.0 and strings are
   // field-type errors. Whether the value is a routable client frame is dispatch, not parsing.
   if (type == nullptr || !type->IsInteger()) {
     RejectBadRequest(error, "frame must carry an integer \"type\"");
@@ -188,6 +188,14 @@ bool ValidateAction(const json::Value& frame, Error* error) {
     if (!protocol::IsValidTileCode(tile.AsString())) {
       return RejectUnknownTile(error, tile.AsString());
     }
+  }
+  return true;
+}
+
+bool ValidateAutoplay(const json::Value& frame, Error* error) {
+  const json::Value* on = frame.Find("on");
+  if (on == nullptr || !on->IsBool()) {
+    return RejectBadRequest(error, "autoplay requires a boolean \"on\"");
   }
   return true;
 }

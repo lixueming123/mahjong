@@ -7,7 +7,7 @@
 //
 //   kSessionFrameBindings   login / register / ping / stats_request   the player's own account
 //   kLobbyFrameBindings     list_rooms / create_room / join_room / ready / sync   -> LobbyActor
-//   kRoomFrameBindings      discard / action                          -> the room (RoomEndpoint)
+//   kRoomFrameBindings      discard / action / autoplay               -> the room (RoomEndpoint)
 //
 // Handlers are free functions rather than members of an agent class: they are stateless, and a
 // free function cannot quietly accumulate player state the way a class can. Everything they may
@@ -59,6 +59,7 @@ void HandleSync(const PlayerServices& services, json::Value frame);
 // ---- room-owned frames (player_room_agent.cc) -----------------------------------------
 void HandleDiscard(const PlayerServices& services, json::Value frame);
 void HandleAction(const PlayerServices& services, json::Value frame);
+void HandleAutoplay(const PlayerServices& services, json::Value frame);
 
 // One client frame type: its wire enum value (PROTOCOL v2.0 §1.3.1), whether an identity is
 // required (PROTOCOL.md §4.1), and who handles it.
@@ -89,6 +90,7 @@ inline constexpr FrameBinding kLobbyFrameBindings[] = {
 inline constexpr FrameBinding kRoomFrameBindings[] = {
     {.type = protocol::FrameType::kDiscard, .requires_login = true, .handle = &HandleDiscard},
     {.type = protocol::FrameType::kAction, .requires_login = true, .handle = &HandleAction},
+    {.type = protocol::FrameType::kAutoplay, .requires_login = true, .handle = &HandleAutoplay},
 };
 
 }  // namespace mahjong

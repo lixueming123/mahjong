@@ -89,6 +89,7 @@ export function createState() {
     rooms: [],                        // §5.14 大厅房间列表（最近一次 room_list）
     handCounts: [HAND_SIZE, HAND_SIZE, HAND_SIZE, HAND_SIZE],
     disconnected: [false, false, false, false],
+    autoplay: [false, false, false, false],  // 真人交给 AI；与 isBot 无关，可取消
     riichi: [false, false, false, false],
     riichiTiles: [],                  // v1.21：立直宣言牌候选（当前打牌窗口）
     riichiArming: false,              // 立直宣言模式：点候选牌才发帧（渲染层据此高亮）
@@ -242,6 +243,8 @@ export function createState() {
       state.isBot[view] = !!seat.is_bot;
       state.handCounts[view] = Number.isInteger(seat.hand_count) ? seat.hand_count : state.handCounts[view];
       state.disconnected[view] = !!seat.disconnected;
+      // 缺键 = 未托管。机器人座位不会带这个键，取消托管也不改 is_bot。
+      state.autoplay[view] = !!seat.autoplay && !seat.is_bot;
       state.riichi[view] = !!seat.riichi;
       const discards = Array.isArray(seat.discards) ? seat.discards : [];
       state.rivers[view] = discards.filter(isValidTile);
@@ -571,6 +574,8 @@ export function createState() {
     state.remaining = 0;
     state.turn = 0;
     state.phase = 'idle';
+    state.autoplay = [false, false, false, false];
+    state.disconnected = [false, false, false, false];
     state.result = null;
     state.resultAt = 0;
     state.winSeat = null;

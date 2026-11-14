@@ -199,18 +199,21 @@ class ClassicMahjongGame final : public Game {
   GameVerdict ValidateAction(int seat, const json::Value& frame) const;
   void ApplyDiscardFrame(GameStep& step, int seat, const json::Value& frame);
   void ApplyActionFrame(GameStep& step, int seat, const json::Value& frame);
+  // Manual handoff. Never writes is_bot: a bot seat cannot be turned back into a human.
+  void ApplyAutoplay(GameStep& step, int seat, bool on);
+  // Re-sends the still-open action_request (same seq, same deadline) after autoplay is cancelled.
+  void EmitOpenRequest(GameStep& step, int seat);
 
   // ---- helpers ----------------------------------------------------------------------
   uint64_t Transition();
   void ResetClaimWindow();
   // A seat is played by the server inside the message that opens its window only when it is a
-  // bot or when it has no wire to ask (defensive: only seat 0 ever has a sink in this
-  // milestone). A disconnected human seat is NOT automated: it keeps the window's normal
-  // countdown, so the deadline — not the disconnect — plays the default action.
+  // bot, when the human turned autoplay on, or when it has no wire to ask. A disconnected human
+  // seat is NOT automated: it keeps the window's normal countdown, so the deadline — not the
+  // disconnect — plays the default action. is_bot itself is fixed for the match.
   bool IsAutomated(int seat) const { return seats_[static_cast<size_t>(seat)].is_bot; }
-  bool NeedsPlayerReply(int seat) const {
-    return !IsAutomated(seat) && seats_[static_cast<size_t>(seat)].wired;
-  }
+  bool PlaysWithAi(int seat) const { return IsAutomated(seat) || autoplay_[static_cast<size_t>(seat)]; }
+  bool NeedsPlayerReply(int seat) const { return !PlaysWithAi(seat) && seats_[static_cast<size_t>(seat)].wired; }
   bool SeatPresent(int seat) const { return !disconnected_[static_cast<size_t>(seat)]; }
   std::optional<Tile> DefaultDiscardFor(int seat) const;
   // Takes the next tile off the live wall. Classic draws every tile the same way; the riichi
@@ -274,6 +277,7 @@ class ClassicMahjongGame final : public Game {
   bool deadlines_supported_ = false;
   std::vector<GameSeat> seats_;
   std::array<bool, kSeatCount> disconnected_ {};  // fed by OnSeatPresence
+  std::array<bool, kSeatCount> autoplay_ {};      // human handed the seat to the AI; never set on a bot
   std::array<std::vector<Tile>, kSeatCount> hands_;
   std::array<std::vector<Meld>, kSeatCount> melds_;
   std::array<std::vector<Tile>, kSeatCount> discards_;

@@ -1,5 +1,5 @@
 {
-  "version": "2.1",
+  "version": "2.2",
   "note": "Frozen wire enum values for PROTOCOL v2.1 (game/docs/PROTOCOL.md §1.3.1). Every domain reserves 0 = INVALID; real values are contiguous 1..N. NEVER renumber: append only at the end of a domain and bump the protocol version. Keys are the canonical names (the v1.x wire strings where they existed) for docs, logs, DB boundary translation and golden-log conversion.",
   "domains": {
     "frame_type": {
@@ -30,7 +30,8 @@
       "room_list": 24,
       "match_end": 25,
       "tenpai": 26,
-      "room_update": 27
+      "room_update": 27,
+      "autoplay": 28
     },
     "action": {
       "INVALID": 0,

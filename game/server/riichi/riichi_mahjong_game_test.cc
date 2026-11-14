@@ -18,7 +18,7 @@
 // human policy never declares riichi and never answers a chankan window — the frozen transcript
 // was produced by a policy that did not, so changing it here would only change the hash.
 
-#include <gtest/gtest.h>
+#include "riichi/riichi_mahjong_game.h"
 
 #include <algorithm>
 #include <array>
@@ -29,9 +29,10 @@
 #include <utility>
 #include <vector>
 
+#include <gtest/gtest.h>
+
 #include "game_test_support.h"
 #include "protocol.h"
-#include "riichi/riichi_mahjong_game.h"
 
 namespace mahjong {
 namespace {
@@ -417,6 +418,134 @@ TEST(RiichiMahjongGameTest, DeclaredRiichiIsPublicButHandsStayPrivate) {
       }
     }
   }
+}
+
+json::Value AutoplayFrame(bool on) {
+  json::Value frame = json::Value::Obj();
+  frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kAutoplay)));
+  frame.Set("on", json::Value::Bool(on));
+  return frame;
+}
+
+// Manual autoplay is a separate flag from is_bot. Turning it off hands the open window back;
+// a bot seat ignores the frame, so is_bot cannot be cancelled.
+TEST(RiichiMahjongGameTest, ManualAutoplayCanBeCancelledAndDoesNotChangeBots) {
+  RiichiMahjongGame game;
+  GameContext context;
+  context.room_id = "r-autoplay";
+  context.seed = 7;
+  context.action_timeout_ms = kActionTimeoutMs;
+  context.inter_hand_delay_ms = 0;
+  context.ai_delay_ms = 900;
+  context.deadlines_supported = true;
+  context.options_json = kTonpuOptions;
+  for (int seat = 0; seat < kSeatCount; ++seat) {
+    context.seats.push_back(GameSeat {.seat = seat,
+                                      .is_bot = seat != kSeat0,
+                                      .wired = true,
+                                      .player_id = seat == kSeat0 ? "p-human" : "bot-" + std::to_string(seat),
+                                      .name = seat == kSeat0 ? "Human" : "AI-" + std::to_string(seat)});
+  }
+  const GameStep setup = game.Setup(context);
+  ASSERT_FALSE(setup.outbounds.empty());
+  ASSERT_EQ(game.CurrentWindow(), protocol::Window::kDiscard);
+  ASSERT_EQ(game.current_seat(), kSeat0);
+  const uint64_t seq = game.seq();
+
+  EXPECT_EQ(game.Validate(/*seat=*/1, AutoplayFrame(false)).kind, GameVerdict::Kind::kDrop);
+  const GameStep bot_ignored = game.Apply(/*seat=*/1, AutoplayFrame(false));
+  EXPECT_TRUE(bot_ignored.empty());
+  EXPECT_EQ(game.seq(), seq);
+
+  ASSERT_EQ(game.Validate(kSeat0, AutoplayFrame(true)).kind, GameVerdict::Kind::kAccept);
+  const GameStep started = game.Apply(kSeat0, AutoplayFrame(true));
+  EXPECT_EQ(game.seq(), seq);
+  EXPECT_EQ(game.CurrentWindow(), protocol::Window::kDiscard);
+  bool paced = false;
+  for (const Deadline& deadline : started.deadlines) {
+    if (IsAiPacingToken(deadline.token) && WindowSeqOfToken(deadline.token) == seq) {
+      paced = true;
+    }
+  }
+  EXPECT_TRUE(paced);
+  bool saw_sync = false;
+  for (const Outbound& outbound : started.outbounds) {
+    const std::optional<json::Value> frame = json::Value::Parse(outbound.frame, nullptr);
+    if (!frame.has_value()) {
+      continue;
+    }
+    EXPECT_NE(TypeOf(*frame), protocol::FrameType::kDiscardEvent);
+    if (TypeOf(*frame) != protocol::FrameType::kStateSync) {
+      continue;
+    }
+    saw_sync = true;
+    const json::Value* seats = frame->Find("seats");
+    ASSERT_NE(seats, nullptr);
+    for (const json::Value& entry : seats->AsArray()) {
+      const int seat = static_cast<int>(IntOf(entry, "seat"));
+      const json::Value* is_bot = entry.Find("is_bot");
+      ASSERT_NE(is_bot, nullptr);
+      if (seat == kSeat0) {
+        EXPECT_FALSE(is_bot->AsBool());
+        const json::Value* autoplay = entry.Find("autoplay");
+        ASSERT_NE(autoplay, nullptr);
+        EXPECT_TRUE(autoplay->AsBool());
+      } else {
+        EXPECT_TRUE(is_bot->AsBool());
+        EXPECT_EQ(entry.Find("autoplay"), nullptr) << "seat " << seat;
+      }
+    }
+  }
+  EXPECT_TRUE(saw_sync);
+
+  json::Value discard = json::Value::Obj();
+  discard.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kDiscard)));
+  discard.Set("tile", json::Value::Str(FormatTile(game.hand_of(kSeat0).back())));
+  discard.Set("seq", json::Value::Int(static_cast<int64_t>(seq)));
+  // The room never Apply-s a dropped frame. Doing so here would play the tile anyway.
+  EXPECT_EQ(game.Validate(kSeat0, discard).kind, GameVerdict::Kind::kDrop);
+  EXPECT_EQ(game.seq(), seq);
+
+  const GameStep stopped = game.Apply(kSeat0, AutoplayFrame(false));
+  EXPECT_EQ(game.seq(), seq);
+  EXPECT_EQ(game.CurrentWindow(), protocol::Window::kDiscard);
+  bool replayed = false;
+  bool cleared = false;
+  for (const Outbound& outbound : stopped.outbounds) {
+    const std::optional<json::Value> frame = json::Value::Parse(outbound.frame, nullptr);
+    if (!frame.has_value()) {
+      continue;
+    }
+    if (TypeOf(*frame) == protocol::FrameType::kActionRequest && static_cast<uint64_t>(IntOf(*frame, "seq")) == seq) {
+      replayed = true;
+    }
+    if (TypeOf(*frame) != protocol::FrameType::kStateSync) {
+      continue;
+    }
+    const json::Value* seats = frame->Find("seats");
+    ASSERT_NE(seats, nullptr);
+    for (const json::Value& entry : seats->AsArray()) {
+      if (IntOf(entry, "seat") != kSeat0) {
+        EXPECT_EQ(entry.Find("autoplay"), nullptr);
+        continue;
+      }
+      cleared = true;
+      EXPECT_FALSE(entry.Find("is_bot")->AsBool());
+      EXPECT_EQ(entry.Find("autoplay"), nullptr);
+    }
+  }
+  EXPECT_TRUE(replayed);
+  EXPECT_TRUE(cleared);
+
+  const GameStep late = game.OnTimeout(MakeAiPacingToken(seq));
+  EXPECT_TRUE(late.empty());
+  EXPECT_EQ(game.seq(), seq);
+  EXPECT_EQ(game.current_seat(), kSeat0);
+
+  ASSERT_EQ(game.Validate(kSeat0, discard).kind, GameVerdict::Kind::kAccept);
+  game.Apply(kSeat0, discard);
+  EXPECT_NE(game.seq(), seq);
+  EXPECT_FALSE(game.discards_of(kSeat0).empty());
 }
 
 }  // namespace

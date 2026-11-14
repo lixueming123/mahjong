@@ -159,7 +159,7 @@ body { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-s
 }
 .call-btn.win { border-color: #e58080; color: #ffd9d9; }
 
-/* 窗口一开，能按的按钮自己亮：吃/碰/杠/立直/和/过 不再靠玩家去盯操作栏 */
+/* 窗口一开，出现的按钮自己亮：做不了的已经从栏里拿掉，不靠置灰占位 */
 .call-btn:not(:disabled) { animation: btn-hot 1.15s ease-in-out infinite; }
 .call-btn.win:not(:disabled) {
   background: linear-gradient(180deg, #d94b4b, #8c1f28);
@@ -231,6 +231,11 @@ body { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-s
   padding: 3px 10px; border-radius: 12px;
   border: 1px solid rgba(160,190,230,.45);
   background: rgba(12,22,40,.8); color: #bcd2f0;
+}
+.mini-btn.on {
+  border-color: #e0b15a;
+  color: #ffe3a3;
+  background: rgba(80, 52, 12, .9);
 }
 .signal { position: absolute; display: flex; align-items: flex-end; gap: 3px; height: 22px; }
 .signal i { width: 5px; background: #4ade80; border-radius: 1px; }
@@ -308,25 +313,30 @@ body { font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-s
 .tp-note:empty { display: none; }
 
 /* ---------- 播报 ---------- */
+/* 锚点是字的中心。座位落在各自牌列内侧，别压到手牌和名牌上。 */
 .broadcast {
-  position: absolute; left: 960px; top: 198px; transform: translate(-50%, 0);
-  display: flex; align-items: baseline; gap: 14px;
-  text-align: center; pointer-events: none; z-index: 30;
-  white-space: nowrap;
+  position: absolute; left: 960px; top: 230px; transform: translate(-50%, -50%);
+  pointer-events: none; z-index: 30; white-space: nowrap;
 }
+.broadcast.seat-0 { left: 900px; top: 650px; }
+.broadcast.seat-1 { left: 1380px; top: 470px; }
+.broadcast.seat-2 { left: 960px; top: 200px; }
+.broadcast.seat-3 { left: 540px; top: 430px; }
+.bc-pop {
+  display: flex; align-items: baseline; gap: 14px; text-align: center;
+}
+.bc-pop.in { animation: bc-in .26s cubic-bezier(.2,1.5,.5,1) both; }
+.bc-pop.out { animation: bc-out .35s ease-in forwards; }
 .bc-main {
   font-size: 66px; font-weight: 900; letter-spacing: 10px; line-height: 1.1;
   color: #ffe6ad;
   text-shadow:
     0 0 18px rgba(255,196,84,.65), 0 4px 0 #6b3d06, 0 8px 26px rgba(0,0,0,.85);
-  animation: bc-in .26s cubic-bezier(.2,1.5,.5,1) both;
 }
 .bc-sub {
   font-size: 19px; font-weight: 700; letter-spacing: 2px; color: #dbe7ff;
   text-shadow: 0 2px 10px #000;
-  animation: bc-in .3s .04s ease-out both;
 }
-.broadcast.out { animation: bc-out .35s ease-in forwards; }
 @keyframes bc-in {
   from { opacity: 0; transform: translateY(18px) scale(1.18); }
   to { opacity: 1; transform: none; }

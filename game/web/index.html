@@ -76,15 +76,15 @@
   <div class="side-bar side-left" style="left:0;top:420px"><span>理</span><span>和</span><span>鸣</span><span>切</span><em>▶</em></div>
   <div class="side-bar side-right" style="left:1858px;top:455px"><span>表</span><span>情</span></div>
 
-  <!-- 右下操作栏 -->
-  <div class="action-bar" style="left:1180px;top:762px">
-    <button class="call-btn" disabled>吃</button>
-    <button class="call-btn" disabled>碰</button>
-    <button class="call-btn" disabled>杠</button>
-    <button class="call-btn" disabled>立直</button>
-    <button class="call-btn win" disabled>和</button>
-    <button class="call-btn" id="btn-pass">过</button>
-    <button class="call-btn primary" id="btn-discard" disabled>打出</button>
+  <!-- 右下操作栏：只出现当前能操作的按钮，右缘固定，少几个就往右收 -->
+  <div class="action-bar" style="right:158px;top:762px">
+    <button class="call-btn" hidden disabled>吃</button>
+    <button class="call-btn" hidden disabled>碰</button>
+    <button class="call-btn" hidden disabled>杠</button>
+    <button class="call-btn" hidden disabled>立直</button>
+    <button class="call-btn win" hidden disabled>和</button>
+    <button class="call-btn" id="btn-pass" hidden disabled>过</button>
+    <button class="call-btn primary" id="btn-discard" hidden disabled>打出</button>
   </div>
 
   <!-- 鸣牌提示：这次到底吃/碰/和哪一张 -->
@@ -110,10 +110,12 @@
     <span class="tp-note" id="tp-note"></span>
   </div>
 
-  <!-- 播报 -->
+  <!-- 播报：吃/碰/杠/立直/和按座位落点，开局与流局留在桌心 -->
   <div id="broadcast" class="broadcast" hidden>
-    <div class="bc-main" id="bc-main"></div>
-    <div class="bc-sub" id="bc-sub"></div>
+    <div class="bc-pop" id="bc-pop">
+      <div class="bc-main" id="bc-main"></div>
+      <div class="bc-sub" id="bc-sub"></div>
+    </div>
   </div>
 
   <!-- 轻提示 -->
@@ -127,6 +129,7 @@
     <span id="log-text">—</span>
   </div>
   <div class="hud-right" style="left:1450px;top:878px">
+    <button class="mini-btn" id="btn-autoplay" hidden title="让 AI 接手打牌，再点一次取消">托管</button>
     <button class="mini-btn" id="btn-sfx">♪ 音效开</button>
     <span id="stats">— draw calls</span>
   </div>

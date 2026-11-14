@@ -14,7 +14,7 @@
 // let it expire; round advance and match end are fired from the recorded deadlines) because the
 // transcript's cross-seat order is a property of that loop, not of the frames.
 
-#include <gtest/gtest.h>
+#include "classic/classic_mahjong_game.h"
 
 #include <algorithm>
 #include <array>
@@ -25,7 +25,8 @@
 #include <utility>
 #include <vector>
 
-#include "classic/classic_mahjong_game.h"
+#include <gtest/gtest.h>
+
 #include "game_test_support.h"
 #include "protocol.h"
 
@@ -158,8 +159,7 @@ class Driver {
       if (request.has_value() && OptionOf(*request, protocol::Action::kWin) != nullptr) {
         SendAction(protocol::Action::kWin, {}, seq);
       } else {
-        std::optional<Tile> chosen =
-            ChooseDiscard(game_.hand_of(kSeat0), game_.melds_of(kSeat0), drawn_);
+        std::optional<Tile> chosen = ChooseDiscard(game_.hand_of(kSeat0), game_.melds_of(kSeat0), drawn_);
         const std::vector<Tile> hand = SortedTiles(game_.hand_of(kSeat0));
         SendDiscard(chosen.value_or(hand.back()), seq);
         drawn_.reset();
@@ -302,6 +302,73 @@ TEST(ClassicMahjongGameTest, NoFrameCarriesTheWallOrTheSeed) {
       EXPECT_EQ(frame.find("\"seed\""), std::string::npos) << frame;
     }
   }
+}
+
+json::Value AutoplayFrame(bool on) {
+  json::Value frame = json::Value::Obj();
+  frame.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kAutoplay)));
+  frame.Set("on", json::Value::Bool(on));
+  return frame;
+}
+
+// Same contract as the riichi test: cancelling restores the human, and a bot seat is not a toggle.
+TEST(ClassicMahjongGameTest, ManualAutoplayCanBeCancelledAndDoesNotChangeBots) {
+  ClassicMahjongGame game;
+  GameContext context;
+  context.room_id = "r-autoplay";
+  context.seed = 7;
+  context.action_timeout_ms = kActionTimeoutMs;
+  context.inter_hand_delay_ms = 0;
+  context.ai_delay_ms = 900;
+  context.deadlines_supported = true;
+  for (int seat = 0; seat < kSeatCount; ++seat) {
+    context.seats.push_back(GameSeat {.seat = seat,
+                                      .is_bot = seat != kSeat0,
+                                      .wired = true,
+                                      .player_id = seat == kSeat0 ? "p-human" : "bot-" + std::to_string(seat),
+                                      .name = seat == kSeat0 ? "Human" : "AI-" + std::to_string(seat)});
+  }
+  ASSERT_FALSE(game.Setup(context).outbounds.empty());
+  ASSERT_EQ(game.CurrentWindow(), protocol::Window::kDiscard);
+  ASSERT_EQ(game.current_seat(), kSeat0);
+  const uint64_t seq = game.seq();
+
+  EXPECT_EQ(game.Validate(/*seat=*/1, AutoplayFrame(false)).kind, GameVerdict::Kind::kDrop);
+  EXPECT_TRUE(game.Apply(/*seat=*/1, AutoplayFrame(false)).empty());
+
+  ASSERT_EQ(game.Validate(kSeat0, AutoplayFrame(true)).kind, GameVerdict::Kind::kAccept);
+  const GameStep started = game.Apply(kSeat0, AutoplayFrame(true));
+  EXPECT_EQ(game.seq(), seq);
+  bool paced = false;
+  for (const Deadline& deadline : started.deadlines) {
+    if (IsAiPacingToken(deadline.token)) {
+      paced = true;
+    }
+  }
+  EXPECT_TRUE(paced);
+
+  json::Value discard = json::Value::Obj();
+  discard.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kDiscard)));
+  discard.Set("tile", json::Value::Str(FormatTile(game.hand_of(kSeat0).back())));
+  discard.Set("seq", json::Value::Int(static_cast<int64_t>(seq)));
+  EXPECT_EQ(game.Validate(kSeat0, discard).kind, GameVerdict::Kind::kDrop);
+
+  const GameStep stopped = game.Apply(kSeat0, AutoplayFrame(false));
+  bool replayed = false;
+  for (const Outbound& outbound : stopped.outbounds) {
+    const std::optional<json::Value> frame = json::Value::Parse(outbound.frame, nullptr);
+    if (!frame.has_value() || TypeOf(*frame) != protocol::FrameType::kActionRequest) {
+      continue;
+    }
+    replayed = static_cast<uint64_t>(IntOf(*frame, "seq")) == seq;
+  }
+  EXPECT_TRUE(replayed);
+  EXPECT_TRUE(game.OnTimeout(MakeAiPacingToken(seq)).empty());
+  EXPECT_EQ(game.seq(), seq);
+
+  ASSERT_EQ(game.Validate(kSeat0, discard).kind, GameVerdict::Kind::kAccept);
+  game.Apply(kSeat0, discard);
+  EXPECT_NE(game.seq(), seq);
 }
 
 }  // namespace

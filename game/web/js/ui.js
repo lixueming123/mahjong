@@ -84,6 +84,7 @@ export class UI {
       tags: [0, 1, 2, 3].map((i) => $(`seat-tags-${i}`)),
       seats: [0, 1, 2, 3].map((i) => $(`seat-${i}`)),
       toggleSfx: $('btn-sfx'),
+      autoplay: $('btn-autoplay'),
 
       countdown: $('countdown'),
       cdNum: $('cd-num'),
@@ -94,6 +95,7 @@ export class UI {
       tenpaiNote: $('tp-note'),
 
       broadcast: $('broadcast'),
+      bcPop: $('bc-pop'),
       bcMain: $('bc-main'),
       bcSub: $('bc-sub'),
 
@@ -163,12 +165,28 @@ export class UI {
 
       const tags = [];
       if (state.riichi?.[view]) tags.push('<span class="seat-tag">立直</span>');
-      if (state.disconnected?.[view]) tags.push('<span class="seat-tag off">托管</span>');
+      if (state.disconnected?.[view] || (state.autoplay?.[view] && !state.isBot?.[view])) {
+        tags.push('<span class="seat-tag off">托管</span>');
+      }
       if (state.isBot?.[view] && view !== 0) tags.push('<span class="seat-tag off">AI</span>');
       if (el.tags[view]) el.tags[view].innerHTML = tags.join('');
     }
 
     this.renderTenpai(state);
+    this.renderAutoplay(state);
+  }
+
+  /** 只给真人自己。机器人的 is_bot 不能从这里取消。 */
+  renderAutoplay(state) {
+    const button = this.el.autoplay;
+    if (!button) return;
+    const mineIsBot = !!state.isBot?.[0];
+    const show = !mineIsBot && (state.phase === 'playing' ||
+      (state.phase === 'ended' && state.matchWillContinue));
+    button.hidden = !show;
+    const on = !!state.autoplay?.[0];
+    button.textContent = on ? '取消托管' : '托管';
+    button.classList.toggle('on', on);
   }
 
   /**
@@ -263,19 +281,28 @@ export class UI {
 
   // ------------------------------------------------------------------ 播报 / 提示
 
-  /** 中央大字播报：立直、碰、吃、杠、和、局终 */
-  broadcast(main, sub = '', ms = 1100) {
+  /**
+   * 大字播报。view 是屏幕座位（本家 0、下家 1、对家 2、上家 3）时，
+   * 字落在该家牌列内侧；不传则留在桌心（开局、流局）。
+   */
+  broadcast(main, sub = '', ms = 1100, view = null) {
     const el = this.el;
     if (!el.broadcast) return;
     clearTimeout(this._bcTimer);
     el.broadcast.hidden = false;
-    el.broadcast.classList.remove('out');
+    el.broadcast.classList.remove('seat-0', 'seat-1', 'seat-2', 'seat-3');
+    if (view === 0 || view === 1 || view === 2 || view === 3) {
+      el.broadcast.classList.add(`seat-${view}`);
+    }
     el.bcMain.textContent = main;
     el.bcSub.textContent = sub;
-    // 重启动画：强制 reflow
-    void el.broadcast.offsetWidth;
+    const pop = el.bcPop || el.broadcast;
+    pop.classList.remove('in', 'out');
+    void pop.offsetWidth;
+    pop.classList.add('in');
     this._bcTimer = setTimeout(() => {
-      el.broadcast.classList.add('out');
+      pop.classList.remove('in');
+      pop.classList.add('out');
       this._bcTimer = setTimeout(() => { el.broadcast.hidden = true; }, 360);
     }, Math.max(360, ms));
   }
@@ -385,7 +412,7 @@ export class UI {
           : (frame.reason === REASON.DRAW_EXHAUSTED && frame.tenpai?.[result.seat] ? '听牌' : '—');
       const delta = result.delta_score;
       const total = isRiichi ? frame.points_after[result.seat] : result.match_total;
-      const dealer = frame.dealer === result.seat ? '<em>亲</em>' : '';
+      const dealer = frame.dealer === result.seat ? '<em>庄</em>' : '';
       return `<div class="rs-row${me}">`
         + `<span class="name">${esc(state.seatNames[view])}${dealer}</span>`
         + `<span class="role">${esc(role)}</span>`

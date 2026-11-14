@@ -304,8 +304,7 @@ GameStep RiichiMahjongGame::Setup(const GameContext& context) {
   seed_ = context.seed;
   action_timeout_ms_ = context.action_timeout_ms;
   ai_delay_ms_ = context.ai_delay_ms < 0 ? kRiichiDefaultAiDelayMs : context.ai_delay_ms;
-  inter_hand_delay_ms_ =
-      context.inter_hand_delay_ms < 0 ? kRiichiDefaultInterHandDelayMs : context.inter_hand_delay_ms;
+  inter_hand_delay_ms_ = context.inter_hand_delay_ms < 0 ? kRiichiDefaultInterHandDelayMs : context.inter_hand_delay_ms;
   deadlines_supported_ = context.deadlines_supported;
   seats_ = context.seats;
   // Seat number == index everywhere in this class; make that true even if the caller handed
@@ -372,6 +371,20 @@ GameVerdict RiichiMahjongGame::Validate(int seat, const json::Value& frame) cons
   if (!game_started_) {
     return GameVerdict::Drop();
   }
+  // autoplay carries no seq: it is a seat flag, not a window reply. A bot seat is refused
+  // here so is_bot can never be cleared by this frame.
+  if (const json::Value* type = frame.Find("type");
+      type != nullptr && type->IsInteger() &&
+      protocol::ParseFrameType(type->AsInt()) == protocol::FrameType::kAutoplay) {
+    if (phase_ == Phase::kMatchEnd || IsAutomated(seat)) {
+      return GameVerdict::Drop();
+    }
+    const json::Value* on = frame.Find("on");
+    if (on == nullptr || !on->IsBool()) {
+      return GameVerdict::Refuse(protocol::ErrorCode::kBadRequest, "autoplay requires a boolean \"on\"");
+    }
+    return GameVerdict::Accept();
+  }
   // v1.6（C4/C13）：只有**场终**才静默早退；局终后的对局帧回 BAD_REQUEST（新局未开始，
   // 客户端不得把 game_end 当作可继续对局的信号）。
   if (phase_ == Phase::kMatchEnd) {
@@ -392,6 +405,12 @@ GameVerdict RiichiMahjongGame::Validate(int seat, const json::Value& frame) cons
     return GameVerdict::Drop();
   }
   const std::optional<protocol::FrameType> frame_type = protocol::ParseFrameType(type->AsInt());
+  if (frame_type == protocol::FrameType::kDiscard || frame_type == protocol::FrameType::kAction) {
+    // A click that races the handoff must not be charged to the illegal-op quota.
+    if (autoplay_[static_cast<size_t>(seat)]) {
+      return GameVerdict::Drop();
+    }
+  }
   if (frame_type == protocol::FrameType::kDiscard) {
     return ValidateDiscard(seat, frame);
   }
@@ -458,8 +477,7 @@ GameVerdict RiichiMahjongGame::ValidateAction(int seat, const json::Value& frame
 
   if (phase_ == Phase::kDiscardWindow && discard_window_open_) {
     if (seat != current_seat_) {
-      return GameVerdict::Refuse(protocol::ErrorCode::kNoPendingAction,
-                                 "the discard window belongs to another seat");
+      return GameVerdict::Refuse(protocol::ErrorCode::kNoPendingAction, "the discard window belongs to another seat");
     }
     if (action == protocol::Action::kAnkan || action == protocol::Action::kKakan) {
       // v1.6 自理杠（PROTOCOL §4.6）：只在打牌窗口、tiles 恰 1 个牌面元素、以窗口 options 为准，
@@ -569,12 +587,87 @@ GameStep RiichiMahjongGame::Apply(int seat, const json::Value& action) {
     return step;
   }
   const std::optional<protocol::FrameType> frame_type = protocol::ParseFrameType(type->AsInt());
-  if (frame_type == protocol::FrameType::kDiscard) {
+  if (frame_type == protocol::FrameType::kAutoplay) {
+    const json::Value* on = action.Find("on");
+    if (on != nullptr && on->IsBool()) {
+      ApplyAutoplay(step, seat, on->AsBool());
+    }
+  } else if (frame_type == protocol::FrameType::kDiscard) {
     ApplyDiscardFrame(step, seat, action);
   } else if (frame_type == protocol::FrameType::kAction) {
     ApplyActionFrame(step, seat, action);
   }
   return step;
+}
+
+void RiichiMahjongGame::EmitOpenRequest(GameStep& step, int seat) {
+  if (!SeatPresent(seat) || window_deadline_ms_ <= clock::EpochMs()) {
+    return;
+  }
+  if (phase_ == Phase::kDiscardWindow && discard_window_open_ && current_seat_ == seat) {
+    Emit(step, seat,
+         BuildActionRequestFrame(seq_, window_deadline_ms_, protocol::Window::kDiscard, discard_options_, std::nullopt,
+                                 discard_riichi_tiles_));
+  } else if (phase_ == Phase::kClaimWindow && claim_open_ && claim_recipient_[static_cast<size_t>(seat)] &&
+             !claim_answers_[static_cast<size_t>(seat)].answered) {
+    Emit(step, seat,
+         BuildActionRequestFrame(seq_, window_deadline_ms_,
+                                 claim_chankan_ ? protocol::Window::kChankan : protocol::Window::kClaim,
+                                 claim_options_[static_cast<size_t>(seat)],
+                                 claim_chankan_ ? std::optional<Tile>(claim_tile_) : std::nullopt));
+  }
+}
+
+void RiichiMahjongGame::ApplyAutoplay(GameStep& step, int seat, bool on) {
+  // A bot is already played by the AI. This frame must not clear is_bot.
+  if (seat < 0 || seat >= kSeatCount || IsAutomated(seat)) {
+    return;
+  }
+  const size_t index = static_cast<size_t>(seat);
+  if (autoplay_[index] == on) {
+    EmitPerSeat(step, StateSyncFrames());
+    return;
+  }
+  autoplay_[index] = on;
+  spdlog::info("room {}: seat {} autoplay {}", room_id_, seat, on ? "on" : "off");
+  const bool discard_here = phase_ == Phase::kDiscardWindow && discard_window_open_ && current_seat_ == seat;
+  const bool claim_here =
+      phase_ == Phase::kClaimWindow && claim_open_ && claim_recipient_[index] && !claim_answers_[index].answered;
+  if (claim_here) {
+    if (on) {
+      if (claim_pending_humans_ > 0) {
+        --claim_pending_humans_;
+      }
+      if (ai_delay_ms_ > 0) {
+        if (!ai_claim_pending_) {
+          if (ScheduleAiAction(step, ai_delay_ms_)) {
+            ai_claim_pending_ = true;
+          } else {
+            ResolveAutomatedClaimAnswers();
+          }
+        }
+      } else {
+        ResolveAutomatedClaimAnswers();
+      }
+    } else {
+      const bool timer_already = claim_pending_humans_ > 0;
+      ++claim_pending_humans_;
+      EmitOpenRequest(step, seat);
+      if (!timer_already) {
+        OpenWindowTimer(step);
+      }
+    }
+  }
+  if (discard_here && !on) {
+    // The pacing message stays armed; clearing the flag makes it a no-op. The original
+    // window timer still owns the deadline, so the replayed request keeps that deadline.
+    ai_discard_pending_ = false;
+    EmitOpenRequest(step, seat);
+  }
+  EmitPerSeat(step, StateSyncFrames());
+  if (on && (discard_here || claim_here)) {
+    Pump(step);
+  }
 }
 
 void RiichiMahjongGame::ApplyDiscardFrame(GameStep& step, int seat, const json::Value& frame) {
@@ -793,8 +886,7 @@ void RiichiMahjongGame::Pump(GameStep& step) {
         //     GAME_DESIGN §5.6.2 — play the tile just drawn, or the largest tile when the
         //     window has no draw record — immediately: there is nobody to answer it. A
         //     disconnected seat with a wire is NOT here; its window waits for the deadline.
-        if (seats_[static_cast<size_t>(seat)].is_bot && ai_delay_ms_ > 0 &&
-            (ai_discard_pending_ || ScheduleAiAction(step, ai_delay_ms_))) {
+        if (PlaysWithAi(seat) && ai_delay_ms_ > 0 && (ai_discard_pending_ || ScheduleAiAction(step, ai_delay_ms_))) {
           ai_discard_pending_ = true;
           return;  // the decision arrives as a deadline; the table keeps serving human frames
         }
@@ -934,8 +1026,8 @@ void RiichiMahjongGame::ApplyDiscard(GameStep& step, int seat, Tile tile) {
 }
 
 void RiichiMahjongGame::OpenClaimWindow(GameStep& step, int from_seat, Tile tile,
-                                         const std::array<bool, kSeatCount>& recipients,
-                                         const std::array<std::vector<Option>, kSeatCount>& options, bool chankan) {
+                                        const std::array<bool, kSeatCount>& recipients,
+                                        const std::array<std::vector<Option>, kSeatCount>& options, bool chankan) {
   claim_open_ = true;
   claim_chankan_ = chankan;
   claim_from_seat_ = from_seat;
@@ -961,12 +1053,12 @@ void RiichiMahjongGame::OpenClaimWindow(GameStep& step, int from_seat, Tile tile
       // the frozen §5.6.2 default action immediately, exactly as the timeout message would.
       // A disconnected human is not here: it stays a pending recipient until the deadline.
       // A bot only takes a meld that does not worsen the shanten of its hand (t21/t23).
-      if (seats_[static_cast<size_t>(seat)].is_bot && ai_delay_ms_ > 0) {
+      if (PlaysWithAi(seat) && ai_delay_ms_ > 0) {
         ai_pending = true;
         continue;
       }
       Option choice;
-      if (seats_[static_cast<size_t>(seat)].is_bot) {
+      if (PlaysWithAi(seat)) {
         choice = ChooseClaimAnswer(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)],
                                    options[static_cast<size_t>(seat)], tile);
       } else if (const Option* pass = FindOption(options[static_cast<size_t>(seat)], protocol::Action::kPass);
@@ -985,10 +1077,9 @@ void RiichiMahjongGame::OpenClaimWindow(GameStep& step, int from_seat, Tile tile
     ++claim_pending_humans_;
     if (SeatPresent(seat)) {
       Emit(step, seat,
-           BuildActionRequestFrame(seq_, window_deadline_ms_,
-                                   chankan ? protocol::Window::kChankan : protocol::Window::kClaim,
-                                   options[static_cast<size_t>(seat)],
-                                   chankan ? std::optional<Tile>(tile) : std::nullopt));
+           BuildActionRequestFrame(
+               seq_, window_deadline_ms_, chankan ? protocol::Window::kChankan : protocol::Window::kClaim,
+               options[static_cast<size_t>(seat)], chankan ? std::optional<Tile>(tile) : std::nullopt));
     }
   }
   if (claim_pending_humans_ > 0) {
@@ -1006,7 +1097,7 @@ void RiichiMahjongGame::OpenClaimWindow(GameStep& step, int from_seat, Tile tile
 }
 
 Option RiichiMahjongGame::ChooseClaimAnswer(const std::vector<Tile>& hand, const std::vector<Meld>& melds,
-                                             const std::vector<Option>& options, Tile claimed) {
+                                            const std::vector<Option>& options, Tile claimed) {
   Option pass;
   if (const Option* declared = FindOption(options, protocol::Action::kPass); declared != nullptr) {
     pass = *declared;
@@ -1132,7 +1223,7 @@ void RiichiMahjongGame::ResolveClaimWindow(GameStep& step) {
 }
 
 void RiichiMahjongGame::ApplyMeld(GameStep& step, int seat, protocol::Action action,
-                                   const std::vector<Tile>& client_tiles, int from_seat, Tile claimed_tile) {
+                                  const std::vector<Tile>& client_tiles, int from_seat, Tile claimed_tile) {
   const Face claimed_face = FaceOf(claimed_tile);
   Meld meld;
   meld.type = MeldTypeForAction(action);
@@ -1198,7 +1289,7 @@ void RiichiMahjongGame::ApplyMeld(GameStep& step, int seat, protocol::Action act
 // 张数公式逐字不变：一个杠在 melds 里仍是 1 组、账面 3 张，第 4 张由 kans 单独补回 ——
 // 三个杠的差别只在「第 4 张从哪来」，本函数只负责把它放进去并补摸 1 张。
 void RiichiMahjongGame::ApplySelfKan(GameStep& step, int seat, protocol::Action action,
-                                      const std::vector<Tile>& client_tiles) {
+                                     const std::vector<Tile>& client_tiles) {
   const Face face = FaceOf(client_tiles.front());
   std::optional<KongResult> result;
   if (action == protocol::Action::kAnkan) {
@@ -1255,8 +1346,8 @@ void RiichiMahjongGame::ApplySelfKan(GameStep& step, int seat, protocol::Action 
   OpenDiscardWindow(step, /*win_check=*/true, drawn);
 }
 
-void RiichiMahjongGame::EndRoundWithWin(GameStep& step, int winner_seat, int from_seat, Tile winning_tile,
-                                        bool tsumo, bool is_chankan) {
+void RiichiMahjongGame::EndRoundWithWin(GameStep& step, int winner_seat, int from_seat, Tile winning_tile, bool tsumo,
+                                        bool is_chankan) {
   const uint64_t old_seq = seq_;
   if (!tsumo) {
     // Ron: the winning tile completes the winner's hand (it stays visible in the river).
@@ -1344,8 +1435,8 @@ void RiichiMahjongGame::EndRoundWithWin(GameStep& step, int winner_seat, int fro
   ApplyDeltaToPoints(settlement.delta);
   settlement.points_after = points_;
 
-  EmitAll(step, BuildActionEventFrame(winner_seat, protocol::Action::kWin, {winning_tile}, tsumo ? -1 : from_seat,
-                                      old_seq));
+  EmitAll(step,
+          BuildActionEventFrame(winner_seat, protocol::Action::kWin, {winning_tile}, tsumo ? -1 : from_seat, old_seq));
   // PROTOCOL.md §5.12 + §5.9 v1.6：game_end 前的最后一份 state_sync 必须**揭示全部暗杠**。
   EmitPerSeat(step, StateSyncFramesRevealed());
   AdvanceAfterRound(step, settlement);
@@ -1576,9 +1667,9 @@ std::vector<Option> RiichiMahjongGame::DiscardOptionsFor(int seat, std::vector<T
 }
 
 std::vector<Option> RiichiMahjongGame::ClaimOptionsFor(int seat, Tile tile, bool is_next_player, int from_seat) const {
-  std::vector<Option> options = riichi::ClaimOptions(hands_[static_cast<size_t>(seat)],
-                                                     melds_[static_cast<size_t>(seat)], tile, remaining_, is_next_player,
-                                                     IsFuriten(seat));
+  std::vector<Option> options =
+      riichi::ClaimOptions(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)], tile, remaining_,
+                           is_next_player, IsFuriten(seat));
   if (RiichiDeclared(seat)) {
     // 立直后手牌锁定：吃/碰/杠一律不可（只保留 win / pass）
     options.erase(std::remove_if(options.begin(), options.end(),
@@ -1639,8 +1730,8 @@ bool RiichiMahjongGame::HasYakuForWin(int seat, Tile winning_tile, bool tsumo, i
   return !riichi::DetectYaku(hand, melds_[static_cast<size_t>(seat)], winning_tile, ctx).empty();
 }
 
-bool RiichiMahjongGame::IsWinShape(const std::vector<Tile>& concealed, const std::vector<Meld>& melds, Tile winning_tile,
-                                   bool tsumo) const {
+bool RiichiMahjongGame::IsWinShape(const std::vector<Tile>& concealed, const std::vector<Meld>& melds,
+                                   Tile winning_tile, bool tsumo) const {
   return riichi::IsRiichiWinningHand(concealed, melds, winning_tile, tsumo);
 }
 
@@ -1881,7 +1972,7 @@ bool RiichiMahjongGame::PlayAutomatedDiscard(GameStep& step) {
   if (!discard_window_open_ || NeedsPlayerReply(seat)) {
     return false;  // the window moved on while the decision was pending
   }
-  if (seats_[static_cast<size_t>(seat)].is_bot) {
+  if (PlaysWithAi(seat)) {
     // A bot must declare the win it is offered instead of discarding it (t24).
     if (BotDeclaresTsumo(step, seat)) {
       return false;  // the game is over
@@ -1905,8 +1996,8 @@ bool RiichiMahjongGame::PlayAutomatedDiscard(GameStep& step) {
         return true;
       }
     }
-    std::optional<Tile> tile = ChooseDiscard(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)],
-                                             drawn_tile_);
+    std::optional<Tile> tile =
+        ChooseDiscard(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)], drawn_tile_);
     if (!tile.has_value()) {
       EndRoundWithDraw(step);
       return false;
@@ -1935,7 +2026,7 @@ void RiichiMahjongGame::ResolveAutomatedClaimAnswers() {
       continue;
     }
     ClaimAnswer answer;
-    if (seats_[static_cast<size_t>(seat)].is_bot) {
+    if (PlaysWithAi(seat)) {
       const Option choice = ChooseClaimAnswer(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)],
                                               claim_options_[static_cast<size_t>(seat)], claim_tile_);
       answer.action = choice.action;
@@ -1954,8 +2045,7 @@ void RiichiMahjongGame::ResolveAutomatedClaimAnswers() {
 bool RiichiMahjongGame::HasPendingHumanWin() const {
   for (int seat = 0; seat < kSeatCount; ++seat) {
     const ClaimAnswer& answer = claim_answers_[static_cast<size_t>(seat)];
-    if (answer.answered && answer.action == protocol::Action::kWin &&
-        !seats_[static_cast<size_t>(seat)].is_bot) {
+    if (answer.answered && answer.action == protocol::Action::kWin && !PlaysWithAi(seat)) {
       return true;
     }
   }
@@ -2108,14 +2198,16 @@ GameStep RiichiMahjongGame::Reconnect(int seat) {
   if (phase_ == Phase::kDiscardWindow && discard_window_open_ && current_seat_ == seat && window_deadline_ms_ > now) {
     // 重放的请求必须与首发逐字节等价：立直宣言牌候选一并带上，否则重连后客户端
     // 就没有「哪几张可以作宣言牌」的提示了（v1.21 §4.4）。
-    Emit(step, seat, BuildActionRequestFrame(seq_, window_deadline_ms_, protocol::Window::kDiscard, discard_options_,
-                                            std::nullopt, discard_riichi_tiles_));
+    Emit(step, seat,
+         BuildActionRequestFrame(seq_, window_deadline_ms_, protocol::Window::kDiscard, discard_options_, std::nullopt,
+                                 discard_riichi_tiles_));
   } else if (phase_ == Phase::kClaimWindow && claim_open_ && claim_recipient_[static_cast<size_t>(seat)] &&
              !claim_answers_[static_cast<size_t>(seat)].answered && window_deadline_ms_ > now) {
     // 抢杠窗口与普通鸣牌窗口是**两种 window**，重放时必须还原成原来那种，并且带上被抢的那张牌
     // （它不在任何人的牌河里，客户端推不出来）。
     Emit(step, seat,
-         BuildActionRequestFrame(seq_, window_deadline_ms_, claim_chankan_ ? protocol::Window::kChankan : protocol::Window::kClaim,
+         BuildActionRequestFrame(seq_, window_deadline_ms_,
+                                 claim_chankan_ ? protocol::Window::kChankan : protocol::Window::kClaim,
                                  claim_options_[static_cast<size_t>(seat)],
                                  claim_chankan_ ? std::optional<Tile>(claim_tile_) : std::nullopt));
   }
@@ -2199,6 +2291,11 @@ json::Value RiichiMahjongGame::BuildSeatsArray(int viewer) const {
     }
     entry.Set("melds", std::move(melds));
     entry.Set("disconnected", json::Value::Bool(disconnected_[seat]));
+    // Omitted when false so a seat that is not entrusted keeps the frozen frame bytes.
+    // A bot never carries it: is_bot is not a toggle.
+    if (autoplay_[seat] && !game_seat.is_bot) {
+      entry.Set("autoplay", json::Value::Bool(true));
+    }
     // 立直是公开信息（立直棒与横置），每个收件人都看得到
     entry.Set("riichi", json::Value::Bool(riichi_[seat]));
     seat_array.Append(std::move(entry));
@@ -2259,7 +2356,7 @@ json::Value RiichiMahjongGame::BuildTenpaiFrame(int seat) const {
     const riichi::WinContext hint_ctx =
         BuildRiichiContext(seat, (seat + 1) % kSeatCount, /*tsumo=*/false, faces.front());
     // `faces` 已经算过等待张，传进去让 `WinningWaits` 不必再跑一遍 `RiichiWaitingTiles`
-    //（实测：九面听下一遍就是 79 µs Release / 472 µs Debug，占整帧的一半）。
+    // （实测：九面听下一遍就是 79 µs Release / 472 µs Debug，占整帧的一半）。
     winning = riichi::WinningWaits(concealed, melds, hint_ctx, faces);
     no_yaku = winning.empty();
   }

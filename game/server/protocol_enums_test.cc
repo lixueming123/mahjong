@@ -2,13 +2,13 @@
 // are guarded against game/protocol/enums.json (and the Python/JS/doc tables) by
 // tests/protocol_enums_consistency_test.py; this test covers parsing, names and boundaries.
 
+#include "protocol_enums.h"
+
 #include <cstdint>
 #include <optional>
 #include <string_view>
 
 #include <gtest/gtest.h>
-
-#include "protocol_enums.h"
 
 namespace mahjong::protocol {
 namespace {
@@ -66,11 +66,17 @@ TEST(ProtocolEnumsTest, LimitNoneIsARealValue) {
 }
 
 TEST(ProtocolEnumsTest, ClientFrameTypesCoverOneToEleven) {
+  // 1..11 stay contiguous. autoplay is appended at 28 so the S→C block is not renumbered.
   EXPECT_EQ(kClientFrameTypes.size(), static_cast<size_t>(kClientFrameTypeMax));
-  for (size_t index = 0; index < kClientFrameTypes.size(); ++index) {
+  ASSERT_GE(kClientFrameTypes.size(), static_cast<size_t>(11));
+  for (size_t index = 0; index < 11; ++index) {
     EXPECT_EQ(WireOf(kClientFrameTypes[index]), static_cast<int>(index) + 1);
-    EXPECT_TRUE(IsClientFrameType(kClientFrameTypes[index]));
-    EXPECT_FALSE(IsServerFrameType(kClientFrameTypes[index]));
+  }
+  EXPECT_EQ(kClientFrameTypes.back(), FrameType::kAutoplay);
+  EXPECT_EQ(WireOf(FrameType::kAutoplay), 28);
+  for (const FrameType type : kClientFrameTypes) {
+    EXPECT_TRUE(IsClientFrameType(type));
+    EXPECT_FALSE(IsServerFrameType(type));
   }
   EXPECT_TRUE(IsServerFrameType(FrameType::kLoginOk));
   EXPECT_TRUE(IsServerFrameType(FrameType::kRoomUpdate));

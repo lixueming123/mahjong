@@ -302,6 +302,20 @@ GameVerdict ClassicMahjongGame::Validate(int seat, const json::Value& frame) con
   if (!game_started_) {
     return GameVerdict::Drop();
   }
+  // autoplay carries no seq: it is a seat flag, not a window reply. A bot seat is refused
+  // here so is_bot can never be cleared by this frame.
+  if (const json::Value* type = frame.Find("type");
+      type != nullptr && type->IsInteger() &&
+      protocol::ParseFrameType(type->AsInt()) == protocol::FrameType::kAutoplay) {
+    if (phase_ == Phase::kMatchEnd || IsAutomated(seat)) {
+      return GameVerdict::Drop();
+    }
+    const json::Value* on = frame.Find("on");
+    if (on == nullptr || !on->IsBool()) {
+      return GameVerdict::Refuse(protocol::ErrorCode::kBadRequest, "autoplay requires a boolean \"on\"");
+    }
+    return GameVerdict::Accept();
+  }
   // v1.6（C4/C13）：只有**场终**才静默早退；局终后的对局帧回 BAD_REQUEST（新局未开始，
   // 客户端不得把 game_end 当作可继续对局的信号）。
   if (phase_ == Phase::kMatchEnd) {
@@ -322,6 +336,12 @@ GameVerdict ClassicMahjongGame::Validate(int seat, const json::Value& frame) con
     return GameVerdict::Drop();
   }
   const std::optional<protocol::FrameType> frame_type = protocol::ParseFrameType(type->AsInt());
+  if (frame_type == protocol::FrameType::kDiscard || frame_type == protocol::FrameType::kAction) {
+    // A click that races the handoff must not be charged to the illegal-op quota.
+    if (autoplay_[static_cast<size_t>(seat)]) {
+      return GameVerdict::Drop();
+    }
+  }
   if (frame_type == protocol::FrameType::kDiscard) {
     return ValidateDiscard(seat, frame);
   }
@@ -383,8 +403,7 @@ GameVerdict ClassicMahjongGame::ValidateAction(int seat, const json::Value& fram
 
   if (phase_ == Phase::kDiscardWindow && discard_window_open_) {
     if (seat != current_seat_) {
-      return GameVerdict::Refuse(protocol::ErrorCode::kNoPendingAction,
-                                 "the discard window belongs to another seat");
+      return GameVerdict::Refuse(protocol::ErrorCode::kNoPendingAction, "the discard window belongs to another seat");
     }
     if (action == protocol::Action::kAnkan || action == protocol::Action::kKakan) {
       // v1.6 自理杠（PROTOCOL §4.6）：只在打牌窗口、tiles 恰 1 个牌面元素、以窗口 options 为准，
@@ -485,12 +504,83 @@ GameStep ClassicMahjongGame::Apply(int seat, const json::Value& action) {
     return step;
   }
   const std::optional<protocol::FrameType> frame_type = protocol::ParseFrameType(type->AsInt());
-  if (frame_type == protocol::FrameType::kDiscard) {
+  if (frame_type == protocol::FrameType::kAutoplay) {
+    const json::Value* on = action.Find("on");
+    if (on != nullptr && on->IsBool()) {
+      ApplyAutoplay(step, seat, on->AsBool());
+    }
+  } else if (frame_type == protocol::FrameType::kDiscard) {
     ApplyDiscardFrame(step, seat, action);
   } else if (frame_type == protocol::FrameType::kAction) {
     ApplyActionFrame(step, seat, action);
   }
   return step;
+}
+
+void ClassicMahjongGame::EmitOpenRequest(GameStep& step, int seat) {
+  if (!SeatPresent(seat) || window_deadline_ms_ <= clock::EpochMs()) {
+    return;
+  }
+  if (phase_ == Phase::kDiscardWindow && discard_window_open_ && current_seat_ == seat) {
+    Emit(step, seat, BuildActionRequestFrame(seq_, window_deadline_ms_, protocol::Window::kDiscard, discard_options_));
+  } else if (phase_ == Phase::kClaimWindow && claim_open_ && claim_recipient_[static_cast<size_t>(seat)] &&
+             !claim_answers_[static_cast<size_t>(seat)].answered) {
+    Emit(step, seat,
+         BuildActionRequestFrame(seq_, window_deadline_ms_, protocol::Window::kClaim,
+                                 claim_options_[static_cast<size_t>(seat)]));
+  }
+}
+
+void ClassicMahjongGame::ApplyAutoplay(GameStep& step, int seat, bool on) {
+  // A bot is already played by the AI. This frame must not clear is_bot.
+  if (seat < 0 || seat >= kSeatCount || IsAutomated(seat)) {
+    return;
+  }
+  const size_t index = static_cast<size_t>(seat);
+  if (autoplay_[index] == on) {
+    EmitPerSeat(step, StateSyncFrames());
+    return;
+  }
+  autoplay_[index] = on;
+  spdlog::info("room {}: seat {} autoplay {}", room_id_, seat, on ? "on" : "off");
+  const bool discard_here = phase_ == Phase::kDiscardWindow && discard_window_open_ && current_seat_ == seat;
+  const bool claim_here =
+      phase_ == Phase::kClaimWindow && claim_open_ && claim_recipient_[index] && !claim_answers_[index].answered;
+  if (claim_here) {
+    if (on) {
+      if (claim_pending_humans_ > 0) {
+        --claim_pending_humans_;
+      }
+      if (ai_delay_ms_ > 0) {
+        if (!ai_claim_pending_) {
+          if (ScheduleAiAction(step, ai_delay_ms_)) {
+            ai_claim_pending_ = true;
+          } else {
+            ResolveAutomatedClaimAnswers();
+          }
+        }
+      } else {
+        ResolveAutomatedClaimAnswers();
+      }
+    } else {
+      const bool timer_already = claim_pending_humans_ > 0;
+      ++claim_pending_humans_;
+      EmitOpenRequest(step, seat);
+      if (!timer_already) {
+        OpenWindowTimer(step);
+      }
+    }
+  }
+  if (discard_here && !on) {
+    // The pacing message stays armed; clearing the flag makes it a no-op. The original
+    // window timer still owns the deadline, so the replayed request keeps that deadline.
+    ai_discard_pending_ = false;
+    EmitOpenRequest(step, seat);
+  }
+  EmitPerSeat(step, StateSyncFrames());
+  if (on && (discard_here || claim_here)) {
+    Pump(step);
+  }
 }
 
 void ClassicMahjongGame::ApplyDiscardFrame(GameStep& step, int seat, const json::Value& frame) {
@@ -576,9 +666,9 @@ void ClassicMahjongGame::StartMatch(GameStep& step) {
   tenpai_seq_ = {};    // v1.7 §5.16：tenpai_seq 从 1 起；跨局不重置，新场次才归零
   dealer_ = 0;         // 首局庄家 = seat 0（GAME_DESIGN v1.10 §3.3）
   match_end_pending_ = false;
-  points_.fill(0);  // classic 没有持点；保留以与 riichi 同形的测试脚手架
+  points_.fill(0);   // classic 没有持点；保留以与 riichi 同形的测试脚手架
   round_count_ = 4;  // C15：classic 的局数冻结为 4
-  round_wind_ = 0;  // 东场 1 局：round_index_ = 0
+  round_wind_ = 0;   // 东场 1 局：round_index_ = 0
   StartRound(step);
 }
 
@@ -671,8 +761,7 @@ void ClassicMahjongGame::Pump(GameStep& step) {
         //     GAME_DESIGN §5.6.2 — play the tile just drawn, or the largest tile when the
         //     window has no draw record — immediately: there is nobody to answer it. A
         //     disconnected seat with a wire is NOT here; its window waits for the deadline.
-        if (seats_[static_cast<size_t>(seat)].is_bot && ai_delay_ms_ > 0 &&
-            (ai_discard_pending_ || ScheduleAiAction(step, ai_delay_ms_))) {
+        if (PlaysWithAi(seat) && ai_delay_ms_ > 0 && (ai_discard_pending_ || ScheduleAiAction(step, ai_delay_ms_))) {
           ai_discard_pending_ = true;
           return;  // the decision arrives as a deadline; the table keeps serving human frames
         }
@@ -827,12 +916,12 @@ void ClassicMahjongGame::OpenClaimWindow(GameStep& step, int from_seat, Tile til
       // the frozen §5.6.2 default action immediately, exactly as the timeout message would.
       // A disconnected human is not here: it stays a pending recipient until the deadline.
       // A bot only takes a meld that does not worsen the shanten of its hand (t21/t23).
-      if (seats_[static_cast<size_t>(seat)].is_bot && ai_delay_ms_ > 0) {
+      if (PlaysWithAi(seat) && ai_delay_ms_ > 0) {
         ai_pending = true;
         continue;
       }
       Option choice;
-      if (seats_[static_cast<size_t>(seat)].is_bot) {
+      if (PlaysWithAi(seat)) {
         choice = ChooseClaimAnswer(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)],
                                    options[static_cast<size_t>(seat)], tile);
       } else if (const Option* pass = FindOption(options[static_cast<size_t>(seat)], protocol::Action::kPass);
@@ -1156,8 +1245,8 @@ void ClassicMahjongGame::EndRoundWithWin(GameStep& step, int winner_seat, int fr
   settlement.round_index = round_index_;
   settlement.dealer = dealer_;
 
-  EmitAll(step, BuildActionEventFrame(winner_seat, protocol::Action::kWin, {winning_tile}, tsumo ? -1 : from_seat,
-                                      old_seq));
+  EmitAll(step,
+          BuildActionEventFrame(winner_seat, protocol::Action::kWin, {winning_tile}, tsumo ? -1 : from_seat, old_seq));
   // PROTOCOL.md §5.12 + §5.9 v1.6：game_end 前的最后一份 state_sync 必须**揭示全部暗杠**。
   EmitPerSeat(step, StateSyncFramesRevealed());
   AdvanceAfterRound(step, settlement, score);
@@ -1233,8 +1322,8 @@ void ClassicMahjongGame::AdvanceAfterRound(GameStep& step, Settlement& settlemen
 
   BroadcastSettlement(step, settlement);  // game_end（局终帧，一场 4..8 次）
   spdlog::info("room {}: round over (reason={}, round_index={}, dealer={}, winner={}, R={}, han={}, seq {})", room_id_,
-               protocol::NameOf(settlement.reason), settlement.round_index, settlement.dealer,
-               settlement.winner_seat, score.multiplier, settlement.han, seq_);
+               protocol::NameOf(settlement.reason), settlement.round_index, settlement.dealer, settlement.winner_seat,
+               score.multiplier, settlement.han, seq_);
 
   // C10：逐局上报；房间只在 match_over 时把它当作回收信号。
   GameResult result;
@@ -1397,13 +1486,13 @@ bool ClassicMahjongGame::PlayAutomatedDiscard(GameStep& step) {
   if (!discard_window_open_ || NeedsPlayerReply(seat)) {
     return false;  // the window moved on while the decision was pending
   }
-  if (seats_[static_cast<size_t>(seat)].is_bot) {
+  if (PlaysWithAi(seat)) {
     // A bot must declare the win it is offered instead of discarding it (t24).
     if (BotDeclaresTsumo(step, seat)) {
       return false;  // the game is over
     }
-    std::optional<Tile> tile = ChooseDiscard(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)],
-                                             drawn_tile_);
+    std::optional<Tile> tile =
+        ChooseDiscard(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)], drawn_tile_);
     if (!tile.has_value()) {
       EndRoundWithDraw(step);
       return false;
@@ -1432,7 +1521,7 @@ void ClassicMahjongGame::ResolveAutomatedClaimAnswers() {
       continue;
     }
     ClaimAnswer answer;
-    if (seats_[static_cast<size_t>(seat)].is_bot) {
+    if (PlaysWithAi(seat)) {
       const Option choice = ChooseClaimAnswer(hands_[static_cast<size_t>(seat)], melds_[static_cast<size_t>(seat)],
                                               claim_options_[static_cast<size_t>(seat)], claim_tile_);
       answer.action = choice.action;
@@ -1451,8 +1540,7 @@ void ClassicMahjongGame::ResolveAutomatedClaimAnswers() {
 bool ClassicMahjongGame::HasPendingHumanWin() const {
   for (int seat = 0; seat < kSeatCount; ++seat) {
     const ClaimAnswer& answer = claim_answers_[static_cast<size_t>(seat)];
-    if (answer.answered && answer.action == protocol::Action::kWin &&
-        !seats_[static_cast<size_t>(seat)].is_bot) {
+    if (answer.answered && answer.action == protocol::Action::kWin && !PlaysWithAi(seat)) {
       return true;
     }
   }
@@ -1690,6 +1778,11 @@ json::Value ClassicMahjongGame::BuildSeatsArray(int viewer) const {
     }
     entry.Set("melds", std::move(melds));
     entry.Set("disconnected", json::Value::Bool(disconnected_[seat]));
+    // Omitted when false so a seat that is not entrusted keeps the frozen frame bytes.
+    // A bot never carries it: is_bot is not a toggle.
+    if (autoplay_[seat] && !game_seat.is_bot) {
+      entry.Set("autoplay", json::Value::Bool(true));
+    }
     seat_array.Append(std::move(entry));
   }
   return seat_array;
@@ -1791,8 +1884,8 @@ std::string ClassicMahjongGame::BuildMatchEnd() const {
   };
   std::array<Ranked, kSeatCount> standings {};
   for (int seat = 0; seat < kSeatCount; ++seat) {
-    standings[static_cast<size_t>(seat)] = Ranked {.seat = seat, .score = match_totals_[static_cast<size_t>(seat)],
-                                                   .rank = 1};
+    standings[static_cast<size_t>(seat)] =
+        Ranked {.seat = seat, .score = match_totals_[static_cast<size_t>(seat)], .rank = 1};
   }
   std::sort(standings.begin(), standings.end(), [](const Ranked& a, const Ranked& b) {
     if (a.score != b.score) return a.score > b.score;  // final_score 降序

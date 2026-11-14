@@ -9,7 +9,7 @@
  * 行为口径对齐 `game/client/game_state.py` + `game/client/app.py`（参考客户端）：
  *   - `seq` 只认严格更大：更新的帧推进窗口，过期帧不重建窗口（§6.2 / H9）
  *   - 提交后进入 pending：服务端确认（action_event / 本家 discard_event）前不再发帧
- *   - 窗口到期（服务端 deadline 与本地兜底取小）后按钮全灰（§6.2）
+ *   - 窗口到期（服务端 deadline 与本地兜底取小）后按钮全部隐藏（§6.2）
  *   - 立直两段式：点「立直」进入宣言模式 → 点候选牌即宣言并打出（§12.4 / v1.21）
  *   - 吃/暗杠/加杠有多条 options 时，用当前选中的手牌消歧，而不是永远取第一条
  *
@@ -286,6 +286,21 @@ export class MahjongClient {
     if (buttons.pong) buttons.pong.addEventListener('click', () => this.actionFromOptions(ACTION.PONG));
     if (buttons.kong) buttons.kong.addEventListener('click', () => this.actionFromOptions([ACTION.KONG, ACTION.ANKAN, ACTION.KAKAN]));
     if (buttons.riichi) buttons.riichi.addEventListener('click', () => this.declareRiichi());
+    this.ui?.el.autoplay?.addEventListener('click', () => this.toggleAutoplay());
+    this.applyButtons();
+  }
+
+  /** 把本座位交给 AI，或取消。机器人座位不发这帧（is_bot 不能被取消）。 */
+  toggleAutoplay() {
+    if (this.state.isBot?.[0]) return;
+    if (this.state.phase !== 'playing' && !(this.state.phase === 'ended' && this.state.matchWillContinue)) {
+      return;
+    }
+    const on = !this.state.autoplay?.[0];
+    if (!this.send({ type: FRAME_TYPE.AUTOPLAY, on })) return;
+    this.state.autoplay[0] = on;
+    this.state.lastAction = on ? '已托管，AI 接手' : '已取消托管';
+    this.app.changed();
     this.applyButtons();
   }
 
@@ -300,14 +315,18 @@ export class MahjongClient {
   }
 
   /**
-   * 按钮可用性完全按窗口 options 决定（H1），再叠加参考端的四道基础闸门：
-   * 无窗口 / 已提交待确认 / 已冻结 / 窗口到期 / 连接断开 —— 任一成立即全灰。
+   * 按钮完全按窗口 options 决定（H1），再叠加参考端的四道基础闸门：
+   * 无窗口 / 已提交待确认 / 已冻结 / 窗口到期 / 连接断开 —— 任一成立即不显示。
+   * 当前做不了的动作直接拿掉，不留灰色占位。
    */
   applyButtons() {
     const win = this.window;
-    const base = !!win && !this.pending && !this.frozen && this.remainingMs() > 0 && this.net.connected;
+    const entrusted = !!this.state.autoplay?.[0] && !this.state.isBot?.[0];
+    const base = !!win && !this.pending && !this.frozen && !entrusted && this.remainingMs() > 0 && this.net.connected;
     const set = (button, enabled) => {
-      if (button) button.disabled = !enabled;
+      if (!button) return;
+      button.hidden = !enabled;
+      button.disabled = !enabled;
     };
     const buttons = this.buttons;
     set(buttons.discard, base && win.window === WINDOW.DISCARD && this.state.selected >= 0);
@@ -1259,8 +1278,9 @@ export class MahjongClient {
       caption = '荒庄流局';
     }
     this.sfx?.speak?.(cues);
-    // 横幅窗口 = 语音总时长 + 余量，至少 2.4s；「和/流」大字沿用副露播报样式
-    this.ui?.broadcast?.(win ? '和' : '流局', caption, Math.max(2400, voiceDuration(cues) + 800));
+    // 横幅窗口 = 语音总时长 + 余量，至少 2.4s。「和」跟和牌家走，流局没有座位，留在桌心。
+    const view = win && Number.isInteger(win.seat) ? this.app.viewSeat(win.seat) : null;
+    this.ui?.broadcast?.(win ? '和' : '流局', caption, Math.max(2400, voiceDuration(cues) + 800), view);
   }
 
   describeRankings(frame) {
@@ -1278,7 +1298,7 @@ export class MahjongClient {
     this.ui?.toast?.(text);
   }
 
-  /** 副露 / 立直 / 和牌的中央播报（§5.8 action_event 即权威事件源） */
+  /** 副露 / 立直 / 和牌按操作者的屏幕座位飘字（§5.8 action_event 即权威事件源） */
   announceAction(frame) {
     const labels = {
       [ACTION.PONG]: '碰', [ACTION.CHOW]: '吃', [ACTION.KONG]: '杠', [ACTION.ANKAN]: '暗杠',
@@ -1288,7 +1308,7 @@ export class MahjongClient {
     if (!label) return;
     const view = this.app.viewSeat(frame.seat);
     const name = this.state.seatNames[view] || '';
-    this.ui?.broadcast?.(label, name, 820);
+    this.ui?.broadcast?.(label, name, 820, view);
     if (frame.action === ACTION.RIICHI) this.sfx?.play?.('click');
   }
 }

@@ -218,14 +218,18 @@ class RiichiMahjongGame final : public Game {
   GameVerdict ValidateAction(int seat, const json::Value& frame) const;
   void ApplyDiscardFrame(GameStep& step, int seat, const json::Value& frame);
   void ApplyActionFrame(GameStep& step, int seat, const json::Value& frame);
+  // Manual handoff. Never writes is_bot: a bot seat cannot be turned back into a human.
+  void ApplyAutoplay(GameStep& step, int seat, bool on);
+  // Re-sends the still-open action_request (same seq, same deadline) after autoplay is cancelled.
+  void EmitOpenRequest(GameStep& step, int seat);
 
   // ---- helpers ----------------------------------------------------------------------
   uint64_t Transition();
   void ResetClaimWindow();
+  // is_bot is fixed for the match. autoplay_ is the only handoff a human can cancel.
   bool IsAutomated(int seat) const { return seats_[static_cast<size_t>(seat)].is_bot; }
-  bool NeedsPlayerReply(int seat) const {
-    return !IsAutomated(seat) && seats_[static_cast<size_t>(seat)].wired;
-  }
+  bool PlaysWithAi(int seat) const { return IsAutomated(seat) || autoplay_[static_cast<size_t>(seat)]; }
+  bool NeedsPlayerReply(int seat) const { return !PlaysWithAi(seat) && seats_[static_cast<size_t>(seat)].wired; }
   bool SeatPresent(int seat) const { return !disconnected_[static_cast<size_t>(seat)]; }
   std::optional<Tile> DefaultDiscardFor(int seat) const;
   // Takes the next tile off the live wall (a plain draw, no dead wall involved).
@@ -292,6 +296,7 @@ class RiichiMahjongGame final : public Game {
   bool deadlines_supported_ = false;
   std::vector<GameSeat> seats_;
   std::array<bool, kSeatCount> disconnected_ {};  // fed by OnSeatPresence
+  std::array<bool, kSeatCount> autoplay_ {};      // human handed the seat to the AI; never set on a bot
   std::array<std::vector<Tile>, kSeatCount> hands_;
   std::array<std::vector<Meld>, kSeatCount> melds_;
   std::array<std::vector<Tile>, kSeatCount> discards_;
@@ -304,11 +309,11 @@ class RiichiMahjongGame final : public Game {
   // 王牌 14 张：0..3 岭上牌 / 4..8 宝牌指示牌 / 9..13 里宝指示牌。
   std::vector<Tile> dead_wall_;
   int dead_draw_index_ = 0;
-  std::vector<Tile> dora_indicators_;      // 已翻开的指示牌
-  std::array<int, kSeatCount> points_ {};  // 持点（25000 起）
-  int kyoutaku_ = 0;                       // 供托（立直棒总数 × 1000）
-  int honba_ = 0;                          // 本场数
-  int round_wind_ = 0;                     // 场风：0 东 / 1 南（每局开始时按 round_index_ 推导）
+  std::vector<Tile> dora_indicators_;              // 已翻开的指示牌
+  std::array<int, kSeatCount> points_ {};          // 持点（25000 起）
+  int kyoutaku_ = 0;                               // 供托（立直棒总数 × 1000）
+  int honba_ = 0;                                  // 本场数
+  int round_wind_ = 0;                             // 场风：0 东 / 1 南（每局开始时按 round_index_ 推导）
   std::array<bool, kSeatCount> riichi_ {};         // 本局已宣言立直
   std::array<bool, kSeatCount> ippatsu_ {};        // 一发仍然有效（鸣牌后清除）
   std::array<bool, kSeatCount> ippatsu_armed_ {};  // 宣言后尚未跨过「下一摸」

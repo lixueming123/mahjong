@@ -21,7 +21,9 @@
 
 namespace mahjong::protocol {
 
-// ---- frame_type: C→S 1..11 (kClientFrameTypes order), S→C 12..27 (§3.2 table order) -----
+// ---- frame_type: C→S 1..11 plus autoplay=28, S→C 12..27 (§3.2 table order) ----------
+// kClientFrameTypeMax is the count of C→S types, not their largest wire value: autoplay
+// is appended after the S→C block so nothing already on the wire is renumbered.
 enum class FrameType : uint8_t {
   kInvalid = 0,
   kLogin = 1,
@@ -51,22 +53,23 @@ enum class FrameType : uint8_t {
   kMatchEnd = 25,
   kTenpai = 26,
   kRoomUpdate = 27,
+  kAutoplay = 28,
 };
-inline constexpr int kFrameTypeMax = 27;
-inline constexpr int kClientFrameTypeMax = 11;
+inline constexpr int kFrameTypeMax = 28;
+inline constexpr int kClientFrameTypeMax = 12;
 inline constexpr std::array<std::string_view, kFrameTypeMax + 1> kFrameTypeNames = {
     "INVALID",     "login",      "register",       "ping",          "stats_request",
     "list_rooms",  "create_room", "join_room",     "ready",         "sync",
     "discard",     "action",      "login_ok",      "error",         "room_joined",
     "game_start",  "draw",        "discard_event", "action_request", "action_event",
     "state_sync",  "game_end",    "pong",          "stats",         "room_list",
-    "match_end",   "tenpai",      "room_update",
+    "match_end",   "tenpai",      "room_update",   "autoplay",
 };
 inline constexpr std::array<FrameType, kClientFrameTypeMax> kClientFrameTypes = {
     FrameType::kLogin,        FrameType::kRegister, FrameType::kPing,
     FrameType::kStatsRequest, FrameType::kListRooms, FrameType::kCreateRoom,
     FrameType::kJoinRoom,     FrameType::kReady,    FrameType::kSync,
-    FrameType::kDiscard,      FrameType::kAction,
+    FrameType::kDiscard,      FrameType::kAction,   FrameType::kAutoplay,
 };
 
 // ---- action (§4.6 + 日麻 riichi) ---------------------------------------------------------
@@ -375,12 +378,16 @@ constexpr std::optional<YakuId> ParseYakuId(int64_t value) { return ParseWire<Ya
 constexpr std::optional<WireLimit> ParseWireLimit(int64_t value) { return ParseWire<WireLimit>(value); }
 
 constexpr bool IsClientFrameType(FrameType type) {
-  const int value = WireOf(type);
-  return value >= 1 && value <= kClientFrameTypeMax;
+  for (const FrameType client : kClientFrameTypes) {
+    if (client == type) {
+      return true;
+    }
+  }
+  return false;
 }
 constexpr bool IsServerFrameType(FrameType type) {
   const int value = WireOf(type);
-  return value > kClientFrameTypeMax && value <= kFrameTypeMax;
+  return value >= 1 && value <= kFrameTypeMax && !IsClientFrameType(type);
 }
 
 // ---- compile-time invariants ------------------------------------------------------------
@@ -396,7 +403,7 @@ static_assert(std::is_same_v<std::underlying_type_t<ErrorCode>, uint8_t>);
 static_assert(std::is_same_v<std::underlying_type_t<YakuId>, uint8_t>);
 static_assert(std::is_same_v<std::underlying_type_t<WireLimit>, uint8_t>);
 
-static_assert(WireOf(FrameType::kRoomUpdate) == kFrameTypeMax);
+static_assert(WireOf(FrameType::kAutoplay) == kFrameTypeMax);
 static_assert(WireOf(Action::kRiichi) == kActionMax);
 static_assert(WireOf(Window::kChankan) == kWindowMax);
 static_assert(WireOf(WireMode::kRiichi) == kModeMax);

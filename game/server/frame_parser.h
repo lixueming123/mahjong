@@ -49,7 +49,7 @@ struct Envelope {
 };
 
 // Parses one line and checks the envelope every frame shares (§4): a JSON object carrying an
-// integer "type" in 1..27. Does not decide whether the type is routable — that is dispatch,
+// integer "type" in 1..28. Does not decide whether the type is routable — that is dispatch,
 // not parsing.
 std::optional<Envelope> ParseEnvelope(std::string_view line, Error* error);
 
@@ -84,5 +84,6 @@ std::optional<JoinRoom> ParseJoinRoom(const json::Value& frame, Error* error);
 // nothing would ever read are just a second copy waiting to rot.
 bool ValidateDiscard(const json::Value& frame, Error* error);
 bool ValidateAction(const json::Value& frame, Error* error);
+bool ValidateAutoplay(const json::Value& frame, Error* error);
 
 }  // namespace mahjong::frame_parser

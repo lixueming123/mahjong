@@ -185,7 +185,7 @@ async function boot() {
   }));
   syncSound();
   document.getElementById('btn-help')?.addEventListener('click', () => {
-    ui.toast('点牌选中，再点一次（或 Enter、或「打出」）出牌；空格 = 过；S = 同步；Esc = 取消；点「立直」后点高亮牌即宣言', '', 6000);
+    ui.toast('点牌选中，再点一次（或 Enter、或「打出」）出牌；空格 = 过；S = 同步；Esc = 取消；点「立直」后点高亮牌即宣言；「托管」让 AI 接手，再点一次取消', '', 6000);
   });
 
   let frames = 0, last = performance.now();

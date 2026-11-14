@@ -30,7 +30,7 @@ SERVE_PY = ROOT / "web" / "serve.py"
 
 # domain -> (real value count, C++ enum class name, C++ name-table variable)
 DOMAIN_LAYOUT = {
-    "frame_type": (27, "FrameType", "kFrameTypeNames"),
+    "frame_type": (28, "FrameType", "kFrameTypeNames"),
     "action": (8, "Action", "kActionNames"),
     "window": (3, "Window", "kWindowNames"),
     "mode": (2, "WireMode", "kModeNames"),
@@ -56,7 +56,7 @@ def check(condition: bool, message: str) -> None:
 
 def canonical() -> dict[str, dict[str, int]]:
     definition = json.loads(ENUMS_JSON.read_text(encoding="utf-8"))
-    check(definition.get("version") == "2.1", "enums.json version must be 2.1")
+    check(definition.get("version") == "2.2", "enums.json version must be 2.2")
     domains = definition.get("domains", {})
     check(
         set(domains) == set(DOMAIN_LAYOUT),
@@ -153,7 +153,7 @@ def check_python(domains: dict[str, dict[str, int]]) -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     check(module.domains() == domains, "Python: domains() differs from enums.json")
-    check(module.VERSION == "2.1", "Python: VERSION must be 2.1")
+    check(module.VERSION == "2.2", "Python: VERSION must be 2.2")
     check(
         module.FRAME_TYPE.DISCARD == domains["frame_type"]["discard"],
         "Python: FRAME_TYPE.DISCARD mismatch",

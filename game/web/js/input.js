@@ -26,6 +26,7 @@ export class Input {
   canSelectHand() {
     const client = this.client;
     if (!client.window) return false;
+    if (client.state.autoplay?.[0] && !client.state.isBot?.[0]) return false;
     if (client.pending || client.frozen) return false;
     if (client.remainingMs() <= 0) return false;
     return true;
