@@ -84,7 +84,10 @@
 ### 2.4 立直 / 振听 / 宝牌（全新状态）
 
 - **立直**：需要新动作 `riichi`（打牌窗口的一个 option）+ 1000 点供托 + 门清校验 + 立直后手牌锁定（只允许摸切，暗杠受限）+ 一发窗口（立直后一巡内、且中间无鸣牌）。
-- **振听**：三种（自己牌河、见逃、同巡）。现行 `ClaimOptions` 没有任何「放过」记忆，`win` 是无条件给出的，所以必须给房间加 `furiten_[4]`，并在 `ClaimOptions`/`DiscardOptions` 调用处过滤 `win`。
+- **振听**：三种（自己牌河、见逃、同巡）。现行 `ClaimOptions` 没有任何「放过」记忆，`win` 是无条件给出的，所以必须给房间加振听状态，并在 `ClaimOptions`/`DiscardOptions` 调用处过滤 `win`。
+  实现（v1.24）：`furiten_ever_[4]` 记**见逃**（仅立直者，整局持久），`temporary_furiten_[4][34]` 记**同巡**
+  （按牌面，未立直者在自己摸牌或鸣牌时解除）；舍て牌振听由 `riichi::IsPermanentFuriten` 现算。
+  荣和过滤走 `IsFuritenFor(seat, tile)`，立直资格走粗口径 `IsFuriten(seat)`。详见 `PROTOCOL.md` §12.14。
 - **宝牌**：指示牌 → 宝牌映射（数牌 +1、9→1；风牌东→南→西→北→东；三元白→发→中→白）。里宝只在立直和牌时揭示。
 - 立直状态还要进**动作事件**广播（`riichi` 打出 1000 点、横置），客户端要能画立直棒。
 
@@ -305,7 +308,8 @@ M1 是纯重构，**必须独立提交**，不要和 M2 混在一个 PR 里—�
 | 宝牌指示牌（开局 1 张，每杠 +1）/ 里宝（仅立直和牌） | ✅ | `FlipDoraIndicator`、`BuildRiichiContext` |
 | 立直宣言（`action:8` + 打牌同一条消息） | ✅ | `HandleAction`、`DeclareRiichi` |
 | 一发窗口（下一摸前有效，鸣牌即清） | ✅ | `ippatsu_` / `ippatsu_armed_` |
-| 振听（自家牌河 + 见逃，荣和过滤） | ✅ | `IsFuriten`、`ClaimOptionsFor` |
+| 振听（自家牌河 + 见逃 + 同巡，荣和过滤） | ✅ | `IsFuriten` / `IsFuritenFor`、`ClaimOptionsFor`；同巡见 §12.14 |
+| 食替禁止（喰い替え，完整口径：モロ + スジ） | ✅ | `riichi::KuikaeForbiddenFaces`、`kuikae_faces_` / `KuikaeFacesFor`；帧契约见 PROTOCOL §12.15（v2.5） |
 | 持点 25000 / 供托 1000 / 本场 300 | ✅ | `points_`、`kyoutaku_`、`honba_` |
 | 场终排名按持点 | ✅ | `ComputeFinalRanks`、`BuildMatchEnd` |
 | 击飞终局（任一持点 < 0 即终局，0 点继续，箱下照算） | ✅ | `riichi::IsBusted`、`AdvanceAfterRound`（v1.19） |
