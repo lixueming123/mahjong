@@ -114,6 +114,9 @@ class ActionWindow:
     # v1.21 §4.4：立直宣言牌的候选**牌面**（只有日麻打牌窗口带 `riichi` 选项时才有值）。
     # 服务端按「打出后仍在听牌、且不落振听」算好再下发；空 = 不能立直。
     riichi_tiles: list[str] = field(default_factory=list)
+    # v2.5 §12.15：喰い替え禁止 —— 本窗口打不出去的牌面（刚吃/碰完当巡，含モロ与スジ）。
+    # 空 = 没有限制。服务端只在**确实有禁区**时才写这个键。
+    forbidden_discards: list[str] = field(default_factory=list)
 
     def has(self, action: int, tiles: list[str] | None = None) -> bool:
         for opt in self.options:
@@ -206,6 +209,9 @@ class GameState:
         self.is_tenpai: bool = False
         # 日麻（v1.13 §12.8）：形听但不能和。classic 帧不带该键 ⇒ 恒 False，听牌条行为不变。
         self.tenpai_no_yaku: bool = False
+        # 日麻（v1.24 §12.14）：整手是否振听（舍て牌 / 见逃 / 同巡任一）。
+        # 与 `tenpai_no_yaku` 是两个**独立**的否决位：无役可靠立直/自摸，振听只能等解禁。
+        self.tenpai_furiten: bool = False
         self.last_discard_seat: int | None = None   # B 批：F-CL-01 被鸣牌定位（公开派生）
 
     # ------------------------------------------------------------ 派生查询
@@ -440,6 +446,18 @@ class GameState:
 
         self.last_seq = seq
         self.seq = seq
+        # v2.5 §12.15：喰い替え禁止的牌面（刚吃/碰完当巡打不出去的牌）。与 riichi_tiles 同口径：
+        # 统一按牌面记（赤 5 归一为 5m），免得「手上一张 0p」被漏掉。
+        forbidden_discards: list[str] = []
+        raw_forbidden = frame.get("forbidden_discards")
+        if isinstance(raw_forbidden, list):
+            for code in raw_forbidden:
+                if not is_valid_tile(code):
+                    log.warning("forbidden_discards 含非法牌码：%r（已忽略）", code)
+                    continue
+                face = tile_face(code)
+                if face not in forbidden_discards:
+                    forbidden_discards.append(face)
         self.window = ActionWindow(
             seq=seq,
             deadline_ms=int(deadline),
@@ -450,6 +468,7 @@ class GameState:
             window_ms=window_ms,
             tile=chankan_tile if window == WINDOW_CHANKAN else None,
             riichi_tiles=riichi_tiles,
+            forbidden_discards=forbidden_discards,
         )
         self.pending = False
         self.pending_label = None
@@ -568,6 +587,7 @@ class GameState:
         self.tenpai_waits = []
         self.is_tenpai = False
         self.tenpai_no_yaku = False
+        self.tenpai_furiten = False
 
     def _apply_tenpai(self, frame: dict) -> None:
         """`tenpai` 帧：**仅本家**、独立 `tenpai_seq`、不掺 `room.seq`。
@@ -601,8 +621,11 @@ class GameState:
                         remaining = 0
                 # `yaku` 只有日麻帧才有；缺省 True ⇒ classic 与老服务端的渲染路径完全不变。
                 has_yaku = item.get("yaku", True)
+                # §12.14 逐张振听（v1.24）：缺省 False ⇒ 老服务端与 classic 行为不变。
+                is_furiten = item.get("furiten", False)
                 clean.append({"tile": tile, "remaining": remaining,
-                              "yaku": has_yaku if isinstance(has_yaku, bool) else True})
+                              "yaku": has_yaku if isinstance(has_yaku, bool) else True,
+                              "furiten": is_furiten if isinstance(is_furiten, bool) else False})
         else:
             log.warning("tenpai.waits 非法，按空处理")
         flag = frame.get("is_tenpai")
@@ -611,9 +634,13 @@ class GameState:
         no_yaku = frame.get("no_yaku")
         # 帧级标记只做「提示口径」，不改变 is_tenpai：形听仍然要收流局罚符、仍然可以立直。
         self.tenpai_no_yaku = bool(no_yaku) if isinstance(no_yaku, bool) else False
+        # §12.14：整手是否振听。与 no_yaku 是两个独立的否决位（原因不同、解法也不同）。
+        furiten = frame.get("furiten")
+        self.tenpai_furiten = bool(furiten) if isinstance(furiten, bool) else False
         if not self.is_tenpai:
             self.tenpai_waits = []  # 双向一致（false ⇒ []）
             self.tenpai_no_yaku = False
+            self.tenpai_furiten = False
 
     def _apply_game_end(self, frame: dict) -> None:
         # §5.10 / H5：game_end 不携带 seq，不参与 seq 比较。v2.0：game_end = 局终页（非终态），

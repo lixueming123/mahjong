@@ -288,6 +288,9 @@ def _status_text(state: GameState, ui: UiView) -> tuple[str, str, tuple]:
             if state.selected_index is not None:
                 return "点立直：宣言并打出选中的牌", "再点立直", T.TEXT_DIM
             return "点立直，再点一张高亮的牌", "立直→点高亮的牌", T.TEXT_DIM
+        if state.window.forbidden_discards:
+            # v2.5 §12.15：刚吃/碰完的这一巡有禁区（喰い替え），压暗的牌打不出去。
+            return "刚鸣牌：压暗的牌当巡不能打", "压暗的牌不能打", T.TEXT_DIM
         return "请打牌", "", T.TEXT_DIM
     if state.window.window == WINDOW_CHANKAN:
         # 抢杠的那张牌不在牌河里，玩家只能靠这行知道自己在抢什么

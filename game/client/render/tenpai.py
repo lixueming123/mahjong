@@ -111,8 +111,14 @@ def render(surface: pygame.Surface, ui: UiView, feel) -> None:
     # `is_tenpai` 仍是形听（流局罚符照收、仍可立直），所以这里只做「能不能和」的提示，
     # 绝不把牌藏掉——藏了玩家会以为没听牌。classic / 老服务端没有这两个键，走不到这里。
     dead = [item for item in items if not item.get("yaku", True)]
+    # 日麻（v1.24 §12.14）：振听的等待张**能摸到也不能荣和**。与「无役」是两个独立原因，
+    # 提示要分开写（各自解法不同：无役可立直/自摸，振听只能等自己摸牌或鸣牌）。
+    furiten = [item for item in items if item.get("furiten") is True]
     suffix = ""
-    if getattr(state, "tenpai_no_yaku", False):
+    if getattr(state, "tenpai_furiten", False):
+        # 振听优先说：它是「连自摸以外全堵死」的那一类，比无役更硬（无役至少还能自摸）。
+        suffix = "· 振听不能和"
+    elif getattr(state, "tenpai_no_yaku", False):
         # 暗杠**不破门清**（riichi::IsClosedHand 同口径）：只有吃/碰/明杠/加杠才让这手牌彻底没救
         open_hand = any(getattr(meld, "type", "") != MELD_TYPE.ANKAN for meld in state.melds)
         suffix = "· 无役不能和" if open_hand else "· 无役（立直或自摸才可和）"
@@ -151,8 +157,10 @@ def render(surface: pygame.Surface, ui: UiView, feel) -> None:
     for index, item in enumerate(items):
         remaining = item.get("remaining", 0)
         face = str(item.get("tile", "?"))
-        # 无役的等待张：枚数改红字 + 牌面压灰（不能用删除线——那是 `remaining == 0` 的语义）
-        riichi_dead = not item.get("yaku", True)
+        # 无役 / 振听的等待张：枚数改红字 + 牌面压灰（不能用删除线——那是 `remaining == 0` 的语义）
+        dead_yaku = not item.get("yaku", True)
+        dead_furiten = item.get("furiten") is True
+        riichi_dead = dead_yaku or dead_furiten
         color = T.NEG if riichi_dead else remaining_color(remaining)
         width = item_w[index]
         # F-TP-07：新增项用 WARN 底色高亮并淡出（同整条一起衰减）

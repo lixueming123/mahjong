@@ -1606,6 +1606,11 @@ def _draw_self_hand(surface: pygame.Surface, ui: UiView, feel=None) -> None:
     riichi_faces: set[str] = set()
     if state.riichi_arming and state.window is not None and state.window.riichi_tiles:
         riichi_faces = {tile_face(code) for code in state.window.riichi_tiles}
+    # v2.5 §12.15：喰い替え禁止 —— 刚吃/碰完的当巡打不出去的牌面（モロ + スジ），压暗表示点不动。
+    # 与立直标记互斥：立直手不可能刚鸣牌（鸣牌即破门清），两个集合同时非空不会发生。
+    forbidden_faces: set[str] = set()
+    if state.window is not None and state.window.forbidden_discards:
+        forbidden_faces = set(state.window.forbidden_discards)
     consumed: dict[str, int] = {}
     if not rects and state.game_started:
         W.draw_text(
@@ -1623,6 +1628,7 @@ def _draw_self_hand(surface: pygame.Surface, ui: UiView, feel=None) -> None:
             and not state.pending
             and state.selected_index != i
             and (not riichi_faces or tile_face(face) in riichi_faces)
+            and tile_face(face) not in forbidden_faces
         )
         W.draw_tile(
             surface,
@@ -1662,6 +1668,12 @@ def _draw_self_hand(surface: pygame.Surface, ui: UiView, feel=None) -> None:
                 pygame.draw.rect(dim, (6, 10, 18, 140), (0, 0, shifted[2], shifted[3]),
                                  border_radius=6)
                 surface.blit(dim, (shifted[0], shifted[1]))
+        elif tile_face(face) in forbidden_faces and state.selected_index != i:
+            # v2.5：喰い替え禁止 —— 压暗但不描边（点它只会弹提示，不发帧）。
+            dim = pygame.Surface((shifted[2], shifted[3]), pygame.SRCALPHA)
+            pygame.draw.rect(dim, (6, 10, 18, 140), (0, 0, shifted[2], shifted[3]),
+                             border_radius=6)
+            surface.blit(dim, (shifted[0], shifted[1]))
         if hovered:
             lift = T.HAND_DRAWN_LIFT if state.drawn_index == i else 0
             pygame.draw.rect(

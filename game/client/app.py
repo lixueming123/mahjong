@@ -1697,6 +1697,11 @@ class GameApp:
             # 宣言模式：点一张牌 = 直接宣言立直并打出它（只有 riichi_tiles 里的牌可点）
             self._commit_riichi_with(index)
             return
+        # v2.5 §12.15：喰い替え禁止牌点不动（本地提示，不发帧）。
+        window = state.window
+        if window is not None and tile_face(state.hand[index]) in window.forbidden_discards:
+            self._toast("刚吃/碰过，这张当巡不能打（喰い替え）", self.now)
+            return
         if state.selected_index == index:
             self._confirm_discard()
         else:
@@ -1739,6 +1744,11 @@ class GameApp:
         if event.key in digits and self._can_select_hand():
             index = digits[event.key]
             if index < len(state.hand):
+                # v2.5：喰い替え禁止牌用数字键也选不上（与鼠标同口径）。
+                window = state.window
+                if window is not None and tile_face(state.hand[index]) in window.forbidden_discards:
+                    self._toast("刚吃/碰过，这张当巡不能打（喰い替え）", self.now)
+                    return
                 state.selected_index = index
 
     def _dispatch_button(self, spec: actionbar.ButtonSpec) -> None:
@@ -1806,6 +1816,11 @@ class GameApp:
         if index is None or not 0 <= index < len(state.hand):
             return False
         tile = state.hand[index]
+        # v2.5 §12.15：喰い替え禁止的牌打出去必被拒 —— 本地先拦一道，省一次非法操作计数。
+        window = state.window
+        if window is not None and tile_face(tile) in window.forbidden_discards:
+            self._toast("刚吃/碰过，这张当巡不能打（喰い替え）", self.now)
+            return False
         seq = state.window.seq if state.window else None
         if seq is None:
             return False
