@@ -266,10 +266,14 @@ TEST(RiichiMahjongGameTest, GoldenTranscriptIsFrozen) {
   };
   // Frozen by room.cc's GoldenTranscriptIsFrozen before the split. Same seed, same policy, same
   // four seats, tonpu — a different number here means the port changed the wire.
+  // 注意：这条转录同时冻结了**机器人策略**（Driver 里那个「人类」座位的打牌/鸣牌选择也是
+  // 冻结的），所以调整 AI 决策会让它变红，那不一定是协议改动。这三个值是在把机器人弃牌
+  // 改成「并列处按役/振听决胜」、并给立直加手牌锁之后重新冻结的（classic 的同款 golden 未变，
+  // 共享的 `mahjong_rules::ChooseDiscard` 没有被改动）。
   const Golden cases[] = {
-      {20251005, "riichi/seed-20251005", 0xf0a019a1abcb98acull},
-      {7, "riichi/seed-7", 0xa97f495a097f5634ull},
-      {424242, "riichi/seed-424242", 0xf905a3d9c4067481ull},
+      {20251005, "riichi/seed-20251005", 0xb5e73d8de8662cafull},
+      {7, "riichi/seed-7", 0xbdc6d6a4584e8977ull},
+      {424242, "riichi/seed-424242", 0xd74c3ebf444db32full},
   };
   for (const Golden& golden : cases) {
     Driver driver(golden.seed);
@@ -418,6 +422,151 @@ TEST(RiichiMahjongGameTest, DeclaredRiichiIsPublicButHandsStayPrivate) {
       }
     }
   }
+}
+
+// 机器人在立直之后必须锁手牌（摸切）。`ValidateDiscard` 只对真人执行这条规则，而 AI 不走
+// Validate —— 少了这个分支，机器人会继续按牌效率换牌，那是日麻不允许的。
+TEST(RiichiMahjongGameTest, BotRiichiLocksItsHandToTheDrawnTile) {
+  // 逐种子重放：单个种子里「机器人立直后又摸到能改手的牌」不一定出现，所以要多跑几局。
+  // 只要有一个座位在立直后改了手牌就失败 —— 回滚这段逻辑时这条用例必须变红。
+  int violations = 0;
+  int rounds = 0;
+  int riichi_rounds = 0;
+  for (uint64_t seed = 1; seed <= 12; ++seed) {
+    RiichiMahjongGame game;
+    GameContext context;
+    context.room_id = "r-riichi-lock";
+    context.seed = seed;
+    context.action_timeout_ms = kActionTimeoutMs;
+    context.inter_hand_delay_ms = 0;
+    // 必须用非零 delay：ai_delay=0 时 `Pump` 会在**一条**消息里跑完整局，观察者只看得到
+    // 段末状态，抓不到「立直后改了手牌」这种中间步骤。900 = 生产节奏，一次决策一步。
+    context.ai_delay_ms = 900;
+    context.deadlines_supported = true;
+    context.options_json = kTonpuOptions;
+    for (int seat = 0; seat < kSeatCount; ++seat) {
+      context.seats.push_back(GameSeat {.seat = seat,
+                                        .is_bot = true,
+                                        .wired = false,
+                                        .player_id = "bot-" + std::to_string(seat),
+                                        .name = "AI-" + std::to_string(seat)});
+    }
+    std::vector<std::pair<int64_t, uint64_t>> scheduled;
+    std::array<std::vector<Face>, kSeatCount> locked;
+    std::array<bool, kSeatCount> have_lock {};
+    bool saw_riichi = false;
+    const auto drain = [&](const GameStep& step) {
+      for (const Deadline& deadline : step.deadlines) {
+        scheduled.emplace_back(deadline.delay_ms, deadline.token);
+      }
+      rounds += static_cast<int>(step.results.size());
+      if (game.game_finished() || game.round_finished()) {
+        have_lock.fill(false);
+        for (auto& faces : locked) faces.clear();
+      }
+      for (int seat = 0; seat < kSeatCount; ++seat) {
+        const std::vector<Tile>& hand = game.hand_of(seat);
+        if (hand.size() + 3 * game.melds_of(seat).size() != 13) continue;
+        if (!game.riichi_declared(seat)) {
+          have_lock[static_cast<size_t>(seat)] = false;
+          continue;
+        }
+        saw_riichi = true;
+        std::vector<Face> faces;
+        for (Tile tile : hand) faces.push_back(FaceOf(tile));
+        std::sort(faces.begin(), faces.end());
+        if (!have_lock[static_cast<size_t>(seat)]) {
+          have_lock[static_cast<size_t>(seat)] = true;
+          locked[static_cast<size_t>(seat)] = std::move(faces);
+        } else if (faces != locked[static_cast<size_t>(seat)]) {
+          ++violations;
+          locked[static_cast<size_t>(seat)] = std::move(faces);
+        }
+      }
+    };
+    drain(game.Setup(context));
+    int guard = 0;
+    while (!game.game_finished() && guard++ < 200000) {
+      if (game.round_finished()) {
+        bool fired = false;
+        for (size_t index = scheduled.size(); index > 0 && !fired; --index) {
+          const uint64_t token = scheduled[index - 1].second;
+          if (IsRoundAdvanceToken(token) || IsMatchEndToken(token)) {
+            scheduled.erase(scheduled.begin() + static_cast<std::ptrdiff_t>(index - 1));
+            drain(game.OnTimeout(token));
+            fired = true;
+          }
+        }
+        if (!fired) break;
+        continue;
+      }
+      const uint64_t before = game.seq();
+      drain(game.OnTimeout(before));
+      if (game.seq() == before && !game.round_finished() && !game.game_finished()) {
+        bool fired = false;
+        for (size_t index = scheduled.size(); index > 0 && !fired; --index) {
+          const uint64_t token = scheduled[index - 1].second;
+          if (IsAiPacingToken(token)) {
+            scheduled.erase(scheduled.begin() + static_cast<std::ptrdiff_t>(index - 1));
+            drain(game.OnTimeout(token));
+            fired = true;
+          }
+        }
+        if (!fired) break;
+      }
+    }
+    if (saw_riichi) ++riichi_rounds;
+  }
+  ASSERT_GT(rounds, 0);
+  ASSERT_GT(riichi_rounds, 0) << "12 个种子里一次立直都没有，这条用例失去意义";
+  EXPECT_EQ(violations, 0) << "机器人立直后改了手牌：立直手必须只摸切";
+}
+
+// 国士无双必须能真正和掉。窗口选项（`riichi::DiscardOptions`）早就把国士的 win 放进去了，
+// 但落地校验曾经用共享的 `IsWinningHand`（番数制口径，不认国士）—— 于是「看得到胡、点了被拒」。
+// 这条用例走完整的 Apply 路径，直接摆一手国士自摸。
+TEST(RiichiMahjongGameTest, KokushiTsumoActuallyWins) {
+  RiichiMahjongGame game;
+  GameContext context;
+  context.room_id = "r-kokushi";
+  context.seed = 7;
+  context.action_timeout_ms = kActionTimeoutMs;
+  context.inter_hand_delay_ms = 0;
+  context.ai_delay_ms = 0;
+  context.deadlines_supported = true;
+  context.options_json = kTonpuOptions;
+  for (int seat = 0; seat < kSeatCount; ++seat) {
+    context.seats.push_back(GameSeat {.seat = seat,
+                                      .is_bot = seat != kSeat0,
+                                      .wired = true,
+                                      .player_id = seat == kSeat0 ? "p-human" : "bot-" + std::to_string(seat),
+                                      .name = seat == kSeat0 ? "Human" : "AI-" + std::to_string(seat)});
+  }
+  game.Setup(context);
+  ASSERT_EQ(game.current_seat(), kSeat0) << "东一局庄家是 seat 0，起手就是它的打牌窗口";
+
+  // 庄家起手 14 张摆成国士：十三种幺九字各一张 + 其中一种多一张。
+  std::vector<Tile> hand;
+  for (const char* text : {"1m", "9m", "1p", "9p", "1s", "9s", "1z", "2z", "3z", "4z", "5z", "6z", "7z", "1m"}) {
+    const std::optional<Tile> tile = ParseTile(text);
+    ASSERT_TRUE(tile.has_value()) << text;
+    hand.push_back(*tile);
+  }
+  game.SetHandForTest(kSeat0, std::move(hand));
+
+  // 窗口必须真的给出 win（否则客户端根本看不到「胡」按钮）。
+  json::Value win = json::Value::Obj();
+  win.Set("type", json::Value::Int(protocol::WireOf(protocol::FrameType::kAction)));
+  win.Set("action", json::Value::Int(protocol::WireOf(protocol::Action::kWin)));
+  win.Set("tiles", json::Value::Arr(0));
+  win.Set("seq", json::Value::Int(static_cast<int64_t>(game.seq())));
+  ASSERT_EQ(game.Validate(kSeat0, win).kind, GameVerdict::Kind::kAccept)
+      << "国士的自摸必须在窗口里可选、且校验通过";
+
+  const GameStep step = game.Apply(kSeat0, win);
+  ASSERT_FALSE(step.results.empty()) << "国士自摸应当结算这一局";
+  EXPECT_EQ(step.results.front().reason, protocol::RoundEndReason::kWinTsumo);
+  EXPECT_EQ(step.results.front().winner_seat, kSeat0);
 }
 
 json::Value AutoplayFrame(bool on) {

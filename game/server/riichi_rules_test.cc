@@ -848,5 +848,102 @@ TEST(RiichiPerf, TenpaiFrameCostBreakdown) {
   EXPECT_LT(frame_model_us, 200.0) << "tenpai 帧主导成本回归（Release 目标 < 20µs）";
 }
 
+// ---- AI 弃牌：并列处按「役 / 振听」决胜 -----------------------------------------
+// 共享的 `ChooseDiscard` 只用 `BestShantenAfterDraw` 评分，并列时按冻结牌序取最小牌面。
+// 日麻有「无役不能和」，所以并列时必须挑那手**能和**的 —— 否则会出现「牌型完整、听牌、
+// 却永远和不了」的死手（实测占荒庄局的一大半）。
+
+// 测试内的「按牌面扣一张」：`RemoveOneFaceIn` 是 riichi_rules.cc 的匿名命名空间实现，
+// 没有导出，这里照同语义补一份（只扣恰好一张，用于构造等待态）。
+void DropFace(std::vector<Tile>* tiles, Face face) {
+  for (auto it = tiles->begin(); it != tiles->end(); ++it) {
+    if (FaceOf(*it) == face) {
+      tiles->erase(it);
+      return;
+    }
+  }
+  FAIL() << "牌面不在手里: " << static_cast<int>(face);
+}
+
+TEST(RiichiAiDiscard, PrefersTheWaitThatActuallyHasYaku) {
+  // 234m 567m 345p 88s 67s + 9s。两种打法都**立刻听牌**（评分并列），但：
+  //   打 9s ⇒ 234m 567m 345p 88s 67s，听 5s/8s，全手无幺九字 ⇒ 断幺九，有役；
+  //   打 6s ⇒ 234m 567m 345p 88s 79s，听嵌张 8s，带 9s ⇒ 无断幺、无役牌、无役。
+  // 冻结牌序会在并列处取更小的 6s，于是走成死听 —— 这正是要修的。
+  const std::vector<Tile> hand =
+      Tiles({"2m", "3m", "4m", "5m", "6m", "7m", "3p", "4p", "5p", "6s", "7s", "8s", "8s", "9s"});
+  const WinContext ctx = Ron(/*from_seat=*/2);
+  const std::optional<Tile> chosen = ChooseDiscard(hand, {}, {}, ctx, /*can_riichi=*/false);
+  ASSERT_TRUE(chosen.has_value());
+  EXPECT_EQ(FaceOf(*chosen), FaceOf(*ParseTile("9s")))
+      << "应打 9s 留下断幺九的 5s/8s 两面听；实际打出 " << FormatTile(*chosen);
+
+  // 反向确认这手牌确实存在「无役听牌」的另一半，否则上面那条断言没有区分力。
+  std::vector<Tile> no_yaku_side = hand;
+  DropFace(&no_yaku_side, FaceOf(*ParseTile("6s")));
+  const std::vector<Tile> waits = RiichiWaitingTiles(no_yaku_side, {});
+  ASSERT_EQ(waits.size(), 1u) << "打 6s 之后应当是单张听牌";
+  EXPECT_TRUE(WinningWaits(no_yaku_side, {}, ctx, waits).empty()) << "打 6s 那一路本来就该是无役的";
+
+  // 有役的那一半确实能荣和。
+  std::vector<Tile> yaku_side = hand;
+  DropFace(&yaku_side, FaceOf(*ParseTile("9s")));
+  const std::vector<Tile> yaku_waits = RiichiWaitingTiles(yaku_side, {});
+  ASSERT_FALSE(yaku_waits.empty());
+  EXPECT_FALSE(WinningWaits(yaku_side, {}, ctx, yaku_waits).empty()) << "打 9s 那一路应当是断幺九";
+}
+
+TEST(RiichiAiDiscard, ShantenStillBeatsYaku) {
+  // 役只在**并列**处决胜。这里拆 99s 去追断幺九会退向听，必须放弃 —— 评分是第一关键字。
+  const std::vector<Tile> hand = Tiles({"2m", "3m", "4m", "5m", "6m", "7m", "3p", "4p",
+                                       "5p", "6s", "7s", "9s", "9s", "1z"});
+  const WinContext ctx = Ron(/*from_seat=*/2);
+  const std::optional<Tile> chosen = ChooseDiscard(hand, {}, {}, ctx, /*can_riichi=*/false);
+  ASSERT_TRUE(chosen.has_value());
+
+  // 逐个候选算评分，确认选中那张拿到了最小评分（役不能把更差的向听顶上来）。
+  int best = 8;  // 向听上限（`mahjong_rules` 的 kMaxShanten，未导出）
+  for (Tile tile : hand) {
+    std::vector<Tile> rest = hand;
+    DropFace(&rest, FaceOf(tile));
+    best = std::min(best, BestShantenAfterDraw(rest, {}));
+  }
+  std::vector<Tile> after = hand;
+  DropFace(&after, FaceOf(*chosen));
+  EXPECT_EQ(BestShantenAfterDraw(after, {}), best) << "选牌没有拿到最优向听：役盖过了第一关键字";
+}
+
+TEST(RiichiAiDiscard, ClosedHandWithoutYakuStillCountsViaRiichi) {
+  // 门清、能立直 ⇒ 无役听牌也是活的（立直就是役）。这里 can_riichi=true，
+  // 因此不该出现「宁可不听牌也不打那手」的怪行为。
+  const std::vector<Tile> hand = Tiles({"1m", "2m", "3m", "7p", "8p", "9p", "2s", "3s",
+                                       "4s", "6z", "6z", "1z", "1z", "5m"});
+  const WinContext ctx = Ron(/*from_seat=*/2);
+  const std::optional<Tile> chosen = ChooseDiscard(hand, {}, {}, ctx, /*can_riichi=*/true);
+  ASSERT_TRUE(chosen.has_value());
+  std::vector<Tile> after = hand;
+  after.erase(std::find(after.begin(), after.end(), *chosen));
+  EXPECT_FALSE(RiichiWaitingTiles(after, {}).empty()) << "能立直时至少要选一张打成听牌的";
+}
+
+TEST(RiichiAiDiscard, TiesFallBackToTheFrozenTileOrder) {
+  // 全并列（无役路线、不能立直）时，必须回到共享实现的确定性口径：最小牌面。
+  // 七对子形：1z 1z 3z 3z 5z 5z 7z 7z（4 对）+ 散牌，役为零、门清但 can_riichi=false。
+  const std::vector<Tile> hand = Tiles({"1z", "1z", "3z", "3z", "5z", "5z", "7z", "7z",
+                                       "2m", "5m", "2p", "5p", "2s", "5s"});
+  const WinContext ctx = Ron(/*from_seat=*/2);
+  const std::optional<Tile> chosen = ChooseDiscard(hand, {}, {}, ctx, /*can_riichi=*/false);
+  ASSERT_TRUE(chosen.has_value());
+  // 与共享实现的选择对照：并列处两者都必须落在同一张，否则「确定性」就丢了。
+  const std::optional<Tile> shared = mahjong::ChooseDiscard(hand, {}, std::nullopt);
+  ASSERT_TRUE(shared.has_value());
+  // 评分并列时双方取同一牌面；不并列则只要求本实现不更差。
+  std::vector<Tile> after = hand;
+  after.erase(std::find(after.begin(), after.end(), *chosen));
+  std::vector<Tile> after_shared = hand;
+  after_shared.erase(std::find(after_shared.begin(), after_shared.end(), *shared));
+  EXPECT_LE(BestShantenAfterDraw(after, {}), BestShantenAfterDraw(after_shared, {}));
+}
+
 }  // namespace
 }  // namespace mahjong::riichi
