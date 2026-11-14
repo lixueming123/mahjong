@@ -36,6 +36,14 @@ globalThis.performance = globalThis.performance || { now: () => Date.now() };
 const { createState } = await import('../../web/js/state.js');
 const { ReplayPlayer } = await import('../../web/js/replay.js');
 
+/** 一条轨道里的座位视图：麻将的形状是 `{hand, melds}`，两段都可省略。 */
+function seatView(hand = null, melds = null) {
+  return {
+    ...(hand ? { hand: hand.split(',') } : {}),
+    ...(melds ? { melds } : {}),
+  };
+}
+
 /** 一份 1 局、两人对局形状的回放（4 个座位，座位 1/3 是机器人）。 */
 function fixture() {
   // §5.18: frames are spliced into the file as JSON objects, not wrapped in strings.
@@ -147,9 +155,11 @@ function fixture() {
     ],
     win: null,
   };
+  // 视图轨道：每个座位自己看到的私有部分（麻将 = 门前手牌 + 副露）。服务端把它渲染成 JSON，
+  // 录制端与播放器都只当不透明文本搬运，这里只是照着那个形状写夹具。
   return {
     format: 'mahjong-replay',
-    version: 1,
+    version: 2,
     room_id: 'r-0000000000001',
     game_id: 'riichi',
     seed: '1',
@@ -162,22 +172,24 @@ function fixture() {
     final_rank: [1, 2, 3, 4],
     steps: [
       // 开局：game_start 逐座位下发（座位 0 与座位 1 各一份，模拟两个真人座位）
-      { t: 0, h: ['1m,2m,3m,4m,5m,6p,7p,8p,1s,2s,3s,1z,1z,9s', '', '', ''], f: [[[0], frame(start)]] },
+      { t: 0, v: [seatView('1m,2m,3m,4m,5m,6p,7p,8p,1s,2s,3s,1z,1z,9s'), null, null, null],
+        f: [[[0], frame(start)]] },
       // 摸牌后 state_sync：四家各一份，这里录了 0 与 1 两份
-      { t: 100, h: ['', '', '', ''], f: [[[0], frame(sync0)], [[1], frame(sync1)]] },
+      { t: 100, f: [[[0], frame(sync0)], [[1], frame(sync1)]] },
       // 打牌：广播
-      { t: 200, h: ['1m,2m,3m,4m,5m,6p,7p,8p,1s,2s,3s,1z,1z', '', '', ''], f: [[[0, 1, 2, 3], frame(discard)]] },
+      { t: 200, v: [seatView('1m,2m,3m,4m,5m,6p,7p,8p,1s,2s,3s,1z,1z'), null, null, null],
+        f: [[[0, 1, 2, 3], frame(discard)]] },
       // 座位 1 摸牌：私有
-      { t: 300, h: ['', '1s,2s,3s', '', ''], f: [[[1], frame(draw1)]] },
+      { t: 300, v: [null, seatView('1s,2s,3s'), null, null], f: [[[1], frame(draw1)]] },
       // 座位 1 碰：广播
-      { t: 400, h: ['', '', '', ''], f: [[[0, 1, 2, 3], frame(pong)]] },
+      { t: 400, f: [[[0, 1, 2, 3], frame(pong)]] },
       // 碰后 state_sync：四家各一份，这里录了 0 与 1 两份
       {
         t: 500,
-        h: ['', '1s,2s,3s,4p,5p,6p,7s,8s,2z,2z', '', ''],
+        v: [null, seatView('1s,2s,3s,4p,5p,6p,7s,8s,2z,2z'), null, null],
         f: [[[0], frame(syncAfterPong)], [[1], frame(syncAfterPong1)]],
       },
-      { t: 600, h: ['', '', '', ''], f: [[[0, 1, 2, 3], frame(end)]] },
+      { t: 600, f: [[[0, 1, 2, 3], frame(end)]] },
     ],
   };
 }
@@ -224,16 +236,16 @@ check('座位 1 视角：碰是本家副露', app.state.melds.map((m) => m.seat)
 {
   // 轨道也没有 → 空牌桌（不伪造别人的手牌）
   const noTrack = fixture();
-  for (const step of noTrack.steps) step.h = ['', '', '', ''];
+  for (const step of noTrack.steps) delete step.v;
   const bare = new ReplayPlayer({ app: createState(), ui: null, sfx: null, replay: noTrack, seat: 2 });
   bare.seekTo(bare.steps.length);
   check('无轨道 + 无私有帧的座位：本家手牌为空（不伪造）', bare.app.state.hands[0].length, 0);
 
-  // 轨道有货（真实录制里一定有：Game::ReplayHands 每次 state_sync 都记四家）→ 补回手牌。
+  // 轨道有货（真实录制里一定有：Game::ReplaySeatViews 每次 state_sync 都记四家）→ 补回手牌。
   const withTrack = fixture();
   // 给座位 2 补一条自己的轨道，模拟真实录制。
-  withTrack.steps[1].h[2] = '2m,3m,4m,5p,6p,7p,8s,9s,1z,2z,3z,5z,6z';
-  withTrack.steps[5].h[2] = '2m,3m,4m,5p,6p,7p,8s,9s,1z,2z,3z';
+  withTrack.steps[1].v = [null, null, seatView('2m,3m,4m,5p,6p,7p,8s,9s,1z,2z,3z,5z,6z'), null];
+  withTrack.steps[5].v = [null, null, seatView('2m,3m,4m,5p,6p,7p,8s,9s,1z,2z,3z'), null];
   const tracked = new ReplayPlayer({ app: createState(), ui: null, sfx: null, replay: withTrack, seat: 2 });
   tracked.seekTo(tracked.steps.length);
   check('无私有帧但轨道有货的座位：本家手牌由轨道补回', tracked.app.state.hands[0].length, 11);
@@ -242,7 +254,7 @@ check('座位 1 视角：碰是本家副露', app.state.melds.map((m) => m.seat)
 
   // 有私有帧的座位以帧为准：把轨道清空，手牌照样正确。
   const seatOne = new ReplayPlayer({ app: createState(), ui: null, sfx: null, replay: fixture(), seat: 1 });
-  for (const step of seatOne.steps) step.h = ['', '', '', ''];
+  for (const step of seatOne.steps) delete step.v;
   seatOne.seekTo(seatOne.steps.length);
   check('有私有帧的座位：手牌照常来自帧（轨道缺席也不影响）', seatOne.app.state.hands[0].length > 0, true);
 }
@@ -387,7 +399,7 @@ check('倍速接受 4x', player.setSpeed(4), 4);
   const twoRounds = fixture();
   // 造第二局：同一批帧再走一遍，中间夹一个 game_end（广播，所有座位都收到）。
   const endAt = twoRounds.steps.length;
-  twoRounds.steps.push({ t: 700, h: ['', '', '', ''], f: [[[0, 1, 2, 3], {
+  twoRounds.steps.push({ t: 700, f: [[[0, 1, 2, 3], {
     type: FRAME_TYPE.GAME_END,
     reason: 3,
     round_index: 0,
@@ -400,9 +412,9 @@ check('倍速接受 4x', player.setSpeed(4), 4);
   }]] });
   // 第二局的 game_start 只发给座位 0（真实录制就是这个形状）。
   const secondStart = { ...twoRounds.steps[0].f[0][1], round_index: 1 };
-  twoRounds.steps.push({ t: 800, h: ['1m,2m,3m,4m,5m,6p,7p,8p,1s,2s,3s,1z,1z,9s', '', '', ''],
+  twoRounds.steps.push({ t: 800, v: [seatView('1m,2m,3m,4m,5m,6p,7p,8p,1s,2s,3s,1z,1z,9s'), null, null, null],
     f: [[[0], secondStart]] });
-  twoRounds.steps.push({ t: 900, h: ['1m,2m,3m,4m,5m,6p,7p,8p,1s,2s,3s,1z,1z', '', '', ''],
+  twoRounds.steps.push({ t: 900, v: [seatView('1m,2m,3m,4m,5m,6p,7p,8p,1s,2s,3s,1z,1z'), null, null, null],
     f: [[[0, 1, 2, 3], { type: FRAME_TYPE.DISCARD_EVENT, seat: 0, tile: '9s', seq: 20 }]] });
 
   const roundApp = createState();
@@ -453,8 +465,8 @@ check('倍速接受 4x', player.setSpeed(4), 4);
   const multi = fixture();
   const startFrame = multi.steps[0].f[0][1];
   // 追加第二局与第三局：每局开头一份 game_start（只发给座位 0，真实录制就是这个形状）。
-  multi.steps.push({ t: 700, h: ['', '', '', ''], f: [[[0], { ...startFrame, round_index: 0, dealer: 1 }]] });
-  multi.steps.push({ t: 800, h: ['', '', '', ''], f: [[[0], { ...startFrame, round_index: 1, dealer: 0 }]] });
+  multi.steps.push({ t: 700, f: [[[0], { ...startFrame, round_index: 0, dealer: 1 }]] });
+  multi.steps.push({ t: 800, f: [[[0], { ...startFrame, round_index: 1, dealer: 0 }]] });
   const rounds = new ReplayPlayer({ app: createState(), ui: null, sfx: null, replay: multi, seat: 0 });
   // fixture 原有 7 步，追加的两局落在下标 7、8。
   check('局边界按 game_start 切分', rounds._rounds.map((round) => round.index), [0, 7, 8]);
@@ -465,7 +477,7 @@ check('倍速接受 4x', player.setSpeed(4), 4);
   // 南场：round_index 4 起就是南1（一圈 4 局）。
   const nanba = new ReplayPlayer({ app: createState(), ui: null, sfx: null, replay: {
     ...multi,
-    steps: [{ t: 0, h: ['', '', '', ''], f: [[[0], { ...startFrame, round_index: 4, dealer: 0 }]] }],
+    steps: [{ t: 0, f: [[[0], { ...startFrame, round_index: 4, dealer: 0 }]] }],
   }, seat: 0 });
   check('第二圈是南风', nanba._rounds[0].label, '南1');
 
@@ -526,10 +538,70 @@ check('倍速接受 4x', player.setSpeed(4), 4);
   // 早先 `_endStepIndex` 不清，`cursor-1` 恰好指到上一局的 game_end，结算页会一直挂着。
   const nextRound = fixture();
   const startOfRound = nextRound.steps[0].f[0][1];
-  nextRound.steps.push({ t: 700, h: ['', '', '', ''], f: [[[0], { ...startOfRound, round_index: 1 }]] });
+  nextRound.steps.push({ t: 700, f: [[[0], { ...startOfRound, round_index: 1 }]] });
   const across = new ReplayPlayer({ app: createState(), ui: null, sfx: null, replay: nextRound, seat: 0 });
   across.seekTo(across.steps.length);
   check('新一局开局后不再算停在局终', across.atRoundEnd, false);
+}
+
+// ---------------------------------------------------------------- 13. AI 视角的副露
+
+// 副露住在 `state_sync.seats[].melds`（按座位私有），没有 endpoint 的座位收不到，所以切到
+// AI 视角后四家的副露全没了。视图轨道 `steps[].v` 是唯一来源。
+{
+  const withMelds = fixture();
+  // 给第 5 步（碰之后）挂上座位 1 的视图：碰了 9s。视图是整份替换（不是合并），
+  // 所以手牌也要一起写上 —— 这就是服务端录制时的形状。
+  const pong = [{ type: MELD_TYPE.PONG, tiles: ['9s', '9s', '9s'] }];
+  withMelds.steps[5].v = [null, seatView('1s,2s,3s,4p,5p,6p,7s,8s,2z,2z', pong), null, null];
+
+  const meldApp = createState();
+  const fromBot = new ReplayPlayer({ app: meldApp, ui: null, sfx: null, replay: withMelds, seat: 2 });
+  fromBot.seekTo(fromBot.steps.length);
+  // 座位 1 在座位 2 眼里是屏幕座位 3。
+  const melds = meldApp.state.melds;
+  check('AI 视角：副露由轨道补回', melds.map((m) => ({ seat: m.seat, kind: m.kind })),
+    [{ seat: 3, kind: 'pong' }]);
+  check('AI 视角：副露牌面来自轨道', melds[0]?.tiles, ['9s', '9s', '9s']);
+
+  // 没有轨道（旧文件）时不能凭空造副露，也不能破坏线上帧已有的那一份。
+  const noTrack = fixture();
+  for (const step of noTrack.steps) delete step.v;
+  const plainApp = createState();
+  const plain = new ReplayPlayer({ app: plainApp, ui: null, sfx: null, replay: noTrack, seat: 0 });
+  plain.seekTo(plain.steps.length);
+  check('无副露轨道：线上帧的副露保留', plainApp.state.melds.map((m) => m.kind), ['pong']);
+
+  // 横放那张来自 meldClaims：AI 视角同样要正确。
+  check('AI 视角：横放牌跟着 meldClaims', melds[0]?.rotated >= 0, true);
+}
+
+// ---------------------------------------------------------------- 14. v1 文件仍可读
+
+// 格式版本 2 把 `steps[].h`（手牌）与 `steps[].m`（副露）合成了一条不透明的 `steps[].v`。
+// 已经录好的 v1 文件不能因此作废：播放器按同一口径把两条轨道折叠成视图。
+{
+  const legacy = fixture();
+  legacy.version = 1;
+  // 还原成 v1 的两条轨道：`h` 是逗号串，`m` 是副露数组。
+  const pong = [{ type: MELD_TYPE.PONG, tiles: ['9s', '9s', '9s'] }];
+  for (const step of legacy.steps) {
+    const views = step.v;
+    delete step.v;
+    if (!views) continue;
+    const hands = views.map((one) => (one?.hand ? one.hand.join(',') : ''));
+    step.h = hands;
+    const melds = views.map((one) => (one?.melds ?? ''));
+    if (melds.some((one) => Array.isArray(one) && one.length)) step.m = melds;
+  }
+  legacy.steps[5].m = ['', pong, '', ''];
+  legacy.steps[5].h = ['', '1s,2s,3s,4p,5p,6p,7s,8s,2z,2z', '', ''];
+
+  const old = new ReplayPlayer({ app: createState(), ui: null, sfx: null, replay: legacy, seat: 2 });
+  old.seekTo(old.steps.length);
+  check('v1 文件：手牌轨道仍能补回来', old.app.state.hands[0].length, 0);
+  check('v1 文件：他家的牌背张数仍按轨道给', old.app.state.hands[2].length, 13);
+  check('v1 文件：副露轨道仍能补回来', old.app.state.melds.map((m) => m.kind), ['pong']);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

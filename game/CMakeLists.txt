@@ -139,14 +139,15 @@ target_link_libraries(mahjong_replay_test PRIVATE mahjong_classic_game GTest::gt
 add_test(NAME mahjong_replay_test COMMAND mahjong_replay_test)
 set_tests_properties(mahjong_replay_test PROPERTIES TIMEOUT 120)
 
-# Game::ReplayHands()（回放的「透视」唯一数据源）：两种玩法各一份，验它确实是各家门前手牌，
-# 且日麻的赤 5 拼写与线上帧一致（0m/0p/0s）。与录制器分开，因为它测的是游戏侧契约。
-add_executable(mahjong_replay_hands_test server/replay_hands_test.cc server/json.cc server/protocol.cc)
-target_include_directories(mahjong_replay_hands_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
-target_link_libraries(mahjong_replay_hands_test PRIVATE mahjong_classic_game mahjong_riichi_game
-                                                       GTest::gtest_main GTest::gmock)
-add_test(NAME mahjong_replay_hands_test COMMAND mahjong_replay_hands_test)
-set_tests_properties(mahjong_replay_hands_test PROPERTIES TIMEOUT 60)
+# Game::ReplaySeatViews()（回放「从任意座位看牌桌」的唯一数据源）：两种玩法各一份，验它确实是
+# 各家的私有视图（门前手牌 + 副露），且日麻的赤 5 拼写与线上帧一致（0m/0p/0s）。与录制器分开，
+# 因为它测的是游戏侧契约。
+add_executable(mahjong_replay_views_test server/replay_views_test.cc server/json.cc server/protocol.cc)
+target_include_directories(mahjong_replay_views_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_link_libraries(mahjong_replay_views_test PRIVATE mahjong_classic_game mahjong_riichi_game
+                                                        GTest::gtest_main GTest::gmock)
+add_test(NAME mahjong_replay_views_test COMMAND mahjong_replay_views_test)
+set_tests_properties(mahjong_replay_views_test PROPERTIES TIMEOUT 60)
 
 # 玩法插件：riichi（日麻）。与 classic 是**两份互不相识的代码**——不共享房间、不共享帧，
 # 只在规则原语（mahjong_rules 的牌张/拆法/听牌）与契约（game.h / room_contract.h）处相接。

@@ -20,16 +20,6 @@ json::Value OptionsOf(const std::string& options_json) {
   return json::Value::RawJson(options_json);
 }
 
-// A comma-joined tile list ("1m,2m,0p"); empty when the hand is empty, which is also how a step
-// says "this seat's hand did not change".
-json::Value HandsOfStep(const std::array<std::string, kSeatCount>& hands) {
-  json::Value array = json::Value::Arr(kSeatCount);
-  for (const std::string& hand : hands) {
-    array.Append(json::Value::Str(hand));
-  }
-  return array;
-}
-
 json::Value RecipientsOfFrame(const std::vector<int>& recipients) {
   json::Value array = json::Value::Arr(recipients.size());
   for (const int seat : recipients) {
@@ -38,26 +28,50 @@ json::Value RecipientsOfFrame(const std::vector<int>& recipients) {
   return array;
 }
 
+/** Whether any seat's view moved in this step. */
+bool ViewsChanged(const SeatViews& views) {
+  for (const std::string& text : views) {
+    if (!text.empty()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// A seat view is already rendered JSON, so it is spliced verbatim like the frames: wrapping it in
+// Str would escape every quote it contains. An empty seat stays an empty string, which the reader
+// treats as "unchanged".
+json::Value ViewsOfStep(const SeatViews& views) {
+  json::Value array = json::Value::Arr(kSeatCount);
+  for (const std::string& text : views) {
+    if (text.empty()) {
+      array.Append(json::Value::Str(std::string()));
+    } else {
+      array.Append(json::Value::RawJson(text));
+    }
+  }
+  return array;
+}
+
 }  // namespace
 
 ReplayRecorder::ReplayRecorder(ReplayMeta meta) : meta_(std::move(meta)) {}
 
-void ReplayRecorder::AddStep(int64_t t_ms, const std::vector<Outbound>& outbounds,
-                             const std::array<std::string, kSeatCount>* hands) {
+void ReplayRecorder::AddStep(int64_t t_ms, const std::vector<Outbound>& outbounds, const SeatViews* views) {
   Step step;
-  bool hands_changed = false;
-  if (hands != nullptr) {
-    // Only the seats whose hand actually moved. A state_sync step already touches the drawer
-    // every draw, so in practice this is "the drawer plus any seat that just melded".
-    for (size_t seat = 0; seat < hands->size(); ++seat) {
-      if ((*hands)[seat] != last_hands_[seat]) {
-        step.hands[seat] = (*hands)[seat];
-        last_hands_[seat] = (*hands)[seat];
-        hands_changed = true;
+  bool views_changed = false;
+  if (views != nullptr) {
+    // Only the seats whose view actually moved. A state_sync step already touches the drawer every
+    // draw, so in practice this is "the drawer plus any seat whose table just changed".
+    for (size_t seat = 0; seat < views->size(); ++seat) {
+      if ((*views)[seat] != last_views_[seat]) {
+        step.views[seat] = (*views)[seat];
+        last_views_[seat] = (*views)[seat];
+        views_changed = true;
       }
     }
   }
-  if (outbounds.empty() && !hands_changed) {
+  if (outbounds.empty() && !views_changed) {
     return;  // a step that changed nothing observable is not worth a timeline entry
   }
   step.t_ms = t_ms;
@@ -137,9 +151,13 @@ std::string ReplayRecorder::Serialize() const {
 
   json::Value steps = json::Value::Arr(steps_.size());
   for (const Step& step : steps_) {
-    json::Value entry = json::Value::Obj(3);  // t, h, f
+    json::Value entry = json::Value::Obj(3);  // t, v, f
     entry.Set("t", json::Value::Int(step.t_ms));
-    entry.Set("h", HandsOfStep(step.hands));
+    // `v` only when some seat's view moved: a whole-table snapshot is the bulk of a step's cost,
+    // and most steps (a discard_event, a deadline) change no seat's own view.
+    if (ViewsChanged(step.views)) {
+      entry.Set("v", ViewsOfStep(step.views));
+    }
     json::Value frames = json::Value::Arr(step.frames.size());
     for (const Step::Frame& frame : step.frames) {
       // [ [recipients], <frame> ] — the frame is spliced VERBATIM, not stored as a string.

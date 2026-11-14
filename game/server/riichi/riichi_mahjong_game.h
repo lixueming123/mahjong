@@ -58,7 +58,7 @@ class RiichiMahjongGame final : public Game {
   GameStep Sync(int seat) override;
   GameStep Reconnect(int seat) override;
   void OnSeatPresence(int seat, bool present) override;
-  std::array<std::string, kSeatCount> ReplayHands() const override;
+  SeatViews ReplaySeatViews() const override;
 
   // Pure claim policy of an automated seat (exposed so it can be unit-tested directly with
   // crafted hands; OpenClaimWindow calls exactly this function for bots, and a seat with no

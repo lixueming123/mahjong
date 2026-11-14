@@ -74,6 +74,11 @@ struct Outbound {
   std::string frame;
 };
 
+// One rendered JSON object per seat, in seat order; empty text means "this seat has no view" (and,
+// on a recording's per-step track, "this seat's view did not change"). What the object holds is
+// the game's own business — see Game::ReplaySeatViews, which is the only producer.
+using SeatViews = std::array<std::string, kSeatCount>;
+
 // The outcome of one settled round, as the game reports it.
 //
 // Deliberately NOT `GameSettlement`: that one carries each seat's identity, which the room has
@@ -218,15 +223,28 @@ class Game {
   virtual void OnSeatPresence(int seat, bool present) = 0;
 
   // ---- replay recording (replay.h) ------------------------------------------------------
-  // Every seat's concealed hand, comma-joined tile codes ("1m,2m,0p"), in seat order. Recorded
-  // alongside the frames so a replay can offer a view no client ever saw: a bot has no endpoint,
-  // so its `state_sync` is never built, and no amount of recorded wire traffic can reconstruct
-  // it. Returns an empty array when the game has no such view — the recording then simply has no
-  // hand track, and the player shows backs like a live client would.
+  // Each seat's own view of the table, one rendered JSON object per seat, in seat order.
   //
-  // Called only while a recorder is attached, once per step, so a game without replay enabled
-  // pays nothing; still, keep it cheap (the default does nothing at all).
-  virtual std::array<std::string, kSeatCount> ReplayHands() const { return {}; }
+  // Recorded so a replay can offer a view no client ever saw: a seat with no endpoint has its
+  // private frames (`state_sync`, `game_start`) filtered out before they are built, so no amount
+  // of recorded wire traffic can reconstruct what that seat was looking at.
+  //
+  // Deliberately opaque. What a seat's view *contains* is the game's business — mahjong's is a
+  // hand and its melds, a card game's would be hole cards, a board game's may be nothing at all —
+  // so the shell and the recorder only ever relay the text: they compare it, store it, and hand
+  // it back to the same game's renderer. Adding a game therefore never touches replay.h, and this
+  // header needs no word for "hand" or "meld".
+  //
+  // Two rules the text must keep:
+  //   * it is read by the player, which is that game's own client, so it must be spelled the way
+  //     that client's frames spell things (the same tile codes, the same meld shape);
+  //   * it may not reveal more than §8.1 allows the seat itself to see — a recording is a replay
+  //     of one seat's table, not a god mode over hidden information the seat never had.
+  //
+  // Returns an empty array when the game has no such view; the recording then has no view track
+  // and the player shows only what the wire carried. Called only while a recorder is attached and
+  // only on steps that re-render the table, so keep it cheap (the default does nothing at all).
+  virtual SeatViews ReplaySeatViews() const { return {}; }
 };
 
 }  // namespace mahjong

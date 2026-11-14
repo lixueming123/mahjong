@@ -38,8 +38,12 @@ export function sortHand(hand) {
   return [...hand].sort((a, b) => sortKey(a) - sortKey(b) || a.localeCompare(b));
 }
 
-/** 服务端 melds[]（H4）→ 渲染层的 {seat, kind, tiles, rotated} */
-function toViewMeld(viewSeat, meld, claimedTile = null) {
+/** 服务端 melds[]（H4）→ 渲染层的 {seat, kind, tiles, rotated}
+ *
+ * 导出给回放用：`ReplayPlayer` 要把录制里的副露轨道按屏幕座位重建成同一形状，
+ * 两份实现必须一致，否则切视角后副露的横放位置会和联机时不同。
+ */
+export function toViewMeld(viewSeat, meld, claimedTile = null) {
   const tiles = Array.isArray(meld.tiles) && meld.tiles.length
     ? [...meld.tiles]
     : Array(4).fill('back');            // 他家暗杠：服务端恒下发 []（§5.9）

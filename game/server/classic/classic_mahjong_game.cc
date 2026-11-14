@@ -294,21 +294,34 @@ void ClassicMahjongGame::OnSeatPresence(int seat, bool present) {
   disconnected_[static_cast<size_t>(seat)] = !present;
 }
 
-// The god view of a recording (replay.h): classic never deals red fives, so this is the same
-// spelling the seat's own `game_start.hand` uses (FormatTile's default), sorted as §2.2 asks.
-std::array<std::string, kSeatCount> ClassicMahjongGame::ReplayHands() const {
-  std::array<std::string, kSeatCount> hands;
-  for (size_t seat = 0; seat < hands.size(); ++seat) {
-    std::string& out = hands[seat];
-    const std::vector<Tile>& hand = hands_[seat];
-    for (size_t index = 0; index < hand.size(); ++index) {
-      if (index != 0) {
-        out.push_back(',');
-      }
-      out += FormatTile(hand[index]);
+// The recording's view track (replay.h): what each seat was looking at, in that seat's own
+// spelling. It mirrors the private part of a `state_sync` (`hand` plus that seat's `melds`) so the
+// player can hand it straight to the reducer, and so a seat a client never saw — a seat with no
+// endpoint has no `state_sync` built at all — can still be replayed.
+//
+// Classic never deals red fives, so this is the same spelling the seat's own `game_start.hand`
+// uses (FormatTile's default), sorted as §2.2 asks.
+//
+// One seat's entry is not allowed to hold anything §8.1 would refuse that seat: the track is read
+// from any of the four viewpoints, so a concealed kan keeps `tiles: []` even in its owner's entry
+// (four backs are drawn instead). Every other meld is public anyway.
+SeatViews ClassicMahjongGame::ReplaySeatViews() const {
+  SeatViews views;
+  for (size_t seat = 0; seat < views.size(); ++seat) {
+    json::Value melds = json::Value::Arr(melds_[seat].size());
+    for (const Meld& meld : melds_[seat]) {
+      json::Value entry = json::Value::Obj(2);  // type, tiles
+      entry.Set("type", json::Value::Int(protocol::WireOf(protocol::ToWire(meld.type))));
+      const bool concealed = meld.type == MeldType::kAnkan;
+      entry.Set("tiles", concealed ? json::Value::Arr(0) : TilesToJson(meld.tiles));
+      melds.Append(std::move(entry));
     }
+    json::Value view = json::Value::Obj(2);  // hand, melds
+    view.Set("hand", TilesToJson(hands_[seat]));
+    view.Set("melds", std::move(melds));
+    views[seat] = view.Dump();
   }
-  return hands;
+  return views;
 }
 
 // The room's gate (is this seat's turn, is the window still open, is that tile in hand) lives

@@ -17,14 +17,18 @@
  *
  * 视角与透视：
  *   - `seat` 决定喂哪些帧（私有帧只发给对应座位）；
- *   - 上帝视角读 `steps[].h`（四人门前手牌快照）——机器人没有连接，它的 `state_sync`
- *     从不下发，所以这份轨道是线上帧推不出来的唯一来源；
+ *   - `steps[].v` 记的是每个座位**自己看到的私有视图**（麻将里就是门前手牌 + 副露）。
+ *     没有 endpoint 的座位（机器人）服务端从不为它构建私有帧，所以这份轨道是线上帧
+ *     推不出来的唯一来源；
  *   - 透视复用结算期的摊牌通道 `state.revealHands[view]`，`opponents.js` 已有的
  *     "按牌码换牌面"路径直接生效，渲染层零改动。
+ *
+ * 视图的内容对录制端与播放器都是不透明的（game.h 里说明理由）。这里之所以还认识
+ * `hand`/`melds`，是因为下游渲染层就是麻将：换玩法要改的是 `_applySeatViews`，不是格式。
  */
 import { FRAME_TYPE } from './protocol_enums.js';
 import { MahjongClient } from './client.js';
-import { isValidTile } from './state.js';
+import { toViewMeld } from './state.js';
 
 /** 播放倍速档位（1 = 录制时的真实节奏） */
 export const SPEEDS = [0.5, 1, 2, 4];
@@ -73,8 +77,12 @@ export class ReplayPlayer {
     this._endStepIndex = -1;
     /** 已经喂到第几步（= 下一步的游标） */
     this.cursor = 0;
-    /** 每人的最新门前手牌（"1m,2m,..."，来自 steps[].h），透视的唯一来源 */
-    this._lastHands = ['', '', '', ''];
+    /**
+     * 每人的最新私有视图（`{hand, melds}`，来自 steps[].v）。服务端只说"这是该座位此刻看到
+     * 的私有部分"，具体字段由玩法自己定；播放器只认麻将这一份（手牌 + 副露），因为渲染层是麻将的。
+     * 这是透视与「切到没有连接（机器人）的座位」的唯一数据来源。
+     */
+    this._lastViews = [null, null, null, null];
     /** 时间轴上的毫秒位置（按倍速缩放前的原始时间） */
     this.clockMs = 0;
     this._timer = 0;
@@ -172,7 +180,7 @@ export class ReplayPlayer {
       this._applyStep(this.steps[this.cursor]);
       this.cursor += 1;
       // 轨道改动必须发生在 resume 之前，否则这次渲染看不到补上的手牌/透视。
-      this._applyHandTracks();
+      this._applySeatViews();
     } finally {
       this.app.resumeChanged();
     }
@@ -201,14 +209,14 @@ export class ReplayPlayer {
       this.client.window = null;
       this.client.pending = false;
       this.client.frozen = false;
-      this._lastHands = ['', '', '', ''];
+      this._lastViews = [null, null, null, null];
       this._feedRoomJoined();
       for (let index = 0; index < target; index += 1) {
         this._applyStep(this.steps[index], index);
       }
       this.cursor = target;
       // 同 stepForward()：轨道写入要在 resume 之前，才能随这次渲染一起生效。
-      this._applyHandTracks();
+      this._applySeatViews();
     } finally {
       this.app.resumeChanged();
       this._seeking = false;
@@ -248,7 +256,7 @@ export class ReplayPlayer {
    */
   setGodMode(on) {
     this.godMode = !!on;
-    this._applyHandTracks();
+    this._applySeatViews();
     this.app.changed();
     return this.godMode;
   }
@@ -357,7 +365,7 @@ export class ReplayPlayer {
       }
       // 手牌轨道（透视 / 补机器人手牌）必须落在批处理区间内：写在 resume 之后的话，
       // 这次渲染已经发生过了，改动要等下一次 changed 才可见。
-      this._applyHandTracks();
+      this._applySeatViews();
     } finally {
       // suspend 过就一定 resume —— 这是批处理的唯一不变量。条件式配对（只在"有消费"时
       // resume）会让 batchDepth 永久泄漏，之后所有 changed() 都被吞掉，画面再也不刷新。
@@ -371,15 +379,33 @@ export class ReplayPlayer {
 
   /** 一步 = 该步所有发给我这个视角的帧，按录制顺序。`stepIndex` 只用于标记局终位置。 */
   _applyStep(step, stepIndex = this.cursor) {
-    if (!step || !Array.isArray(step.f)) return;
-    // 手牌轨道与帧无关：它记录的是"此刻四家各自握着什么"，按座位下标存，先更新再喂帧。
-    if (Array.isArray(step.h)) {
-      for (let seat = 0; seat < 4 && seat < step.h.length; seat += 1) {
-        const text = step.h[seat];
-        if (typeof text === 'string' && text) this._lastHands[seat] = text;
+    if (!step) return;
+    // 视图轨道与帧无关：它记录的是"此刻每个座位自己的私有视图"（麻将 = 手牌 + 副露），
+    // 按座位下标存，先更新再喂帧。
+    if (Array.isArray(step.v)) {
+      for (let seat = 0; seat < 4 && seat < step.v.length; seat += 1) {
+        const view = step.v[seat];
+        // 缺席（空串/空值）= 该座位这一步没变；对象 = 该座位最新的完整视图。
+        if (view && typeof view === 'object') this._lastViews[seat] = view;
+      }
+    } else {
+      // v1 文件：手牌与副露分两条轨道。保留读取，旧录制不能被一次格式收紧作废。
+      if (Array.isArray(step.h)) {
+        for (let seat = 0; seat < 4 && seat < step.h.length; seat += 1) {
+          const text = step.h[seat];
+          if (typeof text !== 'string' || !text) continue;
+          this._lastViews[seat] = { ...(this._lastViews[seat] || {}), hand: text.split(',') };
+        }
+      }
+      if (Array.isArray(step.m)) {
+        for (let seat = 0; seat < 4 && seat < step.m.length; seat += 1) {
+          const melds = step.m[seat];
+          if (!Array.isArray(melds)) continue;
+          this._lastViews[seat] = { ...(this._lastViews[seat] || {}), melds };
+        }
       }
     }
-    for (const entry of step.f) {
+    for (const entry of step.f || []) {
       if (!Array.isArray(entry) || entry.length < 2) continue;
       const [recipients, payload] = entry;
       // §5.18 的帧是**直接拼接进文件**的对象（不包成字符串，见 replay.cc），所以这里通常是
@@ -395,12 +421,12 @@ export class ReplayPlayer {
         }
       }
       if (!frame || typeof frame !== 'object' || TIMELINE_ONLY.has(frame.type)) continue;
-      // 新的一局（本局的第一帧）：手牌轨道是**本局**的快照，跨局必须清空，否则
-      // `_applyHandTracks` 会把上一局结束时的门前牌当成这一局的（表现为换局后本家手牌
+      // 新的一局（本局的第一帧）：视图轨道是**本局**的快照，跨局必须清空，否则
+      // `_applySeatViews` 会把上一局结束时的门前牌当成这一局的（表现为换局后本家手牌
       // 张数停在旧值）。同理，上一局的局终位置不再代表"当前停在局终"，一起清掉 ——
       // 否则跨过边界后 `atRoundEnd` 仍会认为还停在上局的 game_end 上。
       if (frame.type === FRAME_TYPE.GAME_START) {
-        this._lastHands = ['', '', '', ''];
+        this._lastViews = [null, null, null, null];
         this._lastEndFrame = null;
         this._endStepIndex = -1;
       }
@@ -443,32 +469,35 @@ export class ReplayPlayer {
   }
 
   /**
-   * 用文件里的手牌轨道补三件事，都只在这份录制**有**轨道时才做：
+   * 用文件里的视图轨道补三件事，都只在这份录制**有**轨道时才做：
    *
-   *   1. **本家手牌**：机器人座位没有连接，服务端从不给它发 `state_sync`，所以从它自己的
-   *      视角重放会得到一副空手牌。轨道记的正是它当时握着什么，这里补回去 —— 否则「切到
-   *      任一 AI 视角」就是一块空牌桌，而这个功能最大的用处恰恰是复盘别人的选择。
+   *   1. **本家手牌**：没有 endpoint 的座位（机器人）服务端从不给它发 `state_sync`，所以从
+   *      它自己的视角重放会得到一副空手牌。轨道记的正是它当时看到的那一份，这里补回去 ——
+   *      否则「切到任一 AI 视角」就是一块空牌桌，而这个功能最大的用处恰恰是复盘别人的选择。
    *   2. **另外三家的牌背张数**：同理，`hands[1..3]` 的 `'back'` 占位也来自各座位的私有
    *      `state_sync`；只有真人座位有 wire，所以从 AI 视角看另外三家会一张牌都不画。
    *      轨道里有张数，补齐牌背即可（牌面只在透视时才给）。
    *   3. **透视**：四家门前牌写进 `state.revealHands`（结算页摊牌用的同一条渲染通道）。
    *
-   * `_lastHands` 是"扫到 cursor 为止每人的最新门前牌"（在 `_applyStep` 里滚动维护），
-   * 所以这里是常数时间。`h` 全为空（本玩法没提供轨道）时什么都不做。
+   * `_lastViews` 是"扫到 cursor 为止每人的最新私有视图"（在 `_applyStep` 里滚动维护），
+   * 所以这里是常数时间。整条轨道缺席（玩法没有提供视图）时什么都不做。
+   *
+   * 视图里的字段由玩法自己决定；这里只认麻将这一份（`hand` / `melds`），因为下游的渲染层
+   * 是麻将的。换一个玩法，改的是这个函数，不是录制格式。
    */
-  _applyHandTracks() {
+  _applySeatViews() {
     const state = this.app.state;
-    if (!this._lastHands.some(Boolean)) return;  // 没有轨道：保持线上帧的样子，不伪造
+    if (!this._lastViews.some(Boolean)) return;  // 没有轨道：保持线上帧的样子，不伪造
     const mySeat = state.mySeat ?? 0;
+    const hands = this._lastViews.map((view) => (Array.isArray(view?.hand) ? view.hand : null));
 
     for (let seat = 0; seat < 4; seat += 1) {
-      const text = this._lastHands[seat];
-      if (!text) continue;
+      const tiles = hands[seat];
+      if (!tiles) continue;
       const view = ((seat - mySeat) + 4) % 4;
-      const tiles = text.split(',').filter(isValidTile);
       if (view === 0) {
         // 本家手牌只补空，不覆盖：`state_sync` 是这一步的权威手牌，而轨道是"滚到这一步
-        // 为止最后一次变化的值"，两者可能差一步（delta 编码：空串表示没变）。用轨道
+        // 为止最后一次变化的值"，两者可能差一步（delta 编码：缺席表示没变）。用轨道
         // 覆盖会让下一张 discard_event 找不到牌，进而判 needsSync。
         if (state.hands[0].length === 0) {
           state.hands[0] = tiles;
@@ -484,6 +513,8 @@ export class ReplayPlayer {
     // 留下的旧张数会和一个空手牌同时存在，牌桌上什么都不画、数字却是 13。
     state.handCounts = state.hands.map((hand) => hand.length);
 
+    this._applyMeldTracks();
+
     // 透视
     if (!this.godMode) {
       if (state.revealHands) {
@@ -494,18 +525,48 @@ export class ReplayPlayer {
     }
     const revealed = [null, null, null, null];
     for (let seat = 0; seat < 4; seat += 1) {
-      const text = this._lastHands[seat];
-      if (!text) continue;
+      const tiles = hands[seat];
+      if (!tiles) continue;
       // `revealHands` 按**屏幕**座位索引（本家恒 0），所以按协议座位旋转一次。
-      revealed[((seat - mySeat) + 4) % 4] = text.split(',').filter(isValidTile);
+      revealed[((seat - mySeat) + 4) % 4] = tiles;
     }
     state.revealHands = revealed;
     state.revealWinner = null;  // 透视不是"和牌者高亮"，别抢结算页的金条
   }
+
+  /**
+   * 用视图轨道里的副露补 `state.melds`。
+   *
+   * 副露住在 `state_sync.seats[].melds` 里，而那是**按座位私有的帧** —— 没有 endpoint 的
+   * 座位服务端从不为它构建，所以从 AI 视角重放时四家的副露全没了（牌桌上空空如也，
+   * 但牌河是对的）。轨道是这些信息的唯一来源。
+   *
+   * 屏幕座位（本家恒 0）才是渲染层的索引，所以协议座位要旋转一次。
+   * 横放那张用 `state.meldClaims` —— 它在 `action_event` 里逐步记下来，切视角重放时同样适用。
+   */
+  _applyMeldTracks() {
+    // 没有副露轨道（旧文件，或玩法没有副露）时不做任何事：线上帧已经有权威副露，
+    // 覆盖只会更糟。
+    if (!this._lastViews.some((view) => Array.isArray(view?.melds) && view.melds.length)) return;
+    const state = this.app.state;
+    const mySeat = state.mySeat ?? 0;
+    const rebuilt = [];
+    for (let seat = 0; seat < 4; seat += 1) {
+      const own = this._lastViews[seat]?.melds;
+      if (!Array.isArray(own) || !own.length) continue;
+      const view = ((seat - mySeat) + 4) % 4;
+      const claims = state.meldClaims?.[view] || [];
+      own.forEach((meld, index) => {
+        if (!meld || !Number.isInteger(meld.type)) return;
+        rebuilt.push(toViewMeld(view, meld, claims[index] ?? null));
+      });
+    }
+    state.melds = rebuilt;
+  }
 }
 
-/** 播放器支持的格式版本（§5.18：`version = 1`）。 */
-const SUPPORTED_VERSION = 1;
+/** 播放器支持的格式版本（§5.18）。v2 = `steps[].v`；v1 的 `h`/`m` 轨道仍然能读。 */
+const SUPPORTED_VERSION = 2;
 
 /** 计时器间隔：比 60 fps 粗，比一次渲染贵得多的重放循环省得多。 */
 const TICK_MS = 50;

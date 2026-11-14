@@ -183,22 +183,22 @@ void RoomActor::RecordStep(const GameStep& step) {
     }
     recorder_ = std::make_unique<ReplayRecorder>(std::move(meta));
   }
-  // Only the hand snapshot is needed when the step actually re-renders the table. `state_sync` is
-  // the one frame that reports hands (per seat, privately), and comparing a short prefix is
-  // cheaper than serializing four hands on every deadline-only step. The prefix is exact, not a
+  // Only the seat views are needed when the step actually re-renders the table. `state_sync` is
+  // the one frame that reports a seat's own table (privately), and comparing a short prefix is
+  // cheaper than serializing four views on every deadline-only step. The prefix is exact, not a
   // guess: every frame builder in both games writes `type` first, and the frozen golden hashes
   // depend on that byte order (game_test_support.h).
   constexpr std::string_view kStateSyncPrefix = R"({"type":20,)";  // §1.3.1: state_sync = 20
-  std::array<std::string, kSeatCount> hands;
-  const std::array<std::string, kSeatCount>* hand_track = nullptr;
+  SeatViews views;
+  const SeatViews* view_track = nullptr;
   for (const Outbound& outbound : step.outbounds) {
     if (outbound.frame.rfind(kStateSyncPrefix, 0) == 0) {
-      hands = game().ReplayHands();
-      hand_track = &hands;
+      views = game().ReplaySeatViews();
+      view_track = &views;
       break;
     }
   }
-  recorder_->AddStep(clock::EpochMs() - replay_started_ms_, step.outbounds, hand_track);
+  recorder_->AddStep(clock::EpochMs() - replay_started_ms_, step.outbounds, view_track);
 }
 
 void RoomActor::WriteReplay(const GameResult& result) {

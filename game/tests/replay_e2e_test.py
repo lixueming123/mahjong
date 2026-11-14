@@ -248,8 +248,8 @@ def request_replay(client: Client, room_id: str) -> dict:
 def check_file_shape(replay: dict, room_id: str, text: str | None = None) -> None:
     if replay.get("format") != "mahjong-replay":
         raise TestFailure(f"format must be 'mahjong-replay': {replay.get('format')!r}")
-    if replay.get("version") != 1:
-        raise TestFailure(f"version must be 1: {replay.get('version')!r}")
+    if replay.get("version") != 2:
+        raise TestFailure(f"version must be 2: {replay.get('version')!r}")
     if replay.get("room_id") != room_id:
         raise TestFailure(f"room_id mismatch: {replay.get('room_id')!r} != {room_id!r}")
     if text is not None and "\\" in text:
@@ -267,9 +267,13 @@ def check_file_shape(replay: dict, room_id: str, text: str | None = None) -> Non
     for index, step in enumerate(steps):
         if not isinstance(step.get("t"), int):
             raise TestFailure(f"steps[{index}].t must be an int: {step!r}")
-        hands = step.get("h")
-        if not isinstance(hands, list) or len(hands) != 4:
-            raise TestFailure(f"steps[{index}].h must be 4 entries: {hands!r}")
+        # `v` 只在某座位私有视图变化时出现；出现时四家各占一位（空串 = 该座位没变）。
+        views = step.get("v")
+        if views is not None and (not isinstance(views, list) or len(views) != 4):
+            raise TestFailure(f"steps[{index}].v must be 4 entries: {views!r}")
+        for seat, view in enumerate(views or []):
+            if not isinstance(view, (dict, str)):
+                raise TestFailure(f"steps[{index}].v[{seat}] must be an object or \"\": {view!r}")
         frames = step.get("f")
         if not isinstance(frames, list):
             raise TestFailure(f"steps[{index}].f must be a list: {frames!r}")
@@ -309,14 +313,20 @@ def replay_as_seat(replay: dict, seat: int) -> dict:
     return {"last_sync": last_sync, "game_end": last_end}
 
 
-def hand_track_at(replay: dict, seat: int, step_index: int) -> str:
-    """按播放器口径滚动 `steps[].h`：空串表示"该座位这一步没变"，不是"没有手牌"。"""
-    track: list[str] = ["", "", "", ""]
+def seat_view_at(replay: dict, seat: int, step_index: int) -> dict:
+    """按播放器口径滚动 `steps[].v`：缺席/空串表示"该座位这一步没变"，不是"没有视图"。"""
+    track: list[dict] = [{}, {}, {}, {}]
     for step in (replay.get("steps") or [])[:step_index]:
-        for index, hand in enumerate(step.get("h") or []):
-            if index < len(track) and hand:
-                track[index] = hand
+        for index, view in enumerate(step.get("v") or []):
+            if index < len(track) and isinstance(view, dict):
+                track[index] = view
     return track[seat]
+
+
+def hand_track_at(replay: dict, seat: int, step_index: int) -> list[str]:
+    """该座位在第 `step_index` 步之前最后一份视图里的门前手牌。"""
+    hand = seat_view_at(replay, seat, step_index).get("hand")
+    return hand if isinstance(hand, list) else []
 
 
 def run(args: argparse.Namespace) -> int:
@@ -374,18 +384,18 @@ def run(args: argparse.Namespace) -> int:
         if disk_end.get("reason") != live_end.get("reason"):
             raise TestFailure(f"replayed reason {disk_end.get('reason')!r} != live {live_end.get('reason')!r}")
 
-        # ---- 2b. 手牌轨道必须覆盖四家 ----
-        # 这是「切到 AI 视角」唯一的数据来源：机器人没有连接，服务端从不为它构建 state_sync，
-        # 所以它的手牌只能从 steps[].h 里读。轨道是按步 delta 编码的（空串 = 该座位没变），
-        # 所以要按播放器口径滚动一遍再看，而不是逐条要求四家都非空。
+        # ---- 2b. 视图轨道必须覆盖四家 ----
+        # 这是「切到 AI 视角」唯一的数据来源：没有 endpoint 的座位，服务端从不为它构建
+        # state_sync，所以它的私有视图只能从 steps[].v 里读。轨道是按步 delta 编码的
+        # （缺席 = 该座位没变），所以要按播放器口径滚动一遍再看，而不是逐条要求四家都非空。
         # 曾经的录制只在 state_sync 步取快照，某些座位整局都没被记到，切过去就是一块空牌桌。
         replay_steps = on_disk.get("steps") or []
         for seat in range(4):
             hand = hand_track_at(on_disk, seat, len(replay_steps))
             if not hand:
                 raise TestFailure(
-                    f"hand track never recorded seat {seat}: switching the replay to that seat "
-                    f"would show an empty table (last step h={replay_steps[-1].get('h')!r})")
+                    f"view track never recorded seat {seat}: switching the replay to that seat "
+                    f"would show an empty table (last step v={replay_steps[-1].get('v')!r})")
 
         # ---- 3. 取回 + 鉴权（需要账号）----
         skipped = fetch_and_authorize(port, room_id, on_disk, main_client)

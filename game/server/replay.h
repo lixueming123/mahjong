@@ -6,12 +6,14 @@
 // at all. The frames are the game as it was played, so a recording is a fact, not a program.
 //
 // The recorder is deliberately dumb: it does not know a game, a rule or a phase. The room hands
-// it each step's outbounds and (optionally) each seat's concealed hand; it appends them. That is
-// the same boundary as game.h — the game decides, the room delivers, the recorder remembers.
+// it each step's outbounds and (optionally) each seat's own view of the table; it appends them.
+// That is the same boundary as game.h — the game decides, the room delivers, the recorder
+// remembers.
 //
-// Hand snapshots are the one thing the wire does not carry for every seat: a bot has no endpoint,
-// so its `state_sync` is never built (RoomActor::Context sets `wired`). The god view therefore
-// needs `Game::ReplayHands()`, which the room asks for only while a recording is on.
+// Why a seat's view has to be recorded at all: the wire does not carry it for every seat. A seat
+// with no endpoint has its private frames filtered out before they are built (RoomActor::Context
+// sets `wired`), so replaying from that seat would show an empty table. `Game::ReplaySeatViews()`
+// is what fills the gap, and its text is opaque here on purpose (game.h explains why).
 //
 // I/O never happens on a game thread. `ReplayRecorder` only accumulates in memory; `ReplayActor`
 // (replay_store.h) owns the disk. The room serializes the file and posts it there, exactly like
@@ -56,18 +58,21 @@ class ReplayRecorder {
  public:
   // The file format version. Bumped only when a reader would have to change; a reader that sees
   // a newer version refuses the file instead of guessing (replay.js does the same).
-  static constexpr int kFormatVersion = 1;
+  //
+  // 2: `steps[].v` (one opaque per-seat view) replaced `steps[].h` + `steps[].m`. A v1 reader
+  //    ignores `v` and simply shows what the wire carried; a v2 reader still accepts v1 files.
+  static constexpr int kFormatVersion = 2;
 
   explicit ReplayRecorder(ReplayMeta meta);
 
   // One transition. |outbounds| is exactly what the room is about to deliver, so a broadcast
   // (empty recipients) is recorded once with all four seats as recipients and each private frame
-  // with its own. |hands| is Game::ReplayHands(), or nullptr on a step that does not re-render
-  // the table (no `state_sync`), which is most of them: a deadline-only step changes no hand.
+  // with its own. |views| is Game::ReplaySeatViews(), or nullptr on a step that does not re-render
+  // the table (no `state_sync`), which is most of them: a deadline-only step changes no view.
   //
   // |t_ms| is the offset since the match started. It is used for pacing only — a replay must
   // never depend on it to be correct, because the original delays are wall clock.
-  void AddStep(int64_t t_ms, const std::vector<Outbound>& outbounds, const std::array<std::string, kSeatCount>* hands);
+  void AddStep(int64_t t_ms, const std::vector<Outbound>& outbounds, const SeatViews* views);
 
   // Marks the match as finished and stores the final table. Called from the match_over result;
   // an unfinished match still serializes (a server that dies mid-match leaves a usable file).
@@ -91,9 +96,9 @@ class ReplayRecorder {
   // One recorded frame group: the seats it went to and the exact bytes.
   struct Step {
     int64_t t_ms = 0;
-    // Changed hands only, as "1m,2m,..." (empty = unchanged). Fixed size so a step can index by
+    // Changed views only, as rendered JSON (empty = unchanged). Fixed size so a step can index by
     // seat; the serializer drops the empty entries.
-    std::array<std::string, kSeatCount> hands;
+    SeatViews views;
     struct Frame {
       std::vector<int> recipients;
       std::string frame;
@@ -103,7 +108,7 @@ class ReplayRecorder {
 
   ReplayMeta meta_;
   std::vector<Step> steps_;
-  std::array<std::string, kSeatCount> last_hands_ {};
+  SeatViews last_views_ {};
   bool finished_ = false;
   // Final table, valid when finished_.
   bool match_over_ = false;

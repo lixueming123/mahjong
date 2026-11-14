@@ -6,13 +6,15 @@
 //      seed produces byte-identical files, because the recorder only appends what the game
 //      emitted. `same seed -> same frames` is already proven elsewhere; this pins the step that
 //      turns frames into a file.
-//   2. **The god view is the concealed hands**, and it agrees with `game_end.results[].hand`
-//      once the melds are subtracted — i.e. the track a player uses for 透视 is really each
-//      seat's own hand, not a re-render of something public.
+//   2. **The view track is each seat's own private view**, not a re-render of something public:
+//      replaying from a seat with no endpoint is only possible because the game says what that
+//      seat was looking at.
 //   3. **A broadcast is recorded once with all four recipients**, and a private frame with only
 //      its own: that expansion is what lets any seat's viewpoint be replayed from one file.
-//   4. **The hand track only appears on steps that could change it.** A deadline-only step must
-//      not serialize four hands — that is the whole reason AddStep takes a nullable track.
+//   4. **The view track only appears on steps that could change it.** A deadline-only step must
+//      not serialize four views — that is the whole reason AddStep takes a nullable track.
+//   5. **The view text is opaque to the recorder and the shell.** It is compared, stored and
+//      spliced verbatim; a game that calls its per-seat state something else needs no change here.
 //
 // The driver is deliberately a minimal one (answer seat 0's window with the first legal option,
 // otherwise let the deadline expire) rather than a copy of the golden fixture's: these tests are
@@ -220,16 +222,16 @@ class RecorderDriver {
     return frame;
   }
 
-  // Mirrors RoomActor::RecordStep: the god view is only asked for on a step that re-renders the
+  // Mirrors RoomActor::RecordStep: the seat views are only asked for on a step that re-renders the
   // table, which is recognized by the state_sync prefix (both games write `type` first).
   void RecordAndDeliver(GameStep& step) {
     constexpr std::string_view kStateSyncPrefix = R"({"type":20,)";
-    std::array<std::string, kSeatCount> hands;
-    const std::array<std::string, kSeatCount>* track = nullptr;
+    SeatViews views;
+    const SeatViews* track = nullptr;
     for (const Outbound& outbound : step.outbounds) {
       if (outbound.frame.rfind(kStateSyncPrefix, 0) == 0) {
-        hands = game_.ReplayHands();
-        track = &hands;
+        views = game_.ReplaySeatViews();
+        track = &views;
         break;
       }
     }
@@ -322,16 +324,16 @@ TEST(ReplayRecorderTest, BroadcastExpandsToEverySeatAndPrivateFrameDoesNot) {
   EXPECT_EQ(recorder.Serialize().find("\\\""), std::string::npos);
 }
 
-TEST(ReplayRecorderTest, HandsAreRecordedOnlyWhenTheyChange) {
+TEST(ReplayRecorderTest, ViewsAreRecordedOnlyWhenTheyChange) {
   ReplayMeta meta;
   meta.room_id = "r-0000000000001";
   ReplayRecorder recorder(meta);
 
-  const std::array<std::string, kSeatCount> first {"1m,2m", "", "", ""};
+  const SeatViews first {R"({"hand":["1m","2m"],"melds":[]})", "", "", ""};
   recorder.AddStep(0, {Outbound {{}, R"({"type":20})"}}, &first);
 
-  std::array<std::string, kSeatCount> moved = first;
-  moved[3] = "9s";
+  SeatViews moved = first;
+  moved[3] = R"({"hand":["9s"],"melds":[]})";
   recorder.AddStep(10, {Outbound {{}, R"({"type":20})"}}, &moved);
 
   // A deadline-only step passes nullptr: nothing about the table changed.
@@ -341,16 +343,19 @@ TEST(ReplayRecorderTest, HandsAreRecordedOnlyWhenTheyChange) {
   const json::Value* steps = file.Find("steps");
   ASSERT_NE(steps, nullptr);
   ASSERT_EQ(steps->AsArray().size(), 3u);
-  const json::Value* first_hands = steps->AsArray()[0].Find("h");
-  ASSERT_NE(first_hands, nullptr);
-  EXPECT_EQ(first_hands->AsArray()[0].AsString(), "1m,2m");
-  EXPECT_EQ(first_hands->AsArray()[1].AsString(), "");  // unchanged seats stay empty
-  const json::Value* second_hands = steps->AsArray()[1].Find("h");
-  EXPECT_EQ(second_hands->AsArray()[0].AsString(), "");  // unchanged, so omitted
-  EXPECT_EQ(second_hands->AsArray()[3].AsString(), "9s");
-  const json::Value* third_hands = steps->AsArray()[2].Find("h");
-  EXPECT_EQ(third_hands->AsArray()[0].AsString(), "");
-  EXPECT_EQ(third_hands->AsArray()[3].AsString(), "");
+  // A view is spliced as an object, never as a string: it is rendered JSON already, and quoting it
+  // would escape every inner quote.
+  const json::Value* first_views = steps->AsArray()[0].Find("v");
+  ASSERT_NE(first_views, nullptr);
+  ASSERT_EQ(first_views->AsArray().size(), 4u);
+  EXPECT_TRUE(first_views->AsArray()[0].IsObject());
+  EXPECT_EQ(first_views->AsArray()[0].Find("hand")->AsArray().size(), 2u);
+  EXPECT_EQ(first_views->AsArray()[1].AsString(), "");  // unchanged seats stay empty
+  const json::Value* second_views = steps->AsArray()[1].Find("v");
+  EXPECT_EQ(second_views->AsArray()[0].AsString(), "");  // unchanged, so omitted
+  EXPECT_EQ(second_views->AsArray()[3].Find("hand")->AsArray()[0].AsString(), "9s");
+  const json::Value* third_views = steps->AsArray()[2].Find("v");
+  EXPECT_EQ(third_views, nullptr) << "no view moved, so the whole field is omitted";
 }
 
 TEST(ReplayRecorderTest, SerializedFileContainsNoEscapes) {
@@ -361,8 +366,8 @@ TEST(ReplayRecorderTest, SerializedFileContainsNoEscapes) {
   meta.seed = 7;
   ReplayRecorder recorder(meta);
 
-  const std::array<std::string, kSeatCount> hands {"1m,2m", "", "", ""};
-  recorder.AddStep(0, {Outbound {{}, R"({"type":20,"seq":1,"seats":[]})"}}, &hands);
+  const SeatViews views {R"({"hand":["1m","2m"],"melds":[]})", "", "", ""};
+  recorder.AddStep(0, {Outbound {{}, R"({"type":20,"seq":1,"seats":[]})"}}, &views);
 
   const std::string text = recorder.Serialize();
   EXPECT_EQ(text.find('\\'), std::string::npos)
@@ -392,6 +397,40 @@ TEST(ReplayRecorderTest, NonObjectOptionsDegradeToEmptyObject) {
     EXPECT_TRUE(recorded->IsObject()) << "options=" << options;
     EXPECT_EQ(recorded->Dump(), "{}") << "options=" << options;
   }
+}
+
+// A view that carries melds must be spliced, not escaped, and it must keep the shape the player's
+// reducer expects. Melds live in `state_sync.seats[].melds`, a per-seat private frame that is never
+// built for a seat without an endpoint, so a replay from that seat's viewpoint used to show an
+// empty table (rivers and hand right, melds missing) — the view track is what fixes that.
+//
+// A concealed kan keeps `tiles: []` (§8.1): the track is read from any of the four viewpoints, so
+// an entry may not carry what a seat is never told.
+TEST(ReplayRecorderTest, ViewCarriesMeldsAndIsSplicedNotEscaped) {
+  ReplayMeta meta;
+  meta.room_id = "r-0000000000001";
+  ReplayRecorder recorder(meta);
+
+  const SeatViews views {"",
+                         "",
+                         R"({"hand":["1m"],"melds":[{"type":2,"tiles":["6m","7m","8m"]},{"type":4,"tiles":[]}]})",
+                         ""};
+  recorder.AddStep(0, {Outbound {{}, R"({"type":20})"}}, &views);
+
+  const std::string text = recorder.Serialize();
+  EXPECT_EQ(text.find("\\\""), std::string::npos) << "a view must be spliced, not escaped";
+
+  const json::Value file = *json::Value::Parse(text, nullptr);
+  const json::Value* steps = file.Find("steps");
+  ASSERT_NE(steps, nullptr);
+  ASSERT_EQ(steps->AsArray().size(), 1u);
+  const json::Value* first = steps->AsArray()[0].Find("v");
+  ASSERT_NE(first, nullptr);
+  ASSERT_EQ(first->AsArray().size(), 4u);
+  EXPECT_EQ(first->AsArray()[0].AsString(), "") << "a seat with no view stays empty";
+  ASSERT_EQ(first->AsArray()[2].Find("melds")->AsArray().size(), 2u);
+  EXPECT_EQ(first->AsArray()[2].Find("melds")->AsArray()[1].Find("tiles")->AsArray().size(), 0u)
+      << "a concealed kan must carry no tiles";
 }
 
 TEST(ReplayRecorderTest, EmptyStepIsNotRecorded) {
@@ -448,7 +487,10 @@ TEST(ReplayRecorderTest, SameSeedRecordsTheSameFile) {
     // and it lets ScrubDeadline work on one well-defined rendering.
     ASSERT_EQ(ScrubDeadline(left.Find("f")->Dump()), ScrubDeadline(right.Find("f")->Dump()))
         << "step " << index << " frames differ";
-    ASSERT_EQ(left.Find("h")->Dump(), right.Find("h")->Dump()) << "step " << index << " hands differ";
+    // A step omits `v` when no view moved, so compare the whole step instead of reaching for the
+    // field. `t` is stamped from the driver's own counter (not wall clock), so it matches too.
+    ASSERT_EQ(ScrubDeadline(left.Dump()), ScrubDeadline(right.Dump()))
+        << "step " << index << " views differ";
   }
   // Everything except the pacing track is identical too (metadata, seats, totals).
   EXPECT_EQ(first_file.Find("seats")->Dump(), second_file.Find("seats")->Dump());

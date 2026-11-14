@@ -379,22 +379,33 @@ void RiichiMahjongGame::OnSeatPresence(int seat, bool present) {
   disconnected_[static_cast<size_t>(seat)] = !present;
 }
 
-// The god view of a recording (replay.h). Red fives are spelled `0m`/`0p`/`0s`, exactly as the
-// seat's own `game_start.hand` does (this game's TilesToJson passes red=true), so the replay's
-// hand track and the framed hand agree after a `FormatTile` round trip.
-std::array<std::string, kSeatCount> RiichiMahjongGame::ReplayHands() const {
-  std::array<std::string, kSeatCount> replay_hands;
-  for (size_t seat = 0; seat < replay_hands.size(); ++seat) {
-    std::string& out = replay_hands[seat];
-    const std::vector<Tile>& concealed = hands_[seat];
-    for (size_t index = 0; index < concealed.size(); ++index) {
-      if (index != 0) {
-        out.push_back(',');
-      }
-      out += FormatTile(concealed[index], /*red_fives=*/true);
+// The recording's view track (replay.h): what each seat was looking at, in that seat's own
+// spelling. It mirrors the private part of a `state_sync` (`hand` plus that seat's `melds`), so
+// the player can hand it straight to the reducer.
+//
+// Red fives are spelled `0m`/`0p`/`0s`, exactly as the seat's own `game_start.hand` does (this
+// game's TilesToJson passes red=true), so the hand track and the framed hand agree after a
+// FormatTile round trip.
+//
+// A concealed kan keeps `tiles: []` — the wire rule (§8.1), not a simplification: the recording is
+// read from any of the four viewpoints, so its entries may not hold what a seat is never told.
+SeatViews RiichiMahjongGame::ReplaySeatViews() const {
+  SeatViews views;
+  for (size_t seat = 0; seat < views.size(); ++seat) {
+    json::Value melds = json::Value::Arr(melds_[seat].size());
+    for (const Meld& meld : melds_[seat]) {
+      json::Value entry = json::Value::Obj(2);  // type, tiles
+      entry.Set("type", json::Value::Int(protocol::WireOf(protocol::ToWire(meld.type))));
+      const bool concealed = meld.type == MeldType::kAnkan;
+      entry.Set("tiles", concealed ? json::Value::Arr(0) : TilesToJson(meld.tiles));
+      melds.Append(std::move(entry));
     }
+    json::Value view = json::Value::Obj(2);  // hand, melds
+    view.Set("hand", TilesToJson(hands_[seat]));
+    view.Set("melds", std::move(melds));
+    views[seat] = view.Dump();
   }
-  return replay_hands;
+  return views;
 }
 
 // The room's gate (is this seat's turn, is the window still open, is that tile in hand) lives
