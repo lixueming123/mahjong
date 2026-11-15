@@ -582,17 +582,27 @@ stdexec::task<void> LobbyActor::DropPlayer(PlayerInfo player, ex_actor::ActorRef
   creating_.erase(player.player_id);
   auto it = players_.find(player.player_id);
   if (it == players_.end()) {
+    // Nobody is registered under this id, so no room and no seat is at stake — but the connection
+    // actor itself still exists and this message is the last reference to it. A guest never
+    // enters players_ (the lobby tracks only room-bound players), so without this its actor
+    // would live until Shutdown.
+    co_await RetireEndpoint(conn);
     co_return;
   }
-  // A connection that was already superseded must not release the seat of the newer one.
+  // A connection that was already superseded must not release the seat of the newer one. The
+  // superseded actor still has to die (it is nobody's connection any more), so it is retired on
+  // its way out — the winner keeps its own entry and is not touched.
   if (!force && !it->second.conn.IsEmpty() && !conn.IsEmpty() && it->second.conn != conn) {
+    co_await RetireEndpoint(conn);
     co_return;
   }
   std::string room_id = it->second.room_id;
   ex_actor::ActorRef<SeatEndpoint> old_conn = it->second.conn;
+  ex_actor::ActorRef<SeatEndpoint> retiring = conn.IsEmpty() ? old_conn : conn;
   players_.erase(it);
   if (room_id.empty()) {
     spdlog::info("lobby: player {} left the lobby", player.player_id);
+    co_await RetireEndpoint(retiring);
     co_return;
   }
   ex_actor::ActorRef<RoomEndpoint> room = FindRoom(room_id);
@@ -601,10 +611,13 @@ stdexec::task<void> LobbyActor::DropPlayer(PlayerInfo player, ex_actor::ActorRef
     if (!room.IsEmpty()) {
       // PROTOCOL.md §8.5: during a game the seat becomes entrusted and the round keeps going.
       // The old connection travels with the message so the room can ignore it after a reconnect.
-      ActorSendScope().spawn(room.Send<&RoomEndpoint::Dispatch>(RoomEnvelope::PlayerDisconnected(player, old_conn)));
+      // Awaited rather than spawned: the room drops its copy of the seat's endpoint here, and
+      // only after that is it safe for the connection actor to destroy itself.
+      co_await room.Send<&RoomEndpoint::Dispatch>(RoomEnvelope::PlayerDisconnected(player, old_conn));
     }
     spdlog::info("lobby: player {} disconnected mid-game, room {} keeps playing (seat entrusted)", player.player_id,
                  room_id);
+    co_await RetireEndpoint(retiring);
     co_return;
   }
   auto roster = room_seats_.find(room_id);
@@ -625,17 +638,35 @@ stdexec::task<void> LobbyActor::DropPlayer(PlayerInfo player, ex_actor::ActorRef
     bot.player.name = "AI-" + std::to_string(seat_index);
     roster->second[static_cast<size_t>(seat_index)] = bot;
     if (!room.IsEmpty()) {
-      ActorSendScope().spawn(room.Send<&RoomEndpoint::TakeSeat>(bot) | ex_actor::DiscardResult());
+      // Awaited for the same reason as above: TakeSeat replaces the seat's endpoint, so the room
+      // must have dropped the departing one before that actor is destroyed.
+      co_await room.Send<&RoomEndpoint::TakeSeat>(bot);
     }
     // The departing seat is a bot again: tell the remaining humans before they hit "ready".
     co_await BroadcastRoomUpdate(room_id, roster->second);
     spdlog::info("lobby: player {} left room {} before it started", player.player_id, room_id);
+    co_await RetireEndpoint(retiring);
     co_return;
   }
+  ex_actor::ActorRef<RoomEndpoint> dropped = room;
   rooms_.erase(room_id);
   room_seats_.erase(room_id);
   room_started_.erase(room_id);
+  if (!dropped.IsEmpty()) {
+    co_await dropped.Send<&RoomEndpoint::Dispatch>(RoomEnvelope::Retire());
+  }
   spdlog::info("lobby: player {} disconnected, room {} dropped", player.player_id, room_id);
+  co_await RetireEndpoint(retiring);
+}
+
+stdexec::task<void> LobbyActor::RetireEndpoint(const ex_actor::ActorRef<SeatEndpoint>& conn) {
+  // The last reference to this connection is the one in hand (the registry entry was erased by
+  // the caller). Retire is a message, so the actor destroys itself on its own thread, after the
+  // replies it is still owed have landed.
+  if (conn.IsEmpty()) {
+    co_return;
+  }
+  co_await conn.Send<&SeatEndpoint::Dispatch>(PlayerEnvelope::Retire());
 }
 
 stdexec::task<void> LobbyActor::OnConnectionClosed(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> conn) {
@@ -648,6 +679,7 @@ stdexec::task<void> LobbyActor::ReapRoom(std::string room_id) {
   // Drop the registry in one synchronous section, then close sockets in another. The close
   // awaits the connection actor, so it must not be folded into the registry update.
   std::vector<ex_actor::ActorRef<SeatEndpoint>> closing;
+  ex_actor::ActorRef<RoomEndpoint> reaped;
   auto room_it = rooms_.find(room_id);
   if (room_it == rooms_.end()) {
     co_return;  // already reclaimed (or never registered)
@@ -662,14 +694,21 @@ stdexec::task<void> LobbyActor::ReapRoom(std::string room_id) {
     }
     it = players_.erase(it);
   }
+  reaped = room_it->second;
   rooms_.erase(room_it);
   room_seats_.erase(room_id);
   room_started_.erase(room_id);
   // PROTOCOL.md §1.4.5: the game is long over, so neither the room nor the connection it was
-  // holding is of any use. Dropping the last ActorRef also destroys the RoomActor and its
-  // state; the connections are asked to close so the gateway frees the sockets.
+  // holding is of any use. The connections are asked to close so the gateway frees the sockets;
+  // the room is destroyed through its own mailbox (RoomEnvelope::Retire), which is also what
+  // releases its recording. An ActorRef is a bare pointer, so dropping our copy destroys nothing.
   for (const ex_actor::ActorRef<SeatEndpoint>& conn : closing) {
     co_await conn.Send<&SeatEndpoint::Dispatch>(PlayerEnvelope::Close("room reclaimed after game_end"));
+  }
+  if (!reaped.IsEmpty()) {
+    // Awaited, not spawned: the lobby's own registry entry is already gone, so a failure here
+    // would otherwise be invisible.
+    co_await reaped.Send<&RoomEndpoint::Dispatch>(RoomEnvelope::Retire());
   }
   spdlog::info("lobby: reclaimed room {} after game_end ({} connection(s) closed)", room_id, closing.size());
 }

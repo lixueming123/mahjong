@@ -105,6 +105,10 @@ class LobbyActor : public RoomOwner {
   // already decided to detach); otherwise a stale connection for a superseded session is a
   // no-op. In a started room the seat is entrusted; before the deal the room/seat is released.
   stdexec::task<void> DropPlayer(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> conn, bool force);
+  // Sends PlayerEnvelope::Retire to a connection actor that nothing else references any more, so
+  // it destroys itself instead of living until Shutdown. Awaited by its callers, because the
+  // retire must land after the last frame and the last room hand-off.
+  stdexec::task<void> RetireEndpoint(const ex_actor::ActorRef<SeatEndpoint>& conn);
 
   // Deliberately no `name`: the lobby never reads it. The nickname a client sees comes from
   // RoomSeat::player (the room's copy) and from PlayerInfo on the wire, both owned elsewhere.

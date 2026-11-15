@@ -60,7 +60,6 @@ class PlayerActor : public SeatEndpoint {
   // The one public entry (seat_endpoint.h): gateway frames and socket events, account results,
   // and the seat's frame/error/close deliveries all arrive here, each as its own message type.
   stdexec::task<void> Dispatch(PlayerEnvelope envelope) override;
-
   // Introspection (logging and tests); like the room's getters it is deliberately outside the
   // gate, and nothing outside this actor reads it in production.
   const std::string& player_id() const { return session_.player_id(); }
@@ -98,6 +97,10 @@ class PlayerActor : public SeatEndpoint {
   void SetSelfRef(ex_actor::ActorRef<PlayerActor> self);
   void OnFrame(std::string line);
   void OnClosed(std::string reason);
+  // PlayerEnvelope::Retire arrives here: the last message this actor ever receives. It drops the
+  // room ref and asks the registry to destroy the actor, deferred until every reply it is still
+  // owed has landed.
+  void RetireRequested();
   void OnIdleTimeout();
   void OnLoginResult(AuthOutcome outcome);
   void OnRegisterResult(AuthOutcome outcome);
@@ -140,6 +143,18 @@ class PlayerActor : public SeatEndpoint {
   // Routing cache, not identity: the lobby keeps the same fact as a room_id string and this
   // side needs the ref to skip the lobby on every gameplay frame. Empty until the lobby sets it.
   ex_actor::ActorRef<RoomEndpoint> room_;
+  // How many database replies this actor is still owed. DbActor holds this actor's ActorRef while
+  // one is outstanding, so a retire defers the destroy until this reaches zero — otherwise that
+  // reply would land on freed memory.
+  int db_replies_in_flight_ = 0;
+  // Set by RetireRequested(): the actor must destroy itself as soon as nothing is owed.
+  bool retire_requested_ = false;
+  // Set once the destroy has been requested, so a second reply cannot ask for it again.
+  bool retired_ = false;
+
+  // Destroys this actor once a retire has been requested and no reply is owed. Called from
+  // RetireRequested() itself and after every database reply the mailbox consumes.
+  void RetireIfIdle();
 };
 
 }  // namespace mahjong

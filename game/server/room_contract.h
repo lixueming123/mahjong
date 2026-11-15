@@ -197,6 +197,9 @@ struct RoomEnvelope {
     PlayerInfo player;
     ex_actor::ActorRef<SeatEndpoint> endpoint;
   };
+  // The lobby's last message to a room it has just dropped from its registries: the room destroys
+  // itself so the process does not keep one actor (and its recording) per room ever played.
+  struct RetireMsg {};
 
   static RoomEnvelope Ready(PlayerInfo player) { return {ReadyMsg {std::move(player)}}; }
   static RoomEnvelope Sync(PlayerInfo player) { return {SyncMsg {std::move(player)}}; }
@@ -212,7 +215,14 @@ struct RoomEnvelope {
     return {ReconnectedMsg {.player = std::move(player), .endpoint = std::move(endpoint)}};
   }
 
-  std::variant<ReadyMsg, SyncMsg, GameFrameMsg, WindowTimeoutMsg, PlayerDisconnectedMsg, IdleTimeoutMsg, ReconnectedMsg>
+  // The last message a room receives: the lobby has already dropped it from every registry, so
+  // the room destroys itself as soon as this handler returns. Without it the process keeps one
+  // actor — and its whole recording — per room ever played; the framework only frees actors at
+  // Shutdown.
+  static RoomEnvelope Retire() { return {RetireMsg {}}; }
+
+  std::variant<ReadyMsg, SyncMsg, GameFrameMsg, WindowTimeoutMsg, PlayerDisconnectedMsg, IdleTimeoutMsg, ReconnectedMsg,
+               RetireMsg>
       msg;
 };
 

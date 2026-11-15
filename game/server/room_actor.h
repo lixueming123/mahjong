@@ -56,6 +56,11 @@ class RoomActor : public RoomEndpoint {
             int ai_delay_ms, int inter_hand_delay_ms, std::vector<RoomSeat> seats, std::shared_ptr<WindowTimer> timer,
             ex_actor::ActorRef<RoomOwner> owner = {}, TimeoutScheduler timeout_scheduler = {},
             RoomFinishedCallback finished_for_test = {});
+  // Turns |alive_| off so a deadline already sitting in the window timer stops addressing this
+  // room. The timer cannot be cancelled (§0.5) and the lobby destroys the actor at game end
+  // (lobby.cc ReapRoom), so a fired entry would otherwise Send into freed memory. The flag is a
+  // shared_ptr the closures co-own: it has to outlive this object for that check to be safe.
+  ~RoomActor() override;
 
   stdexec::task<void> Dispatch(RoomEnvelope envelope) override;
   stdexec::task<bool> TakeSeat(RoomSeat seat) override;
@@ -94,6 +99,9 @@ class RoomActor : public RoomEndpoint {
   stdexec::task<void> OnPlayerDisconnected(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> conn);
   stdexec::task<void> OnIdleTimeout(PlayerInfo player);
   stdexec::task<void> OnReconnected(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> endpoint);
+  // The lobby's last message (RoomEnvelope::Retire): stop the deadline closure and destroy the
+  // actor, which is what releases the recording and every seat ref it holds.
+  stdexec::task<void> Retire();
 
   // The one place a GameStep happens. Order is frozen by the protocol, not by taste: the frames
   // go out first (a seat must be able to see the window before its deadline can fire), then the
@@ -138,6 +146,9 @@ class RoomActor : public RoomEndpoint {
   // |replay_started_ms_| anchors each step's `t` (pacing only, never correctness).
   std::unique_ptr<ReplayRecorder> recorder_;
   int64_t replay_started_ms_ = 0;
+  // False once this room is being destroyed. A co-owned flag rather than a bool member because
+  // the window timer's closure reads it after the room is gone (see the destructor).
+  std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
 };
 
 }  // namespace mahjong

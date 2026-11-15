@@ -40,6 +40,12 @@ RoomActor::RoomActor(std::string room_id, std::string game_id, std::string optio
   assert(static_cast<void*>(static_cast<RoomEndpoint*>(this)) == static_cast<void*>(this));
 }
 
+RoomActor::~RoomActor() {
+  // Only the flag is touched: everything else is about to go away, and the closures that read it
+  // are the only code that runs after this.
+  *alive_ = false;
+}
+
 void RoomActor::BindRuntime(ex_actor::ActorRef<RoomEndpoint> self) {
   self_ref_ = std::move(self);
   // PROTOCOL.md §0.5: the production scheduler is the window timer plus the room's own ref. A
@@ -49,11 +55,33 @@ void RoomActor::BindRuntime(ex_actor::ActorRef<RoomEndpoint> self) {
   }
   std::shared_ptr<WindowTimer> timer = timer_;
   ex_actor::ActorRef<RoomEndpoint> ref = self_ref_;
-  timeout_scheduler_ = [timer, ref](int64_t delay_ms, uint64_t token) {
-    timer->Schedule(delay_ms, [ref, token]() {
+  std::shared_ptr<bool> alive = alive_;
+  timeout_scheduler_ = [timer, ref, alive](int64_t delay_ms, uint64_t token) {
+    timer->Schedule(delay_ms, [ref, alive, token]() {
+      if (!*alive) {
+        // The room is gone. The timer cannot be cancelled (§0.5), so the send is dropped here
+        // rather than landing on a destroyed actor.
+        return;
+      }
       ActorSendScope().spawn(ref.Send<&RoomEndpoint::Dispatch>(RoomEnvelope::WindowTimeout(token)));
     });
   };
+}
+
+stdexec::task<void> RoomActor::Retire() {
+  // Nothing may address this room after this point: the lobby dropped it from every registry
+  // before sending this message, and the flag stops a deadline still sitting in the window timer.
+  *alive_ = false;
+  const ex_actor::ActorRef<RoomEndpoint> self = self_ref_;
+  self_ref_ = {};
+  if (self.IsEmpty()) {
+    // A room built directly by a test has no registry entry to destroy; the test owns it.
+    co_return;
+  }
+  // The destroy is a message to ActorRegistryBackend, so it can only run after this activation
+  // returns — the recorder and every seat ref are released with the actor itself.
+  ActorSendScope().spawn(ex_actor::DestroyActor(self) | ex_actor::DiscardResult());
+  co_return;
 }
 
 int RoomActor::SeatOf(const std::string& player_id) const {
@@ -107,6 +135,7 @@ stdexec::task<void> RoomActor::Dispatch(RoomEnvelope envelope) {
           [this](RoomEnvelope::ReconnectedMsg&& m) {
             return OnReconnected(std::move(m.player), std::move(m.endpoint));
           },
+          [this](RoomEnvelope::RetireMsg&&) { return Retire(); },
       },
       std::move(envelope.msg));
 }
@@ -393,6 +422,11 @@ stdexec::task<void> RoomActor::OnPlayerDisconnected(PlayerInfo player, ex_actor:
     co_return;
   }
   seats_[static_cast<size_t>(seat)].disconnected = true;
+  // The endpoint is dropped, not just marked: the lobby destroys that PlayerActor once the seat
+  // is no longer entrusted (lobby.cc DropPlayer), and ActorRef::IsEmpty() is the only liveness
+  // test there is — a kept ref would be a dangling pointer the next broadcast would Send into.
+  // A reconnect installs a fresh one (OnReconnected).
+  seats_[static_cast<size_t>(seat)].endpoint = {};
   spdlog::info("room {}: seat {} lost its wire; its window keeps the countdown", room_id_, seat);
   // GAME_DESIGN §5.6.2 / PROTOCOL v2.3 §8.5: a disconnect does NOT play for the seat. The open
   // window stays unanswered until its deadline, so a reconnect inside the countdown still owns

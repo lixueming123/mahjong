@@ -92,6 +92,8 @@ struct PlayerEnvelope {
   struct CloseMsg {
     std::string reason;
   };
+  // "Nobody will ever send to you again": the last message this actor receives.
+  struct RetireMsg {};
 
   static PlayerEnvelope SetSelfRef(ex_actor::ActorRef<PlayerActor> self) { return {SetSelfRefMsg {std::move(self)}}; }
   static PlayerEnvelope OnFrame(std::string line) { return {OnFrameMsg {std::move(line)}}; }
@@ -109,9 +111,10 @@ struct PlayerEnvelope {
     return {SeatErrorMsg {.frame = std::move(frame), .quota = quota}};
   }
   static PlayerEnvelope Close(std::string reason) { return {CloseMsg {std::move(reason)}}; }
+  static PlayerEnvelope Retire() { return {RetireMsg {}}; }
 
   std::variant<SetSelfRefMsg, OnFrameMsg, OnClosedMsg, OnIdleTimeoutMsg, OnLoginResultMsg, OnRegisterResultMsg,
-               OnStatsResultMsg, SetRoomMsg, SeatFrameMsg, SeatErrorMsg, CloseMsg>
+               OnStatsResultMsg, SetRoomMsg, SeatFrameMsg, SeatErrorMsg, CloseMsg, RetireMsg>
       msg;
 };
 

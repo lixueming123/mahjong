@@ -73,13 +73,26 @@ stdexec::task<void> PlayerActor::Dispatch(PlayerEnvelope envelope) {
                  [this](PlayerEnvelope::OnFrameMsg&& m) { OnFrame(std::move(m.line)); },
                  [this](PlayerEnvelope::OnClosedMsg&& m) { OnClosed(std::move(m.reason)); },
                  [this](PlayerEnvelope::OnIdleTimeoutMsg&&) { OnIdleTimeout(); },
-                 [this](PlayerEnvelope::OnLoginResultMsg&& m) { OnLoginResult(std::move(m.outcome)); },
-                 [this](PlayerEnvelope::OnRegisterResultMsg&& m) { OnRegisterResult(std::move(m.outcome)); },
-                 [this](PlayerEnvelope::OnStatsResultMsg&& m) { OnStatsResult(std::move(m.outcome)); },
+                 [this](PlayerEnvelope::OnLoginResultMsg&& m) {
+                   --db_replies_in_flight_;
+                   OnLoginResult(std::move(m.outcome));
+                   RetireIfIdle();
+                 },
+                 [this](PlayerEnvelope::OnRegisterResultMsg&& m) {
+                   --db_replies_in_flight_;
+                   OnRegisterResult(std::move(m.outcome));
+                   RetireIfIdle();
+                 },
+                 [this](PlayerEnvelope::OnStatsResultMsg&& m) {
+                   --db_replies_in_flight_;
+                   OnStatsResult(std::move(m.outcome));
+                   RetireIfIdle();
+                 },
                  [this](PlayerEnvelope::SetRoomMsg&& m) { SetRoom(std::move(m.room)); },
                  [this](PlayerEnvelope::SeatFrameMsg&& m) { SeatFrame(std::move(m.frame)); },
                  [this](PlayerEnvelope::SeatErrorMsg&& m) { SeatError(std::move(m.frame), m.quota); },
                  [this](PlayerEnvelope::CloseMsg&& m) { Close(std::move(m.reason)); },
+                 [this](PlayerEnvelope::RetireMsg&&) { RetireRequested(); },
              },
              std::move(envelope.msg));
   co_return;
@@ -90,6 +103,30 @@ void PlayerActor::SetSelfRef(ex_actor::ActorRef<PlayerActor> self) { self_ref_ =
 // SeatEndpoint view (seat_endpoint.h): the room and the lobby reach this actor only through
 // these three, so their frames never touch Connection from another thread.
 void PlayerActor::SeatFrame(std::string frame) { conn_->SendFrame(frame); }
+
+void PlayerActor::RetireRequested() {
+  // The room's copy of this ref is already gone: the lobby awaits the room's PlayerDisconnected
+  // before it retires us, and that handler clears the seat's endpoint. What is left is our own
+  // cache of the room, which would otherwise keep a dead room reachable from here.
+  room_ = {};
+  retire_requested_ = true;
+  RetireIfIdle();
+}
+
+void PlayerActor::RetireIfIdle() {
+  if (!retire_requested_ || retired_ || db_replies_in_flight_ > 0) {
+    return;
+  }
+  // Only an actor the registry owns can be destroyed by it. A test harness spawns players without
+  // a lobby, but it still registers them, so the empty self ref is the only case to skip.
+  if (self_ref_.IsEmpty()) {
+    return;
+  }
+  // The destroy is a message to ActorRegistryBackend: it can only run after this activation
+  // returns, so nothing is destroyed under the handler that asked for it.
+  ActorSendScope().spawn(ex_actor::DestroyActor(self_ref_) | ex_actor::DiscardResult());
+  retired_ = true;
+}
 
 void PlayerActor::SetRoom(ex_actor::ActorRef<RoomEndpoint> room) {
   room_ = std::move(room);
@@ -229,6 +266,7 @@ void PlayerActor::BeginAccountLogin(std::string username, std::string password, 
   // which runs inside this actor's mailbox, is the only place the session identity changes.
   pending_resume_ = resume;
   session_.BeginAuth();
+  ++db_replies_in_flight_;  // Retire() must refuse destruction until the answer is delivered
   ActorSendScope().spawn(db.Login(std::move(username), std::move(password), self_ref_));
 }
 
@@ -248,6 +286,7 @@ void PlayerActor::BeginRegister(std::string username, std::string password, std:
   // A brand-new account has no room to resume; the lobby will answer in_room:false.
   pending_resume_ = true;
   session_.BeginAuth();
+  ++db_replies_in_flight_;  // see BeginAccountLogin
   ActorSendScope().spawn(db.Register(std::move(username), std::move(password), std::move(nickname), self_ref_));
 }
 
@@ -263,6 +302,7 @@ void PlayerActor::RequestStats() {
     AccountServiceUnavailable();
     return;
   }
+  ++db_replies_in_flight_;  // OnStatsResult is owed to this mailbox
   ActorSendScope().spawn(db.FetchStats(session_.account_id(), self_ref_));
 }
 
@@ -383,16 +423,23 @@ void PlayerActor::OnClosed(std::string reason) {
   const uint64_t account_id = session_.account_id();
   session_.Close();
   spdlog::info("{}: closed ({})", conn_->Describe(), reason);
-  if (was_logged_in) {
-    // PROTOCOL.md §1.4: only this connection's state is released; rooms of other players are
-    // untouched. LobbyActor drops the room of a disconnecting owner (§8.5). The connection ref
-    // carried with the message lets the lobby ignore a close that arrives after a reconnect.
-    ActorSendScope().spawn(lobby_.Send<&LobbyActor::OnConnectionClosed>(player, self_ref_));
-  }
   // ACCOUNT_DESIGN.md §1.3: the account becomes available again for a new connection.
   if (held_account) {
     sessions_->Release(account_id);
   }
+  if (was_logged_in && !lobby_.IsEmpty()) {
+    // PROTOCOL.md §1.4: only this connection's state is released; rooms of other players are
+    // untouched. LobbyActor drops the room of a disconnecting owner (§8.5). The connection ref
+    // carried with the message lets the lobby ignore a close that arrives after a reconnect.
+    // The lobby owns the retire: it awaits the room's hand-off before telling this actor to go,
+    // because the room holds an endpoint ref until then.
+    ActorSendScope().spawn(lobby_.Send<&LobbyActor::OnConnectionClosed>(player, self_ref_));
+    return;
+  }
+  // No lobby hand-off to make (a guest on a build with no lobby, or a session that never claimed
+  // an identity), so nobody else will ever ask this actor to go: it retires itself. Without this
+  // every accepted socket would leave one actor behind for the life of the process.
+  RetireRequested();
 }
 
 void PlayerActor::OnIdleTimeout() {
