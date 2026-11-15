@@ -1,6 +1,8 @@
 build
 build-release
 compile_commands.json
+# clangd 配置是本地开发环境的（绝对路径随机器而变），不入库
+.clangd
 .agent-teams
 .cache
 Testing/
