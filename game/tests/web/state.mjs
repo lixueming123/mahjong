@@ -115,5 +115,37 @@ check('杠后补牌仍是待打张', { drawn: s.drawn, len: s.hands[0].length },
 app.discardTile({ seat: 0, tile: '1m', seq: 33 });
 check('杠后打出才归位排序', s.hands[0], ['2m', '3m', '2s', '3s', '4s', '5s', '6s', '7s', '8s', '9s']);
 
+// ---- canResync：回放里的"缺牌"不是丢帧，不该置位补偿同步 ----
+//
+// 联机遇到"本家 discard_event 的牌不在手牌里"意味着丢帧，必须拉一份权威状态（`needsSync`）。
+// 回放没有服务端可问，且从 AI 视角重放时本家手牌在重放途中**本来就是空的**（机器人没有私有
+// `state_sync`，手牌由视图轨道在整趟重放结束后补上）。照联机口径会刷几十条告警，并把
+// `needsSync` 永久挂住 —— 它指向的补救在回放里不存在。
+{
+  // 联机（默认）：置位，这是丢帧的唯一信号，不能被改动。
+  const online = createState();
+  online.startRound({ seat: 0, dealer: 0, round_index: 0, round_count: 4, hand: ['1m', '2m'] });
+  online.discardTile({ seat: 0, tile: '9p' });
+  check('联机：缺牌仍置位补偿同步', online.state.needsSync, true);
+  check('联机：缺牌仍照常落河（广播不能被吞）', online.state.rivers[0], ['9p']);
+
+  // 回放：同一帧、同一缺牌，但不置位、不告警；落河与手番推进照旧。
+  const replay = createState();
+  replay.state.canResync = false;
+  replay.startRound({ seat: 0, dealer: 0, round_index: 0, round_count: 4, hand: [] });
+  let warned = 0;
+  const realWarn = console.warn;
+  console.warn = () => { warned += 1; };
+  try {
+    replay.discardTile({ seat: 0, tile: '9p' });
+  } finally {
+    console.warn = realWarn;
+  }
+  check('回放：空手牌打出不置位补偿同步', replay.state.needsSync, false);
+  check('回放：也不再刷"等待同步"告警', warned, 0);
+  check('回放：牌河与手番照常推进',
+    { river: replay.state.rivers[0], turn: replay.state.turn }, { river: ['9p'], turn: 1 });
+}
+
 console.log(`\n状态归约：${fail ? 'FAILED' : 'ALL PASS'}  ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

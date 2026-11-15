@@ -134,6 +134,13 @@ export class MahjongClient {
     this._zeroSince = 0;
     this._zeroWarned = false;
     this._reconnecting = false;   // 主动重连中：旧连接的 close 不再当作"断线"提示
+    /**
+     * 播报闸门：返回 true 表示"此刻可以放结算语音与飘字"。联机不设（恒允许）；回放把它换成
+     * 播放器的 `audible`（replay.js）—— 切视角/拖动进度条都是一次从头重放，路径上会重新喂到
+     * 上一局的 `game_end` 与各条 `action_event`。状态归约必须照做，但播报不能重来：否则画面
+     * 已经走到東2局，耳朵里还在念上一局的和牌，屏幕上还挂着上一局的局终飘字。
+     */
+    this.narrationGate = null;
     // PROTOCOL v2.2 §5.1：账号登录会带 in_room，命中时进入"恢复快照"模式，不能再自动建房/
     // 自动 ready。`restoring` 只用于抑制重放快照期间的开场语音与播报。
     this.resumeNext = true;       // 下一次 login 是否请求恢复（返回大厅时置 false）
@@ -672,7 +679,7 @@ export class MahjongClient {
         this.ui?.hideResult?.();
         this.app.emit('game_start', frame);
         const modeText = this.state.mode === 'riichi' ? '日麻' : '经典';
-        if (!this.restoring) {
+        if (this.narratable) {
           this.ui?.broadcast?.(this.state.round, `${modeText} · 共 ${this.state.roundCount} 局`, 1200);
         }
         // 参考端兜底：进了牌桌但手牌为空（丢帧/重连）⇒ 立刻要一份权威状态
@@ -724,7 +731,7 @@ export class MahjongClient {
         this.stage = 'idle';
         this.app.applyGameEnd(frame);
         this.logGameEnd(frame);
-        if (!this.restoring) this.playEndVoice(frame);
+        if (this.narratable) this.playEndVoice(frame);
         this.app.emit('game_end', frame);
         // 结算页由播放器按**播放位置**决定何时显示（replay.js 的 `atRoundEnd`）：回放暂停在
         // 局终时应该看得到"这局怎么结束的"，而继续播/拖动时又要立刻收起。所以回放里这里
@@ -898,8 +905,25 @@ export class MahjongClient {
     return this.send({ type: FRAME_TYPE.SYNC });
   }
 
+  // ---------------------------------------------------------------- 播报闸门
+
+  /**
+   * 此刻是否允许播报（结算语音 / 飘字 / 横幅 / 轻提示）。
+   *
+   * 这是 `restoring` 的推广版：联机时没有闸门（恒允许），回放时由播放器决定 ——
+   * 一次 seek（切视角、拖进度条、单步）会从头重放已看过的帧，状态必须按它们归约，
+   * 但那些帧的播报是"过去时"，重放一遍就是在念上一局的结论。
+   */
+  get narratable() {
+    if (this.restoring) return false;
+    return this.narrationGate ? !!this.narrationGate() : true;
+  }
+
   /** 牌桌里手牌为空（丢帧 / 重连）⇒ 只补一次 sync（参考端 `_empty_hand_synced`） */
   maybeSyncEmptyHand() {
+    // 回放里没有服务端可问：从 AI 视角重放时本家手牌在重放途中始终为空（机器人没有私有
+    // `state_sync`，手牌由视图轨道在整趟重放结束后补上），这里发 SYNC 只会打空。
+    if (!this.state.canResync) return;
     if (this.state.phase !== 'playing' || this.state.hands[0].length) return;
     if (this._emptyHandSynced) return;
     if (this.requestSync()) this._emptyHandSynced = true;
@@ -1406,7 +1430,9 @@ export class MahjongClient {
     if (el) el.textContent = text;
     console.info('[麻将]', text);
     this.app.emit('hint', text);
-    this.ui?.toast?.(text);
+    // 回放的 seek 里 `game_end` 会被重新喂到（切视角/拖动都是从第 0 步重放），日志条留着
+    // 这条结论是"当前落点的如实描述"，但飘字不能重来 —— 那属于上一局的瞬间，不是现在。
+    if (this.narratable) this.ui?.toast?.(text);
   }
 
   /** 副露 / 立直 / 和牌按操作者的屏幕座位飘字（§5.8 action_event 即权威事件源） */
@@ -1419,7 +1445,7 @@ export class MahjongClient {
     if (!label) return;
     const view = this.app.viewSeat(frame.seat);
     const name = this.state.seatNames[view] || '';
-    this.ui?.broadcast?.(label, name, 820, view);
+    if (this.narratable) this.ui?.broadcast?.(label, name, 820, view);
     if (frame.action === ACTION.RIICHI) this.sfx?.play?.('click');
   }
 }

@@ -330,6 +330,19 @@ export class UI {
   }
 
   /**
+   * 收起所有"瞬间播报"：大字横幅与轻提示。
+   *
+   * 回放 seek（切视角、拖进度条、单步）用：那一次重放不再产生新的播报，但**已经在显示**
+   * 的那条属于上一落点，浮在已经变了的牌桌上方就是错的。日志条不清 —— 它是当前落点的
+   * 如实描述，由 `hint()` 按重放的最后一帧覆盖。
+   */
+  hideNarration() {
+    this.hideBroadcast();
+    clearTimeout(this._toastTimer);
+    if (this.el.toast) this.el.toast.hidden = true;
+  }
+
+  /**
    * 鸣牌提示：这次能吃/碰/杠/和的是**哪一张**。
    * 只给 pass 的时候不显示（没什么可鸣的，别打扰）。
    */

@@ -604,5 +604,104 @@ check('倍速接受 4x', player.setSpeed(4), 4);
   check('v1 文件：副露轨道仍能补回来', old.app.state.melds.map((m) => m.kind), ['pong']);
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
+// ---------------------------------------------------------------- 15. 切视角不能重播上一局的播报
+
+// 切视角 = 用新座位把已看过的部分从头重放一遍（`setSeat` → `seekTo(cursor)`）。重放路径上
+// 必然重新喂到上一局的 `game_end` 与各条 `action_event` —— 状态必须按它们归约（牌河、持点、
+// 副露都得对），但**播报不能重来**：否则画面已经跳到当前局，耳边还在念上一局的和牌，
+// 屏幕上还挂着上一局的局终飘字与「和」字横幅。
+{
+  const calls = { voice: 0, broadcast: 0, toast: 0, silence: 0 };
+  // `el` 是 client.js 构造时绑按钮要用的（`ui.el.autoplay`）；其余方法回放里会被调到，
+  // 这里只统计"播报类"的三种，其余留空实现。
+  const fakeUi = {
+    el: { autoplay: mk(), toggleSfx: mk() },
+    broadcast() { calls.broadcast += 1; },
+    toast() { calls.toast += 1; },
+    hideNarration() { calls.silence += 1; },
+    update() {},
+    hideResult() {},
+    hideClaimTip() {},
+    claimTip() {},
+    tick() {},
+  };
+  const fakeSfx = { speak() { calls.voice += 1; }, play() {}, stopVoice() {} };
+
+  // 两局：第 1 局有一记碰（action_event）与局终，第 2 局只有一张牌。
+  const twoRounds = fixture();
+  const startFrame = twoRounds.steps[0].f[0][1];
+  twoRounds.steps.push({ t: 700, v: [seatView('1m,2m,3m,4m,5m,6p,7p,8p,1s,2s,3s,1z,1z,9s'), null, null, null],
+    f: [[[0], { ...startFrame, round_index: 1 }]] });
+  twoRounds.steps.push({ t: 800, f: [[[0, 1, 2, 3], {
+    type: FRAME_TYPE.DISCARD_EVENT, seat: 0, tile: '9s', seq: 30,
+  }]] });
+
+  const app3 = createState();
+  const player3 = new ReplayPlayer({ app: app3, ui: fakeUi, sfx: fakeSfx, replay: twoRounds, seat: 0 });
+
+  // 先走到末尾：最后一次 seek 是"跳转"，不该有任何播报。
+  player3.seekTo(player3.steps.length);
+  check('seek 重放到局终不播报（语音）', calls.voice, 0);
+  check('seek 重放到局终不飘字（横幅 + 轻提示）', { broadcast: calls.broadcast, toast: calls.toast },
+    { broadcast: 0, toast: 0 });
+  check('seek 会先收掉旧的播报', calls.silence > 0, true);
+
+  // 状态仍然按重放的帧归约到位（播报被掐，归约不能跟着丢）。
+  check('闸门不影响状态归约：第二局的牌河只有 1 张', app3.state.rivers[0].length, 1);
+  check('闸门不影响状态归约：局次前进到第二局', app3.state.roundIndex, 1);
+
+  // 切视角：同样是 seek，同样不该播报。
+  const before = { ...calls };
+  player3.setSeat(1);
+  check('切视角不播报（语音）', calls.voice, before.voice);
+  check('切视角不飘字（横幅 + 轻提示）',
+    { broadcast: calls.broadcast, toast: calls.toast },
+    { broadcast: before.broadcast, toast: before.toast });
+  check('切视角确实换到了新座位', app3.state.mySeat, 1);
+  check('切视角后牌桌仍按新视角重放到位', app3.state.rivers[3].length, 1);
+
+  // 对照：正常速度自动播放**要**播报 —— 闸门不能把联机那条语义也掐掉。
+  // 手动推进一拍（不调 play()，避免真实 setInterval 干扰），落点正好在某条帧上。
+  const liveApp = createState();
+  const live = new ReplayPlayer({ app: liveApp, ui: fakeUi, sfx: fakeSfx, replay: fixture(), seat: 0 });
+  live.playing = true;          // 等价于 play() 之后的状态，但不启计时器
+  live.seekTo(0);
+  live.clockMs = 0;
+  live._seeking = false;
+  live.clockMs = 1e12;
+  live._advanceByClock();
+  check('自动播放到局终会播报语音', calls.voice > 0, true);
+}
+
+// ---------------------------------------------------------------- 16. 回放不触发补偿同步
+
+// 切到机器人座位后，本家手牌在重放途中始终是空的（机器人没有私有 `state_sync`，手牌由
+// 视图轨道在整趟重放结束后补上）。state.js 的 discardTile 遇到"本家的牌不在手牌里"会判
+// "丢帧"并置位 `needsSync` —— 在回放里这是误判：没有服务端可问，那个标记永远消不掉，
+// 而且一次 seek 会刷几十条 "等待同步" 告警把控制台淹掉。
+{
+  // 夹具里座位 0 是唯一有私有帧的座位，所以从座位 2 重放时本家手牌必然为空。
+  const botApp = createState();
+  const bot = new ReplayPlayer({ app: botApp, ui: null, sfx: null, replay: fixture(), seat: 2 });
+  let warned = 0;
+  const realWarn = console.warn;
+  console.warn = (msg) => {
+    if (String(msg).includes('不在手牌中')) warned += 1;
+  };
+  try {
+    bot.seekTo(bot.steps.length);
+  } finally {
+    console.warn = realWarn;
+  }
+  check('AI 视角重放：不判"丢帧"（needsSync 保持 false）', botApp.state.needsSync, false);
+  check('AI 视角重放：不刷"等待同步"告警', warned, 0);
+  // 归约照做：座位 0 打出的 9s 被座位 1 碰走，在座位 2 眼里是屏幕座位 2 的牌河被清空。
+  check('AI 视角重放：牌河仍按帧归约到位', botApp.state.rivers[2], []);
+  check('回放期间 canResync 关闭', botApp.state.canResync, false);
+
+  // 退出回放要把牌桌交回联机会话：复用同一个 app.state 时不能还带着"不可重同步"。
+  bot.dispose();
+  check('退出回放恢复 canResync（交回联机会话）', botApp.state.canResync, true);
+}
+
 process.exit(fail === 0 ? 0 : 1);

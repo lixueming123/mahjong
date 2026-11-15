@@ -132,6 +132,15 @@ export function createState() {
     lastError: null,                  // 最近一条 error{code,message}
     roomId: null,
     needsSync: false,                 // 本地与服务端可能不一致时置位，由 client 拉 sync
+    /**
+     * 这条会话能不能"拉一次权威状态"来补救。
+     *
+     * 联机恒为 true。回放（replay.js）把它置为 false：录制里没有服务端可问，而且从 AI 视角
+     * 重放时本家手牌本来就**暂时**是空的（机器人没有私有 `state_sync`，手牌由视图轨道在
+     * 一趟重放结束后补上）。若照联机口径判"本地手牌缺牌"，一次 seek 会刷几十条告警并把
+     * `needsSync` 永久挂住 —— 那是给"丢帧"准备的信号，在这里指向的是一个不存在的补救。
+     */
+    canResync: true,
     protocolWarning: false,           // §8.2：收到过 seats[].hand 之类的越权字段
   };
 
@@ -368,8 +377,14 @@ export function createState() {
       if (index < 0) {
         // 本地手牌与服务端不一致（丢过帧 / 同步前手牌为空）：这条广播**不能吞**，
         // 否则牌河与手番一起停摆；照常落河，并置位让 client 拉一次权威同步。
-        console.warn('本家 discard_event 的牌不在手牌中，等待同步', tile, hand);
-        state.needsSync = true;
+        //
+        // 回放里没有服务端可问（`canResync === false`）：那里的"缺牌"是重放途中的正常中间态
+        // ——从 AI 视角看，本家手牌由视图轨道在一趟重放结束后补齐，中途本来就是空的。
+        // 照联机口径置位会刷几十条告警并把 `needsSync` 永久挂住，而它指向的补救并不存在。
+        if (state.canResync) {
+          console.warn('本家 discard_event 的牌不在手牌中，等待同步', tile, hand);
+          state.needsSync = true;
+        }
       } else {
         // 飞出起点按「含摸牌偏移」的槽位算：打掉的若是刚摸那张，就从抬起的位置起飞
         from = handLayout(hand.length, drawnIndex(state))[index];

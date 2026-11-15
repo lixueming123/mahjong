@@ -79,4 +79,18 @@ export class Sfx {
       await new Promise((r) => setTimeout(r, VOICE_GAP_MS));
     }
   }
+
+  /**
+   * 掐掉正在播的语音序列。
+   *
+   * 回放切视角/拖动时用：那一次重放不再触发新的播报（客户端有闸门），但**上一条已经开始
+   * 的语音还在响** —— 它属于上一局的结论，而画面已经跳到别处了，必须自己收尾。
+   */
+  stopVoice() {
+    this._voiceSeq += 1;             // 让挂起的序列在下一个 await 处自行退出
+    if (this._voiceSrc) {
+      try { this._voiceSrc.stop(); } catch (_) { /* 已停 */ }
+      this._voiceSrc = null;
+    }
+  }
 }

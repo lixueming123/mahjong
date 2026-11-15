@@ -101,6 +101,19 @@ export class ReplayPlayer {
     this.client.send = () => false;   // 回放里没有任何出站帧是合法的
     this.client.net.send = () => false;
     this.client.net.connected = false;
+    /**
+     * 回放里没有服务端可问：状态归约遇到"本地手牌对不上"时**不要**去置 `needsSync`。
+     * 那个信号的意思是"丢帧了，拉一份权威状态回来"，而录制里唯一的权威就是这份文件本身。
+     * 从 AI 视角重放时本家手牌在重放途中始终是空的（机器人没有私有 `state_sync`，手牌由
+     * 视图轨道在整趟重放结束后补），照联机口径会刷几十条告警并留下一个永不消解的标记。
+     */
+    this.app.state.canResync = false;
+    /**
+     * 播报闸门（client.js 的 `narratable`）：状态归约照做，但结算语音与飘字只在
+     * "正常速度自动播放"时出手。seek 是从第 0 步重放，路径上必然会重新喂到上一局的
+     * `game_end` 与各条 `action_event` —— 那不是"现在发生的事"，不能重播一遍。
+     */
+    this.client.narrationGate = () => this.narratable;
   }
 
   // ---------------------------------------------------------------- 播放控制
@@ -113,6 +126,19 @@ export class ReplayPlayer {
    *  一次 seek 会重放几百步，每步一声会把整局的音效糊成噪音。 */
   get audible() {
     return this.playing && !this._seeking && this.speed <= 1;
+  }
+
+  /**
+   * 是否该**播报**（结算语音 + 飘字/横幅/轻提示）。
+   *
+   * 与 `audible` 只差倍速这一条：音效是"每一步一声"，快放时必须静音（否则糊成噪音）；
+   * 播报一局只有一次（局终/鸣牌），快放照样是"现在发生的事"，所以仍要说出来。真正要禁的
+   * 只有 seek —— 切视角、拖进度条、单步都是"从头重放已看过的部分"，路径上必然重新喂到
+   * 上一局的 `game_end` 与各条 `action_event`：状态该按它们归约，播报却不能再触发一次，
+   * 否则界面已跳到当前局，耳边还在念上一局的和牌，屏幕上还挂着上一局的局终飘字。
+   */
+  get narratable() {
+    return this.playing && !this._seeking;
   }
   get finished() {
     return this.cursor >= this.steps.length;
@@ -175,6 +201,8 @@ export class ReplayPlayer {
   /** 单步前进：喂一步（不论时间），用于逐手复盘。 */
   stepForward() {
     if (this.finished) return false;
+    // 单步是"用户主动换落点"，与 seek 同样：旧播报立刻收掉，这一步本身不发声。
+    this._silence();
     this.app.suspendChanged();
     try {
       this._applyStep(this.steps[this.cursor]);
@@ -198,6 +226,10 @@ export class ReplayPlayer {
   seekTo(stepIndex) {
     const target = Math.max(0, Math.min(Math.floor(stepIndex) || 0, this.steps.length));
     this._seeking = true;
+    // 落点在重放开始前定下：重放过程中 `narratable` 恒为 false（`_seeking`），所以下面
+    // 喂进去的 `game_end` / `action_event` 只归约状态、不播报也不飘字。落点该显示的
+    // 结算页由 `_syncRoundEndOverlay()` 按**位置**补上，与播报无关。
+    this._silence();
     this.app.suspendChanged();
     try {
       this.app.reset();
@@ -264,6 +296,21 @@ export class ReplayPlayer {
   /** 释放计时器（离开回放页时调用）。 */
   dispose() {
     this.pause();
+    this._silence();
+    // 牌桌要交回联机会话（大厅入口复用同一个 `app.state`）：恢复"可以拉权威状态"。
+    this.app.state.canResync = true;
+  }
+
+  /**
+   * 掐掉"已经在响/已经在显示"的播报：语音序列、大字横幅、轻提示。
+   *
+   * 与闸门（`narratable`）是一对：闸门防的是"重放时**新起**一条播报"，这里收的是
+   * "切视角之前那条还没演完"。没有这一步，切视角后上一局的语音还会念完，飘字也会
+   * 挂满它自己的 2.6 秒 —— 牌桌已经换了局次和视角，这两样都属于过去。
+   */
+  _silence() {
+    this.sfx?.stopVoice?.();
+    this.ui?.hideNarration?.();
   }
 
   /**
