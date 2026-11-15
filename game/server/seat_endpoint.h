@@ -33,6 +33,8 @@
 #include <utility>
 #include <variant>
 
+#include <exec/task.hpp>
+
 #include "ex_actor/api.h"
 
 #include "db.h"
