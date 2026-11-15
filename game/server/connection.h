@@ -19,6 +19,24 @@
 
 namespace mahjong {
 
+// How much unflushed outbound data one connection may hold before the gateway gives up on it
+// (PROTOCOL §1.2.2 / §7.2: a connection that stops draining is a client fault, closed like any
+// other quota).
+//
+// The problem this bounds: `outbox_` only ever grows from the producer side. The single thing that
+// shrinks it is the gateway's `send()`, and whether that succeeds depends on the *client* — a peer
+// that never reads eventually fills its receive window, TCP advertises zero, the server's `send()`
+// returns EAGAIN, and the gateway pushes the unsent tail straight back into the outbox. EAGAIN is
+// retried rather than treated as an error, so without a cap nothing ever stops the growth: one
+// connection that sends a `ping` every few seconds (enough to keep `last_inbound_ms` fresh, so the
+// idle timeout never fires) can hold every frame of a whole match in server memory.
+//
+// 4 MB is chosen to be several times the largest legitimate burst: a client that stops reading for
+// a moment may legitimately queue a whole match of frames (~2.3 MB measured on a classic match,
+// which is what the room broadcasts to all four seats). A peer that exceeds this is not merely
+// slow, it is not reading at all.
+inline constexpr size_t kMaxOutboxBytes = 4 * 1024 * 1024;
+
 class Connection {
  public:
   // |wake_flag| is shared by every connection of one gateway. Null skips coalescing and writes
@@ -34,6 +52,11 @@ class Connection {
   // ---- producer side (any thread) -----------------------------------------------------
 
   // Queues one frame. The '\n' terminator is appended when missing. No-op after close.
+  //
+  // A frame that would push the outbox past kMaxOutboxBytes is dropped and the connection is
+  // closed instead: see that constant for why an unbounded outbox is a remote memory-exhaustion
+  // hole rather than merely untidy. Closing (not growing) is the only safe answer, because the
+  // peer that caused it is by definition not reading.
   void SendFrame(std::string_view frame);
   // Queues the frame and asks the loop to close the connection once the outbox is flushed.
   void SendFrameThenClose(std::string_view frame, std::string reason);
@@ -44,6 +67,9 @@ class Connection {
   bool close_requested() const;
   std::string close_reason() const;
   bool HasPendingOutbox() const;
+  // Unflushed bytes currently queued. Bounded by kMaxOutboxBytes; a test (and a log line) uses it
+  // to see the backpressure that a peer which stopped reading produces.
+  size_t outbox_bytes() const;
 
   // ---- quota counters (PROTOCOL §7.2); each returns the value after incrementing ------
   int AddBadFrame();

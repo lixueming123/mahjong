@@ -277,9 +277,15 @@ stdexec::task<void> LobbyActor::CreateRoomWithMode(ex_actor::ActorRef<SeatEndpoi
     co_return;
   }
   if (!owned) {
-    // Disconnect won the race: drop the unregistered actor with `room`.
+    // Disconnect won the race: the room is spawned but nobody registered it, so its own mailbox is
+    // the only thing that can destroy it. Dropping `room` would not: an ActorRef is a bare
+    // pointer (see ReapRoom below), so the actor — and the Game it owns — would survive until
+    // ex_actor::Shutdown(). Retire is the same message DropPlayer and ReapRoom send.
     spdlog::info("lobby: dropped room {} for player {}, the connection closed while it was spawning", room_id,
                  player.player_id);
+    if (!room.IsEmpty()) {
+      co_await room.Send<&RoomEndpoint::Dispatch>(RoomEnvelope::Retire());
+    }
     co_return;
   }
 

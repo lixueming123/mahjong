@@ -21,6 +21,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -64,6 +65,16 @@ class RoomActor : public RoomEndpoint {
 
   stdexec::task<void> Dispatch(RoomEnvelope envelope) override;
   stdexec::task<bool> TakeSeat(RoomSeat seat) override;
+
+  // How many RoomActor instances exist in this process right now, retired ones excluded.
+  //
+  // This is NOT the lobby's `room_count()`, which only counts registry entries: an actor that was
+  // spawned but never registered (a create_room whose owner disconnected while Spawn was still in
+  // flight) is invisible there, so the registry cannot tell a leaked room from a reclaimed one.
+  // The framework keeps actors alive until ex_actor::Shutdown() and exposes no count of its own,
+  // so this one is what a test — and an operator staring at a growing process — can watch.
+  // Bumped in the constructor, dropped in the destructor.
+  static size_t live_room_count();
 
   // Test seam, installed right after construction and before any traffic: production rooms
   // report through |owner| instead. Deliberately not a message — a std::function cannot be

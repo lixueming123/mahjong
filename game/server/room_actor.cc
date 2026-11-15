@@ -12,6 +12,18 @@
 #include "protocol.h"
 
 namespace mahjong {
+namespace {
+
+// One process-wide count of live RoomActor objects. A function-local static (not a class member)
+// so every translation unit shares the one instance; see RoomActor::live_room_count.
+std::atomic<size_t>& LiveRooms() {
+  static std::atomic<size_t> live {0};
+  return live;
+}
+
+}  // namespace
+
+size_t RoomActor::live_room_count() { return LiveRooms().load(std::memory_order_relaxed); }
 
 RoomActor::RoomActor(std::string room_id, std::string game_id, std::string options_json, uint64_t seed,
                      int action_timeout_ms, int ai_delay_ms, int inter_hand_delay_ms, std::vector<RoomSeat> seats,
@@ -38,9 +50,11 @@ RoomActor::RoomActor(std::string room_id, std::string game_id, std::string optio
   // RoomEndpoint is the first base — it does not check. Fail loudly here rather than corrupt
   // memory if someone ever adds a base in front of it.
   assert(static_cast<void*>(static_cast<RoomEndpoint*>(this)) == static_cast<void*>(this));
+  LiveRooms().fetch_add(1, std::memory_order_relaxed);
 }
 
 RoomActor::~RoomActor() {
+  LiveRooms().fetch_sub(1, std::memory_order_relaxed);
   // Only the flag is touched: everything else is about to go away, and the closures that read it
   // are the only code that runs after this.
   *alive_ = false;

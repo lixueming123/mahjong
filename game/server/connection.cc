@@ -52,6 +52,18 @@ void Connection::Wake() {
 }
 
 void Connection::AppendFrameLocked(std::string_view frame) {
+  // Bounded on purpose: see kMaxOutboxBytes (connection.h). A peer that never reads keeps the
+  // gateway's send() in EAGAIN, and the unsent tail comes straight back here, so without this the
+  // outbox is an unbounded buffer fed by remote input. Dropping the frame and closing is the only
+  // correct answer — the peer that filled it is not going to drain it.
+  const size_t needed = frame.size() + 1;  // + the terminator appended below
+  if (outbox_.size() + needed > kMaxOutboxBytes) {
+    close_requested_ = true;
+    if (close_reason_.empty()) {
+      close_reason_ = "outbound buffer full";
+    }
+    return;
+  }
   outbox_.append(frame.data(), frame.size());
   if (outbox_.empty() || outbox_.back() != '\n') {
     outbox_.push_back('\n');
@@ -116,6 +128,11 @@ bool Connection::HasPendingOutbox() const {
   return !outbox_.empty();
 }
 
+size_t Connection::outbox_bytes() const {
+  std::lock_guard lock(mutex_);
+  return outbox_.size();
+}
+
 int Connection::AddBadFrame() {
   std::lock_guard lock(mutex_);
   return ++bad_frames_;
@@ -158,6 +175,20 @@ void Connection::PushBackOutbox(std::string remainder) {
   }
   std::lock_guard lock(mutex_);
   if (closed_) {
+    return;
+  }
+  // The bound applies here too, and this is the path that actually matters. FlushOutbox drains the
+  // whole outbox and then pushes back whatever send() could not take, so a peer that never reads
+  // empties the buffer on every pass and lets the producers refill it to the cap in between:
+  // checking only on append would let the two halves add up to twice the bound (measured: 29MB
+  // against a 4MB cap) and keep growing that way round after round. A peer whose drain produced
+  // more than the cap has proven it is not reading, which is exactly the condition the bound is
+  // there to catch.
+  if (outbox_.size() + remainder.size() > kMaxOutboxBytes) {
+    close_requested_ = true;
+    if (close_reason_.empty()) {
+      close_reason_ = "outbound buffer full";
+    }
     return;
   }
   outbox_.insert(0, remainder);

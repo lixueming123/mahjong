@@ -312,6 +312,44 @@ TEST_F(LobbyTest, DisconnectAroundCreateRoomLeavesNoRoom) {
       << "the room of a disconnected owner must not stay in the registry";
 }
 
+// The case above awaits CreateRoom, so the disconnect always lands *after* the room was registered
+// and `room_count()` is enough to see it. This one races the two: the close is queued while
+// CreateRoom is still parked in its `co_await LaunchRoom`, which is the window where the room is
+// already spawned but `creating_` has been erased — so the handler takes its `!owned` branch and
+// the room is in no registry at all.
+//
+// `room_count()` cannot see that outcome (it reads the registry, and the leaked actor is in none),
+// which is exactly why it went unnoticed: the actor stayed in ex_actor's own table until Shutdown.
+// RoomActor::live_room_count() counts the objects themselves, so a room that survives this test
+// shows up here and nowhere else.
+TEST_F(LobbyTest, RoomSpawnedDuringDisconnectIsDestroyed) {
+  ex_actor::ActorRef<LobbyActor> lobby =
+      WaitValue(ex_actor::Spawn<LobbyActor>(/*seed=*/4242, kFastWindowMs, timer_, kFastReclaimMs));
+  stdexec::sync_wait(lobby.Send<&LobbyActor::SetSelfRef>(lobby));
+  auto conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1, /*wake_write_fd=*/-1);
+
+  const size_t live_before = RoomActor::live_room_count();
+  ASSERT_EQ(live_before, 0u) << "a previous test left a room behind";
+
+  // Neither send is awaited: the lobby starts CreateRoom, suspends in LaunchRoom, and only then
+  // runs OnConnectionClosed (ex_actor runs one message at a time and CreateRoom yields at its
+  // first co_await). That ordering is what makes this deterministic rather than a race to hit.
+  ActorSendScope().spawn(lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(conn, lobby), MakePlayer()));
+  ActorSendScope().spawn(
+      lobby.Send<&LobbyActor::OnConnectionClosed>(MakePlayer(), ex_actor::ActorRef<SeatEndpoint> {}));
+
+  const auto live_rooms = []() { return RoomActor::live_room_count(); };
+  // The room must come back to zero: spawned by the create, destroyed by the Retire the !owned
+  // branch sends. Without that Retire the count stays at 1 for the rest of the process.
+  ASSERT_TRUE(WaitFor([&live_rooms]() { return live_rooms() == 0; }))
+      << "the room spawned during the disconnect was never destroyed (live rooms: " << live_rooms() << ")";
+
+  // Same conclusion through the lobby's own bookkeeping, and no room may appear later.
+  EXPECT_EQ(WaitValue(lobby.Send<&LobbyActor::room_count>()), 0u);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  EXPECT_EQ(live_rooms(), 0u) << "the dropped room stayed alive after the handler returned";
+}
+
 // Times the lobby registry under the real gate. CreateRoom's Spawn runs outside the lock, so
 // a parallel burst should overlap; room_count is only the lock plus one map lookup.
 TEST(LobbyPerf, RegistryLock) {

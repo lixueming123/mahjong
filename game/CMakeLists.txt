@@ -215,6 +215,15 @@ target_link_libraries(mahjong_json_test PRIVATE GTest::gtest_main GTest::gmock)
 add_test(NAME mahjong_json_test COMMAND mahjong_json_test)
 set_tests_properties(mahjong_json_test PROPERTIES TIMEOUT 60)
 
+# Connection 出站缓冲上限（connection.h: kMaxOutboxBytes）。只依赖 connection.cc + net.cc +
+# protocol.cc，不建 actor、不开 socket、不碰数据库 —— 「对端不读」用 fd=-1 模拟即可。
+add_executable(mahjong_connection_test server/connection_test.cc server/connection.cc server/net.cc
+                                       server/protocol.cc server/json.cc)
+target_include_directories(mahjong_connection_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_link_libraries(mahjong_connection_test PRIVATE mahjong_rules GTest::gtest_main GTest::gmock)
+add_test(NAME mahjong_connection_test COMMAND mahjong_connection_test)
+set_tests_properties(mahjong_connection_test PROPERTIES TIMEOUT 60)
+
 # 账号功能的纯逻辑单测（校验规则 / player_id 派生 / stats 帧形状）。
 # 刻意不链接 mahjong_db：这样它在有没有 MySQL 的机器上都恒常可跑。
 add_executable(mahjong_account_test server/account_test.cc server/protocol.cc server/json.cc)
