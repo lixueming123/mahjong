@@ -22,7 +22,7 @@
 
 三条关键结构约束：
 
-1. **一个 actor 同时只有一个 activation**。框架在 handler 第一次 `co_await` 挂起后，就把下一条消息交给同一 actor 执行（`include/ex_actor/internal/actor.h:359-387` 的 `PullMailboxAndRun` 循环）。
+1. **一个 actor 同时只有一个 activation**。框架在 handler 第一次 `co_await` 挂起后，就把下一条消息交给同一 actor 执行（`third_party/ex-actor/include/ex_actor/internal/actor.h` 的 `PullMailboxAndRun` 循环）。
 2. 因此 **跨挂起的临界区必须自己保护**：`RoomActor` 用 `AsyncGate` 覆盖 `Dispatch`/`TakeSeat`；`LobbyActor` 不需要 gate，因为它所有注册表访问都在**同步段**里，跨 `co_await` 的只有"协议"而不是"临界区"（`lobby.h:2-14`）。
 3. **actor 从不直接写别的 actor 的状态**，只投消息。房间只知道 `ActorRef<SeatEndpoint>`，大厅只知道 `ActorRef<RoomEndpoint>`。
 

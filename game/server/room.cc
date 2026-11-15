@@ -278,9 +278,10 @@ LegacyRoomActor::LegacyRoomActor(std::string room_id, uint64_t seed, int action_
   // the seats over in another order.
   std::sort(seats_.begin(), seats_.end(), [](const RoomSeat& lhs, const RoomSeat& rhs) { return lhs.seat < rhs.seat; });
   // The lobby holds this actor as `ActorRef<RoomEndpoint>` and the framework invokes the method
-  // pointer through a static_cast to the method's class (include/ex_actor/internal/actor.h),
-  // which is only correct while RoomEndpoint is the first base — it does not check. Fail loudly
-  // here rather than corrupt memory if someone ever adds a base in front of it.
+  // pointer through a static_cast to the method's class
+  // (third_party/ex-actor/include/ex_actor/internal/actor.h), which is only correct while
+  // RoomEndpoint is the first base — it does not check. Fail loudly here rather than corrupt
+  // memory if someone ever adds a base in front of it.
   assert(static_cast<void*>(static_cast<RoomEndpoint*>(this)) == static_cast<void*>(this));
 }
 

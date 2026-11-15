@@ -102,8 +102,8 @@ endif()
 add_library(mahjong_replay_store STATIC server/replay_store.cc server/gzip.cc)
 target_include_directories(mahjong_replay_store PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(mahjong_replay_store PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server)
-# ZLIB::ZLIB 由根 CMakeLists 的 zlib-cmake 提供（find_package(ZLIB) 已被它 override），
-# 与 capnproto 用的是同一个 target，没有新增依赖。
+# ZLIB::ZLIB 由 third_party/ex-actor 的 CMakeLists 里的 zlib-cmake 提供（find_package(ZLIB)
+# 已被它 override），与 capnproto 用的是同一个 target，没有新增依赖。
 target_link_libraries(mahjong_replay_store PUBLIC ex_actor mahjong_room_shell mahjong_db spdlog::spdlog ZLIB::ZLIB)
 
 # 回放载荷的纯逻辑单测：base64（base64.h）、gzip（gzip.cc）、§5.18 分片（protocol.cc）。

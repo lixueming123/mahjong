@@ -56,9 +56,10 @@ PlayerActor::PlayerActor(std::shared_ptr<Connection> conn, std::shared_ptr<Playe
       sessions_(std::move(sessions)),
       lobby_(std::move(lobby)) {
   // The framework reaches this actor as `ActorRef<SeatEndpoint>` and invokes the method pointer
-  // through a static_cast to the method's class (include/ex_actor/internal/actor.h), which is
-  // only correct while SeatEndpoint is the first base — it does not check. Fail loudly here
-  // rather than corrupt memory if someone ever adds a base in front of it.
+  // through a static_cast to the method's class
+  // (third_party/ex-actor/include/ex_actor/internal/actor.h), which is only correct while
+  // SeatEndpoint is the first base — it does not check. Fail loudly here rather than corrupt
+  // memory if someone ever adds a base in front of it.
   assert(static_cast<void*>(static_cast<SeatEndpoint*>(this)) == static_cast<void*>(this));
 }
 

@@ -2,9 +2,9 @@
 //
 // Why it exists: a handler that suspends keeps its coroutine alive *outside* the actor (the
 // framework's `AsyncDestroy` only waits for activation tasks, not for a handler parked in a
-// `co_await` — include/ex_actor/internal/actor.h), and the room now suspends for real when it
-// fans a broadcast out to four seats. Tearing the actor world down with a handler still parked
-// would reset the actor's instance while the coroutine frame still points at it.
+// `co_await` — third_party/ex-actor/include/ex_actor/internal/actor.h), and the room now suspends
+// for real when it fans a broadcast out to four seats. Tearing the actor world down with a handler
+// still parked would reset the actor's instance while the coroutine frame still points at it.
 //
 // So every send that is not awaited goes through this one scope, and `main()` drains it before
 // `ex_actor::Shutdown()`:

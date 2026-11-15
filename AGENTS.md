@@ -1,7 +1,14 @@
 # Understanding This Project
 
-- Refer README.md and docs/contents for how to use this framework(ignore files listed in .gitignore, which might be stale)
-- Refer "How to build from source" part in CONTRIBUTING.md for how to build&test.
+- This repository is a mahjong game (`game/`) built on the ex_actor actor framework. The framework
+  lives in the `third_party/ex-actor` git submodule and is pinned to a known-good commit; do not
+  modify code under `third_party/`.
+- Refer README.md and `game/docs` for the game itself. Framework docs (API, schedulers, distributed
+  mode) are at `third_party/ex-actor/docs/contents` once the submodule is checked out (ignore files
+  listed in .gitignore, which might be stale).
+- Build&test: run `git submodule update --init --recursive` once, then
+  `python3 scripts/regen_build_dir.py`, `cmake --build build --config Release`, `ctest -C Release`.
+  The server binary is `build/game/mahjong_server`.
 
 # Editing Guidelines
 

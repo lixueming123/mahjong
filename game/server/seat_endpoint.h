@@ -11,8 +11,8 @@
 // `ActorRef<SeatEndpoint>` requires the framework's ActorRef polymorphism: the concrete class
 // must derive *directly* from SeatEndpoint (single, non-virtual inheritance) so the base
 // subobject sits at offset 0 — the framework casts the actor's instance pointer to the method
-// pointer's class (include/ex_actor/internal/actor.h), and it does not check that. The
-// PlayerActor constructor asserts it.
+// pointer's class (third_party/ex-actor/include/ex_actor/internal/actor.h), and it does not check
+// that. The PlayerActor constructor asserts it.
 //
 // There is deliberately ONE envelope type and ONE entry name: `Dispatch`. Two `Dispatch`
 // overloads would make `&PlayerActor::Dispatch` ambiguous the moment someone takes its

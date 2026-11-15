@@ -85,9 +85,15 @@ build_binary() {
   build_dir="$(default_build_dir)"
   local config="${MAHJONG_BUILD_CONFIG:-Release}"
   if [[ ! -f "${build_dir}/CMakeCache.txt" ]]; then
-    # 首次配置会拉 CPM 依赖（要联网）；生成器与 docs/contents/installation.md 一致。
-    echo "[server] 配置 ${build_dir}（Ninja Multi-Config）"
-    cmake -S "${REPO_ROOT}" -B "${build_dir}" -G "Ninja Multi-Config"
+    # 首次配置会拉 CPM 依赖（要联网）。有 ninja 就用多配置生成器（与
+    # third_party/ex-actor/docs/contents/installation.md 一致），没有就退回 Unix Makefiles：
+    # macOS/Homebrew 常常没装 ninja，不该让「跑起来」卡在一个纯构建工具上。
+    local generator="Ninja Multi-Config"
+    if ! command -v ninja > /dev/null 2>&1; then
+      generator="Unix Makefiles"
+    fi
+    echo "[server] 配置 ${build_dir}（${generator}）"
+    cmake -S "${REPO_ROOT}" -B "${build_dir}" -G "${generator}"
   fi
   # 单配置生成器（Unix Makefiles 等）不认 --config，也不该在提示里假装有配置。
   if grep -q '^CMAKE_CONFIGURATION_TYPES' "${build_dir}/CMakeCache.txt" 2>/dev/null; then

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Regenerate the cmake build directory. Works on both Linux/macOS and Windows."""
+"""Regenerate the cmake build directory. Works on both Linux/macOS and Windows.
+
+The ex_actor framework comes from the third_party/ex-actor git submodule, so it must be checked out
+before configuring: run `git submodule update --init --recursive` once after cloning.
+"""
 
 import argparse
 import os
@@ -22,7 +26,11 @@ def default_generator():
         if shutil.which("cl") and shutil.which("ninja"):
             return "Ninja Multi-Config"
         return "Visual Studio 17 2022"
-    return "Ninja Multi-Config"
+    # Ninja is not installed everywhere (macOS/Homebrew users often don't have it); fall back to
+    # Makefiles so the documented one-command flow works with just CMake + a compiler.
+    if shutil.which("ninja"):
+        return "Ninja Multi-Config"
+    return "Unix Makefiles"
 
 
 parser = argparse.ArgumentParser(
@@ -42,6 +50,10 @@ parser.add_argument(
     "--cxx_flags", dest="cxx_flags", default=None,
     help="Value passed to -DCMAKE_CXX_FLAGS.",
 )
+parser.add_argument(
+    "--release", dest="release", action="store_true",
+    help="Configure the Release build in build-release/ instead of the default build/.",
+)
 args, extra_cmake_args = parser.parse_known_args()
 
 
@@ -60,8 +72,19 @@ def resolve_compiler(compiler):
 project_root = Path(__file__).resolve().parent.parent
 os.chdir(project_root)
 
+third_party = project_root / "third_party" / "ex-actor"
+if not (third_party / "CMakeLists.txt").exists():
+    sys.exit(
+        "third_party/ex-actor is empty: run "
+        "`git submodule update --init --recursive` first."
+    )
+
 # Clean previous build artifacts
-build_dir = project_root / "build"
+# Two build directories, kept apart because they are used for different things: build/ is the
+# day-to-day tree (also what --config-less debug runs use), build-release/ is the Release tree that
+# game/start_server.sh --release and the load tests pick up.
+build_dir_name = "build-release" if args.release else "build"
+build_dir = project_root / build_dir_name
 if build_dir.exists():
     shutil.rmtree(build_dir, onerror=force_remove_readonly)
 compile_commands = project_root / "compile_commands.json"
@@ -70,10 +93,14 @@ compile_commands.unlink(missing_ok=True)
 os.environ["CPM_SOURCE_CACHE"] = str(Path.home() / ".cache" / "CPM")
 
 cmake_args = [
-    "cmake", "-S", ".", "-B", "build",
+    "cmake", "-S", ".", "-B", build_dir_name,
     "-DCMAKE_EXPORT_COMPILE_COMMANDS=1",
     "-G", args.generator,
 ]
+
+if args.release:
+    # Single-config generators (Unix Makefiles) need CMAKE_BUILD_TYPE; multi-config Ignore it.
+    cmake_args += ["-DCMAKE_BUILD_TYPE=Release"]
 
 if not args.generator.startswith("Visual Studio") and shutil.which("ccache"):
     cmake_args += [

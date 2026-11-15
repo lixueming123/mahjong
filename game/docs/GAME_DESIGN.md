@@ -75,7 +75,7 @@
 
 ### 0.3 一致性硬约束（来自 ex_actor）
 
-ex_actor 的 `Send` 不可取消、mailbox 不可撤回、actor 执行不可抢占；**并且** actor 的 handler 一旦挂起，框架就会把下一条消息交给同一个 actor（`include/ex_actor/internal/actor.h` 的 drain loop）。因此原子性必须自己保证，本项目的做法是**每个 actor 一个协程锁**（`game/server/async_gate.h`）：
+ex_actor 的 `Send` 不可取消、mailbox 不可撤回、actor 执行不可抢占；**并且** actor 的 handler 一旦挂起，框架就会把下一条消息交给同一个 actor（`third_party/ex-actor/include/ex_actor/internal/actor.h` 的 drain loop）。因此原子性必须自己保证，本项目的做法是**每个 actor 一个协程锁**（`game/server/async_gate.h`）：
 
 1. 超时**不使用**任何取消机制，统一采用**「seq 作废」**方案（见 5.6）。
 2. 任何窗口超时消息到达 RoomActor 时，先比对 `seq`；不匹配即丢弃，不产生任何状态变更。

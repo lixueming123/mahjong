@@ -1,162 +1,85 @@
+# 麻将（mahjong）
 
-<!-- GITHUB README ONLY START -->
-**📖 Documentation: <https://ex-actor.github.io/ex-actor/>**
-<!-- GITHUB README ONLY END -->
+四人麻将游戏：C++20 服务端 + Python/pygame 客户端 + Web 前端。服务端基于
+[ex_actor](https://github.com/ex-actor/ex-actor) actor 框架，框架作为 git submodule 放在
+`third_party/ex-actor`。
 
-[![License: Apache2.0](https://img.shields.io/badge/License-Apache2.0-00c600.svg)](https://opensource.org/licenses/apache-2.0)
-[![Generic badge](https://img.shields.io/badge/C++-20-blue.svg)](https://ex-actor.github.io/ex-actor/installation/)
-[![Generic badge](https://img.shields.io/badge/gcc-11+-blue.svg)](https://ex-actor.github.io/ex-actor/installation/)
-[![Generic badge](https://img.shields.io/badge/clang-16+-blue.svg)](https://ex-actor.github.io/ex-actor/installation/)
-[![Generic badge](https://img.shields.io/badge/MSVC-14.50+-blue.svg)](https://ex-actor.github.io/ex-actor/installation/)
-[![Build and test](https://github.com/ex-actor/ex-actor/actions/workflows/cmake_multi_platform.yml/badge.svg)](https://github.com/ex-actor/ex-actor/actions/workflows/cmake_multi_platform.yml)
-[![codecov](https://codecov.io/gh/ex-actor/ex-actor/graph/badge.svg)](https://codecov.io/gh/ex-actor/ex-actor)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ex-actor/ex-actor)
-
-![image](assets/ex_actor_banner.jpg)
-
-**ex_actor** is a modern C++ actor framework based on `std::execution`. **Only requires C++20 [(?)](#faqs)**.
-
-This framework **turns your C++ class into a stateful async service** (so called actor) by one line of code. All method calls to it will be queued and executed in serial, so in your class you don't need any locks, just focus on your logic.
-
-When the actor is local, args in method will be passed directly in memory. When it's a remote actor, we'll help you to serialize them, send through network, and get the return value back.
-
-This programming paradigm is called "Actor Model". It's a very easy way to write distributed & highly concurrent programs, because you don't need any locks in your code. Just write plain classes.
-
-# Key Features
-
-1. **Easy to Use** - Clean & intuitive API, turn your existing class into an actor.
-2. **Standard-Compliant** - Composable with everything in std::execution ecosystem.
-3. **Pluggable Scheduler** - Use any std::execution scheduler you like! We also [provide many out-of-box](https://ex-actor.github.io/ex-actor/schedulers/): work-sharing, work-stealing, core-pinned, custom priority and so on.
-
-
-# API Glance
-
-**📘 Full Tutorial : <https://ex-actor.github.io/ex-actor/tutorial/>**
-
-Note: currently we're based on std::execution's early implementation - [stdexec](https://github.com/NVIDIA/stdexec),
-so you'll see namespace `stdexec` instead of `std::execution` in the following example.
-
-## Basic Example: Turn Your Class into an Actor
-
-<!-- doc test start -->
-```cpp
-#include <cassert>
-#include "ex_actor/api.h"
-
-struct Counter {
-  int Add(int x) { return count += x; }
-  int count = 0;
-};
-
-stdexec::task<void> MainCoroutine() {
-  ex_actor::Init(/*thread_pool_size=*/1);
-
-  // 1. Create the actor.
-  ex_actor::ActorRef actor = co_await ex_actor::Spawn<Counter>();
-
-  // 2. Call it! It returns a std::execution sender.
-  int res = co_await actor.Send<&Counter::Add>(1);
-  assert(res == 1);
-
-  ex_actor::Shutdown();
-}
-
-int main() { stdexec::sync_wait(MainCoroutine()); }
 ```
-<!-- doc test end -->
-
-## Actor Chaining Example
-
-Actor's method can be a sender. The following example shows how to create an actor inside an actor and call it without blocking the scheduler thread.
-
-<!-- doc test start -->
-```cpp
-#include <cassert>
-#include "ex_actor/api.h"
-
-class Child {
-public:
-  std::string Ping() {
-    return "Dad, I'm here!";
-  }
-};
-
-class Father {
-public:
-  // actor's method can be a sender
-  stdexec::task<std::string> SpawnChildAndPing() {
-    if (child_.IsEmpty()) {
-      child_ = co_await ex_actor::Spawn<Child>();
-    }
-    std::string child_res = co_await child_.Send<&Child::Ping>();
-    co_return "Where is my child? " + child_res;
-  }
-private:
-  ex_actor::ActorRef<Child> child_;
-};
-
-stdexec::task<void> MainCoroutine() {
-  // Here we have only one thread in scheduler, but it still can finish the entire work
-  // because everything is async, there is no blocking wait
-  ex_actor::Init(/*thread_pool_size=*/1);
-
-  ex_actor::ActorRef<Father> father = co_await ex_actor::Spawn<Father>();
-  std::string res = co_await father.Send<&Father::SpawnChildAndPing>();
-  assert(res == "Where is my child? Dad, I'm here!");
-
-  ex_actor::Shutdown();
-}
-
-int main() { stdexec::sync_wait(MainCoroutine()); }
+.
+├── third_party/ex-actor/   # ex_actor 框架（submodule，固定 commit，勿改）
+├── game/
+│   ├── server/             # C++20 服务端：TCP JSON 网关 + RoomActor/PlayerActor/大厅
+│   ├── client/             # pygame 客户端
+│   ├── web/                # Web 前端 + WebSocket→TCP 桥（serve.py）
+│   ├── protocol/           # 线协议枚举（跨语言一致性测试的源头）
+│   ├── tests/              # 端到端脚本（Python / node）
+│   └── docs/               # 玩法、协议、UI 规格
+├── cmake/CPM.cmake         # 依赖管理（根上这份带 curl 回退补丁）
+├── scripts/                # regen_build_dir.py / format.py
+└── CMakeLists.txt          # 麻将工程入口：全局编译选项 + 依赖 + add_subdirectory(game)
 ```
-<!-- doc test end -->
 
-**📘 Full Tutorial : <https://ex-actor.github.io/ex-actor/tutorial/>**
+## 构建与测试
 
-## Installation
+需要 C++20 编译器（GCC 11+/Clang 16+/MSVC 2022）、CMake 3.25+、python3；有 Ninja 会用多配置生成器，没有就退回 Unix Makefiles。
 
-See ⚙️[Installation](https://ex-actor.github.io/ex-actor/installation/) page in our documentation.
+两个构建目录，按用途分开：
 
-## Learning Resources for Actor Model
+| 目录 | 用途 | 怎么生成 |
+|---|---|---|
+| `build/` | 日常开发（不指定 build type） | `python3 scripts/regen_build_dir.py` |
+| `build-release/` | Release（性能测试、压测、对外跑） | `python3 scripts/regen_build_dir.py --release`，或 `./game/start_server.sh --release --build` |
 
- - [Actor Model Explained (Video, English)](https://www.youtube.com/watch?v=ELwEdb_pD0k)
- - [Wikipedia - Actor Model](https://en.wikipedia.org/wiki/Actor_model)
- - [Talk at PureCpp 2025 (Video, Chinese)](https://www.bilibili.com/video/BV1LYB7BMEeQ/)
+```bash
+# 首次克隆后必须先拉子模块，否则 configure 找不到 ex_actor
+git submodule update --init --recursive
 
-# FAQs
+python3 scripts/regen_build_dir.py            # 配置 build/，并生成根目录 compile_commands.json
+cmake --build build -j 4
+ctest --test-dir build --output-on-failure
 
-## `std::execution` is in C++26, why does it only require C++20?
+# Release
+python3 scripts/regen_build_dir.py --release  # 配置 build-release/（-DCMAKE_BUILD_TYPE=Release）
+cmake --build build-release -j 4
+ctest --test-dir build-release --output-on-failure
+```
 
-C++26 is not finalized, now we depend on an early implementation of `std::execution` - [nvidia/stdexec](https://github.com/NVIDIA/stdexec), which only requires C++20. (it's like `fmtlib` vs `std::format` and `ranges-v3` vs `std::ranges`)
+两份 build 都能直接跑 ctest，不会互相打断。`ctest --test-dir <dir>` 需要 CMake 3.20+。
 
-Once C++26 is ready, we'll add a build option to switch to the real `std::execution` in C++26, allowing you to remove the dependency on `stdexec`. And it'll only be an option, you can still use `stdexec` because all senders based on `stdexec` will work well with `std::execution`.
+服务端二进制在 `build/game/mahjong_server`（Release 是 `build-release/game/mahjong_server`；多配置生成器下
+两者都多一层 `Release/`）。`game/start_*.sh` 与 `game/tests/*.py` 都按这些路径找它，找不到会回退到另一个目录。
 
-**From our side, we'll keep our code compatible with both `stdexec` and `std::execution`**. So don't worry about the dependency.
+## 运行
 
-BTW, with C++26's reflection, most boilerplate of the distributed mode API can be eliminated. I'll add a new set of APIs for C++26 in the future, stay tuned!
+```bash
+./game/start_server.sh --seed 199        # 服务端，默认 127.0.0.1:9527
+./game/start_client.sh                   # pygame 客户端（用 ./.venv/bin/python）
+./game/start_web.sh                      # Web 站点 + 桥，默认 8080 -> 127.0.0.1:9527
+```
 
-## Is it production-ready?
+各脚本文件头注释就是完整用法（`--help` 同义）。服务端账号存储走本机 MySQL（`libmysqlclient`），
+连不上时自动退化成 `db_stub.cc`，整局游戏不受影响。
 
-The single-process mode is heavily tested in our company's production environment. While minor issues can occur due to version divergence between internal and open source codes, the overall quality is good, feel free to use it in production.
+## 升级 ex_actor
 
-The distributed mode is fully functional and ready for use, but has not been extensively tested in production yet. Welcome to try it out and build together with us!
+框架不在本仓库维护，改动只发生在 `third_party/ex-actor` 的指针上：
 
-## The Team Behind `ex_actor`
+```bash
+cd third_party/ex-actor
+git fetch origin && git checkout <new-commit>
+cd ../.. && git add third_party/ex-actor
+python3 scripts/regen_build_dir.py && cmake --build build --config Release && ctest -C Release
+```
 
-We are
-<img src="assets/metabit_logo.png" alt="Logo" style="height:1em;">
-[Beijing Qianxiang Private Fund Management Co., Ltd (乾象投资)](https://www.qianxiang.cn/),
-founded in 2018, a technology-driven investment management firm with a focus on artificial intelligence and machine learning. We deeply integrate and enhance machine learning algorithms, applying them to financial data characterized by extremely low signal-to-noise ratios, and thereby generating sustainable returns with low risks for our investors.
+当前固定在 `db08716`（上游 main 上的提交），升级时按上面前四步走，别在子模块里直接改代码。
 
-In the process of engineering our trading system, we discovered that no existing actor framework on the market could meet our specific requirements. Consequently, we built one from the ground up.
+## 文档
 
-While this framework has some successful applications internally, we believe there are more valuable use cases in the community which can make it more mature. So we open-source ex_actor, look forward to building it together with you!
+- `game/docs/GAME_DESIGN.md` 玩法源头（数值与字段是冻结的，协议与规则库必须与它逐字一致）
+- `game/docs/PROTOCOL.md` 线协议；`game/docs/RULESET.md` 规则数值与算法
+- `game/docs/UI_UX_SPEC.md` 界面与交互；`game/docs/ACCOUNT_DESIGN.md` 账号与战绩
+- 框架文档（API、调度器、分布式模式）在 `third_party/ex-actor/docs/contents`
 
-## Standing on the Shoulders of Giants
+## 许可证
 
-* [stdexec](https://github.com/NVIDIA/stdexec) - Early implementation of std::execution in C++20.
-* [ZeroMQ](https://zeromq.org/) - An open-source universal messaging library.
-* [reflect-cpp](https://github.com/getml/reflect-cpp) - A reflection-based C++20 serialization library.
-* [daking::MPSC_queue](https://github.com/dakingffo/MPSC_queue) - A high-performance lock-free MPSC queue.
-* [moodycamel::ConcurrentQueue](https://github.com/cameron314/concurrentqueue) - An industrial-strength MPMC queue.
-* [Cap'n Proto](https://capnproto.org/) - An insanely fast data interchange format.
+Apache-2.0，见 [LICENSE](LICENSE)。

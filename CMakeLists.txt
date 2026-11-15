@@ -1,14 +1,16 @@
 cmake_minimum_required(VERSION 3.25.0 FATAL_ERROR)
-# CMake 4.x errors on cmake_minimum_required(VERSION < 3.5). Clamp to 3.5 for old deps like libzmq.
+# CMake 4.x errors on cmake_minimum_required(VERSION < 3.5). Clamp to 3.5 for old deps like libzmq
+# (pulled in by third_party/ex-actor).
 if(CMAKE_VERSION VERSION_GREATER_EQUAL 4.0)
   set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 endif()
-project(ex_actor VERSION 0.1)
+project(mahjong VERSION 1.0)
 include(cmake/CPM.cmake)
-include(CMakePackageConfigHelpers)
-include(CheckLibraryExists)
 
 # ------------------- global setups -------------------
+# These have to be set at the top level: add_subdirectory() does not inherit the C++ standard or
+# compile options from the subdirectory, and game/ is built with the same flags as before when the
+# mahjong game lived next to the framework.
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -21,144 +23,32 @@ set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS 1 CACHE INTERNAL "")
 if(MSVC)
   add_compile_options(/EHsc)
   add_compile_options(/bigobj)
-  # Match the Linux default of 8 MB stack per thread.
-  # stdexec operation-state objects can be large; the Windows default (1 MB)
-  # is too small for deeply composed sender chains and causes stack overflows
-  # that manifest as SEGFAULT on tests such as skynet_test and distributed_test.
+  # Match the Linux default of 8 MB stack per thread. stdexec operation-state objects can be large;
+  # the Windows default (1 MB) is too small for deeply composed sender chains.
   add_link_options(/STACK:8388608)
 endif()
 
 # ------------------- dependencies -------------------
 
-# When C++26 is ready, I'll add a build option to switch to the real std::execution in C++26,
-# allow you to remove the dependency on stdexec. Stay tuned!
+# The ex_actor actor framework is a git submodule (third_party/ex-actor) pinned to a known-good
+# commit. Its own CMakeLists pulls the rest of the C++ dependencies through CPM: stdexec,
+# capnproto, reflect-cpp, libzmq and spdlog, all of which are needed by both the framework and the
+# game (the game uses spdlog directly and ZLIB::ZLIB for replay compression).
+#
+# EX_ACTOR_BUILD_TESTS OFF keeps the framework's own test suite (and its googletest checkout) out
+# of the build: we only need the ex_actor library. It also means `enable_testing()` and googletest
+# are ours to provide below.
+set(EX_ACTOR_BUILD_TESTS OFF CACHE BOOL "Build ex_actor's own tests")
+add_subdirectory(third_party/ex-actor)
+
+# The game's tests are googletest based; keep the same pinned revision the framework used.
 CPMAddPackage(
-  NAME stdexec
-  GITHUB_REPOSITORY NVIDIA/stdexec
-  GIT_TAG 73559e8963dab7a4ece32ede22f6472c9a815032
-  OPTIONS "BUILD_TESTING OFF"
-  OPTIONS "STDEXEC_BUILD_EXAMPLES OFF"
-  OPTIONS "STDEXEC_INSTALL ON"
+  NAME googletest
+  GITHUB_REPOSITORY google/googletest
+  GIT_TAG b2b9072ecbe874f5937054653ef8f2731eb0f010
+  OPTIONS "INSTALL_GTEST OFF"
+  OPTIONS "gtest_force_shared_crt ON"
 )
 
-# reflect-cpp with Cap'n Proto for actor message serialization
-CPMAddPackage(
-  NAME zlib-cmake
-  GITHUB_REPOSITORY jimmy-park/zlib-cmake
-  GIT_TAG edc9d59d34ea33b1fae4f40268bc69a6d5dd70c0
-  OPTIONS "ZLIB_TEST OFF"
-  OPTIONS "ZLIB_INSTALL ON"
-)
-CPMAddPackage(
-  NAME CapnProto
-  GITHUB_REPOSITORY capnproto/capnproto
-  GIT_TAG v1.2.0
-  OPTIONS "BUILD_TESTING OFF"
-  OPTIONS "CMAKE_CXX_FLAGS -w"
-)
-CPMAddPackage(
-  NAME reflectcpp
-  GITHUB_REPOSITORY getml/reflect-cpp
-  GIT_TAG 30e9b927c2c8309fe12e0b1450816420422701f9
-  OPTIONS "REFLECTCPP_BUILD_BENCHMARKS OFF"
-  OPTIONS "REFLECTCPP_JSON OFF"
-  OPTIONS "REFLECTCPP_CAPNPROTO ON"
-  OPTIONS "REFLECTCPP_INSTALL ON"
-)
-
-# libzmq for message passing in distributed mode (cppzmq headers bundled in 3rd_lib)
-CPMAddPackage(
-  NAME libzmq
-  GITHUB_REPOSITORY zeromq/libzmq
-  GIT_TAG v4.3.5
-  OPTIONS "CMAKE_CXX_FLAGS -w"
-  OPTIONS "BUILD_TESTS OFF"
-  OPTIONS "BUILD_SHARED OFF"
-  OPTIONS "WITH_TLS OFF"
-  OPTIONS "WITH_LIBSODIUM OFF"
-  OPTIONS "WITH_GSSAPI OFF"
-)
-
-CPMAddPackage(
-  NAME spdlog
-  GITHUB_REPOSITORY gabime/spdlog
-  GIT_TAG v1.16.0
-  OPTIONS "SPDLOG_INSTALL ON"
-)
-
-# ------------------- targets -------------------
-file(GLOB_RECURSE EX_ACTOR_SOURCES CONFIGURE_DEPENDS "src/*.cc")
-add_library(
-  ex_actor
-  STATIC
-  ${EX_ACTOR_SOURCES}
-)
-target_include_directories(ex_actor PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-)
-target_link_libraries(
-  ex_actor
-  PUBLIC
-  STDEXEC::stdexec
-  reflectcpp::reflectcpp
-  libzmq-static
-  spdlog::spdlog
-)
-# Link libatomic for 128-bit atomic operations (required by MPSC_queue's Tagged_ptr)
-# Some platforms (e.g. macOS) do not provide a standalone libatomic.
-check_library_exists(atomic __atomic_compare_exchange_16 "" EX_ACTOR_HAS_LIBATOMIC_16)
-if(EX_ACTOR_HAS_LIBATOMIC_16)
-  target_link_libraries(ex_actor PUBLIC atomic)
-endif()
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-  # stdexec's warnings, not our fault
-  target_compile_options(ex_actor PUBLIC -Wno-subobject-linkage)
-endif()
-add_library(ex_actor::ex_actor ALIAS ex_actor)
-
-# ------------------- tests -------------------
-option(EX_ACTOR_BUILD_TESTS "Build tests" ON)
-if(EX_ACTOR_BUILD_TESTS)
-  CPMAddPackage(
-    NAME googletest
-    GITHUB_REPOSITORY google/googletest
-    GIT_TAG b2b9072ecbe874f5937054653ef8f2731eb0f010
-    OPTIONS
-    "INSTALL_GTEST OFF"
-    "gtest_force_shared_crt ON"
-  )
-  enable_testing()
-  add_subdirectory(test)
-  add_subdirectory(game)
-endif()
-
-# ------------------- install -------------------
-if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-  set(EX_ACTOR_IS_TOPLEVEL ON)
-else()
-  set(EX_ACTOR_IS_TOPLEVEL OFF)
-endif()
-
-option(EX_ACTOR_INSTALL "Enable installation of ex_actor" ${EX_ACTOR_IS_TOPLEVEL})
-
-if(EX_ACTOR_INSTALL)
-  install(TARGETS ex_actor EXPORT ex_actor-targets)
-  install(DIRECTORY include/ DESTINATION include)
-  install(
-    EXPORT ex_actor-targets
-    NAMESPACE ex_actor::
-    DESTINATION lib/cmake/ex_actor
-  )
-
-  configure_package_config_file(
-    cmake/ex_actor-config.cmake.in
-    ${CMAKE_CURRENT_BINARY_DIR}/ex_actor-config.cmake
-    INSTALL_DESTINATION lib/cmake/ex_actor
-  )
-
-  install(
-    FILES ${CMAKE_CURRENT_BINARY_DIR}/ex_actor-config.cmake
-    DESTINATION lib/cmake/ex_actor
-  )
-endif()
+enable_testing()
+add_subdirectory(game)
