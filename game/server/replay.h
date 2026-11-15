@@ -81,16 +81,19 @@ class ReplayRecorder {
   const ReplayMeta& meta() const { return meta_; }
   size_t step_count() const { return steps_.size(); }
   bool finished() const { return finished_; }
-  // True when any seat in this recording belongs to |account_id|. What §4.13 authorizes on.
-  bool IncludesAccount(uint64_t account_id) const;
 
   // The file contents. Deterministic in the recorded steps: the same match recorded twice
   // produces byte-identical output (replay_test.cc asserts it).
   std::string Serialize() const;
 
-  // `replays/<room_id>.json`. Room ids are `r-` + 13 lowercase base36 (lobby.cc: FormatRoomId),
-  // so the name needs no escaping and cannot escape |dir|.
+  // `replays/<room_id>.json.gz`. Room ids are `r-` + 13 lowercase base36 (lobby.cc: FormatRoomId),
+  // so the name needs no escaping and cannot escape |dir|. The `.gz` is honest about the bytes:
+  // since v2.6 the file is a gzip stream, not JSON text.
   static std::string FileNameFor(std::string_view room_id);
+
+  // `replays/<room_id>.json`: the name a recording had before the store compressed, still read so
+  // that a restart does not orphan recordings written by the previous build. Never written now.
+  static std::string LegacyFileNameFor(std::string_view room_id);
 
  private:
   // One recorded frame group: the seats it went to and the exact bytes.

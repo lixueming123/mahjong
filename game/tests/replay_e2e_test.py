@@ -24,6 +24,8 @@ MySQL 不可用（或服务端编成 db_stub）时阶段 B 打一行 SKIP 说明
 from __future__ import annotations
 
 import argparse
+import base64
+import gzip
 import json
 import os
 import shutil
@@ -32,6 +34,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -41,6 +44,8 @@ SKIP_RETURN_CODE = 77
 MY_SEAT = 0
 #: replay 帧的单片上限（§5.18），客户端 Net 对单行有 64 KB 硬上限，所以服务端必须切片。
 MAX_REPLAY_CHUNK = 16 * 1024
+#: §5.18 v2.6 的载荷编码。空串 = 明文（旧服务端/旧文件）。
+REPLAY_ENCODING_GZIP = "gzip"
 #: 已知服务端帧类型（用枚举表而不是硬编码数字，避免文档漂移）。
 KNOWN_FRAME_TYPES = {
     value for name, value in vars(FRAME_TYPE).items() if not name.startswith("_") and value != 0
@@ -92,6 +97,16 @@ class Client:
         except OSError:
             pass
 
+    def request_stats(self) -> dict:
+        """§4.10 `stats_request` → §5.13 `stats`。这里只当一条 FIFO 屏障用（见调用处）。"""
+        self.send({"type": FRAME_TYPE.STATS_REQUEST})
+        deadline = time.monotonic() + 20.0
+        while time.monotonic() < deadline:
+            frame = self.recv(timeout=20.0)
+            if frame.get("type") in (FRAME_TYPE.STATS, FRAME_TYPE.ERROR):
+                return frame
+        return {"type": "timeout"}
+
 
 def free_port() -> int:
     with socket.socket() as sock:
@@ -131,14 +146,20 @@ def register(client: Client, username: str, password: str) -> dict:
     return frame
 
 
-def play_one_round(client: Client) -> dict:
-    """游客登录 → 建房 → 打完第一局。返回观测值。
+def play_one_round(client: Client, username: str | None = None, password: str | None = None,
+                   already_logged_in: bool = False) -> dict:
+    """登录 → 建房 → 打完第一局。返回观测值。
 
-    游客路径刻意不碰账号：阶段 A 要能在没有 MySQL 的机器上跑，而回放文件的形状与鉴权无关。
+    不传账号就是游客：阶段 A 要能在没有 MySQL 的机器上跑，而回放文件的形状与鉴权无关。
+    传账号则这一局的座位带真实 `account_id`，阶段 B 用它验证「参与者能取回」。
+    |already_logged_in| 用于 register 之后（§3.2：注册成功即登录，再 login 会被拒）。
     """
-    logged = client.login(None, None, guest="回放观测")
+    if already_logged_in:
+        logged = {"type": FRAME_TYPE.LOGIN_OK}
+    else:
+        logged = client.login(username, password, guest="回放观测")
     if logged.get("type") != FRAME_TYPE.LOGIN_OK:
-        raise TestFailure(f"guest login failed: {logged!r}")
+        raise TestFailure(f"login failed: {logged!r}")
 
     client.send({"type": FRAME_TYPE.CREATE_ROOM})
     joined = client.recv()
@@ -204,10 +225,11 @@ def play_one_round(client: Client) -> dict:
 
 
 def request_replay(client: Client, room_id: str) -> dict:
-    """§4.13 → §5.18：发请求、拼分片、返回解析后的文件。"""
+    """§4.13 → §5.18：发请求、拼分片、还原载荷、返回解析后的文件。"""
     client.send({"type": FRAME_TYPE.REPLAY_REQUEST, "room_id": room_id})
     chunks: dict[int, str] = {}
     total: int | None = None
+    encoding = ""
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
         frame = client.recv(timeout=20.0)
@@ -225,6 +247,13 @@ def request_replay(client: Client, room_id: str) -> dict:
             raise TestFailure(f"replay.chunks must be >= 1: {frame!r}")
         if total is None:
             total = declared
+            # §5.18 v2.6：编码对一次应答恒定，只在第一片读；缺省 = 明文（旧服务端）。
+            declared_encoding = frame.get("encoding")
+            if declared_encoding is not None and not isinstance(declared_encoding, str):
+                raise TestFailure(f"replay.encoding must be a string: {frame!r}")
+            encoding = declared_encoding or ""
+            if encoding and encoding != REPLAY_ENCODING_GZIP:
+                raise TestFailure(f"unexpected replay.encoding: {encoding!r}")
         elif declared != total:
             raise TestFailure(f"replay.chunks changed mid-stream: {declared} != {total}")
         index = frame.get("chunk")
@@ -237,12 +266,29 @@ def request_replay(client: Client, room_id: str) -> dict:
             raise TestFailure(f"replay chunk is {len(data.encode('utf-8'))} bytes > {MAX_REPLAY_CHUNK}")
         chunks[index] = data
         if len(chunks) == total:
-            text = "".join(chunks[i] for i in range(total))
+            joined = "".join(chunks[i] for i in range(total))
             try:
+                text = decode_replay_payload(joined, encoding)
                 return json.loads(text)
+            except (ValueError, zlib.error) as exc:
+                raise TestFailure(f"replayed payload did not decode: {exc}") from exc
             except json.JSONDecodeError as exc:
                 raise TestFailure(f"replayed text is not valid JSON: {exc}") from exc
     raise TestFailure("incomplete replay (timed out)")
+
+
+def decode_replay_payload(joined: str, encoding: str) -> str:
+    """§5.18 的载荷还原。空编码 = 明文；`gzip` = base64 的 gzip 流（v2.6）。
+
+    客户端用的是 `DecompressionStream('gzip')`（见 game/web/js/replay_payload.js），这里用
+    标准库的 gzip 做同一件事 —— 两边解的是同一份字节，所以这条断言同时也守住了
+    「浏览器真的能解开」。
+    """
+    if not encoding:
+        return joined
+    if encoding == "gzip":
+        return gzip.decompress(base64.b64decode(joined, validate=True)).decode("utf-8")
+    raise TestFailure(f"unsupported replay encoding: {encoding!r}")
 
 
 def check_file_shape(replay: dict, room_id: str, text: str | None = None) -> None:
@@ -343,14 +389,19 @@ def run(args: argparse.Namespace) -> int:
         room_id = observed["room_id"]
 
         # ---- 1. 落盘 ----
-        expected_path = Path(replay_dir) / f"{room_id}.json"
+        # v2.6：文件是 gzip 流（`<room_id>.json.gz`），不是 JSON 文本 —— 一份 1.5 MB 的回放
+        # 压到 ~60 KB，且与下发用的是同一份字节（服务端不再为发送重新压一遍）。
+        expected_path = Path(replay_dir) / f"{room_id}.json.gz"
         # 写盘是异步的（ReplayActor 的邮箱），等它落下来。
         deadline = time.monotonic() + 15.0
         while not expected_path.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
         if not expected_path.exists():
             raise TestFailure(f"no replay file at {expected_path} (files: {os.listdir(replay_dir)})")
-        on_disk_text = expected_path.read_text(encoding="utf-8")
+        on_disk_bytes = expected_path.read_bytes()
+        if on_disk_bytes[:2] != b"\x1f\x8b":
+            raise TestFailure(f"{expected_path.name} is not a gzip stream: {on_disk_bytes[:8]!r}")
+        on_disk_text = gzip.decompress(on_disk_bytes).decode("utf-8")
         on_disk = json.loads(on_disk_text)
         check_file_shape(on_disk, room_id, on_disk_text)
 
@@ -398,7 +449,7 @@ def run(args: argparse.Namespace) -> int:
                     f"would show an empty table (last step v={replay_steps[-1].get('v')!r})")
 
         # ---- 3. 取回 + 鉴权（需要账号）----
-        skipped = fetch_and_authorize(port, room_id, on_disk, main_client)
+        skipped = fetch_and_authorize(port, room_id, replay_dir, main_client)
         summary = (f"replay_e2e_test: ok (room {room_id}, {len(on_disk['steps'])} steps, "
                    f"{expected_path.stat().st_size} bytes on disk)")
         if skipped:
@@ -414,34 +465,96 @@ def run(args: argparse.Namespace) -> int:
         shutil.rmtree(replay_dir, ignore_errors=True)
 
 
-def fetch_and_authorize(port: int, room_id: str, on_disk: dict, main_client: Client) -> bool:
-    """阶段 B：账号取回 + 异账号被拒。返回 True 表示"没有账号存储，跳过了"。
+def fetch_and_authorize(port: int, room_id: str, replay_dir: str, main_client: Client) -> bool:
+    """阶段 B：参与者能取回、异账号与游客被拒。返回 True 表示"没有账号存储，跳过了"。
 
-    鉴权以 `seats[].account_id` 为准（§4.13），而游客座位恒为 0、永远匹配不上，所以这一步
-    必须有真账号 —— 没有 MySQL 时不是"失败"，而是"这条链路今天测不了"。
+    鉴权问的是「这个账号在那局里坐过吗」（§4.13），答案来自 `matches` 表而不是回放文件的
+    `seats[]` —— v2.6 起文件是 gzip，读不出座位表了。没有 MySQL 时不是"失败"，而是
+    "这条链路今天测不了"。
     """
     username, password = unique_account("rp")
-    # 同一连接上换个身份：先退出（用 resume:false 的账号登录会替换会话），这里直接新开连接。
-    account_client = Client(port, "account")
+
+    # 0. 用这个账号真打一局，这样 `matches` 里就有它的行。**必须走这条路**：鉴权查的是
+    #    「坐过这个房间」，凭空注册一个账号是查不到的。局终写 `matches` 与随后读它是两条
+    #    消息，路由键都是 account_id，所以 §4.1 的 FIFO 保证「刚打完立刻取回」能查到。
+    participant = Client(port, "participant")
     try:
-        logged = register(account_client, username, password)
+        logged = register(participant, username, password)
         if logged.get("type") == FRAME_TYPE.ERROR and logged.get("code") == 11:
             return True  # INTERNAL = accounts unavailable
         if logged.get("type") == FRAME_TYPE.ERROR:
             # 同一秒内重跑：账号已存在，直接登录。
-            logged = account_client.login(username, password)
+            logged = participant.login(username, password)
         if logged.get("type") != FRAME_TYPE.LOGIN_OK:
             raise TestFailure(f"register/login failed: {logged!r}")
         if not str(logged.get("player_id", "")).startswith("u-"):
             raise TestFailure(f"account login must yield a u- player id: {logged!r}")
+        own = play_one_round(participant, username, password, already_logged_in=True)
+        if own["errors"]:
+            raise TestFailure(f"the participant's game answered errors: {own['errors'][:2]!r}")
+        own_room = own["room_id"]
 
-        # 这个账号没参与过那局，所以取回必须被拒 —— 这正是鉴权在起作用。
-        refused = request_replay(account_client, room_id)
-        if refused.get("error") != 3:  # ROOM_NOT_FOUND
-            raise TestFailure(f"an unrelated account must be refused with error 3, got {refused!r}")
+        # 参与者取回自己的回放：成功，且还原出来的内容与磁盘上的完全一致。这条断言一次说清
+        # 三件事：DB 鉴权放行、gzip+base64 能还原、切片没切坏字节。
+        #
+        # 先发一次 `stats_request`：局终写 `matches` 是 fire-and-forget，而 `game_end` 是房间
+        # 直接下发给座位的，所以「刚看到 game_end 就点回放」可能跑在那一行落库之前。stats 与
+        # RecordMatch 都按 account_id 路由到同一个 DbActor 邮箱（§4.1 的 FIFO），所以 stats
+        # 一旦回来，`matches` 里的行就一定在了 —— 这也正是真实客户端的顺序：玩家是从战绩列表
+        # 点进回放的，那条列表只有在这一行存在之后才会有。
+        stats = participant.request_stats()
+        if stats.get("type") != FRAME_TYPE.STATS:
+            raise TestFailure(f"stats_request failed: {stats!r}")
+        served = request_replay(participant, own_room)
+        if "error" in served:
+            raise TestFailure(f"the participant must be allowed to read its own replay, got {served!r}")
+        own_path = Path(replay_dir) / f"{own_room}.json.gz"
+        deadline = time.monotonic() + 15.0
+        while not own_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not own_path.exists():
+            raise TestFailure(f"no replay file at {own_path} (files: {os.listdir(replay_dir)})")
+        on_disk = json.loads(gzip.decompress(own_path.read_bytes()).decode("utf-8"))
+        if json.dumps(served, ensure_ascii=False, sort_keys=True) != json.dumps(
+            on_disk, ensure_ascii=False, sort_keys=True
+        ):
+            raise TestFailure("the served replay differs from the file on disk")
+
+        # 旧文件名回退（v2.6 迁移）:把这份录制改成 v2.5 的名字 `<room_id>.json`,服务端仍必须
+        # 读出来并下发(内容是 gzip,所以客户端照旧按 `encoding` 还原)。没有这条回退,一次升级
+        # 就会让磁盘上所有已有回放变成 ROOM_NOT_FOUND —— 这正是压缩改动最容易漏掉的一半。
+        legacy_path = Path(replay_dir) / f"{own_room}.json"
+        own_path.rename(legacy_path)
+        legacy_served = request_replay(participant, own_room)
+        if "error" in legacy_served:
+            raise TestFailure(
+                f"a recording under the pre-v2.6 name must still be readable, got {legacy_served!r}"
+            )
+        if json.dumps(legacy_served, ensure_ascii=False, sort_keys=True) != json.dumps(
+            on_disk, ensure_ascii=False, sort_keys=True
+        ):
+            raise TestFailure("the legacy-named recording served different content")
+        # 还原回去,后面的断言仍按 v2.6 的布局理解磁盘。
+        legacy_path.rename(own_path)
+
+        # 另一个账号没参与过那局 → 拒绝（同一个 ROOM_NOT_FOUND，不泄露房间是否存在）。
+        stranger = Client(port, "stranger")
+        try:
+            stranger_name, stranger_password = unique_account("rs")
+            stranger_logged = register(stranger, stranger_name, stranger_password)
+            if stranger_logged.get("type") == FRAME_TYPE.ERROR:
+                stranger_logged = stranger.login(stranger_name, stranger_password)
+            if stranger_logged.get("type") != FRAME_TYPE.LOGIN_OK:
+                raise TestFailure(f"stranger login failed: {stranger_logged!r}")
+            refused = request_replay(stranger, own_room)
+            if refused.get("error") != 3:  # ROOM_NOT_FOUND
+                raise TestFailure(f"an unrelated account must be refused with error 3, got {refused!r}")
+        finally:
+            stranger.close()
     finally:
-        account_client.close()
-    # 游客永远拿不到回放（account_id 0 匹配不上任何座位）：再确认一次这条边界。
+        participant.close()
+
+    # 游客永远拿不到回放（account_id 0，服务端连查都不查）：再确认一次这条边界。
     guest_refused = request_replay(main_client, room_id)
     if guest_refused.get("error") != 3:
         raise TestFailure(f"a guest must be refused with error 3, got {guest_refused!r}")

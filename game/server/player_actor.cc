@@ -20,6 +20,34 @@
 namespace ex = stdexec;
 
 namespace mahjong {
+namespace {
+
+// Answers one §4.13 request: awaits the store (which awaits the account database), then frames the
+// payload as however many §5.18 `replay` frames it takes and queues them on the connection.
+//
+// A free function rather than a PlayerActor member, and it captures only |connection|: the request
+// outlives the mailbox turn that started it, so nothing here may point at the actor. SendFrame is
+// thread-safe and a no-op once the socket is closed, so a client that hangs up mid-query simply
+// gets nothing.
+//
+// §5.18 splits here rather than in the store because the 64 KB line limit is a property of the wire
+// (§1.2), and this is the side that owns the outbox.
+stdexec::task<void> AnswerReplayRequest(ReplayStore& store, std::shared_ptr<Connection> connection, std::string room_id,
+                                        uint64_t account_id) {
+  ReplayLoad loaded = co_await store.Load(room_id, account_id);
+  if (!loaded.found) {
+    // §4.13: one code for "no such recording" and "not yours" — a stranger must not be able to
+    // probe which room ids were played.
+    connection->SendFrame(protocol::ReplayErrorFrame(room_id, protocol::ErrorCode::kRoomNotFound));
+    co_return;
+  }
+  for (std::string& frame : protocol::SplitReplayFrames(room_id, loaded.encoding, loaded.payload)) {
+    connection->SendFrame(std::move(frame));
+  }
+  co_return;
+}
+
+}  // namespace
 
 PlayerActor::PlayerActor(std::shared_ptr<Connection> conn, std::shared_ptr<PlayerIdAllocator> player_ids,
                          std::shared_ptr<SessionRegistry> sessions, ex_actor::ActorRef<LobbyActor> lobby)
@@ -47,9 +75,6 @@ stdexec::task<void> PlayerActor::Dispatch(PlayerEnvelope envelope) {
                  [this](PlayerEnvelope::OnLoginResultMsg&& m) { OnLoginResult(std::move(m.outcome)); },
                  [this](PlayerEnvelope::OnRegisterResultMsg&& m) { OnRegisterResult(std::move(m.outcome)); },
                  [this](PlayerEnvelope::OnStatsResultMsg&& m) { OnStatsResult(std::move(m.outcome)); },
-                 [this](PlayerEnvelope::OnReplayResultMsg&& m) {
-                   OnReplayResult(std::move(m.room_id), m.ok, std::move(m.data));
-                 },
                  [this](PlayerEnvelope::SetRoomMsg&& m) { SetRoom(std::move(m.room)); },
                  [this](PlayerEnvelope::SeatFrameMsg&& m) { SeatFrame(std::move(m.frame)); },
                  [this](PlayerEnvelope::SeatErrorMsg&& m) { SeatError(std::move(m.frame), m.quota); },
@@ -248,12 +273,22 @@ void PlayerActor::RequestReplay(std::string room_id) {
     conn_->SendFrame(protocol::ReplayErrorFrame(room_id, protocol::ErrorCode::kRoomNotFound));
     return;
   }
-  // Authorization is the store's job: it reads the file's seat table. A guest cannot pass it —
-  // account_id 0 never matches — which is why no check is needed here.
-  ActorSendScope().spawn(store.Load(std::move(room_id), session_.account_id(), self_ref_));
+  // The answer is framed by a coroutine of its own instead of coming back as a message and an
+  // OnReplayResult arm: the store now awaits the account database to authorize (§4.13), and a
+  // `co_await` here would suspend this actor's mailbox mid-handler — exactly what player_actor.h's
+  // no-suspension rule forbids.
+  //
+  // Only `conn_` and the two plain values are captured, never `this`: the connection outlives this
+  // actor's turn, and a client that disconnects while the database is thinking must not leave a
+  // frame pointing at a destroyed player. SendFrame is thread-safe and a no-op after close, so a
+  // late answer to a gone client is dropped by design rather than by a liveness check here.
+  //
+  // It lives in ActorSendScope because the store suspends: that parked coroutine would outlive the
+  // actor world otherwise, and main() drains the scope before `ex_actor::Shutdown()`.
+  std::shared_ptr<Connection> connection = conn_;
+  const uint64_t account_id = session_.account_id();
+  ActorSendScope().spawn(AnswerReplayRequest(store, std::move(connection), std::move(room_id), account_id));
 }
-
-// The two result handlers differ only in what a failure means, and both must leave the session
 // retryable: a rejected login cannot strand the connection in kAuthPending, or the client could
 // never send a second one (§3.1: retry on a typo is the common case).
 void PlayerActor::OnLoginResult(AuthOutcome outcome) {
@@ -298,20 +333,6 @@ void PlayerActor::OnStatsResult(StatsOutcome outcome) {
     return;
   }
   conn_->SendFrame(protocol::StatsFrame(outcome.snapshot));
-}
-
-void PlayerActor::OnReplayResult(std::string room_id, bool ok, std::string data) {
-  // §4.13: one code for "no such recording" and "not yours" — a stranger must not be able to
-  // probe which room ids were played.
-  if (!ok) {
-    conn_->SendFrame(protocol::ReplayErrorFrame(room_id, protocol::ErrorCode::kRoomNotFound));
-    return;
-  }
-  // §5.18: split here rather than in the store, because the frame size limit is a property of the
-  // wire (Net drops any line over 64 KB, §1.2) and this actor is the one that owns the outbox.
-  for (std::string& frame : protocol::SplitReplayFrames(room_id, data)) {
-    conn_->SendFrame(std::move(frame));
-  }
 }
 
 bool PlayerActor::AcceptAccount(const AuthOutcome& outcome) {

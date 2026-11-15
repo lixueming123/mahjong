@@ -129,6 +129,25 @@ struct StatsOutcome {
   protocol::StatsSnapshot snapshot;  // classic 同时是 stats 帧的兼容顶层字段
 };
 
+// ---- §4.13 replay authorization -------------------------------------------------------------
+
+// Whether |account_id| may read |room_id|'s recording, i.e. whether that account sat in that game.
+// Answered from `matches` (one row per account-backed seat per round) instead of the replay file,
+// which since v2.6 is gzip and can no longer be parsed to find `seats[].account_id`.
+//
+// This is the same fact the file's seat table records, read from the store that already keeps it.
+// Routing matters: DbService keys a query by account id (see the shard facade below), so this query
+// lands in the same mailbox as the RecordMatch writes for that account — the §4.1 FIFO guarantee
+// then covers "the match just ended, ask for its replay immediately", with no extra table and no
+// re-read of the file.
+struct ReplayAccessOutcome {
+  // kOk: |allowed| is authoritative. kUnavailable: no storage, so the caller must refuse rather
+  // than guess — an account frame answers INTERNAL, and §4.13 deliberately collapses every other
+  // refusal into ROOM_NOT_FOUND.
+  bool ok = false;
+  bool allowed = false;
+};
+
 class DbActor {
  public:
   // Defined by whichever of db_mysql.cc / db_stub.cc is compiled in. |pool| is the process-wide
@@ -156,6 +175,10 @@ class DbActor {
   // rooms a replay exists for. A duplicate room_id is the ordinary "round finished before the
   // match ended" rewrite, so it is logged at DEBUG and ignored.
   stdexec::task<void> RecordReplay(ReplayRecord record);
+  // §4.13: may |account_id| read |room_id|'s recording? Answers by return value (unlike the
+  // handlers above) because its only caller, ReplayActor::Load, is a coroutine of its own: awaiting
+  // here means no reply envelope, no `OnXResult` arm and no state to carry across the round trip.
+  stdexec::task<ReplayAccessOutcome> ReplayAccess(std::string room_id, uint64_t account_id);
 
   // Releases the slot: closes the connection and unregisters the thread. Runs on db_pool (the
   // library is thread scoped, so opening and closing must happen on the same thread); idempotent.
@@ -166,7 +189,8 @@ class DbActor {
   // context: naming the methods before they are declared does not compile.
   constexpr static auto kActorMethods =
       std::make_tuple(&DbActor::Initialize, &DbActor::Login, &DbActor::Register, &DbActor::FetchStats,
-                      &DbActor::RecordMatch, &DbActor::RecordMatchResult, &DbActor::RecordReplay, &DbActor::Stop);
+                      &DbActor::RecordMatch, &DbActor::RecordMatchResult, &DbActor::RecordReplay,
+                      &DbActor::ReplayAccess, &DbActor::Stop);
 
  private:
   // Acquire plus the schema bootstrap: a cold start may find MySQL down, and the tables have to
@@ -184,6 +208,7 @@ class DbActor {
   void RecordJob(const MatchRecord& record);
   void RecordMatchResultJob(const MatchResultRecord& record);
   void RecordReplayJob(const ReplayRecord& record);
+  ReplayAccessOutcome ReplayAccessJob(const std::string& room_id, uint64_t account_id);
 
   std::shared_ptr<DbPool> pool_;
   DbConfig config_;
@@ -254,6 +279,14 @@ class DbService {
   [[nodiscard]] auto RecordReplay(ReplayRecord record) const {
     const ex_actor::ActorRef<DbActor> target = Pick(0);
     return target.Send<&DbActor::RecordReplay>(std::move(record));
+  }
+
+  // §4.13: keyed by the ACCOUNT, not the room, which is what puts this query in the same mailbox
+  // as the RecordMatch writes for that account. "The round just ended, ask for its replay" is then
+  // ordered by §4.1's FIFO rule instead of racing the insert.
+  [[nodiscard]] auto ReplayAccess(std::string room_id, uint64_t account_id) const {
+    const ex_actor::ActorRef<DbActor> target = PickByAccount(account_id);
+    return target.Send<&DbActor::ReplayAccess>(std::move(room_id), account_id);
   }
 
  private:

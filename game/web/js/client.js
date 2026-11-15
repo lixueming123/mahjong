@@ -20,6 +20,7 @@
 import { Net } from './net.js';
 import { normTile, isValidTile, drawnIndex } from './state.js';
 import { buildVoiceCues, voiceDuration } from './voice.js';
+import { joinReplayPayload } from './replay_payload.js';
 import { FRAME_TYPE, ACTION, WINDOW, MODE, LENGTH, ERROR_CODE, yakuName } from './protocol_enums.js';
 
 const FALLBACK_NAMES = ['自', '右', '对', '左'];
@@ -964,7 +965,7 @@ export class MahjongClient {
     });
   }
 
-  /** §5.18：分片拼装。失败帧带 `error`，成功帧带 `chunk/chunks/data`。 */
+  /** §5.18：分片拼装。失败帧带 `error`，成功帧带 `chunk/chunks/data`（v2.6 起还有 `encoding`）。 */
   handleReplayFrame(frame) {
     const pending = this._replayPending;
     if (!pending) {
@@ -990,6 +991,13 @@ export class MahjongClient {
     if (!Array.isArray(pending.chunks)) {
       const total = Number.isInteger(frame.chunks) && frame.chunks > 0 ? frame.chunks : 1;
       pending.chunks = new Array(total).fill(null);
+      pending.encoding = '';
+    }
+    // The encoding is constant for one answer (§5.18), but it is read from whichever frame carries
+    // it rather than assumed to be in the first one to ARRIVE: a fragment that overtakes its
+    // predecessor would otherwise be joined as plain text and fail to parse.
+    if (typeof frame.encoding === 'string' && frame.encoding) {
+      pending.encoding = frame.encoding;
     }
     const index = Number.isInteger(frame.chunk) ? frame.chunk : -1;
     if (index < 0 || index >= pending.chunks.length) {
@@ -999,11 +1007,19 @@ export class MahjongClient {
     if (pending.chunks[index] === null) pending.received += 1;
     pending.chunks[index] = String(frame.data || '');
     if (pending.received < pending.chunks.length) return;
-    try {
-      settle(null, JSON.parse(pending.chunks.join('')));
-    } catch (err) {
-      settle(new Error(`回放文件损坏：${err.message}`));
-    }
+    // v2.6: the payload is gzip+base64 to keep a whole match inside a handful of frames. The join
+    // and the decode are both async, so the promise settles when they finish — the caller (a
+    // Promise) does not care, and a decode failure has to reject rather than throw here.
+    joinReplayPayload(pending.chunks.join(''), pending.encoding).then(
+      (text) => {
+        try {
+          settle(null, JSON.parse(text));
+        } catch (err) {
+          settle(new Error(`回放文件损坏：${err.message}`));
+        }
+      },
+      (err) => settle(err),
+    );
   }
 
   /** 开局信号（§4.4）：重复调用不会再发（服务端会回 BAD_REQUEST） */

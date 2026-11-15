@@ -97,11 +97,23 @@ endif()
 
 # 回放存储：ReplayActor 是**唯一**碰回放文件的 actor（写入与读取），跑在自己的单线程池上，
 # 理由与 DbActor 完全一致 —— 文件 I/O 会阻塞，不能落在游戏线程（ACCOUNT_DESIGN.md §6.1）。
-# 房间只负责序列化（纯 CPU）和投递消息，不碰磁盘。
-add_library(mahjong_replay_store STATIC server/replay_store.cc)
+# 房间只负责序列化（纯 CPU）和投递消息，不碰磁盘。gzip 也在这里做（gzip.cc）：1.5 MB 的
+# 回放压一次约 12 ms，那是单桌时间轴的 5 帧，压在房间线程上就是 5 帧延迟。
+add_library(mahjong_replay_store STATIC server/replay_store.cc server/gzip.cc)
 target_include_directories(mahjong_replay_store PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(mahjong_replay_store PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server)
-target_link_libraries(mahjong_replay_store PUBLIC ex_actor mahjong_room_shell spdlog::spdlog)
+# ZLIB::ZLIB 由根 CMakeLists 的 zlib-cmake 提供（find_package(ZLIB) 已被它 override），
+# 与 capnproto 用的是同一个 target，没有新增依赖。
+target_link_libraries(mahjong_replay_store PUBLIC ex_actor mahjong_room_shell mahjong_db spdlog::spdlog ZLIB::ZLIB)
+
+# 回放载荷的纯逻辑单测：base64（base64.h）、gzip（gzip.cc）、§5.18 分片（protocol.cc）。
+# 不建 actor、不开 socket、不碰磁盘，任何机器上恒常可跑。
+add_executable(mahjong_replay_payload_test server/replay_payload_test.cc server/gzip.cc server/protocol.cc
+                                         server/json.cc)
+target_include_directories(mahjong_replay_payload_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_link_libraries(mahjong_replay_payload_test PRIVATE mahjong_rules GTest::gtest_main GTest::gmock ZLIB::ZLIB)
+add_test(NAME mahjong_replay_payload_test COMMAND mahjong_replay_payload_test)
+set_tests_properties(mahjong_replay_payload_test PROPERTIES TIMEOUT 60)
 
 # 通用房间外壳：座位/端点/分发/一次性截止/投递/结算回传/断线重连，不含任何玩法知识
 # （room_actor.h 顶部写清了边界）。玩法是插件（game.h），绑定见 room_actor_for.h。
@@ -341,6 +353,17 @@ if(NODE_EXECUTABLE)
   add_test(NAME web_replaybar_test
            COMMAND ${NODE_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/web/replaybar.mjs)
   set_tests_properties(web_replaybar_test PROPERTIES TIMEOUT 30)
+
+  # §5.18 v2.6 的载荷还原（gzip + base64）：明文兼容、解压、大载荷、未知编码与截断流。
+  # 与 replay_e2e_test.py 是两端：那边验真服务端产物，这边验浏览器侧的还原。
+  add_test(NAME web_replay_payload_test
+           COMMAND ${NODE_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/web/replay_payload.mjs)
+  set_tests_properties(web_replay_payload_test PROPERTIES TIMEOUT 30)
+
+  # 回放帧 → Promise 的拼装（client.js）：顺序/乱序、多片要等到齐、明文兼容、失败帧。
+  add_test(NAME web_client_replay_test
+           COMMAND ${NODE_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/web/client_replay.mjs)
+  set_tests_properties(web_client_replay_test PROPERTIES TIMEOUT 30)
 
   # index.html 的 id 契约：不重复，且大厅面板不会被 ui.css 的 id 选择器隐藏。
   # `#stats` 曾同时是 HUD 计数器与战绩面板，被 `.hud, #stats { display: none }` 一起隐藏。

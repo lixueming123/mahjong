@@ -1,7 +1,8 @@
 # 麻将里程碑协议（PROTOCOL）
 
 - 文档 ID：PROTOCOL
-- 版本：**v2.5**
+- 版本：**v2.6**
+  v2.6 **回放压缩**：§5.18 `replay` 新增**可选字段** `encoding`（`"gzip"` = `data` 拼起来是 gzip 流的 base64；缺省 = 明文）。磁盘上回放文件改为 `<room_id>.json.gz`（gzip，仍是同一份 JSON，可 `gunzip` 直读）。§4.13 鉴权改为查 `matches` 表，不再读文件里的 `seats[].account_id`（文件已是 gzip）。**零新增帧、零新增错误码**；不带 `encoding` 的旧客户端行为不变（读明文），旧录制文件也仍可下发。见 §4.13、§5.18
   v2.5 **喰い替え禁止（食替禁止 / 同巡振替，仅日麻）**：吃/碰之后**当巡**不能打出「能与该组组成面子的牌面」——
   打回被鸣那张（モロ）与两面吃之后打另一侧的邻张（スジ）都算违例，回 `ILLEGAL_ACTION`。
   `action_request` 新增**可选字段** `forbidden_discards`（牌面数组），只在**打牌窗口且确实有禁区**时出现；
@@ -716,8 +717,9 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | --- | --- | --- | --- |
 | `room_id` | string | 是 | `r-` + 13 位小写 36 进制（§4.2 的形状）。形状不对 → `error{code:8}` |
 
-- **鉴权**：只有**参与过该局**的账号座位才能取回。判定用回放文件里的 `seats[].account_id`：请求者的 `account_id` 必须出现在其中。游客（`account_id == 0`）一律拒绝 —— 游客没有战绩，也就没有战绩列表可供点击。
-- 不在该局 / 文件不存在 / 文件损坏 → `error{code:3}`（`ROOM_NOT_FOUND`，与「房间不存在」同一码，不区分「存在但你没资格」，避免泄露房间是否存在）。
+- **鉴权**：只有**参与过该局**的账号座位才能取回。判定查 `matches` 表（`account_id` + `room_id` 存在一行，即该账号在该局坐过）—— **v2.6 起不再读回放文件**，因为文件是 gzip 流、座位表读不出来；`matches` 本来就有这个事实（每局每个账号座位一行），不需要新表、不需要迁移。**查不到 / 文件不存在 / 文件损坏 / 账号存储不可用** 一律 `error{code:3}`（`ROOM_NOT_FOUND`，不区分「存在但你没资格」，避免泄露房间是否存在）。
+- 游客（`account_id == 0`）一律拒绝，且服务端**不发起查询** —— 游客没有战绩，也就没有战绩列表可供点击。
+- **时序**：`matches` 的写入与本次查询都按 `account_id` 路由到同一个 `DbActor` 邮箱，所以「局终立刻点回放」不会读到还没落库的行（§1.4 的 FIFO 语义）。真实入口（战绩列表）本身就在那一行存在之后才可见。
 - 成功 → 若干帧 `replay`（§5.18），按 `chunk = 0,1,2...` 顺序，`chunks` 恒定。
 - 与对局无关：可以在大厅、房内、甚至另一局进行中发送。服务端只读回放文件，不触碰任何 `RoomActor`。
 - 不计入 §7.2 的任何配额（失败只回 `error`）。客户端在同一连接上应一次只发一个请求。
@@ -1175,11 +1177,11 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 - 客户端 **MUST** 用本帧刷新等待页的四席位（昵称 / 玩家·AI 标记）与人数提示；**不得**靠 `room_list.rooms[].players` 反推座位——该帧只有人数，没有座位名单（§5.14）。`room_list` 轮询只是等待页的兜底。
 - **零新增错误码**；v1.22 客户端不读本帧也能正常跑（未知帧类型忽略，§1.3），只是等待页不会同步他人入座。
 
-### 5.18 `replay`（**v2.3 新增**，一段回放）
+### 5.18 `replay`（**v2.3 新增**，一段回放；**v2.6 起载荷压缩**）
 
 ```json
-{"type":30,"room_id":"r-7t2h4r8w1n6cz","chunk":0,"chunks":3,
- "data":"{\"format\":\"mahjong-replay\",\"version\":1,...}"}
+{"type":30,"room_id":"r-7t2h4r8w1n6cz","chunk":0,"chunks":3,"encoding":"gzip",
+ "data":"H4sIAAAAAAAAA6tWykvMTVWyUgpJLS4BAAx5+3AQAAAA"}
 ```
 > 数值对照：`30`=replay（帧）；完整表见 §1.3.1。
 
@@ -1188,11 +1190,15 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | `room_id` | string | 与请求的 `room_id` 一致；客户端 **MUST** 丢弃不属于当前请求的帧 |
 | `chunk` | int | 本片序号，0 基 |
 | `chunks` | int | 总片数，恒定（同一请求的所有帧同值）。恒 ≥ 1 |
-| `data` | string | 回放文本的一段。`chunks == 1` 时为完整文本 |
+| `encoding` | string | **v2.6 新增，可选**。`"gzip"` = `data` 拼起来是 gzip 流的 base64；**缺省 = 明文**（v2.3 行为，服务端读到的是一份未压缩的旧录制）。对一次应答恒定，客户端可从任一携带它的帧读取 |
+| `data` | string | 载荷的一段。`chunks == 1` 时为完整载荷 |
 | `error` | int | 仅失败帧存在：一条错误帧 `{"type":30,"room_id":...,"error":3}`，无 `chunk`/`chunks`/`data` |
 
 - 收件人：**仅请求者本人**。一帧 `replay_request` 回 `chunks` 帧 `replay`，必须按 `chunk` 升序拼接。
-- **为什么分片**：客户端 `Net` 对单行有 64 KB 硬上限（§1.2 第 3 条，与入站 `kMaxFrameBytes` 同值）。一份東風 4 局的回放约 60–120 KB，整份下发会被客户端当作坏帧丢弃。服务端按 **16 KB**（UTF-8 字节，不切断多字节字符）切片。
+- **为什么分片**：客户端 `Net` 对单行有 64 KB 硬上限（§1.2 第 3 条，与入站 `kMaxFrameBytes` 同值）。服务端按 **16 KB**（UTF-8 字节，不切断多字节字符）切片。
+- **为什么 v2.6 加 `encoding`**：`data` 是 JSON 字符串，二进制载荷必须先转文本才能切片，所以 gzip 流走 base64。收益在两端都很大：一份 1.5 MB 明文回放在线上是 1.89 MB、**94 片**；gzip -6 + base64 后是 63 KB → 84 KB、**6 片**。磁盘上的文件也是同一份 gzip 字节（`<room_id>.json.gz`），服务端不为发送再压一遍。
+- **客户端还原顺序**（MUST）：拼接 → 按 `encoding` 还原（`"gzip"`：base64 解码 → 解 gzip；缺省：原样）→ `JSON.parse`。**MUST NOT** 逐片解压：gzip 的字典跨片，按 16 KB 分片各压各的会大 1.8 倍，所以服务端是整份压完再切。
+- 浏览器侧用 `DecompressionStream('gzip')`（无第三方库）：Chrome 80+ / Firefox 113+ / Safari 16.4+。不支持时 **MUST** 明确报错，不得把 base64 当明文 parse。
 - 无 `seq`（与 `login_ok`/`room_joined`/`game_end` 同类，§6.2）。回放与牌局状态**完全无关**：客户端拼接完成后，把 `data` 当作一份离线文件播放，不回写任何 `RoomActor`。
 - **回放文本格式**（`version = 2`，服务端唯一产出方；客户端按 `version` 拒绝更新的格式，但仍读 `version = 1`）：
 
@@ -1201,7 +1207,7 @@ ex_actor 的 `Send` **不支持取消**、mailbox 中的消息**不可撤回**�
 | `format` | 恒 `"mahjong-replay"` |
 | `version` | 本版 `2`。`1` 的差异只有 `steps[].v` 与 `steps[].h`/`steps[].m` 之别（见上表脚注） |
 | `room_id` / `game_id` / `options_json` / `seed` / `started_at` | 元数据。`seed` 是房间种子（§1.8），仅供排查复现，播放器不重算牌山。`options_json` 是**直接嵌入的 JSON 对象**（该玩法的配置，classic 无配置时为 `{}`），与 `steps[].f` 同理：包成字符串只会为每个内部引号多一个 `\"` |
-| `seats[]` | 恒 4 项：`{seat,player_id,name,is_bot,account_id}`，即 §4.13 鉴权所依赖的座位表 |
+| `seats[]` | 恒 4 项：`{seat,player_id,name,is_bot,account_id}`，即座位表（播放器渲染牌桌用）。**v2.6 起服务端不再用它做鉴权**（鉴权查 `matches`，见 §4.13），但字段仍保留：客户端要名字，且它让一份文件自带「这是哪四个人的对局」 |
 | `finished` / `match_over` | 该文件是否写于场终之后（服务端中途崩溃也留下可用文件） |
 | `totals[4]` / `final_rank[4]` | 场终累计得失分与名次（未场终时两者为写入时刻的值） |
 | `steps[]` | 时间轴，每项 `{t, v?, f}` |
@@ -2110,6 +2116,7 @@ remaining(tile) = 4
 
 | 版本 | 内容 | 来源 |
 | --- | --- | --- |
+| **v2.6** | **回放压缩**：§5.18 `replay` 新增可选 `encoding`（`"gzip"` = base64 的 gzip 流，缺省 = 明文）；磁盘文件改为 `<room_id>.json.gz`；§4.13 鉴权改查 `matches`（不再读 gzip 文件的 `seats[]`）。一份 1.5 MB 回放的下发从 94 片降到 6 片。**零新增帧/错误码**，旧客户端与旧文件均兼容 | 用户需求（回放文件太大：10.5 MB / 9 局） |
 | **v2.3** | **断线保留窗口倒计时（行为修正）**：对局中真人断线不再立即托管代打；`disconnected = true` 的座位仍等满当前/后续窗口的 `deadline_ms`，到期才执行 §6.4 默认动作，倒计时内账号重连可继续回答（原 `action_request` 重放，不改 deadline）。**零新增帧/字段/错误码**；游客行为不变 | 用户反馈（断线瞬间出牌，重连后牌已打出）；方案保持无令牌、一账号一连接 |
 | **v2.2** | **账号登录时查房 + 刷新重连（增补，仅账号玩家）**：`login` 新增可选 `resume`（缺省 true）；账号 `login_ok` 新增可选 `in_room`（由 Lobby 在查房后下发）；`game_start` 新增 `match_total[4]` / `renchan_count`。恢复快照按相位重放既有帧，未回答窗口沿用原 `deadline_ms`。**一账号一连接不变**：不接管、不建第二连接，`ALREADY_ONLINE` 由客户端同连接短重试；游客不参与、等待页不恢复、服务端重启只回大厅。零新增帧、零新增错误码 | 用户需求（Web 刷新后看不到原对局）；方案讨论定稿：无令牌、仅账号 |
 | **v2.1** | **番种 / 满贯分档整数化（破坏性变更、硬切换，不兼容 v2.0）**：`win.yaku[].id`、`win.tags[]`、`results[].win_type[]`、`win.limit` 四类字段由字符串改为整数；新增 §1.3.1 的 `yaku`（47 值）与 `limit`（6 值）两张冻结表，总计 **10 域 117 值**。`results[].win_type[]` 末位用 `win_ron`（46）/ `win_tsumo`（47），与番种 `tsumo`（17）区分。牌码、昵称、id、自由文本、错误 `message` 保持不变；服务端、Python 客户端、Web、全部测试与 golden 日志同批切换，**无双读兼容层、无版本协商** | 线协议 v2.1 补齐 v2.0 漏掉的展示型枚举（10 域 117 值，见 §1.3.1） |

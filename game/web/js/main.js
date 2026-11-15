@@ -20,6 +20,7 @@ import { Sfx } from './audio.js';
 import { Net } from './net.js';
 import { FRAME_TYPE, ERROR_CODE } from './protocol_enums.js';
 import { MahjongClient } from './client.js';
+import { joinReplayPayload } from './replay_payload.js';
 import { ReplayPlayer } from './replay.js';
 import { ReplayBar } from './replaybar.js';
 
@@ -130,6 +131,7 @@ async function loadReplayFromServer(options) {
   return new Promise((resolve, reject) => {
     const socket = new Net(socketUrl());
     let chunks = null;
+    let encoding = '';
     let received = 0;
     let settled = false;
     const finish = (error, value) => {
@@ -166,17 +168,25 @@ async function loadReplayFromServer(options) {
       }
       if (!Array.isArray(chunks)) {
         chunks = new Array(Math.max(1, frame.chunks | 0)).fill(null);
+        // §5.18 v2.6：编码对一次应答恒定，只在第一片读一次。
+        encoding = typeof frame.encoding === 'string' ? frame.encoding : '';
       }
       if (Number.isInteger(frame.chunk) && frame.chunk >= 0 && frame.chunk < chunks.length) {
         if (chunks[frame.chunk] === null) received += 1;
         chunks[frame.chunk] = String(frame.data || '');
       }
       if (received === chunks.length) {
-        try {
-          finish(null, JSON.parse(chunks.join('')));
-        } catch (err) {
-          finish(new Error(`回放文件损坏：${err.message}`));
-        }
+        // gzip+base64 要异步还原（replay_payload.js），所以先拼再解最后 parse。
+        joinReplayPayload(chunks.join(''), encoding).then(
+          (text) => {
+            try {
+              finish(null, JSON.parse(text));
+            } catch (err) {
+              finish(new Error(`回放文件损坏：${err.message}`));
+            }
+          },
+          (err) => finish(err),
+        );
       }
     });
     socket.on('close', () => finish(new Error('连接已断开，未能取回回放')));

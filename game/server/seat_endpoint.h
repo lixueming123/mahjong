@@ -74,13 +74,6 @@ struct PlayerEnvelope {
   struct OnStatsResultMsg {
     StatsOutcome outcome;
   };
-  // replay store -> connection (v2.3 §4.13): the whole replay text, or a refusal. The slicing
-  // into §5.18 `replay` frames happens in PlayerActor, so the store stays about files.
-  struct OnReplayResultMsg {
-    std::string room_id;
-    bool ok = false;
-    std::string data;  // the file contents; empty when !ok
-  };
   // lobby -> connection: this connection's room, so gameplay frames skip the lobby
   struct SetRoomMsg {
     ex_actor::ActorRef<RoomEndpoint> room;
@@ -107,9 +100,6 @@ struct PlayerEnvelope {
   static PlayerEnvelope OnLoginResult(AuthOutcome outcome) { return {OnLoginResultMsg {std::move(outcome)}}; }
   static PlayerEnvelope OnRegisterResult(AuthOutcome outcome) { return {OnRegisterResultMsg {std::move(outcome)}}; }
   static PlayerEnvelope OnStatsResult(StatsOutcome outcome) { return {OnStatsResultMsg {std::move(outcome)}}; }
-  static PlayerEnvelope OnReplayResult(std::string room_id, bool ok, std::string data) {
-    return {OnReplayResultMsg {.room_id = std::move(room_id), .ok = ok, .data = std::move(data)}};
-  }
   // The room this connection plays in (an empty ref never happens: the lobby sets it when it
   // registers the room). Gameplay frames go straight to it, so a busy lobby — e.g. one that is
   // suspended inside another player's create_room — cannot delay this connection's frames.
@@ -121,7 +111,7 @@ struct PlayerEnvelope {
   static PlayerEnvelope Close(std::string reason) { return {CloseMsg {std::move(reason)}}; }
 
   std::variant<SetSelfRefMsg, OnFrameMsg, OnClosedMsg, OnIdleTimeoutMsg, OnLoginResultMsg, OnRegisterResultMsg,
-               OnStatsResultMsg, OnReplayResultMsg, SetRoomMsg, SeatFrameMsg, SeatErrorMsg, CloseMsg>
+               OnStatsResultMsg, SetRoomMsg, SeatFrameMsg, SeatErrorMsg, CloseMsg>
       msg;
 };
 

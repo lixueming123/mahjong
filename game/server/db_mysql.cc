@@ -737,6 +737,10 @@ stdexec::task<void> DbActor::RecordReplay(ReplayRecord record) {
   co_return;
 }
 
+stdexec::task<ReplayAccessOutcome> DbActor::ReplayAccess(std::string room_id, uint64_t account_id) {
+  co_return ReplayAccessJob(room_id, account_id);
+}
+
 stdexec::task<void> DbActor::Stop() {
   // Closes the connection and unregisters this thread. Both must happen here: the library is
   // thread scoped, and the pool would have no safe way to close a socket from main()'s thread.
@@ -986,6 +990,47 @@ void DbActor::RecordReplayJob(const ReplayRecord& record) {
                   mysql_error(mysql));
     lease.MarkBroken(reason);
   }
+}
+
+ReplayAccessOutcome DbActor::ReplayAccessJob(const std::string& room_id, uint64_t account_id) {
+  ReplayAccessOutcome outcome;  // ok == false: "the caller must refuse", never "allowed"
+  DbLease lease = AcquireReadyLease();
+  if (!lease) {
+    spdlog::warn("db: cannot answer the replay access of room {} (slot {} unavailable: {})", room_id, slot_index_,
+                 ToString(lease.failure()));
+    return outcome;
+  }
+  MYSQL* mysql = static_cast<MYSQL*>(lease.handle());
+  // §4.13 asks "did this account sit in this game", and `matches` is exactly that table: one row
+  // per account-backed seat per round, written when the round settled. So the query is a lookup,
+  // not a second source of truth, and it needs no unique key (LIMIT 1 is enough: a match of four
+  // rounds writes four rows for the same seat).
+  //
+  // `room_id` is validated for shape by the caller before it gets here, and both values still go
+  // through Escape: this is the same defence-in-depth as every other statement in this file.
+  const std::string sql = "SELECT 1 FROM matches WHERE account_id = " + std::to_string(account_id) +
+                          " AND room_id = '" + Escape(lease, room_id) + "' LIMIT 1";
+  if (mysql_query(mysql, sql.c_str()) != 0) {
+    const DbFailureClass reason = ClassifyOrQueryError(mysql);
+    spdlog::error("db: replay access query for room {} failed ({}): {}", room_id, ToString(reason),
+                  mysql_error(mysql));
+    lease.MarkBroken(reason);
+    return outcome;
+  }
+  MYSQL_RES* result = mysql_store_result(mysql);
+  if (result == nullptr) {
+    const DbFailureClass reason = ClassifyOrQueryError(mysql);
+    spdlog::error("db: replay access query for room {} returned no result ({}): {}", room_id, ToString(reason),
+                  mysql_error(mysql));
+    lease.MarkBroken(reason);
+    return outcome;
+  }
+  // A row means "sat in that game". An empty result is a definitive "no", which is what lets the
+  // caller answer ROOM_NOT_FOUND without guessing.
+  outcome.ok = true;
+  outcome.allowed = mysql_fetch_row(result) != nullptr;
+  mysql_free_result(result);
+  return outcome;
 }
 
 }  // namespace mahjong

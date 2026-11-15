@@ -441,18 +441,33 @@ TEST(ReplayRecorderTest, EmptyStepIsNotRecorded) {
   EXPECT_EQ(recorder.step_count(), 0u);
 }
 
-TEST(ReplayRecorderTest, AuthorizationFollowsTheSeatTable) {
+// §4.13 authorization used to read the seat table back out of this file. It cannot: the store
+// writes gzip now, and the answer lives in `matches` (db.h ReplayAccess), keyed by account id so
+// that it is ordered behind the match record it depends on. The seat table is still recorded —
+// the player needs the names to render the table — so that is what this checks, together with the
+// file names the read path resolves.
+TEST(ReplayRecorderTest, SeatTableIsRecordedAndFilesAreNamedByRoomId) {
   ReplayMeta meta;
-  meta.room_id = "r-0000000000001";
+  meta.room_id = "r-2o5endvwb8zcx";
+  meta.seats[0].name = "小明";
   meta.seats[0].account_id = 42;
-  meta.seats[0].is_bot = false;
-  meta.seats[1].account_id = 0;  // a bot
   meta.seats[1].is_bot = true;
   ReplayRecorder recorder(meta);
 
-  EXPECT_TRUE(recorder.IncludesAccount(42));
-  EXPECT_FALSE(recorder.IncludesAccount(43));  // never sat here
-  EXPECT_FALSE(recorder.IncludesAccount(0));   // a guest has nothing to claim (§4.13)
+  const std::optional<json::Value> parsed = json::Value::Parse(recorder.Serialize(), nullptr);
+  ASSERT_TRUE(parsed.has_value());
+  const json::Value* seats = parsed->Find("seats");
+  ASSERT_NE(seats, nullptr);
+  ASSERT_TRUE(seats->IsArray());
+  ASSERT_EQ(seats->AsArray().size(), 4u);
+  EXPECT_EQ(seats->AsArray()[0].Find("name")->AsString(), "小明");
+  EXPECT_EQ(seats->AsArray()[0].Find("account_id")->AsInt(), 42);
+  EXPECT_TRUE(seats->AsArray()[1].Find("is_bot")->AsBool());
+
+  // v2.6: the file is a gzip stream, so the name says so. The `.json` spelling is only ever read
+  // (a recording written by the previous build), never written.
+  EXPECT_EQ(ReplayRecorder::FileNameFor("r-2o5endvwb8zcx"), "r-2o5endvwb8zcx.json.gz");
+  EXPECT_EQ(ReplayRecorder::LegacyFileNameFor("r-2o5endvwb8zcx"), "r-2o5endvwb8zcx.json");
 }
 
 // The whole point of recording frames instead of actions: the same match recorded twice is the

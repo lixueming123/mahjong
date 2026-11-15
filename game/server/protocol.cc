@@ -101,12 +101,18 @@ std::string StatsFrame(const StatsSummary& summary) {
 
 // ---- §5.18 replay (v2.3) ---------------------------------------------------------------
 
-std::string ReplayFrame(std::string_view room_id, int chunk, int chunks, std::string_view data) {
-  json::Value frame = json::Value::Obj(5);
+std::string ReplayFrame(std::string_view room_id, int chunk, int chunks, std::string_view encoding,
+                        std::string_view data) {
+  json::Value frame = json::Value::Obj(6);
   frame.Set("type", json::Value::Int(WireOf(FrameType::kReplay)));
   frame.Set("room_id", json::Value::Str(std::string(room_id)));
   frame.Set("chunk", json::Value::Int(chunk));
   frame.Set("chunks", json::Value::Int(chunks));
+  // v2.6 §5.18: an empty encoding means the joined `data` IS the replay text (a file written before
+  // the store compressed), so the key is omitted then and the old frame shape is unchanged.
+  if (!encoding.empty()) {
+    frame.Set("encoding", json::Value::Str(std::string(encoding)));
+  }
   frame.Set("data", json::Value::Str(std::string(data)));
   return frame.Dump();
 }
@@ -121,30 +127,41 @@ std::string ReplayErrorFrame(std::string_view room_id, ErrorCode code) {
   return frame.Dump();
 }
 
-std::vector<std::string> SplitReplayFrames(std::string_view room_id, std::string_view data, size_t max_bytes) {
+std::vector<std::string> SplitReplayFrames(std::string_view room_id, std::string_view encoding,
+                                           std::string_view payload, size_t max_bytes) {
   if (max_bytes == 0) {
     max_bytes = kMaxReplayChunkBytes;
   }
+  // |cuts| holds only the END offset of each slice, so its size IS the chunk count. It used to
+  // start with a 0 sentinel and be indexed as `begin = cuts[i - 1]`, which emitted one empty
+  // `chunk = 0` frame per answer and over-counted `chunks` by one.
+  //
   // Cut points are byte offsets, but a cut may only land on a UTF-8 lead byte: a frame whose
-  // `data` held half a character would make the whole NDJSON line invalid for the client, and the
-  // replay text contains player names.
-  std::vector<size_t> cuts {0};
+  // `data` held half a character would make the whole NDJSON line invalid for the client, and a
+  // legacy (uncompressed) replay text contains player names. Base64 is pure ASCII, so the walk
+  // never moves for a v2.6 payload — it stays because both encodings share this splitter.
+  std::vector<size_t> cuts;
   size_t offset = 0;
-  while (offset < data.size()) {
-    size_t end = std::min(offset + max_bytes, data.size());
+  while (offset < payload.size()) {
+    size_t end = std::min(offset + max_bytes, payload.size());
     // Walk back to the start of the character |end| would land inside. A continuation byte has
     // the top two bits 10; back up over at most three of them.
-    while (end < data.size() && end > offset && (static_cast<unsigned char>(data[end]) & 0xC0) == 0x80) {
+    while (end < payload.size() && end > offset && (static_cast<unsigned char>(payload[end]) & 0xC0) == 0x80) {
       --end;
     }
     if (end == offset) {
-      end = std::min(offset + max_bytes, data.size());  // pathological input: never loop forever
-      while (end < data.size() && (static_cast<unsigned char>(data[end]) & 0xC0) == 0x80) {
+      end = std::min(offset + max_bytes, payload.size());  // pathological input: never loop forever
+      while (end < payload.size() && (static_cast<unsigned char>(payload[end]) & 0xC0) == 0x80) {
         ++end;
       }
     }
     cuts.push_back(end);
     offset = end;
+  }
+  // An empty payload still needs one frame: `chunks` must be >= 1 (§5.18), and the client treats a
+  // zero-length answer as a protocol error otherwise.
+  if (cuts.empty()) {
+    cuts.push_back(0);
   }
   const int chunks = static_cast<int>(cuts.size());
   std::vector<std::string> frames;
@@ -152,7 +169,8 @@ std::vector<std::string> SplitReplayFrames(std::string_view room_id, std::string
   for (size_t index = 0; index < cuts.size(); ++index) {
     const size_t begin = index == 0 ? 0 : cuts[index - 1];
     const size_t end = cuts[index];
-    frames.push_back(ReplayFrame(room_id, static_cast<int>(index), chunks, data.substr(begin, end - begin)));
+    frames.push_back(
+        ReplayFrame(room_id, static_cast<int>(index), chunks, encoding, payload.substr(begin, end - begin)));
   }
   return frames;
 }

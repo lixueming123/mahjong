@@ -100,19 +100,9 @@ void ReplayRecorder::Finish(const GameResult& result) {
   final_rank_ = result.final_rank;
 }
 
-bool ReplayRecorder::IncludesAccount(uint64_t account_id) const {
-  if (account_id == 0) {
-    return false;  // a guest has no history to claim (§4.13)
-  }
-  for (const ReplaySeat& seat : meta_.seats) {
-    if (!seat.is_bot && seat.account_id == account_id) {
-      return true;
-    }
-  }
-  return false;
-}
+std::string ReplayRecorder::FileNameFor(std::string_view room_id) { return std::string(room_id) + ".json.gz"; }
 
-std::string ReplayRecorder::FileNameFor(std::string_view room_id) { return std::string(room_id) + ".json"; }
+std::string ReplayRecorder::LegacyFileNameFor(std::string_view room_id) { return std::string(room_id) + ".json"; }
 
 std::string ReplayRecorder::Serialize() const {
   constexpr size_t kMetaMembers = 11;

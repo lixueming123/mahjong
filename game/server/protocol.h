@@ -158,20 +158,29 @@ std::string StatsFrame(const StatsSnapshot& snapshot);
 // 兼容重载：只填 classic 的调用（内部与单测）等价于「riichi 桶为空」。
 std::string StatsFrame(const StatsSummary& summary);
 
-// ---- §5.18 replay (v2.3) ---------------------------------------------------------------
-// One `replay` frame. |data| is a slice of the replay text; |chunk| is 0-based and |chunks| is
-// constant across the pieces of one answer.
-std::string ReplayFrame(std::string_view room_id, int chunk, int chunks, std::string_view data);
+// ---- §5.18 replay (v2.3, payload encoding in v2.6) --------------------------------------
+// One `replay` frame. |data| is a slice of the replay payload; |chunk| is 0-based and |chunks| is
+// constant across the pieces of one answer. |encoding| names how the joined payload turns back
+// into the JSON text: "gzip" (v2.6, base64 of a gzip stream) or empty for a plain text slice
+// written by a server that predates it.
+std::string ReplayFrame(std::string_view room_id, int chunk, int chunks, std::string_view encoding,
+                        std::string_view data);
 // 失败帧：`{"type":30,"room_id":...,"error":<code>}`，没有 chunk/chunks/data（§5.18）。
 std::string ReplayErrorFrame(std::string_view room_id, ErrorCode code);
-// Splits one replay text into §5.18 frames, each within |max_bytes| of UTF-8 payload and never
+// v2.6: the payload encoding the server produces. Base64 is ASCII, so slicing it can never cut a
+// multi-byte character; the UTF-8 walk below still runs because a legacy plain-text answer does
+// contain the replay's player names.
+inline constexpr char kReplayEncodingGzip[] = "gzip";
+// Splits one replay payload into §5.18 frames, each within |max_bytes| of UTF-8 text and never
 // cutting a multi-byte sequence. A caller sends the returned frames in order.
 //
 // Why splitting exists at all: the client's Net layer drops any line over 64 KB as a bad frame
-// (§1.2), and a full match replay is 60..120 KB. |max_bytes| is well under that on purpose.
+// (§1.2), and an uncompressed match replay is 60..120 KB. |max_bytes| is well under that on
+// purpose. Since v2.6 the payload is gzip+base64 and a whole match is ~40 KB, which is why the
+// chunk count per answer dropped from ~90 to ~6 rather than the splitter changing shape.
 inline constexpr size_t kMaxReplayChunkBytes = 16 * 1024;
-std::vector<std::string> SplitReplayFrames(std::string_view room_id, std::string_view data,
-                                           size_t max_bytes = kMaxReplayChunkBytes);
+std::vector<std::string> SplitReplayFrames(std::string_view room_id, std::string_view encoding,
+                                           std::string_view payload, size_t max_bytes = kMaxReplayChunkBytes);
 
 // ---- 内部枚举 ↔ 线枚举转换（v2.0）-------------------------------------------------------
 // mahjong_rules.h 的 MeldType 是**内部**枚举（0 基、无 INVALID）；线值用 protocol_enums.h 的

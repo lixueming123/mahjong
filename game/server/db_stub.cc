@@ -111,6 +111,12 @@ stdexec::task<void> DbActor::RecordReplay(ReplayRecord /*record*/) {
   co_return;  // no index table without MySQL; the replay file itself is still written
 }
 
+stdexec::task<ReplayAccessOutcome> DbActor::ReplayAccess(std::string /*room_id*/, uint64_t /*account_id*/) {
+  // No storage, so the authorization question has no answer. ReplayActor turns this into the same
+  // ROOM_NOT_FOUND a missing file gets, which is what keeps "no MySQL" from becoming a way in.
+  co_return ReplayAccessOutcome {};
+}
+
 stdexec::task<void> DbActor::Stop() { co_return; }
 
 }  // namespace mahjong
