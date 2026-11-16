@@ -489,7 +489,13 @@ TEST(RiichiYakuman, TenhouAndChiihou) {
   EXPECT_NE(plain.limit, Limit::kYakuman);
 }
 
-// 场风 / 自风（v1.14 半庄）：东场庄家=东，南场庄家=南；自风随庄家逆时针。
+// 场风 / 自风（v1.14 半庄；v1.25 修正自风口径）。
+//
+// 东场：庄家（seat 0）是东，下家南、对家西、上家北。
+// **自风只看「相对庄家的座位」**，与场风无关 —— 庄家恒为东家。南场庄家仍是东家，
+// 所以南场庄家的南刻子只算场风 1 番，不是连风 2 番。
+// 旧实现把 round_wind 加进自风（「庄家自风 = 场风」），南场整体错一圈；天凤真实牌谱
+// （20 半庄 / 183 手和牌）逐手核对后改正，见 game/docs/TENHOU_CORPUS.md。
 TEST(RiichiWind, RoundAndSeatWind) {
   EXPECT_EQ(RoundWindOf(0), 0);
   EXPECT_EQ(RoundWindOf(3), 0);
@@ -508,14 +514,69 @@ TEST(RiichiWind, RoundAndSeatWind) {
   EXPECT_EQ(SeatWindOf(0, 2, 1), 1);
   EXPECT_EQ(SeatWindOf(0, 0, 1), 3);
 
-  // 南场 1 局：庄家（seat 0）是南 → 自风 1，其余 西/北/东
-  EXPECT_EQ(SeatWindOf(1, 0, 0), 1);
-  EXPECT_EQ(SeatWindOf(1, 1, 0), 2);
-  EXPECT_EQ(SeatWindOf(1, 2, 0), 3);
-  EXPECT_EQ(SeatWindOf(1, 3, 0), 0);  // 上家回到东
+  // 南场：**自风与东场完全相同** —— 庄家仍是东家，只是场风变成南
+  EXPECT_EQ(SeatWindOf(1, 0, 0), 0);  // 庄家是东（不是南）
+  EXPECT_EQ(SeatWindOf(1, 1, 0), 1);  // 下家南
+  EXPECT_EQ(SeatWindOf(1, 2, 0), 2);  // 对家西
+  EXPECT_EQ(SeatWindOf(1, 3, 0), 3);  // 上家北
+  // 「庄家自风 == 场风」在南场**不成立**（庄家是东、场风是南）
+  EXPECT_NE(SeatWindOf(1, 0, 0), RoundWindOf(4));
 
-  // 连风牌（南场庄家的南）：场风与自风同面 ⇒ 役牌计 2 番
-  EXPECT_EQ(SeatWindOf(1, 0, 0), RoundWindOf(4));
+  // 自风与场风解耦：同一座位关系下，换场风结果不变
+  for (int round_wind = 0; round_wind < 4; ++round_wind) {
+    for (int dealer = 0; dealer < 4; ++dealer) {
+      for (int seat = 0; seat < 4; ++seat) {
+        EXPECT_EQ(SeatWindOf(round_wind, seat, dealer), (seat - dealer + 4) % 4)
+            << "round_wind=" << round_wind << " seat=" << seat << " dealer=" << dealer;
+      }
+    }
+  }
+}
+
+// 连风牌（场风与自风同面）只在**东场庄家持东刻子**这类局面成立 ⇒ 役牌 2 番。
+// 天凤的真实反例（南场庄家持南）见上一用例。
+TEST(RiichiYakuhai, DoubleEastWindInEastRound) {
+  riichi::WinContext ctx;
+  ctx.winner_seat = 0;
+  ctx.from_seat = 1;
+  ctx.dealer_seat = 0;
+  ctx.round_wind = 0;  // 东场
+  ctx.seat_wind = SeatWindOf(0, 0, 0);
+
+  // 副露：东刻子（场风东 + 自风东 = 连风 2 番）。暗手 3 组 + 将共 11 张。
+  const std::vector<Meld> melds = {Pong({"1z", "1z", "1z"})};
+  const std::vector<Yaku> yaku =
+      riichi::DetectYaku(Tiles({"2m", "3m", "4m", "5p", "6p", "7p", "8s", "8s", "8s", "9s", "9s"}), melds,
+                         *ParseTile("9s"), ctx);
+  int yakuhai_han = 0;
+  for (const Yaku& item : yaku) {
+    if (item.id == protocol::YakuId::kYakuhai) {
+      yakuhai_han = item.han;
+    }
+  }
+  EXPECT_EQ(yakuhai_han, 2) << "东场庄家的东刻子：场风 + 自风 = 2 番";
+}
+
+// 南场庄家的南刻子：只有场风 1 番（庄家的自风是东，不是南）。
+TEST(RiichiYakuhai, SouthRoundDealerSouthTripletIsOneHan) {
+  riichi::WinContext ctx;
+  ctx.winner_seat = 3;
+  ctx.from_seat = -1;  // 自摸
+  ctx.dealer_seat = 3;
+  ctx.round_wind = 1;  // 南场
+  ctx.seat_wind = SeatWindOf(1, 3, 3);
+
+  const std::vector<Meld> melds = {Chow({"3p", "4p", "5p"})};
+  const std::vector<Yaku> yaku =
+      riichi::DetectYaku(Tiles({"2z", "2z", "2z", "3s", "3s", "3s", "4s", "4s", "5m", "6m", "7m"}),
+                         melds, *ParseTile("5m"), ctx);
+  int yakuhai_han = 0;
+  for (const Yaku& item : yaku) {
+    if (item.id == protocol::YakuId::kYakuhai) {
+      yakuhai_han = item.han;
+    }
+  }
+  EXPECT_EQ(yakuhai_han, 1) << "南场庄家的南刻子只算场风，不是连风 2 番";
 }
 
 // 听牌提示的「有役」口径（v1.13 §12.8）：**形听 ≠ 能和**。
@@ -1097,6 +1158,278 @@ TEST(RiichiKuikae, AiDiscardWithoutForbiddenFacesIsUnchanged) {
   ASSERT_TRUE(with_empty.has_value());
   ASSERT_TRUE(legacy.has_value());
   EXPECT_EQ(with_empty->id, legacy->id);
+}
+
+// ---------------------------------------------------------------------------
+// 役满与低频役（TENHOU_CORPUS.md 的补充）
+//
+// 天凤**没有**公开的「役满一览」接口（`/sc/yakuman/` 等均 404），归档日志的每行也只有
+// 「谁和了、得分」而没有役种，因此真实牌谱语料撞不到役满（第一版 20 半庄 / 183 手和牌里
+// 役满为零）。役满的牌型与倍数关系**没有歧义**，这里用人工构造的手牌覆盖，与真实牌谱回归
+// 互补：真实语料保证「常见役在实际局面下算对」，这里保证「稀有形态不会漏判/错倍数」。
+// ---------------------------------------------------------------------------
+namespace {
+
+// 役满用例的上下文：闲家自摸（庄家 bonus 不参与役满，但分摊要用 dealer_seat）。
+WinContext YakumanContext() {
+  WinContext ctx;
+  ctx.winner_seat = 1;
+  ctx.from_seat = -1;
+  ctx.dealer_seat = 0;
+  ctx.round_wind = 0;
+  ctx.seat_wind = 1;
+  return ctx;
+}
+
+// 某一役在结果里出现了几次（役满按倍数算，双倍役满 han = 26）。
+int HanOf(const ScoreResult& result, protocol::YakuId id) {
+  for (const Yaku& item : result.yaku) {
+    if (item.id == id) {
+      return item.han;
+    }
+  }
+  return 0;
+}
+
+// 役满是否成立（limit == yakuman、倍数正确、符恒 0、收入符合 8000×倍数）。
+void ExpectYakuman(const ScoreResult& result, int multiplier) {
+  EXPECT_EQ(result.limit, Limit::kYakuman) << "应为役满";
+  EXPECT_EQ(result.yakuman_count, multiplier) << "役满倍数";
+  EXPECT_EQ(result.fu, 0) << "役满符恒为 0";
+  // 闲家自摸 = 4 × 8000 × 倍数（庄家付 2 份、两闲家各 1 份）；
+  // 庄家自摸 = 6 × 8000 × 倍数（三家各付 2 份）。两种情况都接受，具体由用例的席位决定。
+  const int as_non_dealer = 8000 * multiplier * 4;
+  const int as_dealer = 8000 * multiplier * 6;
+  EXPECT_TRUE(result.points == as_non_dealer || result.points == as_dealer)
+      << "役满收入应为 " << as_non_dealer << "（闲家）或 " << as_dealer << "（庄家），实际 "
+      << result.points;
+}
+
+}  // namespace
+
+// 天和：庄家配牌即和（无鸣牌、无打牌）。
+TEST(RiichiYakuman, Tenhou) {
+  WinContext ctx = YakumanContext();
+  ctx.winner_seat = 0;  // 庄家
+  ctx.dealer_seat = 0;
+  ctx.seat_wind = 0;
+  ctx.is_tenhou = true;
+  const ScoreResult result = ScoreHand(Tiles({"1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s",
+                                              "1z", "1z", "1z", "5z", "5z"}),
+                                       {}, *ParseTile("5z"), ctx);
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kTenhou), 13);
+  ExpectYakuman(result, 1);
+}
+
+// 地和：闲家第一巡自摸。
+TEST(RiichiYakuman, Chiihou) {
+  WinContext ctx = YakumanContext();
+  ctx.is_chiihou = true;
+  const ScoreResult result = ScoreHand(Tiles({"1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s",
+                                              "1z", "1z", "1z", "5z", "5z"}),
+                                       {}, *ParseTile("5z"), ctx);
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kChiihou), 13);
+  ExpectYakuman(result, 1);
+}
+
+// 国士无双（普通，非十三面）：和牌前**已经有那一对**，和牌张补的是缺的那种。
+// 13 种各一张 + 6z 成对 = 14 张里缺 1s，荣和 1s。
+TEST(RiichiYakuman, Kokushi) {
+  WinContext ctx = YakumanContext();
+  ctx.from_seat = 2;  // 荣和
+  const ScoreResult result = ScoreHand(Tiles({"1m", "9m", "1p", "9p", "9s", "1z", "2z",
+                                              "3z", "4z", "5z", "6z", "6z", "7z", "1s"}),
+                                       {}, *ParseTile("1s"), ctx);
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kKokushi), 13) << "普通国士（非十三面）";
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kKokushi13), 0);
+  ExpectYakuman(result, 1);
+}
+
+// 国士十三面：和牌前是十三种各一张（听 13 面）⇒ **双倍**役满。
+// 判据必须看**和牌前**：荣和时 concealed 已含和牌张，只看「和牌张成对」会误判
+// （`Kokushi` 那手会被误报成双倍）。
+TEST(RiichiYakuman, KokushiThirteenSidesIsDouble) {
+  WinContext ctx = YakumanContext();
+  ctx.from_seat = 2;  // 荣和 1m
+  const ScoreResult result = ScoreHand(Tiles({"1m", "9m", "1p", "9p", "1s", "9s", "1z", "2z",
+                                              "3z", "4z", "5z", "6z", "7z", "1m"}),
+                                       {}, *ParseTile("1m"), ctx);
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kKokushi13), 26) << "双倍役满记 26 番";
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kKokushi), 0);
+  ExpectYakuman(result, 2);
+}
+
+// 四暗刻单骑、纯正九莲宝灯的双倍倍数已由 `RiichiYakuman.SuuankouTankiIsDouble` /
+// `.ChuurenJunseiIsDouble`（本文件上半部分）覆盖，这里不再重复。
+
+// 大四喜：四组风刻子 + 将 ⇒ 双倍役满。**注意**：这手牌同时是字一色（1 倍）+ 四暗刻单骑
+// （自摸、和牌张是把将 ⇒ 2 倍），所以合计 5 倍 —— 引擎按「多役满倍数相加」算，与天凤口径一致。
+TEST(RiichiYakuman, DaisuushiiIsDouble) {
+  const ScoreResult result = ScoreHand(Tiles({"1z", "1z", "1z", "2z", "2z", "2z", "3z", "3z", "3z",
+                                              "4z", "4z", "4z", "5z", "5z"}),
+                                       {}, *ParseTile("5z"), YakumanContext());
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kDaisuushii), 26) << "大四喜是双倍役满";
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kTsuuiisou), 13) << "同一手牌也是字一色";
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kSuuankouTanki), 26) << "自摸单骑 ⇒ 四暗刻单骑";
+  ExpectYakuman(result, 5);  // 2 + 1 + 2
+}
+
+// 大三元：三组三元刻子。
+TEST(RiichiYakuman, Daisangen) {
+  const ScoreResult result = ScoreHand(Tiles({"5z", "5z", "5z", "6z", "6z", "6z", "7z", "7z", "7z",
+                                              "1m", "2m", "3m", "9p", "9p"}),
+                                       {}, *ParseTile("9p"), YakumanContext());
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kDaisangen), 13);
+  ExpectYakuman(result, 1);
+}
+
+// 字一色：全部字牌（与 `DaisuushiiIsDouble` 同一手牌的侧面断言 —— 单看字一色是 1 倍，
+// 但那手牌叠加了大四喜与四暗刻单骑，所以倍数合计 5）。
+TEST(RiichiYakuman, Tsuuiisou) {
+  const ScoreResult result = ScoreHand(Tiles({"1z", "1z", "1z", "2z", "2z", "2z", "3z", "3z", "3z",
+                                              "5z", "5z", "5z", "6z", "6z"}),
+                                       {}, *ParseTile("6z"), YakumanContext());
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kTsuuiisou), 13);
+  // 只有大三元（5z/6z… 这里只有白与发的刻子）不成立，故至少是「字一色 + 四暗刻单骑」2 + 1
+  EXPECT_GE(result.yakuman_count, 1);
+  EXPECT_EQ(result.fu, 0);
+  EXPECT_EQ(result.limit, Limit::kYakuman);
+}
+
+// 绿一色：只有 2s/3s/4s/6s/8s/发。
+TEST(RiichiYakuman, Ryuuiisou) {
+  const ScoreResult result = ScoreHand(Tiles({"2s", "3s", "4s", "2s", "3s", "4s", "6s", "6s", "6s",
+                                              "8s", "8s", "8s", "6z", "6z"}),
+                                       {}, *ParseTile("6z"), YakumanContext());
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kRyuuiisou), 13);
+  ExpectYakuman(result, 1);
+}
+
+// 清老头：全部老头牌。这手同时也是四暗刻单骑（自摸、和牌张成刻）⇒ 1 + 2 = 3 倍。
+TEST(RiichiYakuman, Chinroutou) {
+  const ScoreResult result = ScoreHand(Tiles({"1m", "1m", "1m", "9m", "9m", "9m", "1p", "1p", "1p",
+                                              "9s", "9s", "9s", "9p", "9p"}),
+                                       {}, *ParseTile("9p"), YakumanContext());
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kChinroutou), 13);
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kSuuankouTanki), 26) << "自摸单骑 ⇒ 四暗刻单骑";
+  ExpectYakuman(result, 3);  // 清老头 1 + 四暗刻单骑 2
+}
+
+// 四杠子：四组暗杠 + 将 ⇒ 单倍役满。四组暗刻同时构成四暗刻（1 倍），合计 2 倍。
+TEST(RiichiYakuman, Suukantsu) {
+  std::vector<Meld> melds;
+  for (const char* face : {"1m", "5p", "9s", "3z"}) {
+    const Face f = FaceOf(*ParseTile(face));
+    Meld kan;
+    kan.type = MeldType::kAnkan;
+    kan.tiles = {MakeTileFromFace(f, 0), MakeTileFromFace(f, 1), MakeTileFromFace(f, 2),
+                 MakeTileFromFace(f, 3)};
+    melds.push_back(kan);
+  }
+  const ScoreResult result = ScoreHand(Tiles({"7z", "7z"}), melds, *ParseTile("7z"), YakumanContext());
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kSuukantsu), 13) << "四杠子";
+  // 四组暗刻 + 自摸 = 四暗刻（和牌张在将上 ⇒ 不是单骑，单倍）
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kSuuankou), 13) << "同时构成四暗刻（单倍）";
+  ExpectYakuman(result, 2);
+}
+
+// 小四喜：三组风刻子 + 风将（不是役满倍数叠加，单倍役满）。
+TEST(RiichiYakuman, Shousuushii) {
+  const ScoreResult result = ScoreHand(Tiles({"1z", "1z", "1z", "2z", "2z", "2z", "3z", "3z", "3z",
+                                              "1m", "2m", "3m", "4z", "4z"}),
+                                       {}, *ParseTile("4z"), YakumanContext());
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kShousuushii), 13);
+  ExpectYakuman(result, 1);
+}
+
+// ---- 低频通常役（真实语料同样撞不到）----
+
+// 抢杠：加杠的那张被荣和（1 番，且无役也能和）。14 张完整手牌 + 荣和 9p。
+TEST(RiichiRareYaku, Chankan) {
+  WinContext ctx = YakumanContext();
+  ctx.from_seat = 2;
+  ctx.is_chankan = true;
+  const ScoreResult result = ScoreHand(Tiles({"2m", "3m", "4m", "5p", "6p", "7p", "2s", "3s", "4s",
+                                              "1z", "1z", "1z", "9p", "9p"}),
+                                       {}, *ParseTile("9p"), ctx);
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kChankan), 1);
+  EXPECT_EQ(result.yakuman_count, 0);
+}
+
+// 岭上开花：杠后补牌自摸。
+TEST(RiichiRareYaku, Rinshan) {
+  WinContext ctx = YakumanContext();
+  ctx.is_rinshan = true;
+  const ScoreResult result = ScoreHand(Tiles({"2m", "3m", "4m", "5p", "6p", "7p", "2s", "3s", "4s",
+                                              "1z", "1z", "1z", "9p", "9p"}),
+                                       {}, *ParseTile("9p"), ctx);
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kRinshan), 1);
+}
+
+// 河底捞鱼：最后一张弃牌荣和。
+TEST(RiichiRareYaku, Houtei) {
+  WinContext ctx = YakumanContext();
+  ctx.from_seat = 2;
+  ctx.is_houtei = true;
+  const ScoreResult result = ScoreHand(Tiles({"2m", "3m", "4m", "5p", "6p", "7p", "2s", "3s", "4s",
+                                              "1z", "1z", "1z", "9p", "9p"}),
+                                       {}, *ParseTile("9p"), ctx);
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kHoutei), 1);
+}
+
+// 三色同刻（v1.26，2 番）：三种花色、同一数字各一组刻子。**不是**三色同顺。
+TEST(RiichiRareYaku, SanshokuDoukou) {
+  WinContext ctx = YakumanContext();
+  ctx.from_seat = 2;  // 荣和；牌全在手里 ⇒ 仍是门前清
+  // 5m5m5m / 5p5p5p / 5s5s5s 是三色**同刻**；第四组用顺子 1m2m3m，
+  // 避免整手变成四暗刻（那会先命中役满、根本走不到通常役的判定）。
+  const ScoreResult result = ScoreHand(Tiles({"5m", "5m", "5m", "5p", "5p", "5p", "5s", "5s", "5s",
+                                              "2m", "3m", "4m", "9p", "9p"}),
+                                       {}, *ParseTile("9p"), ctx);
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kSanshokuDoukou), 2) << "门前清三色同刻 2 番";
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kSanshokuDoujun), 0) << "同刻不是同顺";
+}
+
+// 三色同刻副露 1 番（与三色同顺同档）。
+TEST(RiichiRareYaku, SanshokuDoukouOpenIsOneHan) {
+  WinContext ctx = YakumanContext();
+  ctx.from_seat = 2;
+  // 副露：碰 5m，手牌仍含 5p/5s 的刻子 ⇒ 非门前清 ⇒ 1 番
+  std::vector<Meld> melds = {Pong({"5m", "5m", "5m"})};
+  const ScoreResult result = ScoreHand(Tiles({"5p", "5p", "5p", "5s", "5s", "5s", "1z", "1z", "1z",
+                                              "9p", "9p"}),
+                                       melds, *ParseTile("9p"), ctx);
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kSanshokuDoukou), 1) << "副露三色同刻 1 番";
+}
+
+// 三色同顺仍是独立役：2m3m4m / 2p3p4p / 2s3s4s（2 番），不得误报成三色同刻。
+TEST(RiichiRareYaku, SanshokuDoujunIsNotDoukou) {
+  WinContext ctx = YakumanContext();
+  ctx.from_seat = 2;
+  const ScoreResult result = ScoreHand(Tiles({"2m", "3m", "4m", "2p", "3p", "4p", "2s", "3s", "4s",
+                                              "1z", "1z", "1z", "9p", "9p"}),
+                                       {}, *ParseTile("9p"), ctx);
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kSanshokuDoujun), 2) << "门前清三色同顺 2 番";
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kSanshokuDoukou), 0) << "同顺不是同刻";
+}
+
+// 三杠子（2 番，通常役）：三组杠 + 一组顺子 + 将。
+TEST(RiichiRareYaku, Sankantsu) {
+  std::vector<Meld> melds;
+  for (const char* face : {"1m", "5p", "9s"}) {
+    const Face f = FaceOf(*ParseTile(face));
+    Meld kan;
+    kan.type = MeldType::kAnkan;
+    kan.tiles = {MakeTileFromFace(f, 0), MakeTileFromFace(f, 1), MakeTileFromFace(f, 2),
+                 MakeTileFromFace(f, 3)};
+    melds.push_back(kan);
+  }
+  WinContext ctx = YakumanContext();
+  ctx.from_seat = 2;  // 荣和，避免三暗刻/四暗刻
+  // 三组杠（9 张账面）+ 顺子 2m3m4m（3 张）+ 将 7z7z ⇒ 14 张逻辑
+  const ScoreResult result = ScoreHand(Tiles({"2m", "3m", "4m", "7z", "7z"}), melds, *ParseTile("4m"), ctx);
+  EXPECT_EQ(HanOf(result, protocol::YakuId::kSankantsu), 2);
+  EXPECT_EQ(result.yakuman_count, 0) << "三杠子不是役满";
 }
 
 }  // namespace

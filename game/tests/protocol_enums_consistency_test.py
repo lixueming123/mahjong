@@ -38,7 +38,7 @@ DOMAIN_LAYOUT = {
     "meld_type": (5, "WireMeldType", "kMeldTypeNames"),
     "reason": (3, "RoundEndReason", "kReasonNames"),
     "error_code": (14, "ErrorCode", "kErrorCodeNames"),
-    "yaku": (47, "YakuId", "kYakuNames"),
+    "yaku": (48, "YakuId", "kYakuNames"),
     "limit": (6, "WireLimit", "kLimitNames"),
 }
 

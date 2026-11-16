@@ -241,8 +241,12 @@ enum class YakuId : uint8_t {
   kDaisuushii = 45,
   kWinRon = 46,
   kWinTsumo = 47,
+  // v1.26 追加：三色同刻（sanshoku doukou，2 番）。**只能追加在末尾** —— 46/47 是
+  // `results[].win_type` 的「和牌方式」哨兵，语义上仍要留在和牌方式的位置，所以新役排在
+  // 它们之后，而不是插在役满与 win_ron 之间（那样会重编号 46/47，破坏冻结表）。
+  kSanshokuDoukou = 48,
 };
-inline constexpr int kYakuMax = 47;
+inline constexpr int kYakuMax = 48;
 inline constexpr std::array<std::string_view, kYakuMax + 1> kYakuNames = {
     "INVALID",        "menzen",          "tanyao",        "pinfu",      "iipeikou",   "yakuhai",
     "rinshan",        "sanshoku_doujun", "ittsuu",        "toitoi",     "sanankou",   "honitsu",
@@ -252,6 +256,7 @@ inline constexpr std::array<std::string_view, kYakuMax + 1> kYakuNames = {
     "aka_dora",       "tenhou",          "chiihou",       "kokushi",    "kokushi_13", "suuankou",
     "suuankou_tanki", "daisangen",       "tsuuiisou",     "ryuuiisou",  "chinroutou", "chuuren",
     "chuuren_junsei", "suukantsu",       "shousuushii",   "daisuushii", "win_ron",    "win_tsumo",
+    "sanshoku_doukou",
 };
 
 // ---- win.limit (v2.1, riichi only) ------------------------------------------------------
@@ -408,7 +413,8 @@ static_assert(WireOf(WireLength::kHanchan) == kLengthMax);
 static_assert(WireOf(WireMeldType::kKakan) == kMeldTypeMax);
 static_assert(WireOf(RoundEndReason::kDrawExhausted) == kReasonMax);
 static_assert(WireOf(ErrorCode::kAlreadyOnline) == kErrorCodeMax);
-static_assert(WireOf(YakuId::kWinTsumo) == kYakuMax);
+static_assert(WireOf(YakuId::kWinTsumo) == 47);
+static_assert(WireOf(YakuId::kSanshokuDoukou) == kYakuMax);
 static_assert(WireOf(YakuId::kMenzen) == 1);
 static_assert(WireOf(WireLimit::kYakuman) == kLimitMax);
 static_assert(WireOf(WireLimit::kNone) == 1);

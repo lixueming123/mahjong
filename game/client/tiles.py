@@ -200,6 +200,18 @@ RIICHI_YAKU_LABEL = {
     "suukantsu": "四杠子",
     "shousuushii": "小四喜",
     "daisuushii": "大四喜",
+    "sanshoku_doukou": "三色同刻",
+    "sanshoku_doujun": "三色同顺",
+    "ittsuu": "一气通贯",
+    "toitoi": "对对和",
+    "sanankou": "三暗刻",
+    "honitsu": "混一色",
+    "shousangen": "小三元",
+    "rinshan": "岭上开花",
+    "pinfu": "平和",
+    "iipeikou": "一杯口",
+    "tanyao": "断幺九",
+    "menzen": "门前清",
 }
 
 # 满贯以上的中文分档（日麻结算行尾）。

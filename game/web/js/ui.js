@@ -41,7 +41,7 @@ const YAKU_LABELS = {
   tenhou: '天和', chiihou: '地和', kokushi: '国士无双', kokushi_13: '国士十三面',
   suuankou: '四暗刻', suuankou_tanki: '四暗刻单骑', daisangen: '大三元', tsuuiisou: '字一色',
   ryuuiisou: '绿一色', chinroutou: '清老头', chuuren: '九莲宝灯', chuuren_junsei: '纯正九莲宝灯',
-  suukantsu: '四杠子', shousuushii: '小四喜', daisuushii: '大四喜',
+  suukantsu: '四杠子', shousuushii: '小四喜', daisuushii: '大四喜', sanshoku_doukou: '三色同刻',
 };
 
 /** §2.1 牌码 → 中文面（用于听牌条 / 立直候选这类小标签） */

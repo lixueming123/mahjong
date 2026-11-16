@@ -152,10 +152,21 @@ HandFacts ComputeFacts(const std::vector<Tile>& concealed, const std::vector<Mel
   return facts;
 }
 
-// 和牌张落在哪一组、是什么待ち形。顺子优先于刻子、刻子优先于将牌（与 WinGroupIndex 同口径）。
-WaitKind WaitOf(const Decomposition& decomp, Face winning) {
+// 和牌张可能落进的所有待ち形。
+//
+// 为什么是「所有」而不是「第一个」：同一拆法里和牌张可能同时落在两组暗顺上。
+// 例：暗手 `4s5s5s5s6s6s7s` 拆成 `5s6s7s + 5s6s7s + 4s6s` 时，和牌张 5s 既是
+// `4s5s6s` 的两面、也是 `5s6s7s` 的两面/嵌张 —— 天凤按**高点法**取两面（平和成立）。
+// 早先只返回第一个匹配的顺子，这手被算成嵌张 ⇒ 少 1 番平和 + 多 10 符。
+// 调用方对每个候选各算一遍番/符后取最优。
+//
+// **只看暗手牌拆出的组**：和牌张物理上只会落进门前手牌，不可能属于已经鸣出的副露组。
+// 此前这里也遍历 `from_meld` 的组，于是「和牌张同时在某组明吃里」时会被误判成嵌张
+// （例：明吃 `7m8m9m` + 暗手 `6m7m8m`，荣和 `8m` 被算成 789 的嵌张 2 符）。
+std::vector<WaitKind> WaitsOf(const Decomposition& decomp, Face winning) {
+  std::vector<WaitKind> waits;
   for (const Group& group : decomp.groups) {
-    if (!group.is_run) {
+    if (!group.is_run || group.from_meld) {
       continue;
     }
     const uint8_t start = group.face;
@@ -169,22 +180,28 @@ WaitKind WaitOf(const Decomposition& decomp, Face winning) {
     }
     const int offset = win_rank - rank;
     if (offset == 1) {
-      return WaitKind::kKanchan;
+      waits.push_back(WaitKind::kKanchan);
+    } else if (offset == 0) {
+      waits.push_back(rank == 7 ? WaitKind::kPenchan : WaitKind::kRyanmen);  // 789 等 7
+    } else {
+      waits.push_back(rank == 1 ? WaitKind::kPenchan : WaitKind::kRyanmen);  // 123 等 3
     }
-    if (offset == 0) {
-      return rank == 7 ? WaitKind::kPenchan : WaitKind::kRyanmen;  // 789 等 7
-    }
-    return rank == 1 ? WaitKind::kPenchan : WaitKind::kRyanmen;  // 123 等 3
+  }
+  if (!waits.empty()) {
+    return waits;
   }
   for (const Group& group : decomp.groups) {
-    if (!group.is_run && group.face == winning) {
-      return WaitKind::kShanpon;
+    if (!group.is_run && !group.from_meld && group.face == winning) {
+      waits.push_back(WaitKind::kShanpon);
+      return waits;
     }
   }
   if (decomp.pair == winning) {
-    return WaitKind::kTanki;
+    waits.push_back(WaitKind::kTanki);
+  } else {
+    waits.push_back(WaitKind::kNone);
   }
-  return WaitKind::kNone;
+  return waits;
 }
 
 bool PairIsYakuhai(Face pair, const WinContext& ctx) {
@@ -204,6 +221,8 @@ std::vector<Yaku> YakuForDecomposition(const Decomposition& decomp, const std::v
   const bool tsumo = ctx.Tsumo();
 
   std::array<int, kSuitCount * kRankCount> run_starts {};
+  // 三色同刻（v1.26）：按「花色 × 数字」统计**刻子/杠**的组数（每组计 1）。
+  std::array<int, kSuitCount * kRankCount> triplet_starts {};
   int run_count = 0;
   int concealed_triplets = 0;
   int dragon_triplets = 0;
@@ -231,6 +250,10 @@ std::vector<Yaku> YakuForDecomposition(const Decomposition& decomp, const std::v
     if (!IsTerminalOrHonor(face)) {
       all_groups_terminal = false;
       all_groups_terminal_honor = false;
+    }
+    // 三色同刻只统计**数牌**的刻子（字牌没有「三色」可言）
+    if (IsNumberFace(face)) {
+      triplet_starts[static_cast<size_t>(SuitOf(face) * kSuitFaces + (RankOf(face) - 1))] += 1;
     }
     if (!info.open) {
       const bool ron_completed = !tsumo && face == winning;
@@ -300,6 +323,18 @@ std::vector<Yaku> YakuForDecomposition(const Decomposition& decomp, const std::v
     }
   }
   push(YakuId::kSanshokuDoujun, sanshoku ? (closed ? 2 : 1) : 0);
+
+  // 三色同刻（v1.26）：三种花色、**同一数字**各一组刻子/杠。门前 2 番、副露 1 番（与三色同顺同档）。
+  // 只吃刻子，吃不到顺子；字牌不参与（`triplet_starts` 只累计数牌）。
+  bool sanshoku_doukou = false;
+  for (int rank = 0; rank < kRankCount; ++rank) {
+    if (triplet_starts[static_cast<size_t>(rank)] > 0 &&
+        triplet_starts[static_cast<size_t>(kSuitFaces + rank)] > 0 &&
+        triplet_starts[static_cast<size_t>(2 * kSuitFaces + rank)] > 0) {
+      sanshoku_doukou = true;
+    }
+  }
+  push(YakuId::kSanshokuDoukou, sanshoku_doukou ? (closed ? 2 : 1) : 0);
 
   bool ittsuu = false;
   for (int suit = 0; suit < kSuitCount; ++suit) {
@@ -452,8 +487,22 @@ std::vector<Yaku> DetectYakuman(const std::vector<Tile>& concealed, const std::v
       }
     }
     if (only_orphans && all_present && has_pair) {
-      // 国士十三面：和牌张正是那张「对子」⇒ 和牌前 13 张是十三种各一张（十三面听）。
-      push(counts[static_cast<size_t>(FaceOf(winning))] == 2 ? YakuId::kKokushi13 : YakuId::kKokushi);
+      // 国士十三面 vs 普通国士：区别只在**和牌前**的手牌形态。
+      //   * 十三面：和牌前是十三种各一张（13 张），和牌张补出那一对；
+      //   * 普通国士：和牌前已经有那一对（13 张里含 2 张），和牌张补的是缺的那种。
+      // 只看 `counts[winning] == 2` 是**错的**：荣和时 concealed 已含和牌张，
+      // 「本来就有一对、荣和成第三张」也会让 count 变成 2，但那不是十三面。
+      // 正确判据：把和牌张从 concealed 里去掉，看剩下的 13 张是不是「十三种各一张」。
+      std::array<int, kFaceCount> before = counts;
+      before[static_cast<size_t>(FaceOf(winning))] -= 1;
+      bool thirteen_sided = true;
+      for (Face face : kOrphans) {
+        if (before[static_cast<size_t>(face)] != 1) {
+          thirteen_sided = false;
+          break;
+        }
+      }
+      push(thirteen_sided ? YakuId::kKokushi13 : YakuId::kKokushi);
       return result;  // 国士无双不与其它役满复合
     }
 
@@ -541,8 +590,10 @@ std::vector<Yaku> YakuOfSevenPairs(const WinContext& ctx, const HandFacts& facts
   return yaku;
 }
 
+// 符：`winning` 用来判「荣和补成的那一组刻子按明刻计符」（日麻通行口径：
+// 荣和时和牌张补成的刻子视为明刻，2/4 符而不是 8/4 符；自摸时仍是暗刻）。
 int FuForDecomposition(const Decomposition& decomp, const std::vector<Meld>& melds, const HandFacts& facts,
-                       WaitKind wait, bool pinfu, bool tsumo, const WinContext& ctx) {
+                       WaitKind wait, bool pinfu, bool tsumo, const WinContext& ctx, Face winning) {
   int fu = 20;
   for (const Group& group : decomp.groups) {
     const GroupInfo info = InfoOf(group, melds);
@@ -550,10 +601,12 @@ int FuForDecomposition(const Decomposition& decomp, const std::vector<Meld>& mel
       continue;
     }
     const bool terminal = IsTerminalOrHonor(info.face);
+    // 荣和补成的刻子按明刻算：`ron_completed` 时 `info.open` 视作真（仅影响符，不影响番）。
+    const bool open_for_fu = info.open || (!tsumo && !group.from_meld && info.face == winning);
     if (info.kan) {
-      fu += info.open ? (terminal ? 16 : 8) : (terminal ? 32 : 16);
+      fu += open_for_fu ? (terminal ? 16 : 8) : (terminal ? 32 : 16);
     } else {
-      fu += info.open ? (terminal ? 4 : 2) : (terminal ? 8 : 4);
+      fu += open_for_fu ? (terminal ? 4 : 2) : (terminal ? 8 : 4);
     }
   }
   if (IsDragon(decomp.pair)) {
@@ -699,6 +752,7 @@ int YakuHan(YakuId id, bool closed) {
     case YakuId::kHonroutou:
       return 2;
     case YakuId::kSanshokuDoujun:
+    case YakuId::kSanshokuDoukou:  // v1.26：与三色同顺同档
     case YakuId::kIttsuu:
     case YakuId::kChanta:
       return closed ? 2 : 1;
@@ -1200,9 +1254,13 @@ int RoundWindOf(int round_index) {
   return (round_index / kRoundsPerWind) % 4;
 }
 
-int SeatWindOf(int round_wind, int seat, int dealer) {
-  const int offset = ((seat - dealer) % 4 + 4) % 4;
-  return ((round_wind % 4 + 4) % 4 + offset) % 4;
+// 自风：**只由「相对庄家的座位」决定**，与场风无关 —— 庄家的自风恒为东（0），下家南、对家西、上家北。
+// 场风只单独参与役牌判定（`YakuForDecomposition` 里场风与自风各算一次），不参与自风的推导。
+// **曾经这里加过 `round_wind`**（「庄家自风 = 场风」），那是错的：南场的庄家仍是东家，
+// 南风刻子只算 1 番场风而不是 2 番连风。天凤真实牌谱（20 半庄 / 183 手和牌）逐手核对：
+// 不加场风的公式 183/183 一致，加场风的 175/183（8 手在南场多给 1 番）。
+int SeatWindOf(int /*round_wind*/, int seat, int dealer) {
+  return ((seat - dealer) % 4 + 4) % 4;
 }
 
 std::vector<Option> ChankanOptions(const std::vector<Tile>& hand, const std::vector<Meld>& melds, Tile tile,
@@ -1288,22 +1346,33 @@ std::vector<Yaku> DetectYaku(const std::vector<Tile>& concealed_with_winning_til
     return yakuman;
   }
   const HandFacts facts = ComputeFacts(concealed_with_winning_tile, melds);
-  if (melds.empty() && IsSevenPairs(concealed_with_winning_tile)) {
-    return YakuOfSevenPairs(ctx, facts);
-  }
+  // 七对子**不能提前返回**：一手牌可能同时是七对子与更高的标准型（典型：二盃口 + 混一色）。
+  // 天凤真实牌谱里的例子：`11s 1z1z 22s33s 66s77s 88s` 荣和 3s ⇒ 二盃口 3 + 混一色 3 = 6 番，
+  // 而七对子路线只有 5 番。所以它与标准型一样当作候选，按番数取最优（同番取先出现的，
+  // 即七对子在前，与既有「同分取枚举序第一个」的口径一致）。
   std::vector<Yaku> best;
   int best_han = -1;
-  for (const Decomposition& decomp : EnumerateDecompositions(concealed_with_winning_tile, melds)) {
-    bool pinfu = false;
-    const WaitKind wait = WaitOf(decomp, FaceOf(winning_tile));
-    std::vector<Yaku> yaku = YakuForDecomposition(decomp, melds, FaceOf(winning_tile), ctx, facts, wait, &pinfu);
-    int han = 0;
-    for (const Yaku& item : yaku) {
-      han += item.han;
+  if (melds.empty() && IsSevenPairs(concealed_with_winning_tile)) {
+    best = YakuOfSevenPairs(ctx, facts);
+    best_han = 0;
+    for (const Yaku& item : best) {
+      best_han += item.han;
     }
-    if (han > best_han) {
-      best_han = han;
-      best = std::move(yaku);
+  }
+  for (const Decomposition& decomp : EnumerateDecompositions(concealed_with_winning_tile, melds)) {
+    // 同一拆法内可能的待ち形不止一种时按高点法逐个试（见 `WaitsOf` 的说明）。
+    for (const WaitKind wait : WaitsOf(decomp, FaceOf(winning_tile))) {
+      bool pinfu = false;
+      std::vector<Yaku> yaku =
+          YakuForDecomposition(decomp, melds, FaceOf(winning_tile), ctx, facts, wait, &pinfu);
+      int han = 0;
+      for (const Yaku& item : yaku) {
+        han += item.han;
+      }
+      if (han > best_han) {
+        best_han = han;
+        best = std::move(yaku);
+      }
     }
   }
   return best;
@@ -1312,26 +1381,37 @@ std::vector<Yaku> DetectYaku(const std::vector<Tile>& concealed_with_winning_til
 int FuOf(const std::vector<Tile>& concealed_with_winning_tile, const std::vector<Meld>& melds, Tile winning_tile,
          const WinContext& ctx) {
   const HandFacts facts = ComputeFacts(concealed_with_winning_tile, melds);
-  if (melds.empty() && IsSevenPairs(concealed_with_winning_tile)) {
-    return 25;
-  }
   if (!DetectYakuman(concealed_with_winning_tile, melds, winning_tile, ctx).empty()) {
     return 0;
   }
   int best_fu = 0;
   int best_han = -1;
-  for (const Decomposition& decomp : EnumerateDecompositions(concealed_with_winning_tile, melds)) {
-    const WaitKind wait = WaitOf(decomp, FaceOf(winning_tile));
-    bool pinfu = false;
-    const std::vector<Yaku> yaku = YakuForDecomposition(decomp, melds, FaceOf(winning_tile), ctx, facts, wait, &pinfu);
+  // 七对子与标准型一样参与比较（不能提前返回 25）：同一手牌可能同时是二盃口 + 混一色，
+  // 那条路线的番更高、符也不同。与 `ScoreHand` / `DetectYaku` 同口径。
+  if (melds.empty() && IsSevenPairs(concealed_with_winning_tile)) {
     int han = 0;
-    for (const Yaku& item : yaku) {
+    for (const Yaku& item : YakuOfSevenPairs(ctx, facts)) {
       han += item.han;
     }
-    const int fu = FuForDecomposition(decomp, melds, facts, wait, pinfu, ctx.Tsumo(), ctx);
-    if (han > best_han || (han == best_han && fu > best_fu)) {
+    if (han > best_han) {
       best_han = han;
-      best_fu = fu;
+      best_fu = 25;
+    }
+  }
+  for (const Decomposition& decomp : EnumerateDecompositions(concealed_with_winning_tile, melds)) {
+    for (const WaitKind wait : WaitsOf(decomp, FaceOf(winning_tile))) {
+      bool pinfu = false;
+      const std::vector<Yaku> yaku =
+          YakuForDecomposition(decomp, melds, FaceOf(winning_tile), ctx, facts, wait, &pinfu);
+      int han = 0;
+      for (const Yaku& item : yaku) {
+        han += item.han;
+      }
+      const int fu = FuForDecomposition(decomp, melds, facts, wait, pinfu, ctx.Tsumo(), ctx, FaceOf(winning_tile));
+      if (han > best_han || (han == best_han && fu > best_fu)) {
+        best_han = han;
+        best_fu = fu;
+      }
     }
   }
   return best_fu > 0 ? best_fu : 30;
@@ -1454,12 +1534,14 @@ ScoreResult ScoreHand(const std::vector<Tile>& concealed_with_winning_tile, cons
 
   if (melds.empty() && IsSevenPairs(concealed_with_winning_tile)) {
     consider(YakuOfSevenPairs(ctx, facts), 25);
-  } else {
-    for (const Decomposition& decomp : EnumerateDecompositions(concealed_with_winning_tile, melds)) {
-      const WaitKind wait = WaitOf(decomp, winning_face);
+  }
+  // 七对子不是 `else`：同一手牌可能同时成立七对子与更高的标准型（二盃口 + 混一色等），
+  // 两条路线都交给 `consider`，由「取点数最高」决定。见 `DetectYaku` 的说明。
+  for (const Decomposition& decomp : EnumerateDecompositions(concealed_with_winning_tile, melds)) {
+    for (const WaitKind wait : WaitsOf(decomp, winning_face)) {
       bool pinfu = false;
       std::vector<Yaku> yaku = YakuForDecomposition(decomp, melds, winning_face, ctx, facts, wait, &pinfu);
-      const int fu = FuForDecomposition(decomp, melds, facts, wait, pinfu, ctx.Tsumo(), ctx);
+      const int fu = FuForDecomposition(decomp, melds, facts, wait, pinfu, ctx.Tsumo(), ctx, FaceOf(winning_tile));
       consider(yaku, fu);
     }
   }

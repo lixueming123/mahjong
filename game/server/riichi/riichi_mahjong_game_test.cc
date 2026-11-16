@@ -287,10 +287,17 @@ TEST(RiichiMahjongGameTest, GoldenTranscriptIsFrozen) {
   // v2.5 喰い替え禁止：打牌窗口的 `action_request` 在**确实有禁区**时多带一个可选字段
   // `forbidden_discards`，帧数与每帧的其它字段都不变（frames 计数逐字相同），因此这里重新
   // 冻结三个值。Driver 的打牌策略也同步按禁区剔除候选 —— 否则它会发出必被拒的牌。
+  //
+  // v1.25 判番修复（TENHOU_CORPUS.md）：用天凤真实牌谱查出并修了 4 个判番缺陷 ——
+  // ① 自风不再随场风滚动（南场庄家仍是东家）；② 和牌张落在明副露里的误判（等待型只看暗手）；
+  // ③ 同一拆法内多种等待型按高点法取最优（平和）；④ 荣和补成的刻子按明刻计符；
+  // ⑤ 七对子不再提前返回，与标准型一起按点数取最优（二盃口 + 混一色）。
+  // 这些只改变 `game_end` 里的 fu/han/points/yaku，**帧数完全不变**（4672 / 2914 / 2969），
+  // 因此这里重新冻结三个 hash。
   const Golden cases[] = {
-      {20251005, "riichi/seed-20251005", 0xcd856fafe4620256ull},
-      {7, "riichi/seed-7", 0xa35ddd9f0a14d820ull},
-      {424242, "riichi/seed-424242", 0x239d92b8e658a2f0ull},
+      {20251005, "riichi/seed-20251005", 0xbcbfc10eade414f6ull},
+      {7, "riichi/seed-7", 0xf27edbdaf2fb0697ull},
+      {424242, "riichi/seed-424242", 0x41b869547b2b273full},
   };
   for (const Golden& golden : cases) {
     Driver driver(golden.seed);

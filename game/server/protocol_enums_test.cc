@@ -51,6 +51,10 @@ TEST(ProtocolEnumsTest, YakuDomainCoversWinMethodsAndYaku) {
   EXPECT_EQ(WireOf(YakuId::kDaisuushii), 45);
   EXPECT_EQ(WireOf(YakuId::kWinRon), 46);
   EXPECT_EQ(WireOf(YakuId::kWinTsumo), 47);
+  // v1.26：三色同刻追加在末尾（不能插在 46/47 之前 —— 那会重编号和牌方式哨兵）
+  EXPECT_EQ(WireOf(YakuId::kSanshokuDoukou), 48);
+  EXPECT_EQ(NameOf(YakuId::kSanshokuDoukou), "sanshoku_doukou");
+  EXPECT_EQ(FromName<YakuId>("sanshoku_doukou"), std::optional<YakuId>(YakuId::kSanshokuDoukou));
   EXPECT_EQ(NameOf(YakuId::kWinTsumo), "win_tsumo");
   EXPECT_EQ(NameOf(YakuId::kTsumo), "tsumo");
   EXPECT_EQ(FromName<YakuId>("win_ron"), std::optional<YakuId>(YakuId::kWinRon));

@@ -134,6 +134,7 @@ export const DOMAINS = Object.freeze({
     daisuushii: 45,
     win_ron: 46,
     win_tsumo: 47,
+    sanshoku_doukou: 48,
   }),
   limit: Object.freeze({
     INVALID: 0,
