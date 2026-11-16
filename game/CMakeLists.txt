@@ -26,6 +26,14 @@ target_link_libraries(riichi_rules_test PRIVATE riichi_rules GTest::gtest_main
 add_test(NAME riichi_rules_test COMMAND riichi_rules_test)
 set_tests_properties(riichi_rules_test PROPERTIES TIMEOUT 60)
 
+# 天凤牌谱回归（TENHOU_CORPUS.md）：用真实和牌结算校核 riichi::ScoreHand 的符/番/点数/役种。
+# 语料是**外部抓取物、不入库**（天凤禁止再配布牌谱），所以用例 JSON 不存在时测试 SKIP（见
+# tests/tenhou_corpus_test.py）。测试注册在下面 Python3 找到之后，抓取与转换见
+# game/tools/tenhou_fetch.py、tenhou_convert.py。
+add_executable(tenhou_rules_check tools/tenhou_rules_check.cc server/json.cc)
+target_include_directories(tenhou_rules_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_link_libraries(tenhou_rules_check PRIVATE riichi_rules)
+
 # ---- 已冻结（FROZEN）：LegacyRoomActor 的两个测试 -------------------------------------------------
 # 这两个二进制驱动的是 `server/room.cc`（LegacyRoomActor），也就是插件化之前那座单体。
 # 它现在只作历史参照：**不参与 all 构建、不注册 ctest、不再维护**。
@@ -275,6 +283,16 @@ if(Python3_Interpreter_FOUND)
     NAME protocol_enums_consistency
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/protocol_enums_consistency_test.py)
+
+  # 天凤牌谱回归：用真实和牌结算校核 riichi::ScoreHand（见 game/docs/TENHOU_CORPUS.md）。
+  # 用例 JSON 由 game/tools/tenhou_convert.py 生成且不入库（天凤禁止再配布牌谱），
+  # 所以不存在的干净 checkout 上以 77 退出 = SKIP。
+  add_test(
+    NAME tenhou_rules_check
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tenhou_corpus_test.py
+            --binary $<TARGET_FILE:tenhou_rules_check>
+            --cases ${CMAKE_BINARY_DIR}/tenhou_cases.json)
+  set_tests_properties(tenhou_rules_check PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
 endif()
 
 # RoomActor 压测：真 actor 运行时、真实座位投递（每个座位是一个真实端点 actor），无 socket。

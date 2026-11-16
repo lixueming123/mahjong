@@ -20,6 +20,10 @@ game/tests/artifacts/
 replays/
 game/replays/
 
+# 天凤牌谱语料与转换出的用例（外部抓取物，天凤禁止再配布，见 game/docs/TENHOU_CORPUS.md）
+game/tools/tenhou_corpus/
+build/tenhou_cases.json
+
 # 视频/截图参考产物（非源码，体积大，不入库）
 game/docs/video-reference/
 game/docs/reference/
