@@ -1,104 +1,74 @@
-// The protocol a player can speak: one binding per client frame type, grouped by who owns it.
+// What the player protocol is bound with: the row type its registration table is made of, the two
+// §4.1 gates a row can name, and the lookup function PlayerActor calls.
 //
-// A binding is the whole story of a message in one line — its wire type, whether it is accepted
-// before the player has an identity, and the function that handles it. That is deliberate: the
-// earlier shape had the type in a routing table *and* again in the owning module's handler
-// table, so eleven messages cost twenty-two rows and the two could drift apart silently.
+// The table itself lives in player_agent.cc and is the only place that names a wire type next to
+// its handler. The agents (player_session_agent.h and friends) are plain business objects: they
+// know nothing about protocol::FrameType, gates or the wire, so adding a frame is one row plus one
+// forward in that file, and an agent can be unit-tested without a protocol at all.
 //
-//   kSessionFrameBindings   login / register / ping / stats_request   the player's own account
-//   kLobbyFrameBindings     list_rooms / create_room / join_room / ready / sync   -> LobbyActor
-//   kRoomFrameBindings      discard / action / autoplay               -> the room (RoomEndpoint)
-//   kReplayFrameBindings    replay_request                            -> ReplayActor
+// A row is {wire type, gate, thunk}. The thunk takes the player rather than an agent, which is what
+// keeps dispatch generic: PlayerActor looks a frame up, applies the gate, and calls the row — it
+// never names an agent type or a frame type, so there is no switch to extend.
 //
-// Handlers are free functions rather than members of an agent class: they are stateless, and a
-// free function cannot quietly accumulate player state the way a class can. Everything they may
-// touch arrives in |PlayerServices|; anything else (the account registry, the database) is
-// reached only through the narrow methods PlayerActor exposes, which is what keeps an agent from
-// turning into a second god object.
+// Handlers are coroutines. Most answer inline and never suspend; the replay lookup awaits another
+// actor. Nothing here locks: the mailbox already serializes handlers that run to completion, so the
+// rule for a suspending one is that it must not touch the player after it resumes — the replay
+// handler copies the connection and the account id out first, and those are what it finishes on.
 
 #pragma once
 
-#include <string>
-#include <string_view>
-#include <utility>
+#include <cstddef>
 
-#include "ex_actor/api.h"
+#include <exec/task.hpp>
+
 #include "json.h"
 #include "protocol.h"
-#include "session.h"
 
 namespace mahjong {
 
 class PlayerActor;
-class LobbyActor;
-class RoomEndpoint;
 
-// What a handler is allowed to touch. |player| is for answering this client (frames, errors and
-// their §7.2 quota); the rest are the destinations the handler forwards to.
-struct PlayerServices {
-  PlayerActor& player;
-  Session& session;
-  ex_actor::ActorRef<LobbyActor>& lobby;
-  ex_actor::ActorRef<RoomEndpoint>& room;
-  // This player's own address, which every lobby call carries so the lobby can answer it.
-  ex_actor::ActorRef<PlayerActor>& self;
+// PROTOCOL.md §4.1's two accepted identity phases, stated as a property of the frame rather than
+// of the handler: login and register are the only frames accepted before an identity exists, and
+// no frame but those two is accepted once it does. Keeping this in the table is what lets the
+// dispatch gate a frame before its handler parses it, so the §7.2 counter charged for a refusal is
+// the one the *gate* names, not the one a parse error would have.
+enum class FrameGate {
+  kAnonymousOnly,  // refused with BAD_REQUEST once this session has an identity or one in flight
+  kLoggedInOnly,   // refused with NOT_LOGGED_IN until it has one
 };
 
-// ---- session-owned frames (player_session_agent.cc) -----------------------------------
-void HandleLogin(const PlayerServices& services, json::Value frame);
-void HandleRegister(const PlayerServices& services, json::Value frame);
-void HandlePing(const PlayerServices& services, json::Value frame);
-void HandleStatsRequest(const PlayerServices& services, json::Value frame);
-
-// ---- lobby-owned frames (player_lobby_agent.cc) ---------------------------------------
-void HandleListRooms(const PlayerServices& services, json::Value frame);
-void HandleCreateRoom(const PlayerServices& services, json::Value frame);
-void HandleJoinRoom(const PlayerServices& services, json::Value frame);
-void HandleReady(const PlayerServices& services, json::Value frame);
-void HandleSync(const PlayerServices& services, json::Value frame);
-
-// ---- room-owned frames (player_room_agent.cc) -----------------------------------------
-void HandleDiscard(const PlayerServices& services, json::Value frame);
-void HandleAction(const PlayerServices& services, json::Value frame);
-void HandleAutoplay(const PlayerServices& services, json::Value frame);
-
-// ---- replay-owned frames (player_replay_agent.cc, v2.3) --------------------------------
-void HandleReplayRequest(const PlayerServices& services, json::Value frame);
-
-// One client frame type: its wire enum value (PROTOCOL v2.0 §1.3.1), whether an identity is
-// required (PROTOCOL.md §4.1), and who handles it.
+// One registered frame: its wire type (PROTOCOL v2.0 §1.3.1), the phase it is accepted in, and the
+// handler that answers it.
 struct FrameBinding {
   protocol::FrameType type;
-  bool requires_login;
-  void (*handle)(const PlayerServices&, json::Value);
+  FrameGate gate;
+  stdexec::task<void> (*invoke)(PlayerActor& player, json::Value frame);
 };
 
-// Declared next to the handlers they name, so a message is spelled exactly once. PlayerActor
-// unions the three tables (player_actor.cc) and asserts the total against
-// protocol::kClientFrameTypes, so a frame type without a binding does not build.
-inline constexpr FrameBinding kSessionFrameBindings[] = {
-    {.type = protocol::FrameType::kLogin, .requires_login = false, .handle = &HandleLogin},
-    {.type = protocol::FrameType::kRegister, .requires_login = false, .handle = &HandleRegister},
-    {.type = protocol::FrameType::kPing, .requires_login = true, .handle = &HandlePing},
-    {.type = protocol::FrameType::kStatsRequest, .requires_login = true, .handle = &HandleStatsRequest},
+// The bridge between that table and the agents, which live behind PlayerActor's private surface.
+// One static coroutine per registered frame, each a one-line forward to the agent that owns the
+// frame's business. It is the friend that lets the table stay a plain constant in player_agent.cc
+// without either widening PlayerActor's interface or listing thirteen friends.
+class PlayerFrames {
+ public:
+  static stdexec::task<void> Login(PlayerActor& player, json::Value frame);
+  static stdexec::task<void> Register(PlayerActor& player, json::Value frame);
+  static stdexec::task<void> Ping(PlayerActor& player, json::Value frame);
+  static stdexec::task<void> StatsRequest(PlayerActor& player, json::Value frame);
+  static stdexec::task<void> ListRooms(PlayerActor& player, json::Value frame);
+  static stdexec::task<void> CreateRoom(PlayerActor& player, json::Value frame);
+  static stdexec::task<void> JoinRoom(PlayerActor& player, json::Value frame);
+  static stdexec::task<void> Ready(PlayerActor& player, json::Value frame);
+  static stdexec::task<void> Sync(PlayerActor& player, json::Value frame);
+  static stdexec::task<void> Discard(PlayerActor& player, json::Value frame);
+  static stdexec::task<void> Action(PlayerActor& player, json::Value frame);
+  static stdexec::task<void> Autoplay(PlayerActor& player, json::Value frame);
+  static stdexec::task<void> ReplayRequest(PlayerActor& player, json::Value frame);
 };
 
-inline constexpr FrameBinding kLobbyFrameBindings[] = {
-    {.type = protocol::FrameType::kListRooms, .requires_login = true, .handle = &HandleListRooms},
-    {.type = protocol::FrameType::kCreateRoom, .requires_login = true, .handle = &HandleCreateRoom},
-    {.type = protocol::FrameType::kJoinRoom, .requires_login = true, .handle = &HandleJoinRoom},
-    {.type = protocol::FrameType::kReady, .requires_login = true, .handle = &HandleReady},
-    {.type = protocol::FrameType::kSync, .requires_login = true, .handle = &HandleSync},
-};
-
-inline constexpr FrameBinding kRoomFrameBindings[] = {
-    {.type = protocol::FrameType::kDiscard, .requires_login = true, .handle = &HandleDiscard},
-    {.type = protocol::FrameType::kAction, .requires_login = true, .handle = &HandleAction},
-    {.type = protocol::FrameType::kAutoplay, .requires_login = true, .handle = &HandleAutoplay},
-};
-
-inline constexpr FrameBinding kReplayFrameBindings[] = {
-    {.type = protocol::FrameType::kReplayRequest, .requires_login = true, .handle = &HandleReplayRequest},
-};
+// The row for |type|, or nullptr when nothing answers it (a server→client type, or a value the
+// protocol has but no handler for — both BAD_REQUEST). An array index, not a scan.
+const FrameBinding* FindClientFrame(protocol::FrameType type);
 
 }  // namespace mahjong

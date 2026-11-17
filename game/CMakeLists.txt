@@ -7,24 +7,12 @@ add_library(mahjong_rules STATIC server/mahjong_rules.cc)
 target_include_directories(mahjong_rules PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(mahjong_rules PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
 
-add_executable(mahjong_rules_test server/mahjong_rules_test.cc)
-target_link_libraries(mahjong_rules_test PRIVATE mahjong_rules GTest::gtest_main
-                                                GTest::gmock)
-add_test(NAME mahjong_rules_test COMMAND mahjong_rules_test)
-set_tests_properties(mahjong_rules_test PROPERTIES TIMEOUT 60)
-
 # 日麻规则库：复用 mahjong_rules 的牌张/拆法/听牌/副露原语，只重写役种、符与点数表
 # （规格 game/docs/GAME_DESIGN_RIICHI_DRAFT.md §2.2/§2.3）
 add_library(riichi_rules STATIC server/riichi_rules.cc)
 target_include_directories(riichi_rules PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(riichi_rules PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
 target_link_libraries(riichi_rules PUBLIC mahjong_rules)
-
-add_executable(riichi_rules_test server/riichi_rules_test.cc)
-target_link_libraries(riichi_rules_test PRIVATE riichi_rules GTest::gtest_main
-                                                GTest::gmock)
-add_test(NAME riichi_rules_test COMMAND riichi_rules_test)
-set_tests_properties(riichi_rules_test PROPERTIES TIMEOUT 60)
 
 # 天凤牌谱回归（TENHOU_CORPUS.md）：用真实和牌结算校核 riichi::ScoreHand 的符/番/点数/役种。
 # 语料是**外部抓取物、不入库**（天凤禁止再配布牌谱），所以用例 JSON 不存在时测试 SKIP（见
@@ -39,6 +27,8 @@ target_link_libraries(tenhou_rules_check PRIVATE riichi_rules)
 # 它现在只作历史参照：**不参与 all 构建、不注册 ctest、不再维护**。
 # 语义覆盖已经由 mahjong_classic_game_test / mahjong_riichi_game_test 接手（golden 转录比对）。
 # 需要时手动构建：cmake --build build --target mahjong_room_test riichi_room_test
+#
+# 它们保留显式源文件列表，因为必须编进冻结的 room.cc；这也正是下面自动注册把它们排除的原因。
 add_executable(riichi_room_test EXCLUDE_FROM_ALL server/riichi_room_test.cc server/room.cc server/timer.cc
                                server/json.cc server/protocol.cc)
 target_link_libraries(riichi_room_test PRIVATE ex_actor mahjong_rules riichi_rules GTest::gtest_main
@@ -114,62 +104,23 @@ target_include_directories(mahjong_replay_store PUBLIC ${CMAKE_CURRENT_SOURCE_DI
 # 已被它 override），与 capnproto 用的是同一个 target，没有新增依赖。
 target_link_libraries(mahjong_replay_store PUBLIC ex_actor mahjong_room_shell mahjong_db spdlog::spdlog ZLIB::ZLIB)
 
-# 回放载荷的纯逻辑单测：base64（base64.h）、gzip（gzip.cc）、§5.18 分片（protocol.cc）。
-# 不建 actor、不开 socket、不碰磁盘，任何机器上恒常可跑。
-add_executable(mahjong_replay_payload_test server/replay_payload_test.cc server/gzip.cc server/protocol.cc
-                                         server/json.cc)
-target_include_directories(mahjong_replay_payload_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
-target_link_libraries(mahjong_replay_payload_test PRIVATE mahjong_rules GTest::gtest_main GTest::gmock ZLIB::ZLIB)
-add_test(NAME mahjong_replay_payload_test COMMAND mahjong_replay_payload_test)
-set_tests_properties(mahjong_replay_payload_test PROPERTIES TIMEOUT 60)
-
 # 通用房间外壳：座位/端点/分发/一次性截止/投递/结算回传/断线重连，不含任何玩法知识
 # （room_actor.h 顶部写清了边界）。玩法是插件（game.h），绑定见 room_actor_for.h。
-# 实现只有 room_actor.cc；JSON/协议/定时器的实现由使用方提供（mahjong_server 已经这样链接，
-# 不重复一份 json.cc/protocol.cc）。replay.cc 是录制器（纯数据结构 + 序列化，无 I/O）。
+# 实现只有 room_actor.cc；JSON/协议/定时器的实现由使用方提供。replay.cc 是录制器
+# （纯数据结构 + 序列化，无 I/O）。
 add_library(mahjong_room_shell STATIC server/room_actor.cc server/replay.cc)
 target_include_directories(mahjong_room_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(mahjong_room_shell PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server)
 target_link_libraries(mahjong_room_shell PUBLIC ex_actor)
 
 # 玩法插件：classic（番数制）。只依赖规则库与共享契约——不认识 actor、端点、定时器
-# （边界写在 game.h 顶部）。现在还没有调用方，先单独编成静态库做类型检查；大厅切到
-# RoomActorFor<ClassicMahjongGame> 之后由 mahjong_server 直接链接。
+# （边界写在 game.h 顶部）。
 # ex_actor 只为了头文件路径：room_contract.h 里的 RoomOwner/TimeoutScheduler 是契约的
 # 一部分，玩法本身不 include 任何 actor 头。
 add_library(mahjong_classic_game STATIC server/classic/classic_mahjong_game.cc)
 target_include_directories(mahjong_classic_game PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(mahjong_classic_game PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server)
 target_link_libraries(mahjong_classic_game PUBLIC mahjong_rules spdlog::spdlog ex_actor)
-
-# 玩法单测：直接驱动 ClassicMahjongGame，不建房间、不建 actor、不开 socket。
-# 三个 hash 继承自拆分前 LegacyRoomActor 冻结的那三个 classic 值；它们的作用是钉住帧序列不漂移
-# （room.cc 已弃用，不再是「与它逐字节兼容」的判据）。
-add_executable(mahjong_classic_game_test server/classic/classic_mahjong_game_test.cc server/json.cc
-                                       server/protocol.cc)
-target_include_directories(mahjong_classic_game_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
-target_link_libraries(mahjong_classic_game_test PRIVATE mahjong_classic_game GTest::gtest_main
-                                                     GTest::gmock)
-add_test(NAME mahjong_classic_game_test COMMAND mahjong_classic_game_test)
-set_tests_properties(mahjong_classic_game_test PROPERTIES TIMEOUT 120)
-
-# 回放录制器单测（replay.h，纯数据结构 + 序列化）：直接驱动 ClassicMahjongGame，
-# 不建房间、不开 socket、不碰磁盘 —— 写盘是 ReplayActor 的事（replay_store.h）。
-add_executable(mahjong_replay_test server/replay_test.cc server/replay.cc server/json.cc server/protocol.cc)
-target_include_directories(mahjong_replay_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
-target_link_libraries(mahjong_replay_test PRIVATE mahjong_classic_game GTest::gtest_main GTest::gmock)
-add_test(NAME mahjong_replay_test COMMAND mahjong_replay_test)
-set_tests_properties(mahjong_replay_test PROPERTIES TIMEOUT 120)
-
-# Game::ReplaySeatViews()（回放「从任意座位看牌桌」的唯一数据源）：两种玩法各一份，验它确实是
-# 各家的私有视图（门前手牌 + 副露），且日麻的赤 5 拼写与线上帧一致（0m/0p/0s）。与录制器分开，
-# 因为它测的是游戏侧契约。
-add_executable(mahjong_replay_views_test server/replay_views_test.cc server/json.cc server/protocol.cc)
-target_include_directories(mahjong_replay_views_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
-target_link_libraries(mahjong_replay_views_test PRIVATE mahjong_classic_game mahjong_riichi_game
-                                                        GTest::gtest_main GTest::gmock)
-add_test(NAME mahjong_replay_views_test COMMAND mahjong_replay_views_test)
-set_tests_properties(mahjong_replay_views_test PROPERTIES TIMEOUT 60)
 
 # 玩法插件：riichi（日麻）。与 classic 是**两份互不相识的代码**——不共享房间、不共享帧，
 # 只在规则原语（mahjong_rules 的牌张/拆法/听牌）与契约（game.h / room_contract.h）处相接。
@@ -178,39 +129,45 @@ target_include_directories(mahjong_riichi_game PUBLIC ${CMAKE_CURRENT_SOURCE_DIR
 target_include_directories(mahjong_riichi_game PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server)
 target_link_libraries(mahjong_riichi_game PUBLIC mahjong_rules riichi_rules spdlog::spdlog ex_actor)
 
-# 玩法单测：直接驱动 RiichiMahjongGame，不建房间、不建 actor、不开 socket。
-# 三个 hash 继承自拆分前 LegacyRoomActor 冻结的那三个日麻值（tonpu），之后随判番修复重新冻结过；
-# 它现在的职责是「帧序列不漂移」，不再是「与 room.cc 逐字节兼容」（room.cc 已弃用）。
-add_executable(mahjong_riichi_game_test server/riichi/riichi_mahjong_game_test.cc server/json.cc
-                                       server/protocol.cc)
-target_include_directories(mahjong_riichi_game_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
-target_link_libraries(mahjong_riichi_game_test PRIVATE mahjong_riichi_game GTest::gtest_main
-                                                     GTest::gmock)
-add_test(NAME mahjong_riichi_game_test COMMAND mahjong_riichi_game_test)
-set_tests_properties(mahjong_riichi_game_test PROPERTIES TIMEOUT 120)
-
 # 麻将服务端（t3：TCP JSON 网关 + 服务器骨架；t4：RoomActor 状态机 / 回合驱动 / 超时 / 结算；
 # 账号与战绩：注册/登录 + 战绩存档，见 game/docs/ACCOUNT_DESIGN.md）
-add_executable(
-  mahjong_server
-  server/main.cc
-  server/json.cc
-  server/protocol.cc
-  server/net.cc
-  server/connection.cc
-  server/player_actor.cc
-  server/player_session_agent.cc
-  server/player_lobby_agent.cc
-  server/player_room_agent.cc
-  server/player_replay_agent.cc
-  server/frame_parser.cc
-  server/lobby.cc
-  server/game_registry.cc
-  server/timer.cc
-  server/gateway.cc)
-target_link_libraries(mahjong_server PRIVATE ex_actor mahjong_rules riichi_rules mahjong_db mahjong_room_shell
-                                          mahjong_replay_store mahjong_classic_game mahjong_riichi_game
-                                          mahjong_asio)
+#
+# 服务端逻辑编成一个静态库，源文件由 glob 发现：新增一个模块（一个新协议 agent、一个新存储）
+# 只加一个 .cc，不改这个文件 —— 二进制和所有单测都链接这个库，于是登记只发生一次。
+#
+# 排除项完全由文件名决定：
+#   * *_test.cc          各自成可执行文件，见下面的自动注册
+#   * main.cc            服务端入口，只属于 mahjong_server
+#   * probe_main.cc / room_bench.cc   另外两个进程入口
+#   * room.cc            LegacyRoomActor，冻结，只给上面两个手动构建的测试用
+# db_mysql.cc / db_stub.cc 归 mahjong_db（二选一由 MAHJONG_DB_SOURCES 决定），不在这里重复。
+#
+# CONFIGURE_DEPENDS 让新增文件在下次构建时自动重新 glob，不必手动重跑 configure。
+file(GLOB MAHJONG_SERVER_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/server/*.cc)
+list(
+  FILTER MAHJONG_SERVER_SOURCES
+  EXCLUDE
+  REGEX ".*(_test\\.cc|/main\\.cc|/probe_main\\.cc|/room_bench\\.cc|/room\\.cc|/db_mysql\\.cc|/db_stub\\.cc)$")
+# 下面这些各自属于一个更小的库（它们有自己的依赖与可测试边界，见上文的说明），不能同时编进
+# 服务端核心库，否则同一个符号会被两个静态库各自提供一份。
+set(MAHJONG_OWNED_BY_OTHER_TARGETS
+    ${CMAKE_CURRENT_SOURCE_DIR}/server/mahjong_rules.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/server/riichi_rules.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/server/room_actor.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/server/replay.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/server/replay_store.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/server/gzip.cc)
+list(REMOVE_ITEM MAHJONG_SERVER_SOURCES ${MAHJONG_OWNED_BY_OTHER_TARGETS})
+
+add_library(mahjong_server_core STATIC ${MAHJONG_SERVER_SOURCES})
+target_include_directories(mahjong_server_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(mahjong_server_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server)
+target_link_libraries(mahjong_server_core
+                      PUBLIC ex_actor mahjong_rules riichi_rules mahjong_db mahjong_room_shell
+                             mahjong_replay_store mahjong_classic_game mahjong_riichi_game mahjong_asio)
+
+add_executable(mahjong_server server/main.cc)
+target_link_libraries(mahjong_server PRIVATE mahjong_server_core)
 if(MAHJONG_MYSQL_FOUND)
   # libmysqlclient's install name is @rpath/libmysqlclient.<n>.dylib, so without this the
   # binary links but fails to launch with "Library not loaded". Its own OpenSSL is resolved
@@ -220,84 +177,143 @@ if(MAHJONG_MYSQL_FOUND)
                                                      INSTALL_RPATH "${MYSQL_LIBRARY_DIR}")
 endif()
 
-# NDJSON 网关的 JSON 解析/序列化单测
-add_executable(mahjong_json_test server/mahjong_json_test.cc server/json.cc)
-target_link_libraries(mahjong_json_test PRIVATE GTest::gtest_main GTest::gmock)
-add_test(NAME mahjong_json_test COMMAND mahjong_json_test)
-set_tests_properties(mahjong_json_test PROPERTIES TIMEOUT 60)
+# ---- 单测的自动注册 ------------------------------------------------------------------------------
+# 每个 *_test.cc 就是一个 ctest 用例，名字是文件名去掉 .cc：新增一个测试只加一个 .cc，不改这个
+# 文件。它们统一链接 mahjong_server_core，所以「这个测试要链接哪些实现」不再是每个
+# add_executable 里的一份手工清单，也不会漏。
+#
+# 例外是上面已经显式建过的两个 LegacyRoomActor 测试（必须编进冻结的 room.cc），所以在这里排除。
+#
+# 这些测试曾经刻意不链接 mahjong_db，好在没有 MySQL 的机器上恒常可跑。这一点现在由 mahjong_db
+# 自己保证：没有 libmysqlclient 时它就是 db_stub.cc，行为与「MySQL 连不上」相同
+# （ACCOUNT_DESIGN.md §2.3）。所以统一链接不再让任何测试依赖本机有没有 MySQL。
+file(GLOB MAHJONG_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/server/*_test.cc
+     ${CMAKE_CURRENT_SOURCE_DIR}/server/*/*_test.cc)
+list(FILTER MAHJONG_TEST_SOURCES EXCLUDE REGEX ".*/(mahjong_room_test|riichi_room_test)\\.cc$")
 
-# Connection 出站缓冲上限（connection.h: kMaxOutboxBytes）。只依赖 connection.cc + net.cc +
-# protocol.cc，不建 actor、不开 socket、不碰数据库 —— 「对端不读」用 fd=-1 模拟即可。
-add_executable(mahjong_connection_test server/connection_test.cc server/connection.cc server/net.cc
-                                       server/protocol.cc server/json.cc)
-target_include_directories(mahjong_connection_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
-target_link_libraries(mahjong_connection_test PRIVATE mahjong_rules GTest::gtest_main GTest::gmock)
-add_test(NAME mahjong_connection_test COMMAND mahjong_connection_test)
-set_tests_properties(mahjong_connection_test PROPERTIES TIMEOUT 60)
+# 用例名默认 = 文件名去掉 .cc，并沿用 mahjong_ 前缀（新增文件无需登记）。下面这张表只列出
+# 「文件名与用例名对不上」的历史例外，两两成对；新文件不要往这里加。
+set(MAHJONG_TEST_NAME_OVERRIDES
+    riichi_mahjong_game_test mahjong_riichi_game_test
+    classic_mahjong_game_test mahjong_classic_game_test
+    riichi_rules_test riichi_rules_test)
 
-# 账号功能的纯逻辑单测（校验规则 / player_id 派生 / stats 帧形状）。
-# 刻意不链接 mahjong_db：这样它在有没有 MySQL 的机器上都恒常可跑。
-add_executable(mahjong_account_test server/account_test.cc server/protocol.cc server/json.cc)
-target_include_directories(mahjong_account_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
-target_link_libraries(mahjong_account_test PRIVATE mahjong_rules GTest::gtest_main GTest::gmock)
-add_test(NAME mahjong_account_test COMMAND mahjong_account_test)
-set_tests_properties(mahjong_account_test PROPERTIES TIMEOUT 60)
+# 默认超时 60 秒；要跑完一整场的用例单独放宽（同样两两成对：名字 秒）。
+set(MAHJONG_TEST_TIMEOUT_OVERRIDES
+    mahjong_classic_game_test 120
+    mahjong_riichi_game_test 120
+    mahjong_replay_test 120)
 
-# MySQL 连接池的策略层单测（错误分类 / 熔断状态机 / 槽位归属，db_policy.h）。
-# 与 mahjong_account_test 同理：不链接 mahjong_db，没装 libmysqlclient 的机器上也恒常可跑。
-add_executable(mahjong_db_policy_test server/db_policy_test.cc)
-target_include_directories(mahjong_db_policy_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
-target_link_libraries(mahjong_db_policy_test PRIVATE GTest::gtest_main GTest::gmock)
-add_test(NAME mahjong_db_policy_test COMMAND mahjong_db_policy_test)
-set_tests_properties(mahjong_db_policy_test PROPERTIES TIMEOUT 60)
+foreach(test_source IN LISTS MAHJONG_TEST_SOURCES)
+  get_filename_component(test_base ${test_source} NAME_WE)
+  set(test_name "mahjong_${test_base}")
+  if(test_base MATCHES "^mahjong_")
+    set(test_name ${test_base})
+  endif()
+  list(FIND MAHJONG_TEST_NAME_OVERRIDES ${test_base} name_index)
+  if(NOT name_index EQUAL -1)
+    math(EXPR name_value "${name_index} + 1")
+    list(GET MAHJONG_TEST_NAME_OVERRIDES ${name_value} test_name)
+  endif()
 
-# 帧解码层的纯逻辑单测（PROTOCOL §4 的字段规则 / 错误码 / §7.2 计量归属）。
-# 与 mahjong_account_test 同理：不链接 actor、不链接 socket，任何机器上恒常可跑。
-add_executable(mahjong_frame_parser_test server/frame_parser_test.cc server/frame_parser.cc
-                                          server/protocol.cc server/json.cc)
-target_include_directories(mahjong_frame_parser_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
-target_link_libraries(mahjong_frame_parser_test PRIVATE mahjong_rules GTest::gtest_main GTest::gmock)
-add_test(NAME mahjong_frame_parser_test COMMAND mahjong_frame_parser_test)
-set_tests_properties(mahjong_frame_parser_test PROPERTIES TIMEOUT 60)
+  add_executable(${test_name} ${test_source})
+  target_link_libraries(${test_name} PRIVATE mahjong_server_core GTest::gtest_main GTest::gmock)
+  add_test(NAME ${test_name} COMMAND ${test_name})
 
-# 会话身份状态机单测（session.h，纯头文件）：五种状态的合法转移与 Closed 吸收。
-add_executable(mahjong_session_test server/session_test.cc)
-target_include_directories(mahjong_session_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
-target_link_libraries(mahjong_session_test PRIVATE GTest::gtest_main GTest::gmock)
-add_test(NAME mahjong_session_test COMMAND mahjong_session_test)
-set_tests_properties(mahjong_session_test PROPERTIES TIMEOUT 60)
+  set(test_timeout 60)
+  list(FIND MAHJONG_TEST_TIMEOUT_OVERRIDES ${test_name} timeout_key)
+  if(NOT timeout_key EQUAL -1)
+    math(EXPR timeout_value "${timeout_key} + 1")
+    list(GET MAHJONG_TEST_TIMEOUT_OVERRIDES ${timeout_value} test_timeout)
+  endif()
+  set_tests_properties(${test_name} PROPERTIES TIMEOUT ${test_timeout})
+endforeach()
 
-# TCP JSON 网关协议冒烟测试（Python 标准库 socket，无第三方依赖）
-# Frozen wire enums (PROTOCOL v2.0): header-only behaviour test + cross-language guard.
-add_executable(mahjong_protocol_enums_test server/protocol_enums_test.cc)
-target_include_directories(mahjong_protocol_enums_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
-target_link_libraries(mahjong_protocol_enums_test PRIVATE GTest::gtest_main)
-add_test(NAME mahjong_protocol_enums_test COMMAND mahjong_protocol_enums_test)
+# RoomActor 压测：真 actor 运行时、真实座位投递（每个座位是一个真实端点 actor），无 socket。
+# 量的是「一局游戏要多少 CPU」和「一个核能带几张桌」，不是通过/失败，所以不注册成 ctest。
+add_executable(mahjong_room_bench server/room_bench.cc)
+target_link_libraries(mahjong_room_bench PRIVATE mahjong_server_core)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  # The tree is configured Debug; a load test at -O0 measures the build type, not the room. This
+  # optimizes only this target's own sources (the framework's static lib stays as configured).
+  target_compile_options(mahjong_room_bench PRIVATE -O2)
+endif()
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
+find_program(NODE_EXECUTABLE node)
+
+# ---- tests/ 目录下脚本测试的自动注册 ---------------------------------------------------------
+# tests/*.py 与 tests/web/*.mjs 里凡是名字以 _test.py / .mjs 结尾的都是 ctest 用例：新增一个脚本
+# 只加文件，不改这个文件。约定（脚本侧）：
+#   * 退出码 0 = 通过，非 0 = 失败；77 = 环境不具备（ctest 显示 SKIP，绝不静默变绿）。
+#   * 需要一个真服务端时，声明 --server-bin 选项并接受显式路径；这里统一把 $<TARGET_FILE:mahjong_server>
+#     传进去，于是测试跑的一定是刚构建的那个二进制，而不是碰巧躺在 build/ 里的旧文件。
+#   * 不需要服务端的脚本一律忽略 --server-bin，所以统一传参是安全的。
+#
+# 少数用例要非默认的参数，或者根本不该随 `ctest` 跑（要人工看产物、需要外部语料），在下面两张表里
+# 说明；表里没有的用例用默认值，两处都不必登记。
+#
+# MAHJONG_SCRIPT_TEST_EXCLUDE：不自动注册的脚本名（不带扩展名）。
+#
+# 需要额外参数的脚本在这里排除并由下面显式注册：一个脚本产出多个 ctest 用例时，光看文件名区分不出来。
+set(MAHJONG_SCRIPT_TEST_EXCLUDE
+    # 手工工具，不是用例：分别生成/渲染产物、抓取语料、导出策略证据、压测连接数。
+    render_side_artifacts
+    discard_policy_evidence
+    socket_load
+    # 需要默认环境里没有的可选依赖，或者要求人工看产物。它们都写在 docs 里用手工方式运行
+    # （Pillow / pygame + 项目 .venv）：
+    #   python3 game/tests/atlas_centering_test.py
+    #   ./.venv/bin/python game/tests/login_memory_test.py
+    #   ./.venv/bin/python game/tests/client_headless_test.py
+    #   ./.venv/bin/python game/tests/client_riichi_e2e_test.py
+    atlas_centering_test
+    login_memory_test
+    client_headless_test
+    client_riichi_e2e_test
+    # 参数是 --binary/--cases 而不是 --server-bin，下面显式注册为 tenhou_rules_check。
+    tenhou_corpus_test
+    # 同一脚本的第二组用例（--slow-tests），下面显式注册为 gateway_smoke_slow_test。
+    gateway_smoke_test
+    # 整场（4..8 局）的真实定时器验收：要十几分钟、依赖本机 MySQL 的测试库与口令，且它的断言
+    # 比 room_full_game_test 更苛刻（局间隔下限、M7 探针计数）。手工运行更合适：
+    #   python3 game/tests/match_full_e2e_test.py --server-bin build/game/mahjong_server
+    # 它此前也没进过 ctest；把它塞进默认跑法只会让每次全量测试多等十几分钟。
+    match_full_e2e_test)
+
+# 默认超时 180 秒（一个 e2e 用例要起服务端并打完一局）。
+#
+# 这里没有 match_full_e2e_test / e2e_full_game 这类整场（4..8 局）脚本：它们跑十几分钟、依赖
+# 本机 MySQL 的测试库与口令，此前也没有进过 ctest，所以留在上面的排除表里手工运行。想临时让
+# ctest 跑它们，把名字从排除表拿掉并在这里给出超时（脚本自身兜底是 960 秒 = 8 × 120s）。
+set(MAHJONG_SCRIPT_TEST_TIMEOUT_OVERRIDES "")
+
+# 已知要跑几分钟、平时不想要的用例打上 slow 标签（`ctest -LE slow` 可跳过）。
+set(MAHJONG_SCRIPT_TEST_SLOW "")
+
 if(Python3_Interpreter_FOUND)
-  add_test(
-    NAME gateway_smoke_test
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/gateway_smoke_test.py
-            --server-bin $<TARGET_FILE:mahjong_server>)
-  set_tests_properties(gateway_smoke_test PROPERTIES TIMEOUT 120)
+  file(GLOB MAHJONG_PY_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/*_test.py)
+  foreach(test_source IN LISTS MAHJONG_PY_TEST_SOURCES)
+    get_filename_component(test_name ${test_source} NAME_WE)
+    if(test_name IN_LIST MAHJONG_SCRIPT_TEST_EXCLUDE)
+      continue()
+    endif()
+    add_test(NAME ${test_name} COMMAND ${Python3_EXECUTABLE} ${test_source} --server-bin $<TARGET_FILE:mahjong_server>)
+    set(test_timeout 180)
+    list(FIND MAHJONG_SCRIPT_TEST_TIMEOUT_OVERRIDES ${test_name} timeout_key)
+    if(NOT timeout_key EQUAL -1)
+      math(EXPR timeout_value "${timeout_key} + 1")
+      list(GET MAHJONG_SCRIPT_TEST_TIMEOUT_OVERRIDES ${timeout_value} test_timeout)
+    endif()
+    set(test_labels "")
+    if(test_name IN_LIST MAHJONG_SCRIPT_TEST_SLOW)
+      set(test_labels LABELS slow)
+    endif()
+    # SKIP_RETURN_CODE 77 是脚本自己报「环境不具备」的约定（没有 MySQL、没有语料）。
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT ${test_timeout} SKIP_RETURN_CODE 77 ${test_labels})
+  endforeach()
 
-  # The heartbeat/idle/entrustment cases take ~2 minutes each (they wait out the real 20 s idle
-  # window), so they are opt-in in the script. They are also the only coverage of the gateway's
-  # time-based paths, which is exactly where a rewritten I/O loop breaks, so they get their own
-  # ctest entry instead of being silently skipped by CI.
-  add_test(
-    NAME gateway_smoke_slow_test
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/gateway_smoke_test.py
-            --server-bin $<TARGET_FILE:mahjong_server> --slow-tests)
-  set_tests_properties(gateway_smoke_slow_test PROPERTIES TIMEOUT 400 LABELS slow)
-
-  add_test(
-    NAME protocol_enums_consistency
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/protocol_enums_consistency_test.py)
-
-  # 天凤牌谱回归：用真实和牌结算校核 riichi::ScoreHand（见 game/docs/TENHOU_CORPUS.md）。
+  # 天凤牌谱回归的参数不是 --server-bin 而是两个路径，所以单独注册。
   # 用例 JSON 由 game/tools/tenhou_convert.py 生成且不入库（天凤禁止再配布牌谱），
   # 所以不存在的干净 checkout 上以 77 退出 = SKIP。
   add_test(
@@ -306,108 +322,24 @@ if(Python3_Interpreter_FOUND)
             --binary $<TARGET_FILE:tenhou_rules_check>
             --cases ${CMAKE_BINARY_DIR}/tenhou_cases.json)
   set_tests_properties(tenhou_rules_check PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
-endif()
 
-# RoomActor 压测：真 actor 运行时、真实座位投递（每个座位是一个真实端点 actor），无 socket。
-# 量的是「一局游戏要多少 CPU」和「一个核能带几张桌」，不是通过/失败，所以不注册成 ctest。
-add_executable(mahjong_room_bench server/room_bench.cc server/timer.cc server/json.cc server/protocol.cc)
-target_link_libraries(mahjong_room_bench PRIVATE ex_actor mahjong_rules riichi_rules mahjong_room_shell
-                                               mahjong_classic_game)
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-  # The tree is configured Debug; a load test at -O0 measures the build type, not the room. This
-  # optimizes only this target's own sources (the framework's static lib stays as configured).
-  target_compile_options(mahjong_room_bench PRIVATE -O2)
-endif()
-
-# t3：LobbyActor 的房间登记与 game_end 后回收（PROTOCOL.md §1.4.5）
-add_executable(mahjong_lobby_test server/lobby_test.cc server/lobby.cc server/game_registry.cc server/connection.cc
-                                  server/player_actor.cc server/player_session_agent.cc server/player_lobby_agent.cc server/player_room_agent.cc server/player_replay_agent.cc server/frame_parser.cc server/net.cc server/timer.cc
-                                  server/json.cc server/protocol.cc)
-target_link_libraries(mahjong_lobby_test PRIVATE ex_actor mahjong_rules riichi_rules mahjong_db mahjong_room_shell
-                                                mahjong_replay_store mahjong_classic_game mahjong_riichi_game GTest::gtest_main GTest::gmock)
-add_test(NAME mahjong_lobby_test COMMAND mahjong_lobby_test)
-set_tests_properties(mahjong_lobby_test PROPERTIES TIMEOUT 60)
-
-# AsyncGate：协程互斥锁 + 临界区重叠检测。它是"让 handler 能按协程写、又保持单 actor 一次只跑
-# 一个 handler"的外部扩展原型（不改框架代码）；见 async_gate.h 顶部说明。
-add_executable(mahjong_async_gate_test server/async_gate_test.cc)
-target_link_libraries(mahjong_async_gate_test PRIVATE ex_actor GTest::gtest_main GTest::gmock)
-add_test(NAME mahjong_async_gate_test COMMAND mahjong_async_gate_test)
-set_tests_properties(mahjong_async_gate_test PROPERTIES TIMEOUT 60)
-
-# t4：一局完整对局的端到端验证（真服务端 + 标准库 socket 客户端，t6 可直接复用）
-if(Python3_Interpreter_FOUND)
+  # 同一个脚本的第二组用例：心跳/空闲/托管那几条各要等满 20 秒的空闲窗口，所以脚本本身把它们
+  # 做成 opt-in（--slow-tests）。它们是唯一覆盖网关时间路径的用例——I/O 循环被重写时就坏在这里
+  # ——因此单独注册，而不是让它们被默认跑法静默跳过。自动注册只按文件名，所以这条显式登记是
+  # 必须的：一个脚本产出两个 ctest 用例，靠文件名认不出来。
   add_test(
-    NAME room_full_game_test
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/room_full_game_test.py
-            --server-bin $<TARGET_FILE:mahjong_server>)
-  set_tests_properties(room_full_game_test PROPERTIES TIMEOUT 180)
-endif()
-
-# 账号与战绩的端到端验证（真服务端 + 真 MySQL，用独立测试库 mahjong_test）。
-# MySQL 不可用（或服务端编译时就没带账号存储）时以 77 退出 = ctest 显示为 SKIP：
-# 宁可让人看见「没跑」，也不要静默变绿。
-if(Python3_Interpreter_FOUND)
-  add_test(
-    NAME account_e2e_test
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/account_e2e_test.py
-            --server-bin $<TARGET_FILE:mahjong_server>)
-  set_tests_properties(account_e2e_test PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
-
-  # PROTOCOL v2.2 §8.5：账号刷新重连（登录时查房 + 同座位快照 / resume:false 脱离）
-  add_test(
-    NAME reconnect_e2e_test
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/reconnect_e2e_test.py
-            --server-bin $<TARGET_FILE:mahjong_server>)
-  set_tests_properties(reconnect_e2e_test PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
-endif()
-
-# 日麻端到端：真服务端 + create_room{"mode":"riichi"} 打完一局，验牌山切分/持点/和牌载荷
-if(Python3_Interpreter_FOUND)
-  add_test(
-    NAME riichi_e2e_test
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/riichi_e2e_test.py
-            --server-bin $<TARGET_FILE:mahjong_server>)
-  set_tests_properties(riichi_e2e_test PROPERTIES TIMEOUT 180)
-endif()
-
-# 对局回放端到端（PROTOCOL v2.3 §4.13/§5.18）：真服务端 + --replay-dir 打完一局 →
-# 回放落盘 → 同账号取回并逐帧拼接 → 异账号被拒 → 重放结果与实时对局一致。
-# 取回要账号（鉴权按 seats[].account_id），所以没有 MySQL 时 77 = SKIP，不静默变绿。
-if(Python3_Interpreter_FOUND)
-  add_test(
-    NAME replay_e2e_test
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/replay_e2e_test.py
-            --server-bin $<TARGET_FILE:mahjong_server>)
-  set_tests_properties(replay_e2e_test PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
+    NAME gateway_smoke_slow_test
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/gateway_smoke_test.py
+            --server-bin $<TARGET_FILE:mahjong_server> --slow-tests)
+  set_tests_properties(gateway_smoke_slow_test PROPERTIES TIMEOUT 400 LABELS slow)
 endif()
 
 # 回放播放器的前端逻辑验收（node，无浏览器）：帧驱动 / 视角过滤 / 透视 / 批量推进。
-find_program(NODE_EXECUTABLE node)
 if(NODE_EXECUTABLE)
-  add_test(NAME web_replay_test
-           COMMAND ${NODE_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/web/replay.mjs)
-  set_tests_properties(web_replay_test PROPERTIES TIMEOUT 60)
-
-  # 回放控制条的进度条分段（纯函数）：局边界切分 + 标签抽稀。
-  add_test(NAME web_replaybar_test
-           COMMAND ${NODE_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/web/replaybar.mjs)
-  set_tests_properties(web_replaybar_test PROPERTIES TIMEOUT 30)
-
-  # §5.18 v2.6 的载荷还原（gzip + base64）：明文兼容、解压、大载荷、未知编码与截断流。
-  # 与 replay_e2e_test.py 是两端：那边验真服务端产物，这边验浏览器侧的还原。
-  add_test(NAME web_replay_payload_test
-           COMMAND ${NODE_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/web/replay_payload.mjs)
-  set_tests_properties(web_replay_payload_test PROPERTIES TIMEOUT 30)
-
-  # 回放帧 → Promise 的拼装（client.js）：顺序/乱序、多片要等到齐、明文兼容、失败帧。
-  add_test(NAME web_client_replay_test
-           COMMAND ${NODE_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/web/client_replay.mjs)
-  set_tests_properties(web_client_replay_test PROPERTIES TIMEOUT 30)
-
-  # index.html 的 id 契约：不重复，且大厅面板不会被 ui.css 的 id 选择器隐藏。
-  # `#stats` 曾同时是 HUD 计数器与战绩面板，被 `.hud, #stats { display: none }` 一起隐藏。
-  add_test(NAME web_dom_ids_test
-           COMMAND ${NODE_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/web/dom_ids.mjs)
-  set_tests_properties(web_dom_ids_test PROPERTIES TIMEOUT 30)
+  file(GLOB MAHJONG_NODE_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/web/*.mjs)
+  foreach(test_source IN LISTS MAHJONG_NODE_TEST_SOURCES)
+    get_filename_component(test_name ${test_source} NAME_WE)
+    add_test(NAME web_${test_name}_test COMMAND ${NODE_EXECUTABLE} ${test_source})
+    set_tests_properties(web_${test_name}_test PROPERTIES TIMEOUT 60)
+  endforeach()
 endif()

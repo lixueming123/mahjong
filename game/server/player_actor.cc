@@ -3,7 +3,6 @@
 #include <cassert>
 #include <exception>
 #include <optional>
-#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -15,39 +14,10 @@
 #include "frame_parser.h"
 #include "overloaded.h"
 #include "protocol.h"
-#include "replay_store.h"
 
 namespace ex = stdexec;
 
 namespace mahjong {
-namespace {
-
-// Answers one §4.13 request: awaits the store (which awaits the account database), then frames the
-// payload as however many §5.18 `replay` frames it takes and queues them on the connection.
-//
-// A free function rather than a PlayerActor member, and it captures only |connection|: the request
-// outlives the mailbox turn that started it, so nothing here may point at the actor. SendFrame is
-// thread-safe and a no-op once the socket is closed, so a client that hangs up mid-query simply
-// gets nothing.
-//
-// §5.18 splits here rather than in the store because the 64 KB line limit is a property of the wire
-// (§1.2), and this is the side that owns the outbox.
-stdexec::task<void> AnswerReplayRequest(ReplayStore& store, std::shared_ptr<Connection> connection, std::string room_id,
-                                        uint64_t account_id) {
-  ReplayLoad loaded = co_await store.Load(room_id, account_id);
-  if (!loaded.found) {
-    // §4.13: one code for "no such recording" and "not yours" — a stranger must not be able to
-    // probe which room ids were played.
-    connection->SendFrame(protocol::ReplayErrorFrame(room_id, protocol::ErrorCode::kRoomNotFound));
-    co_return;
-  }
-  for (std::string& frame : protocol::SplitReplayFrames(room_id, loaded.encoding, loaded.payload)) {
-    connection->SendFrame(std::move(frame));
-  }
-  co_return;
-}
-
-}  // namespace
 
 PlayerActor::PlayerActor(std::shared_ptr<Connection> conn, std::shared_ptr<PlayerIdAllocator> player_ids,
                          std::shared_ptr<SessionRegistry> sessions, ex_actor::ActorRef<LobbyActor> lobby)
@@ -63,29 +33,43 @@ PlayerActor::PlayerActor(std::shared_ptr<Connection> conn, std::shared_ptr<Playe
   assert(static_cast<void*>(static_cast<SeatEndpoint*>(this)) == static_cast<void*>(this));
 }
 
-// The one public entry (player_actor.h / seat_endpoint.h). No arm suspends, so this
-// coroutine runs to the co_return on the mailbox turn that popped it; the next message cannot
-// start in the middle. The visitor is a plain object rather than a coroutine per arm: nothing
-// here awaits, and wrapping the arms in tasks would add a coroutine frame to every message.
+// The one public entry (player_actor.h / seat_endpoint.h).
+//
+// No gate here, and that is a rule rather than an omission: nothing in this actor locks. A handler
+// that runs to completion cannot interleave with another — the mailbox gives that for free — so
+// the only hazard is a handler that *suspends*, and the answer is to not depend on actor state
+// after a suspension rather than to make every message pay for a lock. PlayerReplayAgent is the one
+// that suspends, and it copies the connection and the account id out before it does: what it holds
+// across the await is a shared_ptr and a plain integer, neither of which points back here.
+//
+// The visitor is a plain object rather than a coroutine per arm: the arms that never suspend stay
+// allocation-free, and the one that does (OnFrame) is a coroutine of its own.
 stdexec::task<void> PlayerActor::Dispatch(PlayerEnvelope envelope) {
+  // Frame dispatch is the only arm that can suspend, so it is awaited directly rather than through
+  // the visitor below. Keeping it out of the visitor is what leaves every other arm — the seat
+  // frames a room broadcasts four times per state change, above all — a plain call with no
+  // coroutine frame.
+  if (PlayerEnvelope::OnFrameMsg* frame = std::get_if<PlayerEnvelope::OnFrameMsg>(&envelope.msg); frame != nullptr) {
+    co_await OnFrame(std::move(frame->line));
+    co_return;
+  }
   std::visit(overloaded {
                  [this](PlayerEnvelope::SetSelfRefMsg&& m) { SetSelfRef(std::move(m.self)); },
-                 [this](PlayerEnvelope::OnFrameMsg&& m) { OnFrame(std::move(m.line)); },
                  [this](PlayerEnvelope::OnClosedMsg&& m) { OnClosed(std::move(m.reason)); },
                  [this](PlayerEnvelope::OnIdleTimeoutMsg&&) { OnIdleTimeout(); },
                  [this](PlayerEnvelope::OnLoginResultMsg&& m) {
                    --db_replies_in_flight_;
-                   OnLoginResult(std::move(m.outcome));
+                   session_agent_.OnLoginResult(std::move(m.outcome));
                    RetireIfIdle();
                  },
                  [this](PlayerEnvelope::OnRegisterResultMsg&& m) {
                    --db_replies_in_flight_;
-                   OnRegisterResult(std::move(m.outcome));
+                   session_agent_.OnRegisterResult(std::move(m.outcome));
                    RetireIfIdle();
                  },
                  [this](PlayerEnvelope::OnStatsResultMsg&& m) {
                    --db_replies_in_flight_;
-                   OnStatsResult(std::move(m.outcome));
+                   session_agent_.OnStatsResult(std::move(m.outcome));
                    RetireIfIdle();
                  },
                  [this](PlayerEnvelope::SetRoomMsg&& m) { SetRoom(std::move(m.room)); },
@@ -93,6 +77,7 @@ stdexec::task<void> PlayerActor::Dispatch(PlayerEnvelope envelope) {
                  [this](PlayerEnvelope::SeatErrorMsg&& m) { SeatError(std::move(m.frame), m.quota); },
                  [this](PlayerEnvelope::CloseMsg&& m) { Close(std::move(m.reason)); },
                  [this](PlayerEnvelope::RetireMsg&&) { RetireRequested(); },
+                 [](PlayerEnvelope::OnFrameMsg&&) {},  // handled above
              },
              std::move(envelope.msg));
   co_return;
@@ -146,6 +131,8 @@ void PlayerActor::SeatError(std::string frame, QuotaKind quota) {
 
 void PlayerActor::Close(std::string reason) { conn_->RequestClose(std::move(reason)); }
 
+void PlayerActor::SendFrame(std::string frame) { conn_->SendFrame(frame); }
+
 void PlayerActor::SendError(protocol::ErrorCode code, std::string_view message) {
   conn_->SendFrame(protocol::ErrorFrame(code, message));
 }
@@ -181,234 +168,56 @@ void PlayerActor::ReplyParseError(const frame_parser::Error& error) {
   }
 }
 
-void PlayerActor::AccountServiceUnavailable() {
-  // ACCOUNT_DESIGN.md §2.3: a server-side fault, so no quota is charged (only RecordBadFrame
-  // and RecordIllegalOp would, and neither is used here).
-  SendError(protocol::ErrorCode::kInternal, "account service unavailable");
-}
-
-namespace {
-
-// The whole client protocol, in the order a frame is looked up: the player's own account frames
-// first, then the two agents. The tables themselves live next to the handlers they name
-// (player_agent.h), so a message is spelled exactly once — earlier there was a routing table
-// here *and* a handler table per module, twenty-two rows for eleven frames, and the two could
-// drift apart without anything noticing.
-constexpr std::span<const FrameBinding> kFrameTables[] = {kSessionFrameBindings, kLobbyFrameBindings,
-                                                          kRoomFrameBindings, kReplayFrameBindings};
-
-constexpr size_t CountBindings() {
-  size_t total = 0;
-  for (const std::span<const FrameBinding>& table : kFrameTables) {
-    total += table.size();
-  }
-  return total;
-}
-
-// Adding a frame type to protocol::kClientFrameTypes without binding a handler fails to build.
-static_assert(CountBindings() == std::size(protocol::kClientFrameTypes),
-              "every client frame type needs a binding in player_agent.h");
-
-const FrameBinding* FindBinding(protocol::FrameType type) {
-  for (const std::span<const FrameBinding>& table : kFrameTables) {
-    for (const FrameBinding& binding : table) {
-      if (binding.type == type) {
-        return &binding;
+bool PlayerActor::AllowFrame(FrameGate gate) {
+  switch (gate) {
+    case FrameGate::kAnonymousOnly:
+      // §3.1: a second login is refused as such rather than as a malformed frame — the two are
+      // charged to different §7.2 counters.
+      if (!session_.CanStartAuth()) {
+        BadRequest("already logged in");
+        return false;
       }
-    }
+      return true;
+    case FrameGate::kLoggedInOnly:
+      // §4.1: besides login and register, nothing is accepted before an identity.
+      if (!session_.logged_in()) {
+        SendError(protocol::ErrorCode::kNotLoggedIn, "send login first");
+        return false;
+      }
+      return true;
   }
-  return nullptr;
+  return false;
 }
 
-}  // namespace
-
-void PlayerActor::OnFrame(std::string line) {
+// The frame path. It is a coroutine because its handlers are: the replay lookup awaits the store,
+// which awaits the account database, and doing it here means no detached coroutine and no captured
+// connection. Dispatch holds the gate across this await, so the mailbox cannot start the next
+// message while it is parked — that is what makes the suspension safe.
+stdexec::task<void> PlayerActor::OnFrame(std::string line) {
   try {
     frame_parser::Error error;
     std::optional<frame_parser::Envelope> envelope = frame_parser::ParseEnvelope(line, &error);
     if (!envelope.has_value()) {
       ReplyParseError(error);
-      return;
+      co_return;
     }
-
-    const FrameBinding* binding = FindBinding(envelope->type);
+    const FrameBinding* binding = FindClientFrame(envelope->type);
     if (binding == nullptr) {
-      // The parse layer validated the integer range (§1.3), so reaching here means the value
-      // is either a server→client type or a client type nobody routes — both BAD_REQUEST.
+      // The parse layer validated the integer range (§1.3), so reaching here means the value is
+      // either a server→client type or a client type nobody routes — both BAD_REQUEST.
       BadRequest("unknown frame type: " + std::string(protocol::NameOf(envelope->type)));
-      return;
+      co_return;
     }
-    // PROTOCOL.md §4.1: besides login and register, nothing is accepted before an identity.
-    if (binding->requires_login && !session_.logged_in()) {
-      SendError(protocol::ErrorCode::kNotLoggedIn, "send login first");
-      return;
+    if (!AllowFrame(binding->gate)) {
+      co_return;
     }
-    binding->handle(Services(), std::move(envelope->frame));
+    co_await binding->invoke(*this, std::move(envelope->frame));
   } catch (const std::exception& e) {
     // A thrown handler would terminate the detached operation, so nothing escapes here.
     spdlog::error("{}: frame handling failed: {}", conn_->Describe(), e.what());
     SendError(protocol::ErrorCode::kInternal, "internal error");
   }
-}
-
-// The account entry points handlers call. The "already logged in" guard lives in the handlers
-// (they check before parsing, so §7.2 charges the right counter); what stays here is everything
-// that needs the database or the identity allocator, which no handler may touch.
-void PlayerActor::SendFrame(std::string frame) { conn_->SendFrame(frame); }
-
-void PlayerActor::BeginAccountLogin(std::string username, std::string password, bool resume) {
-  DbService& db = GetDbService();
-  if (db.IsEmpty() || self_ref_.IsEmpty()) {
-    AccountServiceUnavailable();
-    return;
-  }
-  // Asynchronous by necessity (§6.1): the actor submits to DbActor and returns; OnLoginResult,
-  // which runs inside this actor's mailbox, is the only place the session identity changes.
-  pending_resume_ = resume;
-  session_.BeginAuth();
-  ++db_replies_in_flight_;  // Retire() must refuse destruction until the answer is delivered
-  ActorSendScope().spawn(db.Login(std::move(username), std::move(password), self_ref_));
-}
-
-void PlayerActor::LoginAsGuest(std::string name) {
-  session_.LoginAsGuest(player_ids_->Next(), std::move(name));
-  spdlog::info("{}: logged in as {} ({})", conn_->Describe(), session_.player_id(), session_.name());
-  // PROTOCOL v2.2 §5.1: the guest path keeps its frozen frame shape (no in_room).
-  conn_->SendFrame(protocol::LoginOkFrame(session_.player_id(), session_.name()));
-}
-
-void PlayerActor::BeginRegister(std::string username, std::string password, std::string nickname) {
-  DbService& db = GetDbService();
-  if (db.IsEmpty() || self_ref_.IsEmpty()) {
-    AccountServiceUnavailable();
-    return;
-  }
-  // A brand-new account has no room to resume; the lobby will answer in_room:false.
-  pending_resume_ = true;
-  session_.BeginAuth();
-  ++db_replies_in_flight_;  // see BeginAccountLogin
-  ActorSendScope().spawn(db.Register(std::move(username), std::move(password), std::move(nickname), self_ref_));
-}
-
-void PlayerActor::RequestStats() {
-  if (session_.account_id() == 0) {
-    // §3.3: a guest has no account, so nothing was ever recorded. A zeroed payload is not an
-    // error — the client then needs no special case for guest sessions.
-    conn_->SendFrame(protocol::StatsFrame(protocol::StatsSnapshot {}));
-    return;
-  }
-  DbService& db = GetDbService();
-  if (db.IsEmpty() || self_ref_.IsEmpty()) {
-    AccountServiceUnavailable();
-    return;
-  }
-  ++db_replies_in_flight_;  // OnStatsResult is owed to this mailbox
-  ActorSendScope().spawn(db.FetchStats(session_.account_id(), self_ref_));
-}
-
-void PlayerActor::RequestReplay(std::string room_id) {
-  ReplayStore& store = GetReplayStore();
-  if (store.IsEmpty() || self_ref_.IsEmpty()) {
-    // No store installed is the "recording disabled" build: answer the same ROOM_NOT_FOUND a
-    // missing file gets, so the client needs no second code path (§4.13).
-    conn_->SendFrame(protocol::ReplayErrorFrame(room_id, protocol::ErrorCode::kRoomNotFound));
-    return;
-  }
-  // The answer is framed by a coroutine of its own instead of coming back as a message and an
-  // OnReplayResult arm: the store now awaits the account database to authorize (§4.13), and a
-  // `co_await` here would suspend this actor's mailbox mid-handler — exactly what player_actor.h's
-  // no-suspension rule forbids.
-  //
-  // Only `conn_` and the two plain values are captured, never `this`: the connection outlives this
-  // actor's turn, and a client that disconnects while the database is thinking must not leave a
-  // frame pointing at a destroyed player. SendFrame is thread-safe and a no-op after close, so a
-  // late answer to a gone client is dropped by design rather than by a liveness check here.
-  //
-  // It lives in ActorSendScope because the store suspends: that parked coroutine would outlive the
-  // actor world otherwise, and main() drains the scope before `ex_actor::Shutdown()`.
-  std::shared_ptr<Connection> connection = conn_;
-  const uint64_t account_id = session_.account_id();
-  ActorSendScope().spawn(AnswerReplayRequest(store, std::move(connection), std::move(room_id), account_id));
-}
-// retryable: a rejected login cannot strand the connection in kAuthPending, or the client could
-// never send a second one (§3.1: retry on a typo is the common case).
-void PlayerActor::OnLoginResult(AuthOutcome outcome) {
-  switch (outcome.status) {
-    case AuthStatus::kOk:
-      AcceptAccount(outcome);  // clears the pending phase itself when it cannot take the account
-      return;
-    case AuthStatus::kAuthFailed:
-      // §3.1: an unknown account and a wrong password answer the same thing, and the failure
-      // counts toward the frozen illegal-operation quota (§7.2).
-      session_.FailAuth();
-      IllegalOperation(protocol::ErrorCode::kAuthFailed, "wrong username or password");
-      return;
-    case AuthStatus::kUsernameTaken:  // not produced by a login
-    case AuthStatus::kUnavailable:
-      session_.FailAuth();
-      AccountServiceUnavailable();
-      return;
-  }
-}
-
-void PlayerActor::OnRegisterResult(AuthOutcome outcome) {
-  switch (outcome.status) {
-    case AuthStatus::kOk:
-      AcceptAccount(outcome);  // §3.2: a successful register is a login, answer login_ok
-      return;
-    case AuthStatus::kUsernameTaken:
-      session_.FailAuth();  // retryable, no quota: the client picks another name
-      SendError(protocol::ErrorCode::kUsernameTaken, "username already taken");
-      return;
-    case AuthStatus::kAuthFailed:  // not produced by a register
-    case AuthStatus::kUnavailable:
-      session_.FailAuth();
-      AccountServiceUnavailable();
-      return;
-  }
-}
-
-void PlayerActor::OnStatsResult(StatsOutcome outcome) {
-  if (!outcome.ok) {
-    AccountServiceUnavailable();
-    return;
-  }
-  conn_->SendFrame(protocol::StatsFrame(outcome.snapshot));
-}
-
-bool PlayerActor::AcceptAccount(const AuthOutcome& outcome) {
-  // The socket died while the query ran (§6.3). Both checks are needed: the poll thread marks
-  // the connection closed before it queues OnClosed, so a result can arrive in the window
-  // where closed() is already true but the session is not yet closed. Claiming here would
-  // park the account as "online" with nobody left to release it.
-  if (conn_->closed() || session_.closed()) {
-    return false;
-  }
-  if (!sessions_->TryAcquire(outcome.account.id)) {
-    session_.FailAuth();  // back to kAnonymous so the client may log in as someone else
-    SendError(protocol::ErrorCode::kAlreadyOnline, "this account is already online");
-    return false;
-  }
-  const std::string player_id = AccountPlayerId(outcome.account.id);
-  // Unreachable in practice: the only caller runs in kAuthPending. Rolling back the claim rather
-  // than asserting keeps a bad build from parking an account as online forever.
-  if (!session_.LoginAsAccount(outcome.account.id, player_id, outcome.account.nickname)) {
-    session_.FailAuth();  // ... and from stranding the client in kAuthPending either
-    sessions_->Release(outcome.account.id);
-    return false;
-  }
-  spdlog::info("{}: logged in as {} ({}), account {}", conn_->Describe(), session_.player_id(), session_.name(),
-               outcome.account.username);
-  // PROTOCOL v2.2 §5.1: the lobby owns room membership, so it answers `login_ok` with the
-  // authoritative `in_room` and, when the account is still seated, pushes the room snapshot.
-  // An empty self ref only happens in a test harness that never installed it; keep the old
-  // direct answer there rather than dereferencing an empty actor ref.
-  if (self_ref_.IsEmpty()) {
-    conn_->SendFrame(protocol::LoginOkFrame(session_.player_id(), session_.name(), /*in_room=*/false));
-    return true;
-  }
-  ActorSendScope().spawn(lobby_.Send<&LobbyActor::OnLoggedIn>(self_ref_, session_.Info(), pending_resume_));
-  return true;
+  co_return;
 }
 
 void PlayerActor::OnClosed(std::string reason) {

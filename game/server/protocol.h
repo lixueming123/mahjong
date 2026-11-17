@@ -75,7 +75,7 @@ inline constexpr int kMaxActionTimeoutMs = 60000;
 // ---- §4 client frame types ------------------------------------------------------------
 // The "type" field of every client frame is an integer wire value (PROTOCOL v2.0 §1.3.1);
 // the frozen FrameType enum and the kClientFrameTypes list live in protocol_enums.h, which
-// the routing table (player_actor.cc) asserts its completeness against at compile time.
+// the registration table (player_agent.cc) is checked against at compile time.
 
 // ---- ACCOUNT_DESIGN.md §3.1: login/register field rules --------------------------------
 // Account names and passwords are deliberately ASCII-only, which makes a SQL injection

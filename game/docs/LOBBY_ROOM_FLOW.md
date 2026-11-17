@@ -52,8 +52,8 @@ sequenceDiagram
     C->>GW: {"type":6,"mode":1,"length":2}
     GW->>GW: CheckRateLimit / 读 socket
     GW->>PA: Dispatch(OnFrame(line))
-    PA->>PA: ParseEnvelope + FindBinding(需登录)
-    PA->>PA: HandleCreateRoom 解析 mode/length
+    PA->>PA: ParseEnvelope + FindClientFrame 查表 + §4.1 门禁
+    PA->>PA: PlayerLobbyAgent::HandleCreateRoom 解析 mode/length
     Note over PA: classic+hanchan 直接 BAD_REQUEST<br/>未知 mode 在入口就拒
     PA->>LB: spawn Send<CreateRoomWithMode>(self, info, mode, length)
 
@@ -319,8 +319,9 @@ PlayerActor::OnFrame → HandleDiscard → room_.Send<Dispatch>(GameFrame(player
 | 主题 | 位置 |
 | --- | --- |
 | 帧分发入口 | `gateway.cc:532` `DispatchFrame` |
-| 协议路由表 | `player_agent.h:78-93` `kLobbyFrameBindings` / `kRoomFrameBindings` |
-| 建房参数解析 | `player_lobby_agent.cc:22-59` `HandleCreateRoom` |
+| 协议绑定表 | `player_agent.cc` `kFrameBindings`（每行 = wire type + §4.1 门禁 + 转发到 agent 的 thunk），按 type 索引后由 `FindClientFrame` 查表；重复/遗漏在编译期报错 |
+| 各协议的 agent | `player_session_agent.*`（身份/账号/战绩）、`player_lobby_agent.*`、`player_room_agent.*`、`player_replay_agent.*` |
+| 建房参数解析 | `player_lobby_agent.cc` `PlayerLobbyAgent::HandleCreateRoom` |
 | 建房主体 | `lobby.cc:182-292` `CreateRoomWithMode` |
 | 入房主体 | `lobby.cc:382-465` `JoinRoom` |
 | 开局 | `lobby.cc:467-489` `Ready` |
