@@ -38,6 +38,25 @@ inline constexpr size_t kMaxUnframedBytes = 65536;
 // How long the gateway keeps a connection open to flush a final error frame before
 // closing it (PROTOCOL §1.2.2 asks for a best-effort FRAME_TOO_LARGE before closing).
 inline constexpr int kCloseFlushTimeoutMs = 300;
+// How long the writer waits, once the outbox has drained and a close is pending, for the last
+// frames that close implies (the actor answering OnClosed, and the error frame queued before
+// SendFrameThenClose asked for the close) to arrive. Short on purpose: a client that reconnects
+// immediately — account_e2e_test closes and retries its login in a loop — must see the seat
+// released promptly, and kCloseFlushTimeoutMs remains the outer bound for a peer that stopped
+// reading.
+inline constexpr int kCloseGraceMs = 5;
+// How long a freshly accepted connection has to deliver its first complete frame. This is the
+// slowloris bound: a peer that dribbles a byte at a time keeps `last_inbound_ms` fresh (so the
+// §1.6 idle window never fires) and never completes a line (so neither the frame handler nor the
+// bad-frame quota ever sees it). §1.6's idle window alone would let such a peer hold a socket
+// forever, so the first frame gets its own, much shorter, deadline.
+inline constexpr int kFirstFrameTimeoutMs = 10000;
+// Upper bound on a single socket write before the connection is considered stalled. asio
+// operations have no timeout of their own, and `async_write_some` against a peer that stopped
+// reading never completes — TCP advertises a zero window and the kernel blocks rather than
+// failing. Without this bound the write coroutine would pin `writing` forever, which in turn
+// strands the read coroutine (only CloseClient's socket.close() cancels it).
+inline constexpr int kWriteStallTimeoutMs = 5000;
 
 // ---- §1.6 heartbeat -------------------------------------------------------------------
 inline constexpr int kIdleTimeoutMs = 20000;

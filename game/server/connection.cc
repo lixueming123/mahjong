@@ -1,63 +1,37 @@
 #include "connection.h"
 
-#include <unistd.h>
-
-#include <cerrno>
 #include <utility>
 
 #include "net.h"
 
 namespace mahjong {
-namespace {
 
-// True when the byte is in the pipe or a previous byte is already waiting (EAGAIN).
-bool WriteWakeByte(int fd) {
-  const char kByte = 'w';
-  while (true) {
-    const ssize_t written = ::write(fd, &kByte, 1);
-    if (written >= 0) {
-      return true;
-    }
-    if (errno == EINTR) {
-      continue;
-    }
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-      return true;
-    }
-    return false;
-  }
+Connection::Connection(int fd, int id, bool owns_fd) : fd_(fd), id_(id), owns_fd_(owns_fd) {}
+
+void Connection::SetWaker(Waker waker) {
+  std::lock_guard lock(mutex_);
+  waker_ = std::move(waker);
 }
 
-}  // namespace
-
-Connection::Connection(int fd, int id, int wake_write_fd, std::atomic_flag* wake_flag)
-    : fd_(fd), id_(id), wake_write_fd_(wake_write_fd), wake_flag_(wake_flag) {}
-
-void Connection::Wake() {
-  if (wake_write_fd_ < 0) {
-    return;
-  }
-  // The outbox mutex is already released. The flag only coalesces the pipe write: the first
-  // sender arms it and writes one byte, and everyone else returns without a syscall.
-  if (wake_flag_ == nullptr) {
-    static_cast<void>(WriteWakeByte(wake_write_fd_));
-    return;
-  }
-  if (wake_flag_->test_and_set(std::memory_order_acq_rel)) {
-    return;
-  }
-  if (!WriteWakeByte(wake_write_fd_)) {
-    wake_flag_->clear(std::memory_order_release);
+void Connection::Wake(const Waker& waker) {
+  // Called with the outbox mutex released; the waker was copied under it (see the callers), so a
+  // concurrent SetWaker/MarkClosed cannot pull it out from under this call. With no waker (unit
+  // tests) there is nothing to wake: the frame stays queued until someone drains it.
+  if (waker) {
+    waker();
   }
 }
 
 void Connection::AppendFrameLocked(std::string_view frame) {
   // Bounded on purpose: see kMaxOutboxBytes (connection.h). A peer that never reads keeps the
-  // gateway's send() in EAGAIN, and the unsent tail comes straight back here, so without this the
+  // gateway's write in EAGAIN, and the unsent tail comes straight back here, so without this the
   // outbox is an unbounded buffer fed by remote input. Dropping the frame and closing is the only
   // correct answer — the peer that filled it is not going to drain it.
+  //
+  // The budget covers the batch the writer is currently working on (in_flight_bytes_) as well as
+  // what is queued: draining does not free memory, it only moves it into the write coroutine.
   const size_t needed = frame.size() + 1;  // + the terminator appended below
-  if (outbox_.size() + needed > kMaxOutboxBytes) {
+  if (in_flight_bytes_ + outbox_.size() + needed > kMaxOutboxBytes) {
     close_requested_ = true;
     if (close_reason_.empty()) {
       close_reason_ = "outbound buffer full";
@@ -71,17 +45,20 @@ void Connection::AppendFrameLocked(std::string_view frame) {
 }
 
 void Connection::SendFrame(std::string_view frame) {
+  Waker waker;
   {
     std::lock_guard lock(mutex_);
     if (closed_) {
       return;
     }
     AppendFrameLocked(frame);
+    waker = waker_;
   }
-  Wake();
+  Wake(waker);
 }
 
 void Connection::SendFrameThenClose(std::string_view frame, std::string reason) {
+  Waker waker;
   {
     std::lock_guard lock(mutex_);
     if (closed_) {
@@ -92,11 +69,13 @@ void Connection::SendFrameThenClose(std::string_view frame, std::string reason) 
     if (close_reason_.empty()) {
       close_reason_ = std::move(reason);
     }
+    waker = waker_;
   }
-  Wake();
+  Wake(waker);
 }
 
 void Connection::RequestClose(std::string reason) {
+  Waker waker;
   {
     std::lock_guard lock(mutex_);
     if (closed_ || close_requested_) {
@@ -104,8 +83,9 @@ void Connection::RequestClose(std::string reason) {
     }
     close_requested_ = true;
     close_reason_ = std::move(reason);
+    waker = waker_;
   }
-  Wake();
+  Wake(waker);
 }
 
 bool Connection::closed() const {
@@ -123,14 +103,14 @@ std::string Connection::close_reason() const {
   return close_reason_;
 }
 
-bool Connection::HasPendingOutbox() const {
-  std::lock_guard lock(mutex_);
-  return !outbox_.empty();
-}
-
 size_t Connection::outbox_bytes() const {
   std::lock_guard lock(mutex_);
   return outbox_.size();
+}
+
+size_t Connection::in_flight_bytes() const {
+  std::lock_guard lock(mutex_);
+  return in_flight_bytes_;
 }
 
 int Connection::AddBadFrame() {
@@ -167,31 +147,16 @@ void Connection::DrainOutbox(std::string* out) {
   std::lock_guard lock(mutex_);
   out->clear();
   out->swap(outbox_);
+  // The batch is now the writer's, but it is still this connection's memory. Recording it here is
+  // what keeps kMaxOutboxBytes a bound on the connection and not just on the queue: a peer that
+  // never reads empties the queue on every pass, and without this the writer's copy and a freshly
+  // refilled queue add up to twice the cap.
+  in_flight_bytes_ = out->size();
 }
 
-void Connection::PushBackOutbox(std::string remainder) {
-  if (remainder.empty()) {
-    return;
-  }
+void Connection::FinishWrite() {
   std::lock_guard lock(mutex_);
-  if (closed_) {
-    return;
-  }
-  // The bound applies here too, and this is the path that actually matters. FlushOutbox drains the
-  // whole outbox and then pushes back whatever send() could not take, so a peer that never reads
-  // empties the buffer on every pass and lets the producers refill it to the cap in between:
-  // checking only on append would let the two halves add up to twice the bound (measured: 29MB
-  // against a 4MB cap) and keep growing that way round after round. A peer whose drain produced
-  // more than the cap has proven it is not reading, which is exactly the condition the bound is
-  // there to catch.
-  if (outbox_.size() + remainder.size() > kMaxOutboxBytes) {
-    close_requested_ = true;
-    if (close_reason_.empty()) {
-      close_reason_ = "outbound buffer full";
-    }
-    return;
-  }
-  outbox_.insert(0, remainder);
+  in_flight_bytes_ = 0;
 }
 
 void Connection::MarkClosed() {
@@ -204,8 +169,11 @@ void Connection::MarkClosed() {
     closed_ = true;
     fd = fd_;
     fd_ = -1;
+    waker_ = nullptr;  // the gateway's I/O object is going away with the socket
   }
-  mahjong::net::CloseFd(fd);
+  if (owns_fd_) {
+    mahjong::net::CloseFd(fd);
+  }
 }
 
 std::string Connection::Describe() const {
