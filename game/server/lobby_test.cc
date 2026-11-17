@@ -133,7 +133,7 @@ TEST_F(LobbyTest, ReclaimsARoomAndItsConnectionAfterMatchEnd) {
   stdexec::sync_wait(lobby.Send<&LobbyActor::SetSelfRef>(lobby));
 
   // An invalid fd: the outbox and the close request still work, and no socket is touched.
-  auto conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1, /*wake_write_fd=*/-1);
+  auto conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1);
   ASSERT_FALSE(conn->close_requested());
 
   stdexec::sync_wait(lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(conn, lobby), MakePlayer()));
@@ -161,7 +161,7 @@ TEST_F(LobbyTest, LoggedInAccountRebindsItsSeatedRoom) {
   stdexec::sync_wait(lobby.Send<&LobbyActor::SetSelfRef>(lobby));
 
   const PlayerInfo player = MakePlayer();
-  auto first_conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1, /*wake_write_fd=*/-1);
+  auto first_conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1);
   const ex_actor::ActorRef<SeatEndpoint> first = SpawnConnector(first_conn, lobby);
   stdexec::sync_wait(lobby.Send<&LobbyActor::CreateRoom>(first, player));
   const std::string room_id = JoinedRoomId(first_conn);
@@ -171,7 +171,7 @@ TEST_F(LobbyTest, LoggedInAccountRebindsItsSeatedRoom) {
   // The refresh: the old socket goes away, the seat is entrusted, then a fresh connection logs
   // in with the same account and must take the seat back.
   stdexec::sync_wait(lobby.Send<&LobbyActor::OnConnectionClosed>(player, first));
-  auto second_conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/2, /*wake_write_fd=*/-1);
+  auto second_conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/2);
   const ex_actor::ActorRef<SeatEndpoint> second = SpawnConnector(second_conn, lobby);
   stdexec::sync_wait(lobby.Send<&LobbyActor::OnLoggedIn>(second, player, /*resume=*/true));
 
@@ -188,8 +188,8 @@ TEST_F(LobbyTest, ReapRoomIsIdempotentAndLeavesOtherRoomsAlone) {
       WaitValue(ex_actor::Spawn<LobbyActor>(/*seed=*/7, kFastWindowMs, timer_, kFastReclaimMs));
   stdexec::sync_wait(lobby.Send<&LobbyActor::SetSelfRef>(lobby));
 
-  auto first = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1, /*wake_write_fd=*/-1);
-  auto second = std::make_shared<Connection>(/*fd=*/-1, /*id=*/2, /*wake_write_fd=*/-1);
+  auto first = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1);
+  auto second = std::make_shared<Connection>(/*fd=*/-1, /*id=*/2);
   PlayerInfo alice;
   alice.player_id = "p-alice";
   alice.name = "Alice";
@@ -233,9 +233,9 @@ TEST_F(LobbyTest, RoomIdsAreUniqueAcrossLobbiesAndRooms) {
     player.name = "n";
     return player;
   };
-  auto first_conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1, /*wake_write_fd=*/-1);
-  auto second_conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/2, /*wake_write_fd=*/-1);
-  auto third_conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/3, /*wake_write_fd=*/-1);
+  auto first_conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1);
+  auto second_conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/2);
+  auto third_conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/3);
 
   stdexec::sync_wait(
       first_lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(first_conn, first_lobby), make_player("p-alice")));
@@ -272,7 +272,7 @@ TEST_F(LobbyTest, PipelinedCreateRoomKeepsOneRoomPerPlayer) {
   ex_actor::ActorRef<LobbyActor> lobby =
       WaitValue(ex_actor::Spawn<LobbyActor>(/*seed=*/99, kFastWindowMs, timer_, kFastReclaimMs));
   stdexec::sync_wait(lobby.Send<&LobbyActor::SetSelfRef>(lobby));
-  auto conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1, /*wake_write_fd=*/-1);
+  auto conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1);
 
   // Neither send is awaited, so both reach the lobby before the first room finished spawning.
   ActorSendScope().spawn(lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(conn, lobby), MakePlayer()));
@@ -302,7 +302,7 @@ TEST_F(LobbyTest, DisconnectAroundCreateRoomLeavesNoRoom) {
   ex_actor::ActorRef<LobbyActor> lobby =
       WaitValue(ex_actor::Spawn<LobbyActor>(/*seed=*/4242, kFastWindowMs, timer_, kFastReclaimMs));
   stdexec::sync_wait(lobby.Send<&LobbyActor::SetSelfRef>(lobby));
-  auto conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1, /*wake_write_fd=*/-1);
+  auto conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1);
 
   stdexec::sync_wait(lobby.Send<&LobbyActor::CreateRoom>(SpawnConnector(conn, lobby), MakePlayer()));
   stdexec::sync_wait(lobby.Send<&LobbyActor::OnConnectionClosed>(MakePlayer(), ex_actor::ActorRef<SeatEndpoint> {}));
@@ -326,7 +326,7 @@ TEST_F(LobbyTest, RoomSpawnedDuringDisconnectIsDestroyed) {
   ex_actor::ActorRef<LobbyActor> lobby =
       WaitValue(ex_actor::Spawn<LobbyActor>(/*seed=*/4242, kFastWindowMs, timer_, kFastReclaimMs));
   stdexec::sync_wait(lobby.Send<&LobbyActor::SetSelfRef>(lobby));
-  auto conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1, /*wake_write_fd=*/-1);
+  auto conn = std::make_shared<Connection>(/*fd=*/-1, /*id=*/1);
 
   const size_t live_before = RoomActor::live_room_count();
   ASSERT_EQ(live_before, 0u) << "a previous test left a room behind";
@@ -362,7 +362,7 @@ TEST(LobbyPerf, RegistryLock) {
   auto sessions = std::make_shared<SessionRegistry>();
 
   auto spawn_connector = [&](int id, ex_actor::ActorRef<LobbyActor> lobby) {
-    auto conn = std::make_shared<Connection>(/*fd=*/-1, id, /*wake_write_fd=*/-1);
+    auto conn = std::make_shared<Connection>(/*fd=*/-1, id);
     ex_actor::ActorRef<PlayerActor> connector =
         WaitValue(ex_actor::Spawn<PlayerActor>(conn, player_ids, sessions, lobby));
     stdexec::sync_wait(connector.Send<&PlayerActor::Dispatch>(PlayerEnvelope::SetSelfRef(connector)));

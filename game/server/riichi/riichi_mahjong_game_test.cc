@@ -6,11 +6,14 @@
 //      mailbox: it calls Setup/Apply/OnTimeout and reads the frames out of the returned
 //      GameStep. classic_mahjong_game_test proves the same for the other game; that the two
 //      files exist independently is the point of the plugin split.
-//   2. **The port is byte-exact.** The three hashes below are the riichi half of
-//      mahjong_room_test's GoldenTranscriptIsFrozen, frozen *before* room.cc was split. They
-//      were produced by the old monolithic room; reproducing them here means the split changed
-//      no byte of any frame for any seat across a whole 4-round match — including every
+//   2. **The frame sequence does not drift.** The three hashes below pin every byte of every
+//      frame the game produces for all four seats across a whole 4-round match — including every
 //      riichi-only field (points / dora_indicators / fu / limit / ura_dora / kyoutaku_award).
+//      They were inherited from mahjong_room_test's GoldenTranscriptIsFrozen (frozen before the
+//      plugin split, back when room.cc was still the room), so they have also served as the
+//      byte-exactness gate for the port; room.cc is gone now and the job they do is the former:
+//      any unintended change to the wire — a reordered frame, an added field, a different bot
+//      decision — turns this red. An *intended* change means re-freezing them deliberately.
 //
 // The driver mirrors the old fixture's step loop exactly (answer the human's window, otherwise
 // let it expire; round advance and match end are fired from the recorded deadlines) because the
@@ -292,12 +295,19 @@ TEST(RiichiMahjongGameTest, GoldenTranscriptIsFrozen) {
   // ① 自风不再随场风滚动（南场庄家仍是东家）；② 和牌张落在明副露里的误判（等待型只看暗手）；
   // ③ 同一拆法内多种等待型按高点法取最优（平和）；④ 荣和补成的刻子按明刻计符；
   // ⑤ 七对子不再提前返回，与标准型一起按点数取最优（二盃口 + 混一色）。
-  // 这些只改变 `game_end` 里的 fu/han/points/yaku，**帧数完全不变**（4672 / 2914 / 2969），
-  // 因此这里重新冻结三个 hash。
+  // 这些只改变 `game_end` 里的 fu/han/points/yaku，**帧数与帧类型完全不变**（4092 / 5298 / 5277）。
+  // seed-20251005 的 hash 逐字节没动 —— 它那一场没有和牌，评分修复碰不到它，这正是「只有算分
+  // 变了」的自证。
+  //
+  // 另外两个种子的 hash 变了，但变化的字段只有分数：`game_end` 的 win.fu/points/total/
+  // per_payer/multiplier 与 results[].delta_score/match_total，以及被它带出来的分数镜像
+  // （state_sync 与 action_request 的 points[]、game_end 的 points_after[]、match_end 的
+  // rankings[].final_score/seat —— 分数变了名次也会变）。逐个 JSON 路径比对过，没有新增帧、
+  // 没有字段增删。
   const Golden cases[] = {
-      {20251005, "riichi/seed-20251005", 0xbcbfc10eade414f6ull},
-      {7, "riichi/seed-7", 0xf27edbdaf2fb0697ull},
-      {424242, "riichi/seed-424242", 0x41b869547b2b273full},
+      {20251005, "riichi/seed-20251005", 0xcd856fafe4620256ull},
+      {7, "riichi/seed-7", 0x44ed9bc72a8d4446ull},
+      {424242, "riichi/seed-424242", 0x944445e87451a2a8ull},
   };
   for (const Golden& golden : cases) {
     Driver driver(golden.seed);

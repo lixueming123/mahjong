@@ -25,7 +25,7 @@ namespace {
 
 // A connection whose frames can never be flushed: fd -1 and no wake pipe.
 std::shared_ptr<Connection> MakeStuckConnection() {
-  return std::make_shared<Connection>(/*fd=*/-1, /*id=*/1, /*wake_fd=*/-1);
+  return std::make_shared<Connection>(/*fd=*/-1, /*id=*/1);
 }
 
 TEST(ConnectionOutboxTest, AcceptsFramesBelowTheLimit) {
@@ -109,15 +109,16 @@ TEST(ConnectionOutboxTest, SendFrameThenCloseKeepsItsOwnReason) {
   EXPECT_EQ(conn->close_reason(), "peer hung up");
 }
 
-// The path that actually let the buffer escape the bound. FlushOutbox drains the whole outbox and
-// pushes back what send() could not take, so between the two the producers can refill to the cap:
-// an append-only check lets the halves add up to twice the bound, and repeating that round grows
-// the buffer without limit (measured at 29MB against a 4MB cap before PushBackOutbox was bounded).
-TEST(ConnectionOutboxTest, PushBackCannotEscapeTheBound) {
+// The path that lets the buffer escape the bound if draining is not accounted for. DrainOutbox
+// hands the whole outbox to the writer, but that memory is still live: if only the queue were
+// counted, a peer that never reads would empty the queue on every pass and let the producers refill
+// it to the cap in between, so the writer's copy plus the queue would add up to twice the bound and
+// grow that way round after round.
+TEST(ConnectionOutboxTest, InFlightBatchCountsAgainstTheBound) {
   auto conn = MakeStuckConnection();
 
-  // Simulate one flush cycle: fill to just under the cap, drain it (the gateway's swap), then push
-  // the unsent tail back while the producers have already refilled the emptied buffer.
+  // Fill to just under the cap, then drain it — this is one flush cycle with a peer that never
+  // reads, so the batch stays in flight (FinishWrite is the writer's "I am done with this").
   const std::string chunk(64 * 1024, 'x');
   while (conn->outbox_bytes() + chunk.size() + 1 <= kMaxOutboxBytes) {
     conn->SendFrame(chunk);
@@ -127,37 +128,42 @@ TEST(ConnectionOutboxTest, PushBackCannotEscapeTheBound) {
   std::string drained;
   conn->DrainOutbox(&drained);
   EXPECT_EQ(conn->outbox_bytes(), 0u) << "DrainOutbox must hand the whole buffer over";
-  EXPECT_GT(drained.size(), 0u);
+  EXPECT_EQ(conn->in_flight_bytes(), drained.size()) << "the drained batch is still live memory";
 
-  // Refill, then push the unsent tail back on top: together they exceed the bound.
-  for (size_t written = 0; written + chunk.size() + 1 <= kMaxOutboxBytes; written += chunk.size() + 1) {
+  // Refill while the batch is in flight: the producers must hit the cap after the remaining budget
+  // rather than after another full kMaxOutboxBytes.
+  while (!conn->close_requested()) {
     conn->SendFrame(chunk);
   }
-  conn->PushBackOutbox(drained);
-
-  EXPECT_TRUE(conn->close_requested()) << "the push-back must be bounded like an append";
   EXPECT_EQ(conn->close_reason(), "outbound buffer full");
-  EXPECT_LE(conn->outbox_bytes(), kMaxOutboxBytes) << "the buffer escaped kMaxOutboxBytes";
+  EXPECT_LE(conn->in_flight_bytes() + conn->outbox_bytes(), kMaxOutboxBytes)
+      << "queued plus in-flight must stay within kMaxOutboxBytes";
+
+  // Once the writer finishes, that budget is available again.
+  conn->FinishWrite();
+  EXPECT_EQ(conn->in_flight_bytes(), 0u);
 }
 
-// A push-back that still fits must be accepted — this is the normal EAGAIN case of a merely slow
-// reader, and dropping it would truncate a legitimate frame mid-stream.
-TEST(ConnectionOutboxTest, PushBackWithinTheBoundIsAccepted) {
+// Finishing a write frees the in-flight budget, so a merely slow reader is not closed: the batch
+// it just wrote no longer counts, and the next append fits.
+TEST(ConnectionOutboxTest, FinishWriteReleasesTheBudget) {
   auto conn = MakeStuckConnection();
   conn->SendFrame("first");
   std::string drained;
   conn->DrainOutbox(&drained);
   ASSERT_EQ(drained, "first\n");
+  EXPECT_EQ(conn->in_flight_bytes(), drained.size());
 
-  conn->PushBackOutbox(drained);
+  conn->FinishWrite();
   EXPECT_FALSE(conn->close_requested());
-  EXPECT_EQ(conn->outbox_bytes(), drained.size());
+  EXPECT_EQ(conn->outbox_bytes(), 0u);
 
-  // And the restored bytes are really at the front, ahead of anything appended after the push-back.
+  // The ordering guarantee the outbox owes: a frame queued after the batch is only ever written
+  // after it, because the writer drains again once the previous batch is done.
   conn->SendFrame("second");
   std::string all;
   conn->DrainOutbox(&all);
-  EXPECT_EQ(all, "first\nsecond\n") << "push-back must preserve ordering";
+  EXPECT_EQ(all, "second\n");
 }
 
 }  // namespace

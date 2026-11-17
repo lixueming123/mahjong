@@ -54,10 +54,20 @@ class TestFailure(AssertionError):
 class Client:
     """One TCP connection with NDJSON framing helpers."""
 
-    def __init__(self, port: int, name: str = "client", timeout: float = 5.0):
+    def __init__(self, port: int, name: str = "client", timeout: float = 5.0,
+                 recv_buffer_bytes: int | None = None):
         self.name = name
         self.buffer = b""
-        self.sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        if recv_buffer_bytes is None:
+            self.sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        else:
+            # SO_RCVBUF only affects the window that is advertised during the handshake, so it has
+            # to be set on the socket before connect(). A small value is what makes the server's
+            # write fill up quickly instead of after hundreds of kilobytes.
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, recv_buffer_bytes)
+            self.sock.settimeout(timeout)
+            self.sock.connect(("127.0.0.1", port))
         self.sock.settimeout(timeout)
 
     def send_raw(self, payload: bytes) -> None:
@@ -549,6 +559,105 @@ def _seat_disconnected(frame: dict, seat: int):
     return None if entry is None else bool(entry.get("disconnected"))
 
 
+def test_write_stall_is_bounded(port: int) -> None:
+    """A peer that stops reading must be closed, not kept forever.
+
+    asio operations have no timeout of their own, and a peer that stops reading does not produce an
+    error: TCP advertises a zero window and the kernel blocks the write instead of failing it, so
+    `async_write_some` simply never completes (measured: still pending after 10 s). Without the
+    writer's own bound that connection would pin its write coroutine, its read coroutine (nothing
+    cancels it short of the socket close in CloseClient) and its whole Client — an unbounded leak
+    reachable by any client that stops reading while a match is being broadcast to it.
+
+    The repro has to stay under the rate limit while producing outbound traffic: `sync` is cheap to
+    send and each one is answered with a full state_sync, so 40 per second (well under the 100/s
+    limit, and steady enough not to trip the storm rule) fills a 2 KB window in a second or two. The
+    peer then never reads a byte of it.
+    """
+    slow = Client(port, "write-stall", recv_buffer_bytes=2048)
+    try:
+        login(slow, "不收包")
+        slow.send({"type": FRAME_TYPE.CREATE_ROOM})
+        slow.expect_type(FRAME_TYPE.ROOM_JOINED)
+        slow.send({"type": FRAME_TYPE.READY})
+        slow.expect_type(FRAME_TYPE.GAME_START)
+
+        # Keep asking for the board and never read a reply. The receive window closes quickly, the
+        # server's write stops making progress, and kWriteStallTimeoutMs (5 s) is what has to end it.
+        #
+        # Note what must NOT be the reason: a rate-limit storm. 40/s is under the 100/s threshold,
+        # so a close here is the write path's bound, not the quota.
+        deadline = time.monotonic() + 90
+        closed = False
+        while time.monotonic() < deadline:
+            try:
+                slow.send({"type": FRAME_TYPE.SYNC})
+            except (BrokenPipeError, ConnectionResetError):
+                closed = True
+                break
+            time.sleep(0.025)
+            # MSG_PEEK probes for EOF without consuming: the data stays queued, so the window stays
+            # shut and the pending write stays stalled.
+            slow.sock.settimeout(0.005)
+            try:
+                chunk = slow.sock.recv(1, socket.MSG_PEEK)
+            except socket.timeout:
+                continue
+            except ConnectionResetError:
+                closed = True
+                break
+            if not chunk:
+                closed = True
+                break
+
+        if not closed:
+            raise TestFailure(
+                "a peer that never reads was not closed: the write path has no timeout "
+                "(the connection would leak its write coroutine, its read coroutine and its Client)")
+    finally:
+        slow.close()
+
+
+def test_first_frame_timeout(port: int) -> None:
+    """A connection that never completes a frame must be closed.
+
+    The idle timeout measures silence between frames, so a peer that dribbles one byte every few
+    seconds is never idle; and because it never sends a terminator, no line reaches the parser, so
+    neither the bad-frame quota nor the 64 KB unframed cap ever trips either (64 KB at one byte per
+    19 s is about 14 days). Each such connection holds a PlayerActor and two buffers, and there is no
+    cap on how many a peer may open. kFirstFrameTimeoutMs is the bound that closes it.
+    """
+    slow = Client(port, "slowloris")
+    try:
+        # Half a frame, then a byte every few seconds: alive, never complete.
+        slow.send_raw(b'{"type":')
+        started = time.monotonic()
+        deadline = started + 90
+        closed = False
+        last_dribble = started
+        while time.monotonic() < deadline:
+            now = time.monotonic()
+            if now - last_dribble >= 5:
+                slow.send_raw(b" ")
+                last_dribble = now
+            slow.sock.settimeout(1.0)
+            try:
+                chunk = slow.sock.recv(65536)
+            except socket.timeout:
+                continue
+            except (ConnectionResetError, BrokenPipeError):
+                closed = True
+                break
+            if not chunk:
+                closed = True
+                break
+        if not closed:
+            raise TestFailure("a connection that never sent a complete frame was not closed "
+                              "(kFirstFrameTimeoutMs is not enforced)")
+    finally:
+        slow.close()
+
+
 def _drain_until(client: "Client", wanted: int, timeout: float, seen: list) -> dict:
     """Reads frames until |wanted| arrives, collecting the ones seen on the way.
 
@@ -567,49 +676,107 @@ def _drain_until(client: "Client", wanted: int, timeout: float, seen: list) -> d
 
 
 def test_idle_timeout(port: int) -> None:
-    """PROTOCOL.md §1.6: 20s of silence drops a lobby connection but keeps a room seat."""
+    """PROTOCOL.md §1.6/§8.5: 20s of silence drops a lobby connection but keeps a room seat.
+
+    Two connections, because the two halves of §8.5 are only observable from different sides:
+
+      * the silent *lobby* connection must be closed outright (§1.6: 大厅中 → 断开);
+      * the silent *in-room* connection must stay open and keep answering pings (§1.6:
+        对局中 → 进入托管，不立即断开), while a *second* seat in the same room sees that
+        entrustment in `state_sync.seats[].disconnected` (§8.5: 告知其他座位).
+
+    The observer used to be one connection checking its own `disconnected` flag, which the
+    protocol never promises: once a seat is entrusted its endpoint is dropped (room_actor.cc
+    OnPlayerDisconnected), so a `sync` from that seat can no longer be answered at all. What §8.5
+    does promise is that the *other* seats are told, and that is what this checks now.
+    """
     lobby = Client(port, "idle-lobby")
-    in_room = Client(port, "idle-room")
+    quiet = Client(port, "idle-quiet")
+    observer = Client(port, "idle-observer")
     try:
         login(lobby, "大厅发呆")
-        login(in_room, "房内发呆")
-        in_room.send({"type": FRAME_TYPE.CREATE_ROOM})
-        in_room.expect_type(FRAME_TYPE.ROOM_JOINED)
-        in_room.send({"type": FRAME_TYPE.READY})
-        in_room.expect_type(FRAME_TYPE.GAME_START)
+        login(quiet, "房内发呆")
+        login(observer, "旁观托管")
+
+        # One room, two humans: seat 0 goes silent, seat 1 keeps heartbeating and watches.
+        quiet.send({"type": FRAME_TYPE.CREATE_ROOM})
+        room_id = quiet.expect_type(FRAME_TYPE.ROOM_JOINED)["room_id"]
+        observer.send({"type": FRAME_TYPE.JOIN_ROOM, "room_id": room_id})
+        joined = observer.expect_type(FRAME_TYPE.ROOM_JOINED)
+        observer_seat = joined["seat"]
+        if observer_seat == 0:
+            raise TestFailure(f"the observer must not inherit seat 0: {joined!r}")
+        quiet.expect_type(FRAME_TYPE.ROOM_UPDATE)
+        observer.expect_type(FRAME_TYPE.ROOM_UPDATE)
+        quiet.send({"type": FRAME_TYPE.READY})
+        quiet.expect_type(FRAME_TYPE.GAME_START)
+        observer.expect_type(FRAME_TYPE.GAME_START)
+
         started = time.monotonic()
-        # The lobby connection must be closed after ~20s of silence.
-        deadline = started + 30
-        lobby.sock.settimeout(deadline - time.monotonic())
+        # Two clocks run at once from here, and both matter:
+        #
+        #   * the lobby connection must be closed after ~20s of silence (§1.6: 大厅中 → 断开);
+        #   * the observer must keep heartbeating from *now*, because §1.6 counts inbound frames:
+        #     a connection that sends nothing for 20s is entrusted even if it is reading. Waiting
+        #     for the lobby close first and only then starting the observer's heartbeat would
+        #     leave the observer silent for the whole window and entrust it too, which is what an
+        #     earlier version of this test did by accident.
+        lobby.sock.settimeout(1.0)
+        lobby_closed_at = None
+        last_ping = started
         while True:
+            now = time.monotonic()
+            if lobby_closed_at is None:
+                try:
+                    chunk = lobby.sock.recv(65536)
+                except socket.timeout:
+                    chunk = None  # still open, just quiet
+                except ConnectionResetError:
+                    chunk = b""
+                if chunk is not None and not chunk:
+                    lobby_closed_at = now
+            if now - last_ping >= 3.0:
+                observer.send({"type": FRAME_TYPE.PING})
+                last_ping = now
             try:
-                chunk = lobby.sock.recv(65536)
-            except (socket.timeout, ConnectionResetError):
-                chunk = b""
-            if not chunk:
+                observer.recv_frame(timeout=0.2)
+            except TestFailure:
+                pass  # broadcasts interleave with the pong; only the flag below matters
+            if lobby_closed_at is not None and now - started >= 22:
                 break
-        elapsed = time.monotonic() - started
+
+        elapsed = lobby_closed_at - started
         if elapsed < 15:
             raise TestFailure(f"lobby connection closed after only {elapsed:.1f}s (expected ~20s)")
-        # The in-room connection stays open and still answers (its seat becomes entrusted).
-        time.sleep(max(0.0, 21 - elapsed))
-        in_room.send({"type": FRAME_TYPE.PING})
+
+        # The in-room connection stays open and still answers (its seat is entrusted, not dropped).
+        quiet.send({"type": FRAME_TYPE.PING})
         seen: list = []
-        _drain_until(in_room, FRAME_TYPE.PONG, 10.0, seen)
-        # ... and the silence really did entrust the seat: the game either kept broadcasting
-        # snapshots while we were quiet, or answers a `sync` with the authoritative one.
-        # This `disconnected` flag is exactly what the client turns into its 托管 badge.
-        entrust_flags = [flag for flag in (_seat_disconnected(frame, 0) for frame in seen) if flag is not None]
-        if not any(entrust_flags):
-            in_room.send({"type": FRAME_TYPE.SYNC})
-            _drain_until(in_room, FRAME_TYPE.STATE_SYNC, 10.0, seen)
-            entrust_flags = [flag for flag in (_seat_disconnected(frame, 0) for frame in seen) if flag is not None]
-        if not any(entrust_flags):
-            raise TestFailure("20s of real silence must entrust the in-room seat "
-                              f"(no state_sync showed disconnected=true; {len(seen)} frame(s) seen)")
+        _drain_until(quiet, FRAME_TYPE.PONG, 10.0, seen)
+
+        # ... and the entrustment is visible where §8.5 says it is: to the *other* seats. A `sync`
+        # asks for the authoritative board, so this does not depend on a broadcast happening to
+        # fire during the silence.
+        #
+        # The observer's buffer can still hold a state_sync queued *before* the seat was entrusted,
+        # so "the next state_sync" is not necessarily an answer to this request. Drop what is
+        # already buffered and read the fresh one: `sync` always answers, and its reply is the
+        # board as of now.
+        observer.buffer = b""
+        seen.clear()
+        observer.send({"type": FRAME_TYPE.SYNC})
+        snapshot = _drain_until(observer, FRAME_TYPE.STATE_SYNC, 10.0, seen)
+        entrust = _seat_disconnected(snapshot, 0)
+        if entrust is not True:
+            raise TestFailure("§8.5: after 20s of silence the quiet seat must be entrusted and the "
+                              f"other seats must see disconnected=true, got {entrust!r} in {snapshot!r}")
+        if _seat_disconnected(snapshot, observer_seat) is not False:
+            raise TestFailure("the heartbeating seat must NOT be entrusted: "
+                              f"{snapshot.get('seats')!r}")
     finally:
         lobby.close()
-        in_room.close()
+        quiet.close()
+        observer.close()
 
 
 TESTS = (
@@ -785,6 +952,8 @@ SLOW_TESTS = (
     ("idle timeout", test_idle_timeout),
     ("continuous traffic is not idle", test_continuous_traffic_is_not_idle),
     ("slow play is never entrusted", test_slow_play_is_never_entrusted),
+    ("write stall is bounded", test_write_stall_is_bounded),
+    ("first frame timeout", test_first_frame_timeout),
 )
 
 
