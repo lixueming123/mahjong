@@ -1,36 +1,50 @@
 # Understanding This Project
 
-- This repository is a mahjong game (`game/`) built on the ex_actor actor framework. The framework
-  lives in the `third_party/ex-actor` git submodule and is pinned to a known-good commit; do not
-  modify code under `third_party/`.
-- Refer README.md and `game/docs` for the game itself. Framework docs (API, schedulers, distributed
-  mode) are at `third_party/ex-actor/docs/contents` once the submodule is checked out (ignore files
-  listed in .gitignore, which might be stale).
-- Build&test: run `git submodule update --init --recursive` once, then
+- Mahjong game (`game/`) built on the ex_actor actor framework, which lives in the
+  `third_party/ex-actor` git submodule (pinned; never modify code under `third_party/`).
+- Docs: README.md and `game/docs` for the game; `third_party/ex-actor/docs/contents` for the
+  framework (API, schedulers, distributed mode).
+- Build&test: `git submodule update --init --recursive` once, then
   `python3 scripts/regen_build_dir.py`, `cmake --build build --config Release`, `ctest -C Release`.
-  The server binary is `build/game/mahjong_server`.
+  Server binary is `build/game/mahjong_server`.
+
+# Don't Break clangd
+
+The root `compile_commands.json` is not plain CMake output: `regen_build_dir.py` adds a
+`-fsyntax-only` entry per header (~96) so headers don't borrow an unrelated TU's command. Lose it
+and the editor floods with bogus errors.
+
+- Build/test freely: `cmake --build build [--target <t>]`, `ctest`. Neither touches the database.
+- Avoid `rm -rf build`, `git clean -xdf`, and gratuitous `regen_build_dir.py`: they delete both
+  `build/` and the root database, and the script deletes *before* configuring — a failed configure
+  (usually network, e.g. `status_code: 35` on the rapids-cmake download) leaves nothing behind.
+- Never copy `build/compile_commands.json` over the root one: 0 header entries vs ~96.
+- Reconfigure only after `cp compile_commands.json /tmp/cc.bak`; restore the backup on failure.
+  Any manual CMake call needs `-DCMAKE_EXPORT_COMPILE_COMMANDS=1`.
+- Editor errors look bogus? Confirm with `clangd --check=<file> --compile-commands-dir=. 2>&1 |
+  grep "Compile command"` — `inferred from` a stranger TU means the errors are fake.
 
 # Editing Guidelines
 
-- When editing code, try best to keep original comments unless they are stale.
+- Keep original comments unless they are stale.
 
 # Debugging
 
-- When debugging tests, do not simplify the test code unless you are very confident the test is not correct.
-- Prefer adding logs to gather more information before thinking too much.
+- Do not simplify test code when debugging unless you are very confident the test is wrong.
+- Prefer adding logs over thinking too hard.
 
 # Code Style
 
-Based on Google Style Guide, with the following additions:
+Google Style Guide, plus:
 
-- For all args that can't get its meaning from the variable name, add a `/*arg_name=*/` comment before the arg.
-- No one-line if/while/for/switch statements. Always use the `{}` block.
-- Don't std::pair, first/second is hard to read, always define a struct for better readability.
-- When using std::pair or iterators, don't use first/second or iterator->first/second, instead use struct binding like `auto& [key, value] = pair`, or alias like `auto& meaningful_name = iterator->second` if only one field is needed.
-- Don't use placeholder `_` in struct binding. Always use meaningful variable names even it's not used.
-- In maps, when you can't get the key/value meaning from the variable name, add comments like `map</*key_meaning*/KeyType, /*value_meaning*/ValueType/>` for better readability. No "=" sign.
+- Add `/*arg_name=*/` before args whose meaning isn't clear from the name.
+- No one-line if/while/for/switch statements; always use `{}`.
+- No std::pair: define a struct. With pairs/iterators use structured bindings
+  (`auto& [key, value] = pair`) or a meaningful alias, never first/second.
+- No `_` placeholders in bindings, even when unused.
+- Annotate opaque map types: `map</*key_meaning*/K, /*value_meaning*/V>`, no `=`.
 
 # Pull Request Description & Commit Message
 
-- Make the description short and concise so reviewer can quickly understand the changes. don't exceed 50 words. Make the structure compact, no big titles, so it can be directly used as squash merge's commit message.
-
+Short and concise so the reviewer gets it fast, max 50 words, compact structure, no big titles —
+usable directly as a squash-merge commit message.
