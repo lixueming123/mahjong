@@ -133,8 +133,9 @@ cmake --build build --config Release --target tenhou_rules_check
 新增 `RiichiYakuhai.DoubleEastWindInEastRound` / `SouthRoundDealerSouthTripletIsOneHan` 两个
 正反例、以及 `PROTOCOL.md` §12.9 的「庄家的自风恒等于场风」。
 
-riichi 的 golden 转录因此重新冻结（**帧数不变** 4672/2914/2969，只有 `game_end` 的
-fu/han/points/yaku 变了）。
+riichi 的 golden 转录因此重新冻结（**帧数与帧类型不变** 4092/5298/5277，只有 `game_end` 的
+fu/han/points/yaku 变了；seed-20251005 那一场没有和牌，所以它的 hash 逐字未动）。另两个种子被
+改动到的字段只有分数，以及被分数带出来的镜像字段 —— 见 `riichi_mahjong_game_test.cc` 的注释。
 
 修复后：`tenhou_rules_check` **183/183 全部一致**，`riichi_rules_test` 76/76，
 `mahjong_riichi_game_test` 21/21。

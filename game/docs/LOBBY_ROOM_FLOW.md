@@ -11,8 +11,8 @@
 | 参与者 | 代码位置 | 执行上下文 | 职责 |
 | --- | --- | --- | --- |
 | Client | — | 外部进程 | 发 JSON 行帧 |
-| Gateway | `gateway.cc` | **单线程** I/O 循环（epoll/kqueue） | 读写 socket、限流、把帧塞进 PlayerActor 邮箱、刷出 outbox |
-| `Connection` | `connection.h` | 任意线程可写（mutex + outbox） | 每个连接一个出站缓冲，网关循环负责 flush |
+| Gateway | `gateway.cc` | asio io_context，`io_threads` 个线程；每连接一个 strand | 读写 socket、限流、把帧塞进 PlayerActor 邮箱、刷出 outbox |
+| `Connection` | `connection.h` | 任意线程可写（mutex + outbox） | 每个连接一个出站缓冲，连接自己的 strand 负责 flush |
 | `PlayerActor` | `player_actor.cc` | actor 池 | 协议入口：解析帧、登录门禁、路由；同时是 `SeatEndpoint`（房间/大厅的帧都投给它） |
 | `LobbyActor` | `lobby.cc` | actor 池（**单 mailbox，无 gate**） | 玩家→房间映射、房间注册表、等待页座位镜像 |
 | `RoomActor` | `room_actor.cc`（`RoomActorFor<GameT>`） | actor 池（**有 `AsyncGate`**） | 牌桌外壳：座位、投递、一次性 deadline、结算上报 |
@@ -89,7 +89,7 @@ sequenceDiagram
         LB->>PA: co_await Dispatch(SetRoom(room))  ← 缓存路由
         PA->>PA: room_ = room（后续 gameplay 帧不再过大厅）
         LB->>PA: co_await Dispatch(SeatFrame(room_joined{seat:0,seats}))
-        PA->>GW: conn_->SendFrame / outbox + self-pipe
+        PA->>GW: conn_->SendFrame / outbox + waker→post 到 strand
         GW-->>C: {"type":14,...}
     end
 ```
