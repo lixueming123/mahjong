@@ -6,9 +6,11 @@ before configuring: run `git submodule update --init --recursive` once after clo
 """
 
 import argparse
+import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -68,6 +70,83 @@ def resolve_compiler(compiler):
     family, suffix = match.group(1), match.group(2) or ""
     cxx_family = "g++" if family == "gcc" else "clang++"
     return f"{family}{suffix}", f"{cxx_family}{suffix}"
+
+
+def add_header_entries(path):
+    """Give every project header its own compile_commands.json entry.
+
+    CMake only emits entries for translation units, so when an editor opens a header (clangd, and
+    any other tool that looks the file up here) there is no exact match and the command of the
+    *nearest* TU gets inferred by path. That neighbour is arbitrary: actor_scope.h picked up
+    account_test.cc, which does not link ex_actor or stdexec, so <exec/async_scope.hpp> looked
+    missing even though the real build finds it.
+
+    Headers are never compiled standalone, so reusing a TU's flags with -fsyntax-only is enough
+    for the parsers that consume this file, and it keeps the third-party include paths exactly in
+    sync with the real build (no hardcoded paths to the CPM cache, which changes per checkout).
+    """
+    with open(path, "r") as f:
+        entries = json.load(f)
+    if not entries:
+        return
+
+    # One C++ TU that links everything (the server) is the best template: its flag list already
+    # covers ex_actor, stdexec, asio, capnp and spdlog.
+    template = next(
+        (e for e in entries if e["file"].endswith("/game/server/main.cc")),
+        entries[0],
+    )
+
+    def header_entry(header):
+        command = template.get("command")
+        if command is None:
+            args = list(template["arguments"])
+        else:
+            args = shlex.split(command)
+        # Drop the parts that name the template's own source and output: -o <obj> and -c <src>.
+        # Only the exact forms are matched — a prefix test on "-c"/"-o" would also eat legitimate
+        # flags like -cxx-isystem or -objc-arc.
+        cleaned = []
+        skip_next = False
+        for arg in args:
+            if skip_next:
+                skip_next = False
+                continue
+            if arg in ("-o", "-c"):
+                skip_next = True
+                continue
+            cleaned.append(arg)
+        cleaned += ["-fsyntax-only", header]
+
+        entry = {"directory": template["directory"], "file": header}
+        if command is None:
+            entry["arguments"] = cleaned
+        else:
+            entry["command"] = shlex.join(cleaned)
+        return entry
+
+    known = {e["file"] for e in entries}
+    headers = []
+    for pattern in ("game/**/*.h", "game/**/*.hpp"):
+        headers += sorted(project_root.glob(pattern))
+    # Framework headers matter too: they are reached through -isystem, so an exact entry keeps
+    # them from inheriting some unrelated TU's flags.
+    framework_include = third_party / "include"
+    for pattern in ("**/*.h", "**/*.hpp"):
+        headers += sorted(framework_include.glob(pattern))
+
+    added = []
+    for header in headers:
+        resolved = str(header)
+        if resolved not in known and header.is_file():
+            added.append(header_entry(resolved))
+            known.add(resolved)
+
+    if added:
+        with open(path, "w") as f:
+            json.dump(entries + added, f, indent=1)
+        print(f"Added {len(added)} header entries to {path.name} for editors/clangd.", flush=True)
+
 
 project_root = Path(__file__).resolve().parent.parent
 os.chdir(project_root)
@@ -134,3 +213,5 @@ if src.exists():
     text = re.sub(r"-fconcepts-diagnostics-depth=\d*", "", text)
     with open(compile_commands, "w") as f:
         f.write(text)
+
+    add_header_entries(compile_commands)

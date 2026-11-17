@@ -50,5 +50,21 @@ CPMAddPackage(
   OPTIONS "gtest_force_shared_crt ON"
 )
 
+# Asio (standalone, header-only) for the gateway's network layer. The upstream repository ships
+# autotools rather than CMake, so it is fetched as source only (DOWNLOAD_ONLY) and exposed through
+# the INTERFACE target below. No Boost is involved: asio's detail/config.hpp defines ASIO_STANDALONE
+# on its own for C++11 and later. ASIO_NO_DEPRECATED keeps the superseded API out of the build.
+CPMAddPackage(
+  NAME asio
+  GITHUB_REPOSITORY chriskohlhoff/asio
+  GIT_TAG asio-1-39-0
+  DOWNLOAD_ONLY YES
+)
+add_library(mahjong_asio INTERFACE)
+target_include_directories(mahjong_asio SYSTEM INTERFACE ${asio_SOURCE_DIR}/asio/include)
+target_compile_definitions(mahjong_asio INTERFACE ASIO_STANDALONE ASIO_NO_DEPRECATED)
+find_package(Threads REQUIRED)
+target_link_libraries(mahjong_asio INTERFACE Threads::Threads)
+
 enable_testing()
 add_subdirectory(game)

@@ -142,7 +142,9 @@ target_include_directories(mahjong_classic_game PUBLIC ${CMAKE_CURRENT_SOURCE_DI
 target_include_directories(mahjong_classic_game PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server)
 target_link_libraries(mahjong_classic_game PUBLIC mahjong_rules spdlog::spdlog ex_actor)
 
-# 玩法单测：直接驱动 ClassicMahjongGame，不建房间、不建 actor、不开 socket。# 它同时是「端口逐字节兼容」的硬门槛：三个 hash 是拆分前 room.cc 冻结的那三个 classic 值。
+# 玩法单测：直接驱动 ClassicMahjongGame，不建房间、不建 actor、不开 socket。
+# 三个 hash 继承自拆分前 LegacyRoomActor 冻结的那三个 classic 值；它们的作用是钉住帧序列不漂移
+# （room.cc 已弃用，不再是「与它逐字节兼容」的判据）。
 add_executable(mahjong_classic_game_test server/classic/classic_mahjong_game_test.cc server/json.cc
                                        server/protocol.cc)
 target_include_directories(mahjong_classic_game_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
@@ -177,7 +179,8 @@ target_include_directories(mahjong_riichi_game PUBLIC ${CMAKE_CURRENT_SOURCE_DIR
 target_link_libraries(mahjong_riichi_game PUBLIC mahjong_rules riichi_rules spdlog::spdlog ex_actor)
 
 # 玩法单测：直接驱动 RiichiMahjongGame，不建房间、不建 actor、不开 socket。
-# 三个 hash 是拆分前 room.cc 冻结的那三个日麻值（tonpu）。
+# 三个 hash 继承自拆分前 LegacyRoomActor 冻结的那三个日麻值（tonpu），之后随判番修复重新冻结过；
+# 它现在的职责是「帧序列不漂移」，不再是「与 room.cc 逐字节兼容」（room.cc 已弃用）。
 add_executable(mahjong_riichi_game_test server/riichi/riichi_mahjong_game_test.cc server/json.cc
                                        server/protocol.cc)
 target_include_directories(mahjong_riichi_game_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/server)
@@ -194,7 +197,6 @@ add_executable(
   server/json.cc
   server/protocol.cc
   server/net.cc
-  server/reactor.cc
   server/connection.cc
   server/player_actor.cc
   server/player_session_agent.cc
@@ -207,7 +209,8 @@ add_executable(
   server/timer.cc
   server/gateway.cc)
 target_link_libraries(mahjong_server PRIVATE ex_actor mahjong_rules riichi_rules mahjong_db mahjong_room_shell
-                                          mahjong_replay_store mahjong_classic_game mahjong_riichi_game)
+                                          mahjong_replay_store mahjong_classic_game mahjong_riichi_game
+                                          mahjong_asio)
 if(MAHJONG_MYSQL_FOUND)
   # libmysqlclient's install name is @rpath/libmysqlclient.<n>.dylib, so without this the
   # binary links but fails to launch with "Library not loaded". Its own OpenSSL is resolved
@@ -278,6 +281,16 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/gateway_smoke_test.py
             --server-bin $<TARGET_FILE:mahjong_server>)
   set_tests_properties(gateway_smoke_test PROPERTIES TIMEOUT 120)
+
+  # The heartbeat/idle/entrustment cases take ~2 minutes each (they wait out the real 20 s idle
+  # window), so they are opt-in in the script. They are also the only coverage of the gateway's
+  # time-based paths, which is exactly where a rewritten I/O loop breaks, so they get their own
+  # ctest entry instead of being silently skipped by CI.
+  add_test(
+    NAME gateway_smoke_slow_test
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/gateway_smoke_test.py
+            --server-bin $<TARGET_FILE:mahjong_server> --slow-tests)
+  set_tests_properties(gateway_smoke_slow_test PROPERTIES TIMEOUT 400 LABELS slow)
 
   add_test(
     NAME protocol_enums_consistency
