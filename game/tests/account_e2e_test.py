@@ -176,6 +176,9 @@ class Server:
             "--mysql-user", self.args.mysql_user,
             "--mysql-password", self.args.mysql_password,
             "--mysql-db", self.args.mysql_db,
+            # Not a recording test: an empty directory turns recording off, so the run leaves no
+            # files behind (and no `replays` index rows).
+            "--replay-dir", "",
         ]
         self.process = subprocess.Popen(command, stdout=self.log, stderr=subprocess.STDOUT)
         wait_for_server(self.port, self.process)

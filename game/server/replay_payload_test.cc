@@ -21,9 +21,10 @@
 namespace mahjong {
 namespace {
 
-// Inflates with zlib directly rather than through a helper in gzip.h: the server never decompresses
-// anything in production (the browser does), so the only place an inflater belongs is the test that
-// proves the stream is a real gzip stream and not bare deflate.
+// Inflates with zlib directly rather than through GzipDecompress: this is the test that proves the
+// stream is a real gzip stream (wrapper included) and not bare deflate, so it must not borrow the
+// helper whose contract it is checking. GzipDecompress itself is exercised by the part-merge tests
+// in replay_test.cc.
 std::string InflateWithZlib(std::string_view compressed) {
   z_stream stream {};
   EXPECT_EQ(inflateInit2(&stream, 15 + 16), Z_OK);  // 16 = "expect the gzip wrapper"
@@ -89,6 +90,32 @@ TEST(GzipTest, CompressesAReplayLikeText) {
   const std::string compressed = GzipCompress(text);
   ASSERT_FALSE(compressed.empty());
   EXPECT_GT(static_cast<double>(text.size()) / static_cast<double>(compressed.size()), 10.0);
+}
+
+TEST(GzipTest, DecompressInvertsCompress) {
+  // The read path inflates every hand part before merging them (replay_store.cc), so this is the
+  // decoder half of the one round trip the server itself relies on. Multi-byte text and a payload
+  // larger than the decoder's internal chunk are both included on purpose.
+  std::string text = R"({"format":"mahjong-replay","room_id":"r-2o5endvwb8zcx","seats":[{"name":"小明"}]})";
+  // 8 000 * 12 bytes ("小明和牌" is four characters, three bytes each) clears the decoder's
+  // 64 KB chunk, so the loop in GzipDecompress really runs more than once.
+  for (int index = 0; index < 8000; ++index) {
+    text += "小明和牌";
+  }
+  ASSERT_GT(text.size(), 64u * 1024u);
+  const std::string inflated = GzipDecompress(GzipCompress(text));
+  EXPECT_EQ(inflated, text);
+}
+
+TEST(GzipTest, DecompressRefusesWhatIsNotAGzipStream) {
+  // Every caller treats an empty answer as "no such recording": half a part spliced into a
+  // timeline would be a broken file, which is worse than an honest not-found.
+  EXPECT_EQ(GzipDecompress(""), "");
+  EXPECT_EQ(GzipDecompress("not a gzip stream"), "");
+  // A truncated stream: the header is valid, the trailer is gone.
+  const std::string compressed = GzipCompress(R"({"steps":[]})");
+  ASSERT_GT(compressed.size(), 20u);
+  EXPECT_EQ(GzipDecompress(compressed.substr(0, compressed.size() - 8)), "");
 }
 
 TEST(ReplayFramesTest, EncodingIsOmittedForAPlainPayload) {

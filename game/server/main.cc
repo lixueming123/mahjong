@@ -419,13 +419,19 @@ int main(int argc, char** argv) {
   // Window timers: the delayed, seq-carrying timeout messages (PROTOCOL.md §0.5).
   auto window_timer = std::make_shared<mahjong::WindowTimer>();
 
-  // Replay storage: an independent single-thread actor, spawned unconditionally so that reads
-  // (§4.13) work even when the directory is empty (they simply answer ROOM_NOT_FOUND). Store()
-  // no-ops on an empty directory, which is the "recording off" switch.
+  // Replay storage: an independent single-thread actor. It is spawned even when the directory is
+  // empty because reads (§4.13) still have to answer ROOM_NOT_FOUND instead of hanging on an
+  // empty ref.
   //
   // Two registrations, one actor: the write side (ReplaySink, replay.h) is what the room shell
-  // depends on, and the read side (ReplayService, replay_store.h) is what the player side does.
+  // depends on, and the read side (ReplayStore, replay_store.h) is what the player side does.
   // Splitting them is what keeps a target that links the room shell from also needing the store.
+  //
+  // An empty directory means "recording off", and that has to be expressed by NOT installing the
+  // SINK: `ReplayService::IsEmpty()` is what a room asks before it records a step (RoomActor::
+  // RecordStep), and the lobby asks the same question before it writes the `replays` index row
+  // that puts a 回放 button in the stats list. Store() would no-op on an empty directory anyway,
+  // but the row would still be written and the button would then answer ROOM_NOT_FOUND.
   {
     ex_actor::ActorConfig config {.scheduler_index = kReplaySchedulerIndex};
     auto replay_result =
@@ -440,7 +446,9 @@ int main(int argc, char** argv) {
       return 1;
     }
     ex_actor::ActorRef<mahjong::ReplayActor> replay_actor = std::get<0>(*replay_result);
-    mahjong::GetReplayService().SetSink(ex_actor::ActorRef<mahjong::ReplaySink>(replay_actor));
+    if (!options->replay_dir.empty()) {
+      mahjong::GetReplayService().SetSink(ex_actor::ActorRef<mahjong::ReplaySink>(replay_actor));
+    }
     mahjong::GetReplayStore().SetActor(replay_actor);
     spdlog::info("replay: store at {}", options->replay_dir.empty() ? "(disabled)" : options->replay_dir);
   }

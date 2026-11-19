@@ -484,7 +484,7 @@ def run_one_game(binary: str, seed: int, port: int, log_path: str, verbose: bool
     recorder = Recorder(log_path)
     server_log = tempfile.NamedTemporaryFile(prefix="mahjong_e2e_", suffix=".log", delete=False)
     recorder.write({"event": "start", "binary": binary, "port": port, "seed": seed})
-    command = [binary, "--port", str(port), "--seed", str(seed)]
+    command = [binary, "--port", str(port), "--seed", str(seed), "--replay-dir", ""]
     if args_ai_delay_ms is not None:
         command += ["--ai-delay-ms", str(args_ai_delay_ms)]
     process = subprocess.Popen(command, stdout=server_log, stderr=subprocess.STDOUT)
@@ -867,7 +867,7 @@ def run_one_match(binary: str, seed: int, port: int, log_path: str, verbose: boo
     recorder.write({"event": "start", "binary": binary, "port": port, "seed": seed,
                     "inter_hand_delay_ms": inter_hand_delay_ms})
     command = [binary, "--port", str(port), "--seed", str(seed),
-               "--inter-hand-delay-ms", str(inter_hand_delay_ms)]
+               "--inter-hand-delay-ms", str(inter_hand_delay_ms), "--replay-dir", ""]
     if ai_delay_ms is not None:
         command += ["--ai-delay-ms", str(ai_delay_ms)]
     process = subprocess.Popen(command, stdout=server_log, stderr=subprocess.STDOUT)
@@ -928,7 +928,7 @@ def collect_normalized_frames(binary: str, seed: int, log_path: str, verbose: bo
     port = free_port()
     # 归一化剔除 deadline_ms/player_id 后，时序配置不参与 diff；50ms/0 pacing 只为跑得快。
     command = [binary, "--port", str(port), "--seed", str(seed), "--inter-hand-delay-ms", "50",
-               "--ai-delay-ms", "0"]
+               "--ai-delay-ms", "0", "--replay-dir", ""]
     process = subprocess.Popen(command, stdout=server_log, stderr=subprocess.STDOUT)
     client = None
     deadline = time.monotonic() + timeout

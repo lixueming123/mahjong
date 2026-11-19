@@ -7,14 +7,19 @@
 // a slow disk parks exactly one thread that nothing else is scheduled on, and the mailbox keeps
 // writes in the order the rooms reported them.
 //
-// gzip lives here for the same reason (gzip.h): 1.5 MB of JSON is ~12 ms of deflate, which is five
-// frames of one table's timeline and would be five frames late if it ran on the room's thread.
+// gzip lives here for the same reason (gzip.h): deflate is CPU nobody's timeline should wait on,
+// and a hand part is written once and never rewritten (ReplayRecorder::PartFileNameFor).
 //
 // Authorization (§4.13) is a database question, not a file question: see Load.
 //
 // Callers reach it through `GetReplayService()` for writes and `GetReplayStore()` for reads,
 // exactly like `GetDbService()`: main() installs the actor before the gateway exists, and an empty
 // service is the "recording disabled" configuration that unit tests and `--replay-dir=""` runs use.
+//
+// On disk a match is a directory of hand parts (`<room_id>.h<NN>.json.gz`), not one file: the room
+// writes each hand once and drops it, which is what bounds a room's memory. LoadReplayFromDisk is
+// where they are glued back into the single document §5.18 defines; nothing above this file (the
+// player, the client, the wire) ever sees a part.
 
 #pragma once
 
@@ -37,6 +42,19 @@ struct ReplayLoad {
   std::string payload;
 };
 
+// Reads one room's recording out of |dir| and frames it for the wire. Split out of ReplayActor so
+// the layout rules can be tested without an actor, a database or a socket: the parts are the one
+// thing a build can get wrong and still "work" on a server that has never restarted.
+//
+// Three layouts are read, in this order:
+//   1. the hand parts this build writes (`<room_id>.h<NN>.json.gz`), merged back into one
+//      document (MergeReplayParts) and compressed again for the wire;
+//   2. a whole-match `<room_id>.json.gz` written by the previous build;
+//   3. a plain `<room_id>.json` from before the store compressed (served as-is, no `encoding`).
+// Anything unreadable — a truncated part, a part that is not a recording — is "not found" rather
+// than a best-effort answer, because half a timeline is worse than an honest ROOM_NOT_FOUND.
+ReplayLoad LoadReplayFromDisk(const std::string& dir, const std::string& room_id);
+
 class ReplayActor : public ReplaySink {
  public:
   // |dir| is the directory every file lives in. Empty means "no storage": Store does nothing and
@@ -46,10 +64,12 @@ class ReplayActor : public ReplaySink {
   const std::string& dir() const { return dir_; }
 
   // (ReplaySink) Fire and forget, like DbActor::RecordMatch: the match is already over and the
-  // players have their result, so a failed write is logged and never propagates to the game. The
-  // whole file is replaced each time (the room calls this once per settled round), so a crash
-  // mid-match still leaves every finished round readable.
-  stdexec::task<void> Store(std::string room_id, std::string contents) override;
+  // players have their result, so a failed write is logged and never propagates to the game.
+  //
+  // One file per hand (`<room_id>.h<NN>.json.gz`, ReplayRecorder::PartFileNameFor), each written
+  // once and never rewritten: the memory a room holds is one hand's frames, not the whole match,
+  // and a crash mid-match still leaves every finished hand readable. Load merges the parts back.
+  stdexec::task<void> Store(std::string room_id, int part_index, std::string contents) override;
 
   // Answers §4.13 for |requester_account_id|: whether that account sat in |room_id|'s game, and
   // the recording if it did.
@@ -70,10 +90,6 @@ class ReplayActor : public ReplaySink {
   constexpr static auto kActorMethods = std::make_tuple(&ReplayActor::Store, &ReplayActor::Load);
 
  private:
-  // Reads and gunzips. Returns "not found" for a refusal, a missing file or an unreadable one:
-  // §4.13 collapses all of them into ROOM_NOT_FOUND.
-  ReplayLoad LoadFile(const std::string& room_id) const;
-
   std::string dir_;
 };
 
@@ -86,8 +102,8 @@ class ReplayStore {
   bool IsEmpty() const { return actor_.IsEmpty(); }
   const ex_actor::ActorRef<ReplayActor>& actor() const { return actor_; }
 
-  [[nodiscard]] auto Store(std::string room_id, std::string contents) const {
-    return actor_.Send<&ReplayActor::Store>(std::move(room_id), std::move(contents));
+  [[nodiscard]] auto Store(std::string room_id, int part_index, std::string contents) const {
+    return actor_.Send<&ReplayActor::Store>(std::move(room_id), part_index, std::move(contents));
   }
   [[nodiscard]] auto Load(std::string room_id, uint64_t requester_account_id) const {
     return actor_.Send<&ReplayActor::Load>(std::move(room_id), requester_account_id);

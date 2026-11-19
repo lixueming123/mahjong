@@ -2,6 +2,7 @@
 
 #include <zlib.h>
 
+#include <array>
 #include <cstddef>
 
 namespace mahjong {
@@ -32,6 +33,40 @@ std::string GzipCompress(std::string_view bytes, int level) {
     return {};  // the caller answers INTERNAL; an empty payload is never a valid replay
   }
   out.resize(produced);
+  return out;
+}
+
+// windowBits 15 + 16 again: the stream has the gzip wrapper. Inflate is a loop rather than one
+// call because the output size is not known up front; the chunk is deliberately larger than a
+// part (a hand is ~5-30 KB of JSON, see replay.h) so a part is one or two rounds of it.
+//
+// A truncated or non-gzip stream is refused as a whole: half a part would splice a broken frame
+// into the middle of a document, which the player would report as a bad recording rather than as
+// the missing file it is.
+std::string GzipDecompress(std::string_view bytes) {
+  z_stream stream {};
+  if (inflateInit2(&stream, 15 + 16) != Z_OK) {
+    return {};
+  }
+  std::string out;
+  std::array<char, 64 * 1024> chunk {};
+  stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(bytes.data()));
+  stream.avail_in = static_cast<uInt>(bytes.size());
+  int result = Z_OK;
+  while (result == Z_OK) {
+    stream.next_out = reinterpret_cast<Bytef*>(chunk.data());
+    stream.avail_out = static_cast<uInt>(chunk.size());
+    result = inflate(&stream, Z_NO_FLUSH);
+    if (result != Z_OK && result != Z_STREAM_END) {
+      inflateEnd(&stream);
+      return {};
+    }
+    out.append(chunk.data(), chunk.size() - stream.avail_out);
+  }
+  inflateEnd(&stream);
+  if (out.empty()) {
+    return {};
+  }
   return out;
 }
 

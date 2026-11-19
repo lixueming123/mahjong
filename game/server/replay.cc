@@ -53,6 +53,144 @@ json::Value ViewsOfStep(const SeatViews& views) {
   return array;
 }
 
+bool IsJsonSpace(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
+
+size_t SkipJsonSpace(const std::string& text, size_t index) {
+  while (index < text.size() && IsJsonSpace(text[index])) {
+    ++index;
+  }
+  return index;
+}
+
+// Advances |*index| past exactly one JSON value. Structural only: it validates shape (balanced
+// brackets, terminated strings, escapes consumed in pairs) and nothing else, because the documents
+// it walks were written by json::Value::Dump and are known good — a failure here means the caller
+// was handed something that is not a recording, which is answered as "no such file".
+bool SkipJsonValue(const std::string& text, size_t* index) {
+  size_t i = *index;
+  if (i >= text.size()) {
+    return false;
+  }
+  if (text[i] == '"') {
+    ++i;
+    while (i < text.size()) {
+      if (text[i] == '\\') {
+        i += 2;
+        continue;
+      }
+      if (text[i] == '"') {
+        *index = i + 1;
+        return true;
+      }
+      ++i;
+    }
+    return false;
+  }
+  if (text[i] == '{' || text[i] == '[') {
+    int depth = 0;
+    while (i < text.size()) {
+      const char c = text[i];
+      if (c == '"') {
+        if (!SkipJsonValue(text, &i)) {
+          return false;
+        }
+        continue;
+      }
+      if (c == '{' || c == '[') {
+        ++depth;
+      } else if (c == '}' || c == ']') {
+        --depth;
+        if (depth == 0) {
+          *index = i + 1;
+          return true;
+        }
+      }
+      ++i;
+    }
+    return false;
+  }
+  const size_t start = i;
+  while (i < text.size() && !IsJsonSpace(text[i]) && text[i] != ',' && text[i] != '}' && text[i] != ']') {
+    ++i;
+  }
+  if (i == start) {
+    return false;
+  }
+  *index = i;
+  return true;
+}
+
+// Where a rendered replay document keeps its timeline. |key_start| is the opening quote of the
+// `steps` member (the merge keeps everything before it, comma included), [|list_begin|,
+// |list_end|) is the array itself with its brackets.
+struct StepsSpan {
+  size_t key_start = 0;
+  size_t list_begin = 0;
+  size_t list_end = 0;
+};
+
+// Walks the TOP LEVEL of a rendered replay document looking for `steps`. Depth matters: a key of
+// the same name inside a frame would be a different member, and the merge would splice in the
+// wrong place if it matched. Nothing is parsed — see MergeReplayParts for why.
+bool FindTopLevelSteps(const std::string& text, StepsSpan* span) {
+  size_t i = SkipJsonSpace(text, 0);
+  if (i >= text.size() || text[i] != '{') {
+    return false;
+  }
+  ++i;
+  bool found = false;
+  while (true) {
+    i = SkipJsonSpace(text, i);
+    if (i >= text.size()) {
+      return false;
+    }
+    if (text[i] == '}') {
+      return found;
+    }
+    const size_t key_begin = i;
+    size_t after_key = i;
+    if (text[i] != '"' || !SkipJsonValue(text, &after_key)) {
+      return false;
+    }
+    i = SkipJsonSpace(text, after_key);
+    if (i >= text.size() || text[i] != ':') {
+      return false;
+    }
+    i = SkipJsonSpace(text, i + 1);
+    const size_t value_begin = i;
+    if (!SkipJsonValue(text, &i)) {
+      return false;
+    }
+    const size_t value_end = i;
+    // The key is compared unescaped: it is written by Serialize(), which spells it `steps`.
+    if (after_key - key_begin == std::string_view("\"steps\"").size() &&
+        text.compare(key_begin, after_key - key_begin, "\"steps\"") == 0) {
+      if (found) {
+        return false;  // two timelines: refuse rather than pick one
+      }
+      if (value_end - value_begin < 2 || text[value_begin] != '[' || text[value_end - 1] != ']') {
+        return false;
+      }
+      span->key_start = key_begin;
+      span->list_begin = value_begin;
+      span->list_end = value_end;
+      found = true;
+    }
+    i = SkipJsonSpace(text, value_end);
+    if (i >= text.size()) {
+      return false;
+    }
+    if (text[i] == ',') {
+      ++i;
+      continue;
+    }
+    if (text[i] == '}') {
+      return found;
+    }
+    return false;
+  }
+}
+
 }  // namespace
 
 ReplayRecorder::ReplayRecorder(ReplayMeta meta) : meta_(std::move(meta)) {}
@@ -101,6 +239,17 @@ void ReplayRecorder::Finish(const GameResult& result) {
 }
 
 std::string ReplayRecorder::FileNameFor(std::string_view room_id) { return std::string(room_id) + ".json.gz"; }
+
+std::string ReplayRecorder::PartFileNameFor(std::string_view room_id, int part_index) {
+  // Two digits cover the 4..8 hands a match can have (PROTOCOL §5.15, max_rounds + max_renchan)
+  // with room to spare; a longer match still sorts correctly because the padding only fixes the
+  // width up to 99 and the merge sorts by the index it reads back anyway.
+  std::string index = std::to_string(part_index);
+  if (index.size() < 2) {
+    index.insert(index.begin(), 2 - index.size(), '0');
+  }
+  return std::string(room_id) + ".h" + index + ".json.gz";
+}
 
 std::string ReplayRecorder::LegacyFileNameFor(std::string_view room_id) { return std::string(room_id) + ".json"; }
 
@@ -168,6 +317,56 @@ std::string ReplayRecorder::Serialize() const {
   }
   root.Set("steps", std::move(steps));
   return root.Dump();
+}
+
+std::string MergeReplayParts(const std::vector<std::string>& parts) {
+  if (parts.empty()) {
+    return {};
+  }
+  std::vector<StepsSpan> spans;
+  spans.reserve(parts.size());
+  for (const std::string& part : parts) {
+    StepsSpan span;
+    if (!FindTopLevelSteps(part, &span)) {
+      spdlog::warn("replay: a hand part is not a readable recording; answering not-found");
+      return {};
+    }
+    spans.push_back(span);
+  }
+  // Size up front: the result is the whole document, and growing it a hand at a time would copy
+  // the accumulated prefix once per part.
+  size_t total = spans.back().key_start + (parts.back().size() - spans.back().list_end);
+  for (size_t index = 0; index < parts.size(); ++index) {
+    total += spans[index].list_end - spans[index].list_begin;
+  }
+  std::string merged;
+  merged.reserve(total + 1);
+  // The head (format … seats, and the finished/match_over/totals/final_rank block that precedes
+  // the timeline) comes from the LAST part: it is the only one that knows whether the match
+  // ended, it carries the final cumulative totals, and one step can settle two rounds, in which
+  // case the second one lands in a part with no steps of its own.
+  const StepsSpan& last = spans.back();
+  merged.append(parts.back(), 0, last.key_start);
+  merged.append("\"steps\":[");
+  bool wrote_step = false;
+  for (size_t index = 0; index < parts.size(); ++index) {
+    const StepsSpan& span = spans[index];
+    // The inner text between the brackets, verbatim: the parts were rendered by the same
+    // serializer, so their steps are already in the one spelling this file has.
+    const size_t inner_begin = span.list_begin + 1;
+    const size_t inner_end = span.list_end - 1;
+    if (inner_end <= inner_begin) {
+      continue;  // an empty part: a hand that produced no step of its own
+    }
+    if (wrote_step) {
+      merged.push_back(',');
+    }
+    merged.append(parts[index], inner_begin, inner_end - inner_begin);
+    wrote_step = true;
+  }
+  merged.push_back(']');
+  merged.append(parts.back(), last.list_end, std::string::npos);
+  return merged;
 }
 
 }  // namespace mahjong

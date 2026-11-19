@@ -88,8 +88,10 @@ def free_port() -> int:
 
 
 def start_server(binary: str, port: int, seed: int) -> subprocess.Popen:
+    # Not a recording test: an empty --replay-dir turns recording off, so the run leaves no files
+    # behind (the default would be a relative `replays` under the ctest working directory).
     process = subprocess.Popen(
-        [binary, "--port", str(port), "--seed", str(seed)],
+        [binary, "--port", str(port), "--seed", str(seed), "--replay-dir", ""],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

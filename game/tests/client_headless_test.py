@@ -1203,7 +1203,7 @@ def main() -> int:
         log_path = os.path.join(ARTIFACTS, "client_real_server_log.txt")
         with open(log_path, "wb") as log_file:
             proc = subprocess.Popen(
-                [server_bin, "--port", str(real_port), "--seed", "199"],
+                [server_bin, "--port", str(real_port), "--seed", "199", "--replay-dir", ""],
                 stdout=log_file, stderr=subprocess.STDOUT,
             )
         try:

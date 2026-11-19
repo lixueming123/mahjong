@@ -4,15 +4,21 @@
 标准库 only。启动真服务端（带 `--replay-dir`），打完一局，然后分两个阶段验证：
 
 **阶段 A（不需要账号）**
-  1. **落盘**：`<replay-dir>/<room_id>.json` 存在，`format`/`version` 正确，
-     `seats[]` 与四个座位对得上，`steps[]` 非空且每一步的 `f` 都是 `[[收件座位...], "<帧>"]`；
+  1. **落盘**：`<replay-dir>/<room_id>.h00.json.gz` 起的分片存在（v2.7：按局一片，一局写完即
+     丢，房间内存里只有当前这一局），每片是 gzip 流且自带完整头部；把分片按局序合并后，
+     `format`/`version`/`seats[]`/`steps[]` 的形状与单文件时代一致，`steps[].f` 仍是
+     `[[收件座位...], <帧对象>]`；
   2. **逐帧可解析**：每个 `steps[].f[][1]` 都能 JSON.parse，且 `type` 是已知帧类型；
   3. **重放一致**：按座位 0 的视角重放，最后一份 `state_sync` 的 `remaining`/`current_seat`/
-     四家牌河、以及 `game_end` 的 `reason`/`delta_score` 必须与实时对局完全相同。
+     四家牌河、以及 `game_end` 的 `reason`/`delta_score` 必须与实时对局完全相同；
+  4. **合并口径**：`steps[].t` 跨局单调不减（每局新建录制器时最容易退化的就是它）。
 
 **阶段 B（需要 MySQL，因为没有账号就无法鉴权）**
-  4. **取回**：用参与过该局的**账号**发 `replay_request`，拼分片，文本与磁盘一致、每片 <= 16 KB；
-  5. **鉴权**：另一个账号请求同一个 room_id → `replay{error:3}`。
+  4. **取回**：用参与过该局的**账号**发 `replay_request`，拼分片，还原出的文件与「磁盘分片合并
+     结果」一致、每片 <= 16 KB —— 客户端看到的仍是整场一份，分片是服务端内部布局；
+  5. **鉴权**：另一个账号请求同一个 room_id → `replay{error:3}`；
+  6. **旧布局回退**：删掉分片、留一份 `<room_id>.json.gz`（v2.6 整场）和一份 `<room_id>.json`
+     （v2.5 明文），两者都必须仍能读出同样的内容。
 
 MySQL 不可用（或服务端编成 db_stub）时阶段 B 打一行 SKIP 说明并以 77 退出 = ctest 显示 SKIP。
 阶段 A 仍然真跑，所以「没账号」不等于「没验证」。
@@ -62,8 +68,21 @@ class Client:
         self.sock.settimeout(10.0)
         self.buffer = b""
         self.name = name
+        # §7.2: the server drops (and reports RATE_LIMITED for) anything over 100 inbound frames a
+        # second. A human never gets close, but this driver answers every window the instant it
+        # opens, so with --ai-delay-ms 0 a whole match can finish inside 100 ms of wall clock and
+        # the limit fires on the harness rather than on anything under test. Pacing the writes
+        # keeps the run honest: the assertions are about the recording, not about how fast a bot
+        # can mash buttons.
+        self.min_send_interval = 0.012
+        self._last_send = 0.0
 
     def send(self, frame: dict) -> None:
+        if self.min_send_interval > 0.0:
+            wait = self._last_send + self.min_send_interval - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            self._last_send = time.monotonic()
         self.sock.sendall((json.dumps(frame, ensure_ascii=False) + "\n").encode("utf-8"))
 
     def recv(self, timeout: float = 10.0) -> dict:
@@ -147,11 +166,14 @@ def register(client: Client, username: str, password: str) -> dict:
 
 
 def play_one_round(client: Client, username: str | None = None, password: str | None = None,
-                   already_logged_in: bool = False) -> dict:
-    """登录 → 建房 → 打完第一局。返回观测值。
+                   already_logged_in: bool = False, whole_match: bool = False) -> dict:
+    """登录 → 建房 → 打完第一局（或整场）。返回观测值。
 
     不传账号就是游客：阶段 A 要能在没有 MySQL 的机器上跑，而回放文件的形状与鉴权无关。
     传账号则这一局的座位带真实 `account_id`，阶段 B 用它验证「参与者能取回」。
+
+    |whole_match| 一直打到 `match_end`（4..8 局）：录制按局分片，只有整场才有多片可合并，
+    而「多片合并」正是分片方案唯一可能静默出错的环节（片序、尾部字段、`t` 的连续性）。
     |already_logged_in| 用于 register 之后（§3.2：注册成功即登录，再 login 会被拒）。
     """
     if already_logged_in:
@@ -177,9 +199,12 @@ def play_one_round(client: Client, username: str | None = None, password: str | 
         "game_end": None,
         "last_sync": None,
         "sync_frames": 0,
+        # 局终帧全部留下：整场时最后一份 `game_end` 才是"当前局"的那个，而分片数与它相等。
+        "game_ends": [],
     }
     my_hand: list[str] = []
-    deadline = time.monotonic() + 120.0
+    # 整场是 4..8 局，每局一手的窗口都要等；实测（ai_delay=0）一整场约 15 秒，留足余量给慢机器。
+    deadline = time.monotonic() + (300.0 if whole_match else 120.0)
     while time.monotonic() < deadline:
         frame = client.recv(timeout=30.0)
         kind = frame.get("type")
@@ -220,8 +245,16 @@ def play_one_round(client: Client, username: str | None = None, password: str | 
             continue
         if kind == FRAME_TYPE.GAME_END:
             observation["game_end"] = frame
+            observation["game_ends"].append(frame)
+            if whole_match:
+                continue  # 下一局在同一连接上继续；整场以 match_end 结束
             return observation
-    raise TestFailure("no game_end within 120s")
+        if kind == FRAME_TYPE.MATCH_END:
+            if not whole_match:
+                raise TestFailure("match_end arrived when only one round was requested")
+            observation["match_end"] = frame
+            return observation
+    raise TestFailure("no game_end/match_end within 120s")
 
 
 def request_replay(client: Client, room_id: str) -> dict:
@@ -375,6 +408,51 @@ def hand_track_at(replay: dict, seat: int, step_index: int) -> list[str]:
     return hand if isinstance(hand, list) else []
 
 
+def part_paths(replay_dir: str, room_id: str) -> list[Path]:
+    """该房间已落盘的每一局分片，按局序（`<room_id>.h00.json.gz` 起）。"""
+    paths = sorted(Path(replay_dir).glob(f"{room_id}.h??.json.gz"))
+    return paths
+
+
+def wait_for_parts(replay_dir: str, room_id: str, timeout: float = 15.0) -> list[Path]:
+    """等第一片落下来（写盘是 ReplayActor 邮箱里的异步操作）。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        paths = part_paths(replay_dir, room_id)
+        if paths:
+            return paths
+        time.sleep(0.05)
+    raise TestFailure(f"no replay part for {room_id} (files: {os.listdir(replay_dir)})")
+
+
+def merge_parts(paths: list[Path], room_id: str) -> tuple[dict, list[str]]:
+    """把分片按局序合并成一份完整回放（与服务端 replay.cc MergeReplayParts 同口径）。
+
+    服务端是纯文本拼接（`steps` 数组内文原样串起来，其余字段取最后一片），这里按 JSON 语义
+    做同一件事：`steps` 顺序拼接，`finished`/`match_over`/`totals`/`final_rank` 取最后一片 ——
+    只有它知道整场是否结束。两边等价，所以既能验"合并后的东西是对的"，又能顺便守住"分片
+    里没有任何字段丢失"。返回合并结果与每一片的原始文本（后者用来查"片内无转义"这类字节级
+    性质，JSON 解析之后就看不到了）。
+    """
+    texts = []
+    parts = []
+    for path in paths:
+        raw = path.read_bytes()
+        if raw[:2] != b"\x1f\x8b":
+            raise TestFailure(f"{path.name} is not a gzip stream: {raw[:8]!r}")
+        text = gzip.decompress(raw).decode("utf-8")
+        texts.append(text)
+        parts.append(json.loads(text))
+    for path, part in zip(paths, parts):
+        if part.get("format") != "mahjong-replay" or part.get("room_id") != room_id:
+            raise TestFailure(f"{path.name} is not a part of {room_id}: {str(part)[:120]!r}")
+        if not isinstance(part.get("steps"), list):
+            raise TestFailure(f"{path.name} has no steps list: {str(part)[:120]!r}")
+    merged = dict(parts[-1])
+    merged["steps"] = [step for part in parts for step in part["steps"]]
+    return merged, texts
+
+
 def run(args: argparse.Namespace) -> int:
     binary = os.path.abspath(args.server_bin)
     replay_dir = tempfile.mkdtemp(prefix="mahjong-replays-")
@@ -383,27 +461,77 @@ def run(args: argparse.Namespace) -> int:
     main_client = None
     try:
         main_client = Client(port, "guest")
-        observed = play_one_round(main_client)
+        # 整场（4..8 局）而不是一局：分片方案唯一的"静默错"是合并 —— 片序、尾部取哪一片、
+        # `t` 是否跨局连续。只录一局的话这三条一条都测不到（一片合并 = 原样返回）。
+        observed = play_one_round(main_client, whole_match=True)
         if observed["errors"]:
             raise TestFailure(f"the game itself answered errors: {observed['errors'][:2]!r}")
         room_id = observed["room_id"]
+        hands_played = len(observed["game_ends"])
+        if hands_played < 4:
+            raise TestFailure(f"a match must settle 4..8 hands, got {hands_played}")
 
         # ---- 1. 落盘 ----
-        # v2.6：文件是 gzip 流（`<room_id>.json.gz`），不是 JSON 文本 —— 一份 1.5 MB 的回放
-        # 压到 ~60 KB，且与下发用的是同一份字节（服务端不再为发送重新压一遍）。
-        expected_path = Path(replay_dir) / f"{room_id}.json.gz"
-        # 写盘是异步的（ReplayActor 的邮箱），等它落下来。
-        deadline = time.monotonic() + 15.0
-        while not expected_path.exists() and time.monotonic() < deadline:
+        # 录制按**局**分片（`<room_id>.h00.json.gz` 起，v2.7）：一局写完就丢，房间内存里只有
+        # 当前这一局的帧；取回时服务端把分片合并回一份完整文件，所以 §5.18 的形状没变。
+        # 每片都是 gzip 流，且都带完整的头部（format/room_id/seats），能单独读懂。
+        parts = wait_for_parts(replay_dir, room_id)
+        deadline = time.monotonic() + 20.0
+        while len(parts) < hands_played and time.monotonic() < deadline:
             time.sleep(0.05)
-        if not expected_path.exists():
-            raise TestFailure(f"no replay file at {expected_path} (files: {os.listdir(replay_dir)})")
-        on_disk_bytes = expected_path.read_bytes()
-        if on_disk_bytes[:2] != b"\x1f\x8b":
-            raise TestFailure(f"{expected_path.name} is not a gzip stream: {on_disk_bytes[:8]!r}")
-        on_disk_text = gzip.decompress(on_disk_bytes).decode("utf-8")
-        on_disk = json.loads(on_disk_text)
-        check_file_shape(on_disk, room_id, on_disk_text)
+            parts = part_paths(replay_dir, room_id)
+        if len(parts) != hands_played:
+            raise TestFailure(f"expected one part per settled hand ({hands_played}), got "
+                              f"{len(parts)}: {[p.name for p in parts]}")
+        on_disk, part_texts = merge_parts(parts, room_id)
+        check_file_shape(on_disk, room_id)
+        if any(p.stat().st_size == 0 for p in parts):
+            raise TestFailure(f"a replay part is empty: {[p.name for p in parts]}")
+        # 每片只含它那一局：新局以 `game_start` 开头，所以逐片数一遍应该正好等于局数。
+        # 这条也是"分片边界真的落在局边界上"的断言，而不只是"文件数对得上"。
+        starts = 0
+        for text in part_texts:
+            for step in json.loads(text).get("steps") or []:
+                if any(isinstance(frame, dict) and frame.get("type") == FRAME_TYPE.GAME_START
+                       for _seats, frame in step.get("f") or []):
+                    starts += 1
+                    break
+        if starts != hands_played:
+            raise TestFailure(f"expected {hands_played} hand openings across the parts, found {starts}")
+        # §5.18: frames are spliced into the file as JSON objects, so neither a part nor the merged
+        # document may contain a single escaped quote. Asserted on the parts' own bytes because the
+        # merged text is assembled by the server (stage B compares what it serves against them).
+        for path, text in zip(parts, part_texts):
+            if "\\\"" in text:
+                at = text.index("\\\"")
+                raise TestFailure(f"{path.name} contains an escape at offset {at}: "
+                                  f"{text[max(0, at - 80):at + 120]!r}")
+        # `t` is anchored once per match, not per part: a merge that restarted it would make the
+        # player's timeline jump backwards. This is the one field a per-hand recorder can break.
+        marks = [step.get("t") for step in on_disk["steps"]]
+        if marks != sorted(marks):
+            raise TestFailure(f"steps[].t must be non-decreasing across hands, got {marks[:40]!r}")
+        # 尾部字段取最后一片：整场结束时 `match_over` 必须为 true（每片都带一份尾部，只有最后
+        # 一片的 `match_over` 是 true —— 合并取错片的话这里就会是 false）。
+        if on_disk.get("match_over") is not True:
+            raise TestFailure(f"the merged match must be finished: match_over={on_disk.get('match_over')!r}")
+        if on_disk.get("finished") is not True:
+            raise TestFailure("the merged match must be marked finished")
+        # `totals` 也只能来自最后一片：中途各片的 totals 是那一局当时的累计值。
+        match_end = observed.get("match_end") or {}
+        rankings = {entry.get("seat"): entry for entry in match_end.get("rankings") or []}
+        if rankings:
+            for seat in range(4):
+                expected_total = (rankings.get(seat) or {}).get("final_score")
+                if expected_total is None:
+                    continue
+                if on_disk["totals"][seat] != expected_total:
+                    raise TestFailure(f"merged totals[{seat}]={on_disk['totals'][seat]!r} "
+                                      f"!= match_end final_score {expected_total!r}")
+                expected_rank = (rankings.get(seat) or {}).get("rank")
+                if expected_rank is not None and on_disk["final_rank"][seat] != expected_rank:
+                    raise TestFailure(f"merged final_rank[{seat}]={on_disk['final_rank'][seat]!r} "
+                                      f"!= match_end rank {expected_rank!r}")
 
         # ---- 2. 重放一致性：座位 0 视角的最后一帧必须与实时对局一致（无需账号）----
         replayed = replay_as_seat(on_disk, MY_SEAT)
@@ -447,11 +575,24 @@ def run(args: argparse.Namespace) -> int:
                 raise TestFailure(
                     f"view track never recorded seat {seat}: switching the replay to that seat "
                     f"would show an empty table (last step v={replay_steps[-1].get('v')!r})")
+        # 每局新建录制器意味着视图基线也要重来：新局的第一次快照必须记下四家的视图，否则
+        # 播放器在 `game_start` 清空轨道（replay.js）之后会有座位整局空着 —— 只有"该座位的
+        # 视图恰好和上一局末尾一样"时才会暴露，所以这里逐局核对，而不是只在结尾看一次。
+        for path, text in zip(parts, part_texts):
+            part_steps = json.loads(text).get("steps") or []
+            for step in part_steps:
+                views = step.get("v") or []
+                if len(views) >= 4 and all(isinstance(view, dict) and view for view in views[:4]):
+                    break
+            else:
+                raise TestFailure(f"{path.name} never recorded a full four-seat view snapshot; "
+                                  "a fresh recorder per hand must not reuse the previous baseline")
 
         # ---- 3. 取回 + 鉴权（需要账号）----
         skipped = fetch_and_authorize(port, room_id, replay_dir, main_client)
+        on_disk_bytes = sum(path.stat().st_size for path in parts)
         summary = (f"replay_e2e_test: ok (room {room_id}, {len(on_disk['steps'])} steps, "
-                   f"{expected_path.stat().st_size} bytes on disk)")
+                   f"{len(parts)} parts / {on_disk_bytes} bytes on disk)")
         if skipped:
             print(summary + " — served/authorization checks SKIPPED (no account storage)")
             return SKIP_RETURN_CODE
@@ -508,34 +649,46 @@ def fetch_and_authorize(port: int, room_id: str, replay_dir: str, main_client: C
         served = request_replay(participant, own_room)
         if "error" in served:
             raise TestFailure(f"the participant must be allowed to read its own replay, got {served!r}")
-        own_path = Path(replay_dir) / f"{own_room}.json.gz"
-        deadline = time.monotonic() + 15.0
-        while not own_path.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        if not own_path.exists():
-            raise TestFailure(f"no replay file at {own_path} (files: {os.listdir(replay_dir)})")
-        on_disk = json.loads(gzip.decompress(own_path.read_bytes()).decode("utf-8"))
+        own_parts = wait_for_parts(replay_dir, own_room)
+        on_disk, _ = merge_parts(own_parts, own_room)
+        # 服务端下发的是**合并后**的整场文件，不是分片本身：客户端（§5.18）看到的仍然是一份
+        # 完整时间轴。这条断言同时守住三件事：DB 鉴权放行、gzip+base64 能还原、分片合并与
+        # 磁盘内容一致 —— 分片是服务端内部布局，不能泄漏到线上形状里。
+        check_file_shape(served, own_room)
         if json.dumps(served, ensure_ascii=False, sort_keys=True) != json.dumps(
             on_disk, ensure_ascii=False, sort_keys=True
         ):
-            raise TestFailure("the served replay differs from the file on disk")
+            raise TestFailure("the served replay differs from the merged parts on disk")
 
-        # 旧文件名回退（v2.6 迁移）:把这份录制改成 v2.5 的名字 `<room_id>.json`,服务端仍必须
-        # 读出来并下发(内容是 gzip,所以客户端照旧按 `encoding` 还原)。没有这条回退,一次升级
-        # 就会让磁盘上所有已有回放变成 ROOM_NOT_FOUND —— 这正是压缩改动最容易漏掉的一半。
+        # 旧布局回退：一份 v2.6 的整场文件（`<room_id>.json.gz`）和一份 v2.5 的明文文件
+        # （`<room_id>.json`）都必须仍然能读。分片方案把读路径变成"分片优先"，没有这条回退，
+        # 一次升级就会让磁盘上所有已有回放变成 ROOM_NOT_FOUND。
+        own_path = Path(replay_dir) / f"{own_room}.json.gz"
         legacy_path = Path(replay_dir) / f"{own_room}.json"
-        own_path.rename(legacy_path)
+        for path in own_parts:
+            path.unlink()
+        own_path.write_bytes(gzip.compress(json.dumps(
+            on_disk, ensure_ascii=False, separators=(",", ":")).encode("utf-8")))
         legacy_served = request_replay(participant, own_room)
         if "error" in legacy_served:
             raise TestFailure(
-                f"a recording under the pre-v2.6 name must still be readable, got {legacy_served!r}"
+                f"a whole-match recording must still be readable, got {legacy_served!r}"
             )
         if json.dumps(legacy_served, ensure_ascii=False, sort_keys=True) != json.dumps(
             on_disk, ensure_ascii=False, sort_keys=True
         ):
-            raise TestFailure("the legacy-named recording served different content")
-        # 还原回去,后面的断言仍按 v2.6 的布局理解磁盘。
-        legacy_path.rename(own_path)
+            raise TestFailure("the whole-match recording served different content")
+        # v2.5：明文（未压缩），服务端必须原样下发并省掉 `encoding`。
+        own_path.unlink()
+        legacy_path.write_text(json.dumps(on_disk, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        plain_served = request_replay(participant, own_room)
+        if "error" in plain_served:
+            raise TestFailure(f"a pre-v2.6 plain recording must still be readable, got {plain_served!r}")
+        if json.dumps(plain_served, ensure_ascii=False, sort_keys=True) != json.dumps(
+            on_disk, ensure_ascii=False, sort_keys=True
+        ):
+            raise TestFailure("the plain recording served different content")
+        legacy_path.unlink()
 
         # 另一个账号没参与过那局 → 拒绝（同一个 ROOM_NOT_FOUND，不泄露房间是否存在）。
         stranger = Client(port, "stranger")

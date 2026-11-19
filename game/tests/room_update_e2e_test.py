@@ -176,7 +176,7 @@ def main() -> int:
     log_file = tempfile.NamedTemporaryFile(prefix="room_update_server_", suffix=".log", delete=False)
     print(f"[room-update] binary={binary} port={port}")
     process = subprocess.Popen(
-        [binary, "--port", str(port), "--seed", str(random.randint(1, 2**31 - 1))],
+        [binary, "--port", str(port), "--seed", str(random.randint(1, 2**31 - 1)), "--replay-dir", ""],
         stdout=log_file,
         stderr=subprocess.STDOUT,
     )

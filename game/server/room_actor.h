@@ -126,11 +126,13 @@ class RoomActor : public RoomEndpoint {
   // room has held since the deal.
   void ReportResult(const GameResult& result);
 
-  // Replay recording (replay.h). One call before each delivery, so the file holds exactly the
+  // Replay recording (replay.h). One call before each delivery, so the part holds exactly the
   // bytes that were sent, in the order the seats saw them.
   void RecordStep(const GameStep& step);
-  // Serializes the file and posts it to ReplayActor, once per settled round. Serializing here is
-  // pure CPU over data this thread already holds; the disk is the store's, never the room's.
+  // Serializes the hand that just settled and posts it to ReplayActor, once per settled round.
+  // Serializing here is pure CPU over data this thread already holds; the disk is the store's,
+  // never the room's. Called from Run with the step's last result, then the recorder is dropped so
+  // the next hand starts a fresh part.
   void WriteReplay(const GameResult& result);
 
   GameContext Context() const;
@@ -154,9 +156,14 @@ class RoomActor : public RoomEndpoint {
   // ---- replay recording (replay.h) ----
   // Whether to record is whether a store exists (ReplayService), so there is nothing to copy in
   // here. The write itself goes to ReplayActor (replay_store.h), never to this thread.
-  // |replay_started_ms_| anchors each step's `t` (pacing only, never correctness).
+  // |replay_started_ms_| anchors each step's `t` (pacing only, never correctness). It is set once,
+  // on the match's first hand, and every hand part shares that origin.
   std::unique_ptr<ReplayRecorder> recorder_;
   int64_t replay_started_ms_ = 0;
+  // How many hand parts have been written, and therefore the index of the next one (see
+  // ReplayRecorder::PartFileNameFor). Counting here rather than inside the recorder keeps the name
+  // stable across the per-hand recorder reset.
+  int replay_part_index_ = 0;
   // False once this room is being destroyed. A co-owned flag rather than a bool member because
   // the window timer's closure reads it after the room is gone (see the destructor).
   std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);

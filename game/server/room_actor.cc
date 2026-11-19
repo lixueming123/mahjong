@@ -195,6 +195,18 @@ stdexec::task<void> RoomActor::Run(GameStep step) {
       spdlog::error("room {}: no deadline scheduler; the armed deadline is dropped", room_id_);
     }
   }
+  // One replay part per step that settled anything, finished with the LAST result: a step can
+  // settle two rounds at once (GameStep::results — a bot that wins on the deal and ends the match
+  // inside the same message), and only the second one knows `match_over`. Nothing can be recorded
+  // between them, so a single part with the later tail describes the match correctly; splitting it
+  // in two would only produce a part with no timeline of its own.
+  //
+  // Before the settlement, not after: the owner's report is what makes the round show up in the
+  // match history, and a player who opens its replay the moment that row appears must not find the
+  // part still unwritten.
+  if (!step.results.empty()) {
+    WriteReplay(step.results.back());
+  }
   for (const GameResult& result : step.results) {
     ReportResult(result);
   }
@@ -207,15 +219,26 @@ void RoomActor::RecordStep(const GameStep& step) {
     return;  // recording is off: never call into the game for a god view
   }
   if (recorder_ == nullptr) {
-    // The recorder is built on the first step rather than in the constructor: Setup() is the
-    // first thing that reaches Run, and the metadata only needs what the constructor already
-    // has, so either place works — but this one keeps a room that never starts from allocating.
+    // The recorder is built on the first step of each hand rather than in the constructor: Setup()
+    // is the first thing that reaches Run, and the metadata only needs what the constructor
+    // already has, so either place works — but this one keeps a room that never starts from
+    // allocating, and it is also what gives every hand a fresh recording.
+    //
+    // A fresh recorder per hand is deliberate for two reasons. Its `last_views_` baseline starts
+    // empty, so the hand's first `state_sync` records all four seats instead of silently omitting
+    // a seat whose view happens to equal the previous hand's last one — the player resets its own
+    // track at `game_start` (replay.js), so a skipped seat would be blank for the whole hand. And
+    // it is what bounds the room's memory: what is held is one hand, not the match.
     ReplayMeta meta;
     meta.room_id = room_id_;
     meta.game_id = game_id_;
     meta.options_json = options_json_;
     meta.seed = seed_;
-    replay_started_ms_ = clock::EpochMs();
+    if (replay_started_ms_ == 0) {
+      // Anchored once, on the first hand: every part of a match shares one origin, so the merged
+      // file's `t` track is monotonic (the player's timeline is built from it).
+      replay_started_ms_ = clock::EpochMs();
+    }
     meta.started_at_ms = replay_started_ms_;
     for (const RoomSeat& seat : seats_) {
       ReplaySeat& recorded = meta.seats[static_cast<size_t>(seat.seat)];
@@ -252,12 +275,23 @@ void RoomActor::WriteReplay(const GameResult& result) {
   recorder_->Finish(result);
   ReplayService& store = GetReplayService();
   if (store.IsEmpty()) {
-    return;  // the store went away; nothing to write to
+    // The store went away mid-match; there is nothing to write to, and the part is dropped rather
+    // than carried into the next hand (whose own part would then be mislabelled).
+    recorder_.reset();
+    return;
   }
   // Serialized on this thread (pure CPU over data it already holds) and written on the store's.
   // The Send is fire-and-forget for the same reason the settlement is: the round is over, the
   // players have their result, and a failed write must not reach them.
-  ActorSendScope().spawn(store.Store(room_id_, recorder_->Serialize()));
+  //
+  // One part per hand, and the recorder is dropped right after: the room used to keep the whole
+  // match in memory and rewrite it at every settled round, so the last hand paid a full
+  // serialize + gzip of everything and the match's peak memory was the room's. A part is what a
+  // reader merges back (MergeReplayParts); a crash mid-match still leaves every finished hand
+  // readable, which is the property the whole-file rewrite existed for.
+  ActorSendScope().spawn(store.Store(room_id_, replay_part_index_, recorder_->Serialize()));
+  ++replay_part_index_;
+  recorder_.reset();
 }
 stdexec::task<void> RoomActor::Deliver(const std::vector<Outbound>& outbounds) {
   // Sequential on purpose, and measured rather than assumed: fanning a step's frames out to the
@@ -327,11 +361,9 @@ stdexec::task<void> RoomActor::ReplyError(int seat, protocol::ErrorCode code, st
 }
 
 void RoomActor::ReportResult(const GameResult& result) {
-  // Record the round even in a room with no owner (the unit test): the replay is a property of
-  // the table, not of who is listening. Written here because this is the only point where a
-  // round's outcome is known, and rewriting the whole file per round means a crash mid-match
-  // still leaves every finished round readable.
-  WriteReplay(result);
+  // The replay part for a settled round is written by Run (before this, so the recording is on its
+  // way to disk by the time the owner can tell a player the round exists); its tail has to be the
+  // LAST result of the step, which only Run knows. What is left here is the settlement half.
   if (!finished_for_test_ && owner_.IsEmpty()) {
     return;
   }

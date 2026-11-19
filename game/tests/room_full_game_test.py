@@ -485,7 +485,8 @@ def verify_game_end(end: dict, stats: dict, model: TableModel) -> str:
 def run_full_game(binary: str, seed: int, name: str, verbose: bool, port: int | None = None) -> dict:
     port = port or free_port()
     log = tempfile.NamedTemporaryFile(prefix="mahjong_e2e_", suffix=".log", delete=False)
-    process = subprocess.Popen([binary, "--port", str(port), "--seed", str(seed)], stdout=log, stderr=subprocess.STDOUT)
+    process = subprocess.Popen([binary, "--port", str(port), "--seed", str(seed), "--replay-dir", ""],
+                               stdout=log, stderr=subprocess.STDOUT)
     try:
         wait_for_server(port, process)
         client = Client(port, name)
@@ -533,7 +534,7 @@ def run_full_match(binary: str, seed: int, name: str, verbose: bool, port: int |
     port = port or free_port()
     log = tempfile.NamedTemporaryFile(prefix="mahjong_match_", suffix=".log", delete=False)
     process = subprocess.Popen([binary, "--port", str(port), "--seed", str(seed),
-                                "--inter-hand-delay-ms", str(inter_hand_delay_ms)],
+                                "--inter-hand-delay-ms", str(inter_hand_delay_ms), "--replay-dir", ""],
                                stdout=log, stderr=subprocess.STDOUT)
     try:
         wait_for_server(port, process)
@@ -653,7 +654,7 @@ def run_timeout_scenario(binary: str, seed: int, verbose: bool, port: int | None
     port = port or free_port()
     log = tempfile.NamedTemporaryFile(prefix="mahjong_e2e_timeout_", suffix=".log", delete=False)
     process = subprocess.Popen([binary, "--port", str(port), "--seed", str(seed),
-                                "--action-timeout-ms", "1000", "--ai-delay-ms", "0"],
+                                "--action-timeout-ms", "1000", "--ai-delay-ms", "0", "--replay-dir", ""],
                                stdout=log, stderr=subprocess.STDOUT)
     try:
         wait_for_server(port, process)
@@ -712,7 +713,8 @@ def run_disconnect_scenario(binary: str, seed: int, verbose: bool, port: int | N
     # Since v2.3 a disconnected seat keeps its window countdown instead of being played at the
     # instant the socket closes, so the round still runs one deadline per human turn. A short
     # window keeps this scenario fast while exercising exactly that path.
-    process = subprocess.Popen([binary, "--port", str(port), "--seed", str(seed), "--action-timeout-ms", "1000"],
+    process = subprocess.Popen([binary, "--port", str(port), "--seed", str(seed), "--action-timeout-ms", "1000",
+                                "--replay-dir", ""],
                                stdout=log, stderr=subprocess.STDOUT)
     try:
         wait_for_server(port, process)
@@ -790,7 +792,8 @@ def run_multi_room_scenario(binary: str, seed: int, verbose: bool, port: int | N
     def one_server(server_seed: int) -> list[tuple[str, list[str]]]:
         server_port = port or free_port()
         log = tempfile.NamedTemporaryFile(prefix="mahjong_e2e_multiroom_", suffix=".log", delete=False)
-        process = subprocess.Popen([binary, "--port", str(server_port), "--seed", str(server_seed)],
+        process = subprocess.Popen([binary, "--port", str(server_port), "--seed", str(server_seed),
+                                    "--replay-dir", ""],
                                    stdout=log, stderr=subprocess.STDOUT)
         try:
             wait_for_server(server_port, process)

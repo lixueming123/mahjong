@@ -372,6 +372,8 @@ def main() -> int:
             "--action-timeout-ms",
             "15000",
             "--quiet",
+            "--replay-dir",
+            "",
         ],
         stdout=log_file,
         stderr=subprocess.STDOUT,

@@ -95,8 +95,8 @@ endif()
 
 # 回放存储：ReplayActor 是**唯一**碰回放文件的 actor（写入与读取），跑在自己的单线程池上，
 # 理由与 DbActor 完全一致 —— 文件 I/O 会阻塞，不能落在游戏线程（ACCOUNT_DESIGN.md §6.1）。
-# 房间只负责序列化（纯 CPU）和投递消息，不碰磁盘。gzip 也在这里做（gzip.cc）：1.5 MB 的
-# 回放压一次约 12 ms，那是单桌时间轴的 5 帧，压在房间线程上就是 5 帧延迟。
+# 房间只负责序列化（纯 CPU）和投递消息，不碰磁盘。gzip 也在这里做（gzip.cc）：deflate 是纯 CPU，
+# 不该占单桌时间轴；v2.7 起一次写的是一局（约 40~160 KB → 4~5 KB），不是整场。
 add_library(mahjong_replay_store STATIC server/replay_store.cc server/gzip.cc)
 target_include_directories(mahjong_replay_store PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(mahjong_replay_store PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server)

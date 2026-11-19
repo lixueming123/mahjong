@@ -1018,8 +1018,11 @@ def main() -> int:
     print(f"[smoke] binary={binary}")
     print(f"[smoke] port={port} seed={seed}")
 
+    # This test is not about recordings: leave nothing behind (PROTOCOL §5.18). An empty directory
+    # is the "recording off" switch, and it has to be passed explicitly — the default is a relative
+    # `replays` under whatever the ctest working directory is.
     process = subprocess.Popen(
-        [binary, "--port", str(port), "--seed", str(seed)],
+        [binary, "--port", str(port), "--seed", str(seed), "--replay-dir", ""],
         stdout=log_file,
         stderr=subprocess.STDOUT,
     )

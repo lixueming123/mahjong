@@ -190,7 +190,7 @@ def main() -> int:
     with open(log_path, "wb") as log_file:
         process = subprocess.Popen(
             [binary, "--port", str(port), "--seed", "20260101",
-             "--ai-delay-ms", "0", "--inter-hand-delay-ms", "0"],
+             "--ai-delay-ms", "0", "--inter-hand-delay-ms", "0", "--replay-dir", ""],
             stdout=log_file,
             stderr=subprocess.STDOUT,
         )

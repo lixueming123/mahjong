@@ -470,6 +470,171 @@ TEST(ReplayRecorderTest, SeatTableIsRecordedAndFilesAreNamedByRoomId) {
   EXPECT_EQ(ReplayRecorder::LegacyFileNameFor("r-2o5endvwb8zcx"), "r-2o5endvwb8zcx.json");
 }
 
+// A match is written one hand at a time (room_actor.cc WriteReplay), so the names have to sort in
+// play order and stay inside the directory: the room id is shape-checked before it becomes a path
+// (replay_store.cc IsRoomIdShape) and the index is always digits.
+TEST(ReplayRecorderTest, HandPartsAreNamedInPlayOrder) {
+  EXPECT_EQ(ReplayRecorder::PartFileNameFor("r-2o5endvwb8zcx", 0), "r-2o5endvwb8zcx.h00.json.gz");
+  EXPECT_EQ(ReplayRecorder::PartFileNameFor("r-2o5endvwb8zcx", 7), "r-2o5endvwb8zcx.h07.json.gz");
+  EXPECT_EQ(ReplayRecorder::PartFileNameFor("r-2o5endvwb8zcx", 12), "r-2o5endvwb8zcx.h12.json.gz");
+  // Lexicographic order == play order for the 4..8 hands a match has (PROTOCOL §5.15).
+  EXPECT_LT(ReplayRecorder::PartFileNameFor("r-2o5endvwb8zcx", 2),
+            ReplayRecorder::PartFileNameFor("r-2o5endvwb8zcx", 10));
+}
+
+// The merge is what keeps the client unchanged: whatever the room wrote it in parts, the answer to
+// a §4.13 request is one document with one timeline, byte-for-byte the shape a whole-match file
+// used to have.
+//
+// The interesting assertions are the two that a per-hand recorder makes non-obvious: the tail
+// fields (`finished`/`match_over`/`totals`) come from the LAST part, because only it knows the
+// match ended; and the steps are concatenated in part order with nothing lost in the middle.
+TEST(ReplayPartsTest, MergeProducesTheWholeMatchShape) {
+  ReplayMeta meta;
+  meta.room_id = "r-2o5endvwb8zcx";
+  meta.game_id = "classic";
+  meta.options_json = "{}";
+  meta.seed = 9;
+  meta.started_at_ms = 1000;
+  meta.seats[0].name = "小明";
+
+  std::vector<std::string> parts;
+  constexpr int kHands = 3;
+  for (int hand = 0; hand < kHands; ++hand) {
+    ReplayRecorder recorder(meta);
+    recorder.AddStep(hand * 1000, {Outbound {{}, R"({"type":17,"seat":1})"}}, nullptr);
+    recorder.AddStep(hand * 1000 + 10, {Outbound {{}, R"({"type":20,"seq":1})"}}, nullptr);
+    GameResult result;
+    result.match_over = hand == kHands - 1;
+    result.totals[0] = hand == kHands - 1 ? 12345 : 0;
+    result.final_rank[0] = hand == kHands - 1 ? 1 : 0;
+    recorder.Finish(result);
+    parts.push_back(recorder.Serialize());
+  }
+
+  const std::string merged = MergeReplayParts(parts);
+  ASSERT_FALSE(merged.empty());
+  const json::Value file = *json::Value::Parse(merged, nullptr);
+  EXPECT_EQ(file.Find("format")->AsString(), "mahjong-replay");
+  EXPECT_EQ(file.Find("version")->AsInt(), ReplayRecorder::kFormatVersion);
+  EXPECT_EQ(file.Find("room_id")->AsString(), "r-2o5endvwb8zcx");
+  // The head survives once, not once per part.
+  EXPECT_EQ(merged.find("\"seats\":"), merged.rfind("\"seats\":"));
+  // Every hand's steps are there, in order: two per hand.
+  const json::Value* steps = file.Find("steps");
+  ASSERT_NE(steps, nullptr);
+  ASSERT_EQ(steps->AsArray().size(), static_cast<size_t>(kHands * 2));
+  EXPECT_EQ(steps->AsArray()[0].Find("t")->AsInt(), 0);
+  EXPECT_EQ(steps->AsArray()[5].Find("t")->AsInt(), 2010);
+  // The tail is the last part's: only it saw match_over and the final totals.
+  EXPECT_TRUE(file.Find("finished")->AsBool());
+  EXPECT_TRUE(file.Find("match_over")->AsBool());
+  EXPECT_EQ(file.Find("totals")->AsArray()[0].AsInt(), 12345);
+  EXPECT_EQ(file.Find("final_rank")->AsArray()[0].AsInt(), 1);
+}
+
+// The strongest statement the merge can make: split any sequence of steps into parts, merge them
+// back, and the bytes are the file one recorder would have written for the whole match. If this
+// holds, the split is invisible to every reader — the client, the player, the e2e fixture — and
+// nothing about the on-disk layout can leak into the wire shape.
+//
+// Built from synthetic steps rather than a driven match on purpose: the split has to be exercised
+// at arbitrary boundaries (including one that cuts a hand in two), which a real match's hand
+// boundaries would never test.
+TEST(ReplayPartsTest, MergingSplitsEqualsOneWholeFile) {
+  ReplayMeta meta;
+  meta.room_id = "r-2o5endvwb8zcx";
+  meta.game_id = "riichi";
+  meta.options_json = R"({"length":2})";
+  meta.seed = 42;
+  meta.started_at_ms = 5000;
+  meta.seats[0].name = "小明";
+  meta.seats[2].name = "Bob";
+
+  struct HandStep {
+    int64_t t_ms = 0;
+    std::string frame;
+    bool moves_view = false;
+  };
+  std::vector<HandStep> script;
+  for (int index = 0; index < 9; ++index) {
+    script.push_back(HandStep {.t_ms = index * 250,
+                               .frame = R"({"type":17,"seat":)" + std::to_string(index % kSeatCount) + "}",
+                               .moves_view = index % 3 == 0});
+  }
+  const std::vector<size_t> cuts = {0, 4, 4, 7};  // an empty part in the middle, on purpose
+
+  auto play = [&meta, &script](size_t begin, size_t end, const GameResult& tail) {
+    ReplayRecorder recorder(meta);
+    for (size_t index = begin; index < end; ++index) {
+      SeatViews views;
+      const SeatViews* track = nullptr;
+      if (script[index].moves_view) {
+        views[1] = R"({"hand":[")" + std::to_string(index) + R"("],"melds":[]})";
+        track = &views;
+      }
+      recorder.AddStep(script[index].t_ms, {Outbound {{}, script[index].frame}}, track);
+    }
+    recorder.Finish(tail);
+    return recorder.Serialize();
+  };
+
+  GameResult final_result;
+  final_result.match_over = true;
+  final_result.totals[0] = -300;
+  final_result.final_rank[0] = 4;
+  const std::string whole = play(0, script.size(), final_result);
+
+  std::vector<std::string> parts;
+  std::vector<int> ends(cuts.begin() + 1, cuts.end());
+  ends.push_back(static_cast<int>(script.size()));
+  for (size_t index = 0; index < cuts.size(); ++index) {
+    // Every part but the last is finished with an unfinished tail: only the last hand knows the
+    // match ended, which is exactly the case the merge has to resolve in favour of the last part.
+    const GameResult tail = index + 1 == cuts.size() ? final_result : GameResult {};
+    parts.push_back(play(cuts[index], static_cast<size_t>(ends[index]), tail));
+  }
+
+  const std::string merged = MergeReplayParts(parts);
+  ASSERT_FALSE(merged.empty());
+  EXPECT_EQ(merged, whole) << "a merged match must be byte-identical to one recorded in one go";
+}
+
+// (game.h GameStep::results), in which case the second part carries the tail without a timeline of
+// its own. Merging must not drop that tail, nor emit a stray comma.
+TEST(ReplayPartsTest, AnEmptyPartStillSuppliesTheTail) {
+  ReplayMeta meta;
+  meta.room_id = "r-2o5endvwb8zcx";
+
+  ReplayRecorder first(meta);
+  first.AddStep(0, {Outbound {{}, R"({"type":17,"seat":0})"}}, nullptr);
+  first.Finish(GameResult {});
+
+  ReplayRecorder second(meta);
+  second.Finish(GameResult {.match_over = true});
+
+  const std::string merged = MergeReplayParts({first.Serialize(), second.Serialize()});
+  const json::Value file = *json::Value::Parse(merged, nullptr);
+  ASSERT_NE(file.Find("steps"), nullptr);
+  EXPECT_EQ(file.Find("steps")->AsArray().size(), 1u);
+  EXPECT_TRUE(file.Find("match_over")->AsBool());
+}
+
+// A missing part is answered as "no such recording" rather than half a match: the store logs and
+// returns not-found, and it can only do that if the merge says so instead of guessing.
+TEST(ReplayPartsTest, AnUnreadablePartIsRefused) {
+  ReplayMeta meta;
+  meta.room_id = "r-2o5endvwb8zcx";
+  ReplayRecorder recorder(meta);
+  recorder.AddStep(0, {Outbound {{}, R"({"type":17,"seat":0})"}}, nullptr);
+
+  EXPECT_TRUE(MergeReplayParts({}).empty());
+  EXPECT_TRUE(MergeReplayParts({"not json"}).empty());
+  EXPECT_TRUE(MergeReplayParts({recorder.Serialize(), ""}).empty());
+  // A document without a top-level timeline is not a part either.
+  EXPECT_TRUE(MergeReplayParts({R"({"format":"mahjong-replay"})"}).empty());
+}
+
 // The whole point of recording frames instead of actions: the same match recorded twice is the
 // same file. This is what makes a replay a fact rather than a re-simulation.
 //

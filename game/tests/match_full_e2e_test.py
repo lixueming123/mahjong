@@ -95,7 +95,7 @@ def run(args: argparse.Namespace) -> int:
     log = tempfile.NamedTemporaryFile(prefix="e2_match_", suffix=".log", delete=False)
     env = dict(os.environ, MAHJONG_MYSQL_PASSWORD=os.environ.get("MAHJONG_MYSQL_PASSWORD", "12345678"))
     command = [binary, "--port", str(port), "--seed", str(args.seed),
-               "--inter-hand-delay-ms", str(args.inter_hand_delay_ms),
+               "--inter-hand-delay-ms", str(args.inter_hand_delay_ms), "--replay-dir", "",
                "--mysql-host", args.mysql_host, "--mysql-port", str(args.mysql_port),
                "--mysql-user", args.mysql_user, "--mysql-db", args.mysql_db]
     proc = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=env)
