@@ -29,7 +29,7 @@ std::string LoginOkFrame(std::string_view player_id, std::string_view name, std:
   frame.Set("type", json::Value::Int(WireOf(FrameType::kLoginOk)));
   frame.Set("player_id", json::Value::Str(std::string(player_id)));
   frame.Set("name", json::Value::Str(std::string(name)));
-  // PROTOCOL v2.2 §5.1: only account logins report whether the player is already in a room.
+  // Only account logins report whether the player is already in a room.
   // The guest path leaves the key out, keeping its frozen frame shape.
   if (in_room.has_value()) {
     frame.Set("in_room", json::Value::Bool(*in_room));
@@ -55,7 +55,7 @@ json::Value RecentJson(const StatsSummary& summary) {
     item.Set("delta_score", json::Value::Int(entry.delta_score));
     item.Set("win", json::Value::Bool(entry.win));
     item.Set("ended_at", json::Value::Int(entry.ended_at));
-    // v2.3 §5.13: only written when true, so a client that predates replays sees the exact frame
+    // Only written when true, so a client that predates replays sees the exact frame
     // it saw before (this is the same "omit when false" rule state_sync uses for `autoplay`).
     if (entry.has_replay) {
       item.Set("has_replay", json::Value::Bool(true));
@@ -99,7 +99,7 @@ std::string StatsFrame(const StatsSummary& summary) {
   return StatsFrame(snapshot);
 }
 
-// ---- §5.18 replay (v2.3) ---------------------------------------------------------------
+// ---- replay ---------------------------------------------------------------------------
 
 std::string ReplayFrame(std::string_view room_id, int chunk, int chunks, std::string_view encoding,
                         std::string_view data) {
@@ -108,7 +108,7 @@ std::string ReplayFrame(std::string_view room_id, int chunk, int chunks, std::st
   frame.Set("room_id", json::Value::Str(std::string(room_id)));
   frame.Set("chunk", json::Value::Int(chunk));
   frame.Set("chunks", json::Value::Int(chunks));
-  // v2.6 §5.18: an empty encoding means the joined `data` IS the replay text (a file written before
+  // An empty encoding means the joined `data` IS the replay text (a file written before
   // the store compressed), so the key is omitted then and the old frame shape is unchanged.
   if (!encoding.empty()) {
     frame.Set("encoding", json::Value::Str(std::string(encoding)));
@@ -118,7 +118,7 @@ std::string ReplayFrame(std::string_view room_id, int chunk, int chunks, std::st
 }
 
 std::string ReplayErrorFrame(std::string_view room_id, ErrorCode code) {
-  // §5.18: the failure shape carries no chunk/chunks/data, so a client never has to guess
+  // The failure shape carries no chunk/chunks/data, so a client never has to guess
   // whether an empty `data` means "failed" or "an empty file".
   json::Value frame = json::Value::Obj(3);
   frame.Set("type", json::Value::Int(WireOf(FrameType::kReplay)));
@@ -158,7 +158,7 @@ std::vector<std::string> SplitReplayFrames(std::string_view room_id, std::string
     cuts.push_back(end);
     offset = end;
   }
-  // An empty payload still needs one frame: `chunks` must be >= 1 (§5.18), and the client treats a
+  // An empty payload still needs one frame: `chunks` must be >= 1, and the client treats a
   // zero-length answer as a protocol error otherwise.
   if (cuts.empty()) {
     cuts.push_back(0);

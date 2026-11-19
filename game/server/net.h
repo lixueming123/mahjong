@@ -1,8 +1,7 @@
 // Descriptor helpers that outlived the hand-written event loop.
 //
-// asio owns the listening socket and every client socket now, so this is down to one function:
-// Connection still closes a descriptor it owns itself when nothing else will (owns_fd=true, which
-// is the tests; the gateway passes false because asio must not see a closed descriptor twice).
+// asio owns the sockets, so one function is left: Connection still closes a descriptor it owns
+// itself (owns_fd=true, which is the tests; the gateway passes false).
 
 #pragma once
 

@@ -1,4 +1,4 @@
-// DbPool: the process-wide MySQL connection pool (ACCOUNT_DESIGN.md §2.4).
+// DbPool: the process-wide MySQL connection pool.
 //
 // One slot per db thread, and a slot may only be used by the thread that bound it. A MYSQL* must
 // never be touched by two threads, and libmysqlclient keeps per-thread state registered by
@@ -25,8 +25,8 @@
 namespace mahjong {
 
 struct DbPoolOptions {
-  // Per-socket timeouts. The C API speaks seconds, so these are rounded up (§2.3 spelled them as
-  // one hard-coded 3s constant for all three).
+  // Per-socket timeouts. The C API speaks seconds, so these are rounded up (one value serves all
+  // three operations).
   int connect_timeout_ms = 3000;
   int read_timeout_ms = 3000;
   int write_timeout_ms = 3000;
@@ -42,7 +42,7 @@ struct DbPoolOptions {
 };
 
 // Why Acquire() produced a failed lease. Handlers only log it: the wire answer is always
-// AuthStatus::kUnavailable / StatsOutcome{ok=false} (§2.3).
+// AuthStatus::kUnavailable / StatsOutcome{ok=false}.
 enum class DbAcquireFailure {
   kNone,
   kNotBound,       // Acquire from a thread that never called BindCurrentThread

@@ -1,6 +1,6 @@
 // WindowTimer: delivers the delayed "action window timeout" message.
 //
-// PROTOCOL.md §0.5 forbids cancellation of actor messages, so a timeout is a message that
+// Cancellation of actor messages is forbidden, so a timeout is a message that
 // carries the window's |seq|; when it arrives after the window already moved on, the
 // RoomActor drops it and changes nothing (seq invalidation). Timers are therefore never
 // cancelled either — a fired timer whose window is gone is simply ignored.

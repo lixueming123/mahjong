@@ -23,7 +23,7 @@ stdexec::task<void> PlayerLobbyAgent::HandleListRooms(json::Value) {
 
 stdexec::task<void> PlayerLobbyAgent::HandleCreateRoom(json::Value frame) {
   // "mode" 可选：缺省 classic。未知值在入口就拒（BAD_REQUEST），不要把一个拼错的玩法带进房间。
-  // v2.0：线值是整数（§1.3.1），{1 = classic, 2 = riichi}。
+  // v2.0：线值是整数，{1 = classic, 2 = riichi}。
   GameMode mode = GameMode::kClassic;
   if (const json::Value* value = frame.Find("mode"); value != nullptr) {
     if (!value->IsInteger()) {

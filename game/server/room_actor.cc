@@ -62,8 +62,8 @@ RoomActor::~RoomActor() {
 
 void RoomActor::BindRuntime(ex_actor::ActorRef<RoomEndpoint> self) {
   self_ref_ = std::move(self);
-  // PROTOCOL.md §0.5: the production scheduler is the window timer plus the room's own ref. A
-  // room without a timer (the unit test) keeps whatever scheduler it was constructed with.
+  // The production scheduler is the window timer plus the room's own ref. A room without a timer
+  // (the unit test) keeps whatever scheduler it was constructed with.
   if (timer_ == nullptr || timeout_scheduler_) {
     return;
   }
@@ -73,7 +73,7 @@ void RoomActor::BindRuntime(ex_actor::ActorRef<RoomEndpoint> self) {
   timeout_scheduler_ = [timer, ref, alive](int64_t delay_ms, uint64_t token) {
     timer->Schedule(delay_ms, [ref, alive, token]() {
       if (!*alive) {
-        // The room is gone. The timer cannot be cancelled (§0.5), so the send is dropped here
+        // The room is gone. The timer cannot be cancelled, so the send is dropped here
         // rather than landing on a destroyed actor.
         return;
       }
@@ -255,7 +255,7 @@ void RoomActor::RecordStep(const GameStep& step) {
   // cheaper than serializing four views on every deadline-only step. The prefix is exact, not a
   // guess: every frame builder in both games writes `type` first, and the frozen golden hashes
   // depend on that byte order (game_test_support.h).
-  constexpr std::string_view kStateSyncPrefix = R"({"type":20,)";  // §1.3.1: state_sync = 20
+  constexpr std::string_view kStateSyncPrefix = R"({"type":20,)";  // state_sync = 20
   SeatViews views;
   const SeatViews* view_track = nullptr;
   for (const Outbound& outbound : step.outbounds) {
@@ -338,10 +338,10 @@ stdexec::task<void> RoomActor::DeliverSeat(int seat, std::string frame) {
 }
 
 stdexec::task<void> RoomActor::ReplyError(int seat, protocol::ErrorCode code, std::string_view message) {
-  // PROTOCOL §7.2: the disconnect quota counts every error answered to a connection, so a
-  // rejected room-level action is accounted too. The frame and the quota travel in ONE message,
-  // which is what keeps "the frame is already queued" true before a quota can ask for a close.
-  // ROOM_NOT_FOUND and INTERNAL are in neither bucket.
+  // The disconnect quota counts every error answered to a connection, so a rejected room-level action
+  // is accounted too. The frame and the quota travel in ONE message, which is what keeps "the frame is
+  // already queued" true before a quota can ask for a close. ROOM_NOT_FOUND and INTERNAL are in
+  // neither bucket.
   QuotaKind quota = QuotaKind::kNone;
   if (code == protocol::ErrorCode::kBadRequest) {
     quota = QuotaKind::kBadFrame;
@@ -367,10 +367,9 @@ void RoomActor::ReportResult(const GameResult& result) {
   if (!finished_for_test_ && owner_.IsEmpty()) {
     return;
   }
-  // ACCOUNT_DESIGN.md §4.2/§4.3: the owner gets the outcome per seat together with the identity
-  // this room has held since the deal. It cannot come from the lobby's registry, whose entry for
-  // this seat is already gone if the player disconnected mid-game (§8.5 trusts the seat and keeps
-  // the room playing to game_end).
+  // The owner gets the outcome per seat together with the identity this room has held since the deal.
+  // It cannot come from the lobby's registry, whose entry for this seat is already gone if the player
+  // disconnected mid-game (the room trusts the seat and keeps playing to game_end).
   GameSettlement finished;
   finished.room_id = room_id_;
   finished.reason = result.reason;
@@ -418,7 +417,7 @@ stdexec::task<void> RoomActor::Ready(PlayerInfo player) {
     co_return;
   }
   // The room is created with every seat already filled (bots take the rest), so the first ready
-  // starts the match: there is no separate "everyone is ready" round trip (§1.4.2).
+  // starts the match: there is no separate "everyone is ready" round trip.
   game_started_ = true;
   co_await Run(game().Setup(Context()));
 }
@@ -440,10 +439,10 @@ stdexec::task<void> RoomActor::HandleGameFrame(PlayerInfo player, json::Value fr
   if (seat < 0 || !game_started_) {
     co_return;
   }
-  // §6.3: the room owns "is this your move / is the window still open / is that tile yours"; the
-  // player owns the wire shape. All of it lives in Validate, which must not mutate — including
-  // the "a reply for a window that already moved on is dropped silently" case (§6.3), which is
-  // the reason there are three outcomes and not two.
+  // The room owns "is this your move / is the window still open / is that tile yours"; the player owns
+  // the wire shape. All of it lives in Validate, which must not mutate — including the "a reply for a
+  // window that already moved on is dropped silently" case, which is the reason there are three
+  // outcomes and not two.
   const GameVerdict verdict = game().Validate(seat, frame);
   if (verdict.kind == GameVerdict::Kind::kDrop) {
     co_return;
@@ -474,10 +473,10 @@ stdexec::task<void> RoomActor::OnPlayerDisconnected(PlayerInfo player, ex_actor:
   // A reconnect installs a fresh one (OnReconnected).
   seats_[static_cast<size_t>(seat)].endpoint = {};
   spdlog::info("room {}: seat {} lost its wire; its window keeps the countdown", room_id_, seat);
-  // GAME_DESIGN §5.6.2 / PROTOCOL v2.3 §8.5: a disconnect does NOT play for the seat. The open
-  // window stays unanswered until its deadline, so a reconnect inside the countdown still owns
-  // the decision. There is nothing to run here — and that is a rule, not an omission. The game
-  // is told only so it stops addressing requests at a seat that cannot hear them.
+  // A disconnect does NOT play for the seat. The open window stays unanswered until its deadline, so a
+  // reconnect inside the countdown still owns the decision. There is nothing to run here — and that is
+  // a rule, not an omission. The game is told only so it stops addressing requests at a seat that
+  // cannot hear them.
   if (game_started_) {
     game().OnSeatPresence(seat, /*present=*/false);
   }
@@ -501,8 +500,8 @@ stdexec::task<void> RoomActor::OnReconnected(PlayerInfo player, ex_actor::ActorR
     co_return;
   }
   game().OnSeatPresence(seat, /*present=*/true);
-  // PROTOCOL v2.3 §8.5: the replayed frames are the game's business (round metadata first, then
-  // the authoritative board) — the room only knows which seat asked.
+  // The replayed frames are the game's business (round metadata first, then the authoritative board) —
+  // the room only knows which seat asked.
   co_await Run(game().Reconnect(seat));
 }
 

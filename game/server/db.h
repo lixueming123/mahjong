@@ -1,40 +1,31 @@
 // DbActor: the only part of the server that talks to MySQL, and the front of the connection pool.
 //
-// ACCOUNT_DESIGN.md §6.1 says an actor handler must never block the actor world's threads.
-// MySQL *blocks* (a password check is a round trip), so these actors do not live on the game
-// pools at all: main() gives each shard its own dedicated single-thread pool (`db_pool(1)` per
-// shard) through `ex_actor::SchedulerUnion` + `ActorConfig::scheduler_index`. Blocking inside one
-// of the handlers therefore parks exactly one thread, which nobody else is scheduled on, and the
-// handler runs to completion before the next message starts.
+// MySQL *blocks* (a password check is a round trip), and an actor handler must never block the
+// game pools, so each shard runs on its own single-thread pool (`db_pool(1)`) via
+// `SchedulerUnion` + `ActorConfig::scheduler_index`. Blocking parks exactly one thread nobody else
+// is scheduled on.
 //
-// Since v1.6 the connection itself lives in `DbPool` (db_pool.h, §2.4): a handler takes a
-// `DbLease`, runs its statements on it, and the lease's destructor gives the connection back. The
-// pool owns connect/reconnect, the idle ping, rotation, the circuit breaker and the counters.
+// The connection lives in `DbPool` (db_pool.h): a handler takes a `DbLease`, runs its statements on
+// it, and the lease's destructor gives the connection back. The pool owns connect/reconnect, the
+// idle ping, rotation, the circuit breaker and the counters.
 //
 // Three consequences shape the interface:
-//   * A shard's single thread is also its FIFO guarantee (§4.1): a match record is submitted
-//     before the client can ask for the stats that must include it, and one mailbox drained in
-//     order preserves that for free — *within* a shard. DbService is what makes two requests for
-//     one account land on the same shard in the first place.
-//   * The MySQL connection is per-thread (mysql_thread_init/mysql_thread_end are thread
-//     scoped), so the pool binds one slot to one thread and the slot count equals the thread
-//     count by construction. A connection may therefore be rotated or rebuilt between two
-//     requests without disturbing the ordering above: what serializes them is the mailbox, not
-//     the socket.
-//   * The client library itself is process-wide (DbLibraryInit/DbLibraryShutdown), owned by
-//     main(), because mysql_library_init is not thread safe and must not be torn down while
-//     another shard's thread is still using it.
+//   * A shard's single thread is also its FIFO guarantee: one mailbox drained in order means a match
+//     record is written before the stats query that must include it — *within* a shard. DbService is
+//     what makes two requests for one account land on the same shard.
+//   * MySQL connections are per-thread, so a pool slot is bound to a thread and the slot count equals
+//     the thread count. A connection may be rotated between requests: the mailbox, not the socket, is
+//     what serializes them.
+//   * The client library is process-wide (DbLibraryInit/Shutdown) and owned by main(), because
+//     mysql_library_init is not thread safe.
 //
-// Callers reach these actors through `GetDbService()` — one process-wide, key-routed set of
-// `ActorRef<DbActor>`. main() fills the shards before the lobby and the gateway exist; every
-// actor reads that same object, so a player does not keep a copy of the routing table. Every
-// request carries a `reply` ref for its result: PlayerActor's handlers must not suspend, so the
-// answer is a message back into its mailbox rather than something to `co_await`.
+// Callers reach these actors through `GetDbService()`, a process-wide key-routed set of
+// `ActorRef<DbActor>`. Every request carries a `reply` ref: PlayerActor's handlers must not suspend,
+// so the answer is a message back into its mailbox.
 //
 // Two implementations exist and CMake picks exactly one, so no #ifdef leaks into the code:
-//   * db_mysql.cc — the real one, linked against libmysqlclient (and the real DbPool)
-//   * db_stub.cc  — used with -DMAHJONG_WITH_MYSQL=OFF; everything reports "unavailable",
-//                   which is the same degraded behaviour as a MySQL that is down (§2.3).
+//   * db_mysql.cc — the real one, linked against libmysqlclient
+//   * db_stub.cc  — used with -DMAHJONG_WITH_MYSQL=OFF; everything reports "unavailable"
 
 #pragma once
 
@@ -56,8 +47,8 @@
 namespace mahjong {
 
 class PlayerActor;
-// Forward declared on purpose: this header must stay usable in a build without <mysql.h>, and
-// both types hide every libmysqlclient detail behind db_pool.h.
+// Forward declared on purpose: this header must stay usable without <mysql.h>, and both types hide
+// every libmysqlclient detail behind db_pool.h.
 class DbLease;
 class DbPool;
 
@@ -69,7 +60,7 @@ struct DbConfig {
   std::string db = "mahjong";
 };
 
-// The durable account row (§2.1). `id` becomes the account's player_id (player.h).
+// The durable account row. `id` becomes the account's player_id (player.h).
 struct AccountRow {
   uint64_t id = 0;
   std::string username;
@@ -78,11 +69,10 @@ struct AccountRow {
 
 enum class AuthStatus {
   kOk,
-  // Wrong password *or* unknown account: the two are deliberately indistinguishable (§3.1).
+  // Wrong password *or* unknown account: deliberately indistinguishable.
   kAuthFailed,
   kUsernameTaken,  // register only
-  // MySQL is unreachable or the schema could not be created (§2.3). The caller answers
-  // INTERNAL and, unlike a client error, does not charge any quota.
+  // MySQL unreachable or the schema could not be created: answer INTERNAL, charge no quota.
   kUnavailable,
 };
 
@@ -91,7 +81,7 @@ struct AuthOutcome {
   AccountRow account;  // meaningful only when status == kOk
 };
 
-// One finished game as it is stored in `matches` (§2.1, §4).
+// One finished round as it is stored in `matches`.
 struct MatchRecord {
   uint64_t account_id = 0;
   std::string room_id;
@@ -101,49 +91,43 @@ struct MatchRecord {
   std::string mode = "classic";  // classic / riichi（stats 按玩法分桶，绝不混算）
 };
 
-// One finished MATCH per account, stored in `match_results` (ACCOUNT_DESIGN.md v1.3 §4 item 7).
-// Written exactly once per match (at match_end), one row per account-backed seat; the
-// UNIQUE(room_id, account_id) key is the structural defence against double writes.
+// One finished MATCH per account, stored in `match_results`.
+// Written once per match (at match_end), one row per account-backed seat; the UNIQUE(room_id,
+// account_id) key is the structural defence against double writes.
 struct MatchResultRecord {
   uint64_t account_id = 0;
   std::string room_id;
   std::string mode = "classic";
-  int hands_played = 0;  // 实际计入局数（D2 口径：无截断 = round_count，截断场更小）
-  int dealer_hands = 0;  // 该座位本场坐庄的手数（含连庄的额外手）
+  int hands_played = 0;  // 实际计入局数（无截断 = round_count）
+  int dealer_hands = 0;  // 该座位本场坐庄的手数（含连庄）
   int final_score = 0;   // 本场累计得失分（同 room_id 四行之和 = 0）
-  int final_rank = 0;    // 1..4，并列跳号（PROTOCOL.md §5.15）
+  int final_rank = 0;    // 1..4，并列跳号
 };
 
-// One match's replay, as an index row in `replays` (PROTOCOL v2.3 §4.13 / §5.13). The file itself
-// is the store's (replay_store.h); this row exists only so `stats.recent[]` can say which rooms
-// still have a playable recording without touching the filesystem.
+// One match's replay index row in `replays`. The file is the store's (replay_store.h); this row lets
+// `stats.recent[]` mark which rooms have a recording.
 struct ReplayRecord {
   std::string room_id;
   std::string mode = "classic";
 };
 
-// A zeroed summary is a legitimate answer for a guest (§3.3), so the caller cannot tell a
-// failure from "no games played" by the payload alone — hence the explicit flag.
+// A zeroed summary is a legitimate answer for a guest, so a failure cannot be told from "no games
+// played" by the payload alone — hence the explicit flag.
 struct StatsOutcome {
   bool ok = false;
   protocol::StatsSnapshot snapshot;  // classic 同时是 stats 帧的兼容顶层字段
 };
 
-// ---- §4.13 replay authorization -------------------------------------------------------------
-
 // Whether |account_id| may read |room_id|'s recording, i.e. whether that account sat in that game.
-// Answered from `matches` (one row per account-backed seat per round) instead of the replay file,
-// which since v2.6 is gzip and can no longer be parsed to find `seats[].account_id`.
+// Answered from `matches` instead of the replay file, which since v2.6 is gzip and can no longer be
+// parsed to find `seats[].account_id`.
 //
-// This is the same fact the file's seat table records, read from the store that already keeps it.
-// Routing matters: DbService keys a query by account id (see the shard facade below), so this query
-// lands in the same mailbox as the RecordMatch writes for that account — the §4.1 FIFO guarantee
-// then covers "the match just ended, ask for its replay immediately", with no extra table and no
-// re-read of the file.
+// Routing matters: DbService keys this by account id, so it lands in the same mailbox as the
+// RecordMatch writes for that account and the FIFO guarantee covers "the match just ended, ask for
+// its replay immediately".
 struct ReplayAccessOutcome {
   // kOk: |allowed| is authoritative. kUnavailable: no storage, so the caller must refuse rather
-  // than guess — an account frame answers INTERNAL, and §4.13 deliberately collapses every other
-  // refusal into ROOM_NOT_FOUND.
+  // than guess — every other refusal collapses into ROOM_NOT_FOUND.
   bool ok = false;
   bool allowed = false;
 };
@@ -154,53 +138,50 @@ class DbActor {
   // pool shared by every shard; |slot_index| is the slot this shard's thread will claim.
   DbActor(std::shared_ptr<DbPool> pool, DbConfig config, size_t slot_index);
 
-  // Binds the shard's thread to its pool slot and probes MySQL through a lease. Runs on db_pool,
-  // so the connect's blocking resolve/TCP/auth never touches the game pools. Returns whether
-  // accounts are usable; the server starts either way (§2.3).
+  // Binds the shard's thread to its pool slot and probes MySQL through a lease. Runs on db_pool, so
+  // the connect's blocking resolve/TCP/auth never touches the game pools. The server starts either
+  // way.
   stdexec::task<bool> Initialize();
 
-  // Login/Register/FetchStats answer by posting OnLoginResult/OnRegisterResult/OnStatsResult
-  // into |reply|; they return nothing, so the caller never awaits MySQL.
+  // Login/Register/FetchStats answer by posting OnLoginResult/OnRegisterResult/OnStatsResult into
+  // |reply|; they return nothing, so the caller never awaits MySQL.
   stdexec::task<void> Login(std::string username, std::string password, ex_actor::ActorRef<PlayerActor> reply);
-  // `nickname` empty means "use the username" (§3.2).
+  // `nickname` empty means "use the username".
   stdexec::task<void> Register(std::string username, std::string password, std::string nickname,
                                ex_actor::ActorRef<PlayerActor> reply);
   stdexec::task<void> FetchStats(uint64_t account_id, ex_actor::ActorRef<PlayerActor> reply);
-  // Fire and forget: a failed write is logged and never propagates to the game (§2.3, §4.6).
+  // Fire and forget: a failed write is logged and never propagates to the game.
   stdexec::task<void> RecordMatch(MatchRecord record);
-  // Fire and forget, v1.3 (§4 item 7): one `match_results` row per account at match end.
-  // A duplicate (room_id, account_id) is logged as a WARN and ignored — never retried.
+  // One `match_results` row per account at match end. A duplicate (room_id, account_id) is logged
+  // as a WARN and ignored — never retried.
   stdexec::task<void> RecordMatchResult(MatchResultRecord record);
-  // Fire and forget, v2.3: one `replays` row per finished match, so the stats list can mark the
-  // rooms a replay exists for. A duplicate room_id is the ordinary "round finished before the
-  // match ended" rewrite, so it is logged at DEBUG and ignored.
+  // One `replays` row per finished match. A duplicate room_id is the ordinary "round finished
+  // before the match ended" rewrite, so it is logged at DEBUG and ignored.
   stdexec::task<void> RecordReplay(ReplayRecord record);
-  // §4.13: may |account_id| read |room_id|'s recording? Answers by return value (unlike the
-  // handlers above) because its only caller, ReplayActor::Load, is a coroutine of its own: awaiting
-  // here means no reply envelope, no `OnXResult` arm and no state to carry across the round trip.
+  // Answers by return value (unlike the handlers above) because its only caller, ReplayActor::Load,
+  // is a coroutine of its own — awaiting here means no reply envelope.
   stdexec::task<ReplayAccessOutcome> ReplayAccess(std::string room_id, uint64_t account_id);
 
   // Releases the slot: closes the connection and unregisters the thread. Runs on db_pool (the
-  // library is thread scoped, so opening and closing must happen on the same thread); idempotent.
+  // library is thread scoped, so open and close must be on the same thread); idempotent.
   stdexec::task<void> Stop();
 
-  // The method list ex_actor needs to resolve `Send<&DbActor::X>` (reflect.h). It sits
-  // after the declarations because a static data member's initializer is not a complete-class
-  // context: naming the methods before they are declared does not compile.
+  // The method list ex_actor needs to resolve `Send<&DbActor::X>`. It sits after the declarations
+  // because a static data member's initializer is not a complete-class context.
   constexpr static auto kActorMethods =
       std::make_tuple(&DbActor::Initialize, &DbActor::Login, &DbActor::Register, &DbActor::FetchStats,
                       &DbActor::RecordMatch, &DbActor::RecordMatchResult, &DbActor::RecordReplay,
                       &DbActor::ReplayAccess, &DbActor::Stop);
 
  private:
-  // Acquire plus the schema bootstrap: a cold start may find MySQL down, and the tables have to
-  // be created on the first lease that actually reaches the server, not only at startup.
+  // Acquire plus the schema bootstrap: a cold start may find MySQL down, so the tables are created
+  // on the first lease that actually reaches the server, not only at startup.
   DbLease AcquireReadyLease();
-  // Creates the database and the tables. Returns kNone on success, otherwise the classification
-  // the caller must charge to the pool.
+  // Creates the database and the tables. Returns kNone on success, otherwise the classification the
+  // caller must charge to the pool.
   DbFailureClass EnsureSchema(void* mysql_handle);
-  // Escapes a value for the single-quoted literal it will sit in (§2.2). The inputs are
-  // already charset-validated, so this is the second line of defence, not the first.
+  // Escapes a value for the single-quoted literal it will sit in. The inputs are already
+  // charset-validated, so this is the second line of defence, not the first.
   std::string Escape(const DbLease& lease, const std::string& value);
   AuthOutcome LoginJob(const std::string& username, const std::string& password);
   AuthOutcome RegisterJob(const std::string& username, const std::string& password, const std::string& nickname);
@@ -217,25 +198,20 @@ class DbActor {
   bool schema_ready_ = false;
 };
 
-// ---- process-level client-library lifetime -------------------------------------------------
-
-// mysql_library_init / mysql_library_end are process-wide and not thread safe, so they can no
-// longer live inside DbActor: with more than one db thread, a per-actor init/end would tear the
-// library down under another thread's feet. main() calls these once around the whole run; each
-// db thread keeps only mysql_thread_init / mysql_thread_end. No-ops in the db_stub.cc build.
+// mysql_library_init / mysql_library_end are process-wide and not thread safe, so they cannot live
+// inside DbActor: a per-actor init/end would tear the library down under another thread's feet.
+// main() calls these once around the whole run; each db thread keeps only mysql_thread_init/end.
+// No-ops in the db_stub.cc build.
 bool DbLibraryInit();
 void DbLibraryShutdown();
 
-// ---- sharded facade -------------------------------------------------------------------------
-
-// A MySQL connection is thread-scoped, so the connection count equals the thread count: every
-// shard is one DbActor pinned to its own single-thread pool. This type replaces the bare
-// ActorRef and routes each request by a key.
+// A MySQL connection is thread-scoped, so the connection count equals the thread count: every shard
+// is one DbActor pinned to its own single-thread pool. This type routes each request by a key.
 //
-// The keying is what keeps ACCOUNT_DESIGN.md §4.1's FIFO property alive once a single mailbox no
-// longer serializes everything: Register and Login both key on the username (the account id is
-// not known before login), so they share a connection; a match record is keyed by account id,
-// exactly like the StatsSummary request that must include it.
+// The keying is what keeps the FIFO property alive once one mailbox no longer serializes everything:
+// Register and Login both key on the username (the account id is not known before login), so they
+// share a connection; a match record is keyed by account id, exactly like the stats request that must
+// include it.
 class DbService {
  public:
   void AddShard(ex_actor::ActorRef<DbActor> shard) { shards_.push_back(std::move(shard)); }
@@ -273,17 +249,15 @@ class DbService {
     return target.Send<&DbActor::RecordMatchResult>(std::move(record));
   }
 
-  // v2.3: the replay index has no account (one row per match), so it goes to the first shard.
-  // Ordering does not matter: the row is only read by a later stats query, never in a race with
-  // the write that created it.
+  // The replay index has no account (one row per match), so it goes to the first shard. Ordering
+  // does not matter: the row is only read by a later stats query.
   [[nodiscard]] auto RecordReplay(ReplayRecord record) const {
     const ex_actor::ActorRef<DbActor> target = Pick(0);
     return target.Send<&DbActor::RecordReplay>(std::move(record));
   }
 
-  // §4.13: keyed by the ACCOUNT, not the room, which is what puts this query in the same mailbox
-  // as the RecordMatch writes for that account. "The round just ended, ask for its replay" is then
-  // ordered by §4.1's FIFO rule instead of racing the insert.
+  // Keyed by the ACCOUNT, not the room, which puts this query in the same mailbox as the RecordMatch
+  // writes for that account.
   [[nodiscard]] auto ReplayAccess(std::string room_id, uint64_t account_id) const {
     const ex_actor::ActorRef<DbActor> target = PickByAccount(account_id);
     return target.Send<&DbActor::ReplayAccess>(std::move(room_id), account_id);
@@ -296,8 +270,8 @@ class DbService {
   ex_actor::ActorRef<DbActor> PickByAccount(uint64_t account_id) const {
     return Pick(std::hash<uint64_t> {}(account_id));
   }
-  // An empty result reproduces the old empty-ActorRef behaviour: Send throws, and callers
-  // that check IsEmpty() first never get here.
+  // An empty result reproduces the old empty-ActorRef behaviour: Send throws, and callers that
+  // check IsEmpty() first never get here.
   ex_actor::ActorRef<DbActor> Pick(size_t hash) const {
     if (shards_.empty()) {
       return ex_actor::ActorRef<DbActor> {};
@@ -308,9 +282,8 @@ class DbService {
   std::vector<ex_actor::ActorRef<DbActor>> shards_;
 };
 
-// The one router for the process. Empty until main() adds the shards, which is also the
-// degraded path a test or a build without MySQL runs on (§2.3): account frames answer INTERNAL
-// and the lobby writes no match history.
+// The one router for the process. Empty until main() adds the shards, which is also the degraded path
+// a test or a build without MySQL runs on.
 inline DbService& GetDbService() {
   static DbService service;
   return service;

@@ -38,7 +38,7 @@ class Session {
   enum class Phase {
     kAnonymous,    // no identity yet; login/register are the only frames accepted
     kAuthPending,  // an account login or register is in flight; still no identity
-    kGuest,        // logged in under a per-process id (ACCOUNT_DESIGN.md §1.2)
+    kGuest,        // logged in under a per-process id, with no account behind it
     kAccount,      // logged in behind a claimed account
     kClosed,       // OnClosed ran; only the release path remains
   };
@@ -47,7 +47,7 @@ class Session {
   bool logged_in() const { return phase_ == Phase::kGuest || phase_ == Phase::kAccount; }
   bool closed() const { return phase_ == Phase::kClosed; }
   // True while this session owns an entry in the SessionRegistry, i.e. while the account must
-  // be released on the way out (§1.3).
+  // be released on the way out.
   bool holds_account() const { return phase_ == Phase::kAccount; }
 
   // True while the connection may still start an account operation: reachable for a guest that

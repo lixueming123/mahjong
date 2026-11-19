@@ -1,22 +1,18 @@
 // RoomActor: one table, driven by a Game plugin. No rules live here.
 //
-// What is here is everything that would be identical for poker, mahjong or a two-player number
-// game: who sits where, where a seat's frames go, the single message entry point and its gate,
-// the one-shot deadline, the delivery of a step's outbounds, the per-round report to the owner
-// (§1.4.5), and the disconnect/reconnect bookkeeping (§8.5, PROTOCOL v2.3).
+// Everything that would be identical for any game lives here: seats, where a seat's frames go, the
+// single message entry and its gate, the one-shot deadline, delivery of a step's outbounds, the
+// per-round report to the owner, and disconnect/reconnect bookkeeping.
 //
-// What is NOT here — and must never appear — is a wall, a hand, a turn, a window, a point, a
-// `seq`, a `phase`, a `mode`. Those are the Game's (game.h). If a change to a rule ever makes you
-// want to add a member to this class, the answer is a hook on Game instead: the whole point of
-// the split is that adding a game does not touch this file.
+// What must never appear here: a wall, a hand, a turn, a window, a point, a seq, a phase, a mode.
+// Those are the Game's (game.h). A rule change that seems to need a new member here is a hook on
+// Game instead.
 //
-// Two ways in, both on RoomEndpoint: `Dispatch` (the message entry, which takes the gate) and
-// `TakeSeat` (request/response, same gate). Handlers are private, so nothing can reach room state
-// without the gate — async_gate.h explains why that matters.
+// Two ways in, both on RoomEndpoint: `Dispatch` (message entry) and `TakeSeat` (request/response).
+// Handlers are private, so nothing reaches room state without the gate (async_gate.h).
 //
-// Threading: the gate is taken on every entry and held across the suspensions (delivery awaits
-// each seat's mailbox), because ex_actor would otherwise start the next message the moment a
-// handler suspended. That is the one thing the framework does not give us.
+// Threading: the gate is held across the suspensions (delivery awaits each seat's mailbox), because
+// ex_actor would otherwise start the next message the moment a handler suspended.
 
 #pragma once
 
@@ -44,44 +40,29 @@ namespace mahjong {
 
 class RoomActor : public RoomEndpoint {
  public:
-  // |options_json| is the game's own configuration, opaque here (the lobby accepted it, this
-  // class only carries it to Game::Setup). |game_id| is what the lobby asked for, kept for logs
-  // and for the settlement; the binding to a concrete Game is the template parameter of
-  // RoomActorFor, so a mismatch is a wiring bug, not a runtime choice.
-  //
-  // |owner| is the lobby that spawned this room: it gets every settled round (GameSettlement) and
-  // never written match history by the room. Empty in the unit test, which passes
-  // |finished_for_test| instead — a scheduler and a capture callback are process-local, so they
-  // cannot travel in a message.
+  // |options_json| is the game's own configuration, opaque here. |owner| is the lobby that spawned
+  // this room: it gets every settled round and never sees match history written. Empty in the unit
+  // test, which passes |finished_for_test| instead (a scheduler and a callback are process-local
+  // and cannot travel in a message).
   RoomActor(std::string room_id, std::string game_id, std::string options_json, uint64_t seed, int action_timeout_ms,
             int ai_delay_ms, int inter_hand_delay_ms, std::vector<RoomSeat> seats, std::shared_ptr<WindowTimer> timer,
             ex_actor::ActorRef<RoomOwner> owner = {}, TimeoutScheduler timeout_scheduler = {},
             RoomFinishedCallback finished_for_test = {});
-  // Turns |alive_| off so a deadline already sitting in the window timer stops addressing this
-  // room. The timer cannot be cancelled (§0.5) and the lobby destroys the actor at game end
-  // (lobby.cc ReapRoom), so a fired entry would otherwise Send into freed memory. The flag is a
-  // shared_ptr the closures co-own: it has to outlive this object for that check to be safe.
+  // Turns |alive_| off so a deadline already sitting in the timer stops addressing this room: the
+  // timer cannot be cancelled and the lobby destroys the actor at game end, so a fired entry would
+  // otherwise Send into freed memory.
   ~RoomActor() override;
 
   stdexec::task<void> Dispatch(RoomEnvelope envelope) override;
   stdexec::task<bool> TakeSeat(RoomSeat seat) override;
 
-  // How many RoomActor instances exist in this process right now, retired ones excluded.
-  //
-  // This is NOT the lobby's `room_count()`, which only counts registry entries: an actor that was
-  // spawned but never registered (a create_room whose owner disconnected while Spawn was still in
-  // flight) is invisible there, so the registry cannot tell a leaked room from a reclaimed one.
-  // The framework keeps actors alive until ex_actor::Shutdown() and exposes no count of its own,
-  // so this one is what a test — and an operator staring at a growing process — can watch.
-  // Bumped in the constructor, dropped in the destructor.
+  // Live RoomActor instances, retired ones excluded. Not the lobby's room_count(): an actor spawned
+  // but never registered is invisible there, so this is what can distinguish a leaked room.
   static size_t live_room_count();
 
-  // Test seam, installed right after construction and before any traffic: production rooms
-  // report through |owner| instead. Deliberately not a message — a std::function cannot be
-  // serialized.
+  // Test seam, installed right after construction: production rooms report through |owner|.
   void SetFinishedCallbackForTest(RoomFinishedCallback callback) { finished_for_test_ = std::move(callback); }
 
-  // Introspection (logs and tests).
   const std::string& room_id() const { return room_id_; }
   const std::string& game_id() const { return game_id_; }
   bool game_started() const { return game_started_; }
@@ -89,14 +70,11 @@ class RoomActor : public RoomEndpoint {
   const std::vector<RoomSeat>& seats() const { return seats_; }
 
  protected:
-  // The single concrete binding: RoomActorFor<GameT> returns its own member (covariantly, so a
-  // test can reach the concrete type's introspection without a cast).
+  // The single concrete binding: RoomActorFor<GameT> returns its own member.
   virtual Game& game() = 0;
 
-  // ex_actor hands every actor its own ref right after construction; RoomActorFor forwards it
-  // here. The room needs it to post the frozen deadline back to itself, so the production
-  // scheduler is installed here instead of arriving in a message (a std::function could never be
-  // serialized).
+  // ex_actor hands every actor its own ref right after construction; RoomActorFor forwards it. The
+  // room needs it to post the deadline back to itself.
   void BindRuntime(ex_actor::ActorRef<RoomEndpoint> self);
 
  private:
@@ -110,29 +88,23 @@ class RoomActor : public RoomEndpoint {
   stdexec::task<void> OnPlayerDisconnected(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> conn);
   stdexec::task<void> OnIdleTimeout(PlayerInfo player);
   stdexec::task<void> OnReconnected(PlayerInfo player, ex_actor::ActorRef<SeatEndpoint> endpoint);
-  // The lobby's last message (RoomEnvelope::Retire): stop the deadline closure and destroy the
-  // actor, which is what releases the recording and every seat ref it holds.
+  // Stops the deadline closure and destroys the actor, which releases the recording and every seat
+  // ref it holds.
   stdexec::task<void> Retire();
 
-  // The one place a GameStep happens. Order is frozen by the protocol, not by taste: the frames
-  // go out first (a seat must be able to see the window before its deadline can fire), then the
-  // deadline is armed, then a settled round is reported to the owner.
+  // The one place a GameStep happens. Order is frozen by the protocol: frames go out first (a seat
+  // must see the window before its deadline can fire), then deadlines are armed, then a settled
+  // round is reported to the owner.
   stdexec::task<void> Run(GameStep step);
   stdexec::task<void> Deliver(const std::vector<Outbound>& outbounds);
   stdexec::task<void> DeliverSeat(int seat, std::string frame);
-  // Answer one seat with an error frame and the §7.2 quota its kind names.
   stdexec::task<void> ReplyError(int seat, protocol::ErrorCode code, std::string_view message);
-  // Per-round report to the owner (ACCOUNT_DESIGN.md §4): the outcome plus the identity this
-  // room has held since the deal.
   void ReportResult(const GameResult& result);
 
-  // Replay recording (replay.h). One call before each delivery, so the part holds exactly the
-  // bytes that were sent, in the order the seats saw them.
+  // One call before each delivery, so the part holds exactly the bytes that were sent.
   void RecordStep(const GameStep& step);
-  // Serializes the hand that just settled and posts it to ReplayActor, once per settled round.
-  // Serializing here is pure CPU over data this thread already holds; the disk is the store's,
-  // never the room's. Called from Run with the step's last result, then the recorder is dropped so
-  // the next hand starts a fresh part.
+  // Serializes the settled hand and posts it to ReplayActor; the disk is the store's, never the
+  // room's. Then the recorder is dropped so the next hand starts a fresh part.
   void WriteReplay(const GameResult& result);
 
   GameContext Context() const;
@@ -154,18 +126,16 @@ class RoomActor : public RoomEndpoint {
   AsyncGate gate_;
 
   // ---- replay recording (replay.h) ----
-  // Whether to record is whether a store exists (ReplayService), so there is nothing to copy in
-  // here. The write itself goes to ReplayActor (replay_store.h), never to this thread.
-  // |replay_started_ms_| anchors each step's `t` (pacing only, never correctness). It is set once,
-  // on the match's first hand, and every hand part shares that origin.
+  // Whether to record is whether a store exists, so nothing to copy in here.
+  // |replay_started_ms_| anchors each step's `t` (pacing only); every hand part shares the origin of
+  // the match's first hand.
   std::unique_ptr<ReplayRecorder> recorder_;
   int64_t replay_started_ms_ = 0;
-  // How many hand parts have been written, and therefore the index of the next one (see
-  // ReplayRecorder::PartFileNameFor). Counting here rather than inside the recorder keeps the name
-  // stable across the per-hand recorder reset.
+  // Hand parts written so far, i.e. the next part's index. Counted here rather than in the recorder
+  // so the name stays stable across the per-hand recorder reset.
   int replay_part_index_ = 0;
-  // False once this room is being destroyed. A co-owned flag rather than a bool member because
-  // the window timer's closure reads it after the room is gone (see the destructor).
+  // False once the room is being destroyed; co-owned because the timer's closure reads it after the
+  // room is gone.
   std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
 };
 

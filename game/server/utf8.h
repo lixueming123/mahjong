@@ -1,4 +1,4 @@
-// UTF-8 helpers for the NDJSON gateway (PROTOCOL.md §1.2).
+// UTF-8 helpers for the NDJSON gateway.
 
 #pragma once
 
@@ -73,7 +73,7 @@ inline size_t CountCodePoints(std::string_view text) {
 }
 
 // True when the text contains a C0 control character, DEL or a newline
-// (PROTOCOL.md §4.1 forbids them in login names).
+// (all of them are forbidden in login names).
 inline bool HasControlCharacter(std::string_view text) {
   for (char raw : text) {
     auto c = static_cast<unsigned char>(raw);

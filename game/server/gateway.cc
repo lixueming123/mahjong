@@ -32,8 +32,8 @@ void HandleStopSignal(int signal_number) {
 
 bool StopRequested() { return g_stop_requested != 0; }
 
-// The idle sweep's period. It only decides how late an idle report can be (§1.6's threshold is
-// 20 s, so 250 ms of slack is irrelevant) and how quickly Stop() is noticed.
+// The idle sweep's period. It only decides how late an idle report can be (the threshold is 20 s, so
+// 250 ms of slack is irrelevant) and how quickly Stop() is noticed.
 constexpr int kIdleSweepMs = 250;
 
 // Logs whatever a fire-and-forget coroutine threw instead of dropping it on the floor.
@@ -162,7 +162,7 @@ void Gateway::Run() {
   asio::co_spawn(asio::make_strand(io_.get_executor()), AcceptLoop(), LoggedDetached{"accept loop"});
 
   // The idle sweep: one timer instead of a per-client steady_timer, because the sweep has to visit
-  // every client anyway (PROTOCOL.md §1.6's report is per connection, not per socket event).
+  // every client anyway (the report is per connection, not per socket event).
   auto arm_idle_sweep = [this](auto& self) -> void {
     idle_timer_->expires_after(std::chrono::milliseconds(kIdleSweepMs));
     idle_timer_->async_wait([this, &self](const asio::error_code& ec) {
@@ -383,8 +383,8 @@ bool Gateway::ProcessInboundFrames(Client& client) {
         break;
     }
     if (!utf8::IsValid(line)) {
-      // Read-side and parse-side failures share one bad-frame budget (§7.2), so the counter lives
-      // on the shared Connection rather than in this loop.
+      // Read-side and parse-side failures share one bad-frame budget, so the counter lives on the
+      // shared Connection rather than in this loop.
       client.conn->SendFrame(protocol::ErrorFrame(protocol::ErrorCode::kBadRequest, "frame is not valid UTF-8"));
       if (client.conn->RecordBadFrame() >= protocol::kMaxBadFrames) {
         return false;
@@ -394,13 +394,13 @@ bool Gateway::ProcessInboundFrames(Client& client) {
     DispatchFrame(client, std::move(line));
   }
 
-  // Drop the consumed prefix once, not per frame (§1.2).
+  // Drop the consumed prefix once, not per frame.
   if (client.inbound_begin > 0) {
     client.inbound.erase(0, client.inbound_begin);
     client.inbound_begin = 0;
   }
   if (client.inbound.size() > protocol::kMaxUnframedBytes) {
-    // §1.2.3: no terminator within 64 KB, never buffer without bound.
+    // No terminator within 64 KB, never buffer without bound.
     client.inbound.clear();
     client.conn->SendFrameThenClose(
         protocol::ErrorFrame(protocol::ErrorCode::kFrameTooLarge, "no frame terminator within 65536 bytes"),
@@ -432,7 +432,7 @@ RateLimitDecision Gateway::CheckRateLimit(Client& client) {
     client.limited_second = second;
   }
 
-  // At most one RATE_LIMITED frame per limiting event (§1.7).
+  // At most one RATE_LIMITED frame per limiting event.
   if (client.rate_limit_reported_second != second) {
     client.rate_limit_reported_second = second;
     client.conn->SendFrame(protocol::ErrorFrame(protocol::ErrorCode::kRateLimited, "inbound frame rate exceeds 100/s"));
@@ -668,7 +668,7 @@ void Gateway::ReportIdleIfDue(const std::shared_ptr<Client>& client, int64_t now
   }
   client->idle_reported_for_inbound_ms = client->last_inbound_ms;
   try {
-    // §1.6: the lobby drops idle lobby connections, rooms keep the seat entrusted instead.
+    // The lobby drops idle lobby connections, rooms keep the seat entrusted instead.
     ActorSendScope().spawn(client->actor.Send<&PlayerActor::Dispatch>(PlayerEnvelope::OnIdleTimeout()));
   } catch (const std::exception& e) {
     spdlog::error("gateway: failed to dispatch the idle timeout for conn#{}: {}", client->conn->id(), e.what());
@@ -687,9 +687,9 @@ void Gateway::NotifyActorClosed(const std::shared_ptr<Client>& client, const std
     return;
   }
   try {
-    // This is what releases the account (ACCOUNT_DESIGN §1.3 "one account, one live connection")
-    // and hands the seat to the room, so it must not wait for the socket to be torn down: a client
-    // that reconnects right after closing (account_e2e_test) retries until the seat is free.
+    // This is what releases the account ("one account, one live connection") and hands the seat to the
+    // room, so it must not wait for the socket to be torn down: a client that reconnects right after
+    // closing (account_e2e_test) retries until the seat is free.
     ActorSendScope().spawn(client->actor.Send<&PlayerActor::Dispatch>(PlayerEnvelope::OnClosed(reason)));
   } catch (const std::exception& e) {
     spdlog::error("gateway: failed to notify conn#{} about the close: {}", client->conn->id(), e.what());

@@ -1,5 +1,5 @@
-// Base64 (RFC 4648 §4), for one purpose: a replay payload is gzip bytes and §5.18's `data` is a
-// JSON string, so the bytes have to become text before they can be sliced into frames.
+// Base64 (RFC 4648), for one purpose: a replay payload is gzip bytes and a replay frame's `data`
+// is a JSON string, so the bytes have to become text before they can be sliced into frames.
 //
 // Base64 costs 33% over the compressed size and is still ~20x smaller than the plain JSON text it
 // replaces (10.5 MB of sample replays: 12.9 MB of framed plain text -> 595 KB of framed base64).

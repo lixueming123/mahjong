@@ -241,7 +241,7 @@ void ReplayRecorder::Finish(const GameResult& result) {
 std::string ReplayRecorder::FileNameFor(std::string_view room_id) { return std::string(room_id) + ".json.gz"; }
 
 std::string ReplayRecorder::PartFileNameFor(std::string_view room_id, int part_index) {
-  // Two digits cover the 4..8 hands a match can have (PROTOCOL §5.15, max_rounds + max_renchan)
+  // Two digits cover the 4..8 hands a match can have (max_rounds + max_renchan)
   // with room to spare; a longer match still sorts correctly because the padding only fixes the
   // width up to 99 and the merge sorts by the index it reads back anyway.
   std::string index = std::to_string(part_index);

@@ -1,18 +1,11 @@
 // game_registry: the lobby's "which game?" question, answered in one table.
 //
-// The lobby must not name a concrete room: `Spawn<RoomActorFor<GameT>>` needs the complete type,
-// and a lobby that mentions one game is a lobby that has to be edited for the next one. So the
-// only place a game is named is this file: one row per game (wire selector -> spawn function),
-// and adding a game is a `Game` implementation plus one row.
+// The lobby must not name a concrete room: `Spawn<RoomActorFor<GameT>>` needs the complete type, and
+// a lobby that mentions one game would have to be edited for the next one. So this file is the only
+// place a game is named: one row per game (wire selector -> spawn function).
 //
-// Two things live here besides the table, both because they are "how a room is launched":
-//
-//   * the process-wide pacing knobs (`--ai-delay-ms` / `--inter-hand-delay-ms`). They used to sit
-//     in room.h because the monolith read them in its constructor; a launch is exactly what
-//     consumes them now, and -1 ("not passed") resolves here so a game's own default still
-//     applies when nothing was configured.
-//   * the options string each game gets. The wire only offers a mode and a length; a game that
-//     needs more would extend its own parser, not this struct.
+// The process-wide pacing knobs live here too, because they are "how a room is launched": -1 ("not
+// passed") resolves here so a game's own default applies when nothing was configured.
 
 #pragma once
 
@@ -29,10 +22,9 @@
 
 namespace mahjong {
 
-// GAME_DESIGN v1.4 §5.4: a bot's own decision is executed ai_delay_ms after its window opened, so a
-// human can follow the table. 0 disables the pacing (the bot decides inline, inside the same
-// step). SETTLEMENT_BROADCAST_RULINGS §2.1: the interlude between rounds is a separate, longer
-// pause, and the match end uses the same one.
+// A bot's own decision is executed ai_delay_ms after its window opened, so a human can follow the
+// table; 0 means it decides inline, inside the same step. The interlude between rounds is a
+// separate, longer pause, and the match end uses the same one.
 inline constexpr int kDefaultAiDelayMs = 900;
 inline constexpr int kMaxAiDelayMs = 5000;
 inline constexpr int kDefaultInterHandDelayMs = 12000;
@@ -45,7 +37,7 @@ void SetInterHandDelayMs(int delay_ms);
 int InterHandDelayMs();
 
 // Everything a room needs that the lobby already holds. Deliberately the lobby's vocabulary:
-// nothing about a game appears here (no wall, no hand, no option).
+// nothing about a game appears here.
 struct RoomLaunch {
   std::string room_id;
   uint64_t seed = 0;
@@ -55,22 +47,21 @@ struct RoomLaunch {
   ex_actor::ActorRef<RoomOwner> owner;
 };
 
-// A launch with everything resolved: which game, its configuration, and the pacing it should run
-// at (already defaulted, so a game never sees the "not configured" sentinel -1 from here).
+// A launch with everything resolved: which game, its configuration, and the pacing it should run at
+// (already defaulted, so a game never sees the sentinel -1 from here).
 struct RoomPlan {
   RoomLaunch launch;
   std::string game_id;
   std::string options_json;
-  // The wire's length selector as parsed. It is here (and not only inside |options_json|) because
-  // the length is a *launch* choice the older build read directly; a new game reads it from its
-  // options string instead.
+  // The wire's length selector as parsed; it is here as well as inside |options_json| because the
+  // length is a launch choice.
   GameLength length = GameLength::kTonpu;
   int ai_delay_ms = 0;
   int inter_hand_delay_ms = 0;
 };
 
-// The wire's length selector, encoded the way the game reads it. Classic takes no options (C15
-// freezes it at four rounds), so it answers with an empty string; riichi needs it.
+// The wire's length selector, encoded the way the game reads it. Classic takes no options, so it
+// answers with an empty string; riichi needs it.
 using GameOptionsFn = std::string (*)(GameLength length);
 
 // One instantiation of `RoomActorFor<GameT>`, as a plain function pointer: the table is a
@@ -84,12 +75,12 @@ struct GameEntry {
   RoomSpawnFn spawn;
 };
 
-// nullptr when the mode is not registered: the lobby answers a protocol error instead of
-// throwing, so an old client asking for a retired game sees a message, not a crash.
+// nullptr when the mode is not registered: the lobby answers a protocol error instead of throwing, so
+// an old client asking for a retired game sees a message, not a crash.
 const GameEntry* FindGame(GameMode mode);
 
-// Fills the plan's defaults and hands it to the entry's spawn function. The returned ref is
-// already narrowed to `RoomEndpoint` — the lobby never sees the concrete room type.
+// Fills the plan's defaults and hands it to the entry's spawn function. The returned ref is already
+// narrowed to `RoomEndpoint`.
 stdexec::task<ex_actor::ActorRef<RoomEndpoint>> LaunchRoom(const GameEntry& entry, RoomLaunch launch,
                                                            GameLength length);
 

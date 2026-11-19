@@ -7,7 +7,7 @@
 // passes, and the symptom is a ROOM_NOT_FOUND on a replay somebody just played.
 //
 // No actor, no database, no socket: LoadReplayFromDisk is the whole read path minus authorization
-// (§4.13), and authorization is the part a database test covers.
+// (a database question), and authorization is the part a database test covers.
 
 #include "replay_store.h"
 

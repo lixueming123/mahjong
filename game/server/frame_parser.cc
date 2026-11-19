@@ -8,11 +8,11 @@
 namespace mahjong::frame_parser {
 namespace {
 
-// ACCOUNT_DESIGN.md §3.1: the field rules shared by `login`'s account form and `register`.
+// The field rules shared by `login`'s account form and `register`.
 constexpr char kAccountFieldRules[] =
     "username must be 3..16 characters [A-Za-z0-9_] and password 6..64 printable ASCII characters";
 
-// PROTOCOL.md §4.1: the frozen nickname rule message (the rule itself is
+// The frozen nickname rule message (the rule itself is
 // protocol::IsValidNickname, shared with register's optional name).
 constexpr char kNicknameRules[] = "name must be 1..16 UTF-8 characters without control characters";
 
@@ -39,7 +39,7 @@ bool RejectInvalidName(Error* error) {
   return false;
 }
 
-// §4.5: a `seq` is the client's monotonic counter, so 0 and negatives are malformed, not stale.
+// A `seq` is the client's monotonic counter, so 0 and negatives are malformed, not stale.
 bool IsValidSeq(const json::Value* seq) { return seq != nullptr && seq->IsInteger() && seq->AsInt() >= 1; }
 
 }  // namespace
@@ -56,7 +56,7 @@ std::optional<Envelope> ParseEnvelope(std::string_view line, Error* error) {
     return std::nullopt;
   }
   const json::Value* type = parsed->Find("type");
-  // PROTOCOL v2.0 §1.3: "type" is an integer wire value (1..28, §1.3.1); 3.0 and strings are
+  // "type" is an integer wire value (1..28); 3.0 and strings are
   // field-type errors. Whether the value is a routable client frame is dispatch, not parsing.
   if (type == nullptr || !type->IsInteger()) {
     RejectBadRequest(error, "frame must carry an integer \"type\"");
@@ -72,7 +72,7 @@ std::optional<Envelope> ParseEnvelope(std::string_view line, Error* error) {
 }
 
 std::optional<Login> ParseLogin(const json::Value& frame, Error* error) {
-  // PROTOCOL v2.2 §4.1: `resume` is optional and defaults to true. It only affects the account
+  // `resume` is optional and defaults to true. It only affects the account
   // form (the guest path ignores it), but it is validated for every login so a typo is a
   // BAD_REQUEST instead of a silently ignored field.
   bool resume = true;
@@ -84,7 +84,7 @@ std::optional<Login> ParseLogin(const json::Value& frame, Error* error) {
     resume = value->AsBool();
   }
 
-  // ACCOUNT_DESIGN.md §3.1: the presence of `username` selects the account form; without it
+  // The presence of `username` selects the account form; without it
   // the frame is the frozen name-only guest login.
   const json::Value* account_name = frame.Find("username");
   if (account_name != nullptr) {
@@ -111,7 +111,7 @@ std::optional<Login> ParseLogin(const json::Value& frame, Error* error) {
     return std::nullopt;
   }
   if (!protocol::IsValidNickname(name->AsString())) {
-    RejectInvalidName(error);  // §1.7 counts these apart from bad frames
+    RejectInvalidName(error);  // counted apart from bad frames
     return std::nullopt;
   }
   Login intent;
@@ -132,7 +132,7 @@ std::optional<Register> ParseRegister(const json::Value& frame, Error* error) {
     return std::nullopt;
   }
 
-  // §3.2: the nickname is optional and defaults to the username (the DB layer fills it in).
+  // The nickname is optional and defaults to the username (the DB layer fills it in).
   Register intent;
   const json::Value* name = frame.Find("name");
   if (name != nullptr) {
@@ -178,7 +178,7 @@ std::optional<ReplayRequest> ParseReplayRequest(const json::Value& frame, Error*
     return std::nullopt;
   }
   // Shape only. A well-shaped but unknown id is ROOM_NOT_FOUND from the store, not BAD_REQUEST:
-  // §4.13 collapses "no such room" and "not your game" into one answer.
+  // "no such room" and "not your game" collapse into one answer.
   if (!IsRoomIdShaped(room_id->AsString())) {
     RejectBadRequest(error, "replay_request room_id must be \"r-\" + 13 lowercase base36");
     return std::nullopt;
@@ -207,7 +207,7 @@ bool ValidateAction(const json::Value& frame, Error* error) {
                             "action requires an integer \"action\", an array \"tiles\" and an integer \"seq\" >= 1");
   }
   if (!protocol::ParseAction(action->AsInt()).has_value()) {
-    // §4.6 freezes the eight action wire values; an unknown one is a malformed frame. Whether
+    // The eight action wire values are frozen; an unknown one is a malformed frame. Whether
     // the action is legal *in the current window* is ILLEGAL_ACTION and belongs to the room.
     return RejectBadRequest(error, "unknown action: " + std::to_string(action->AsInt()));
   }

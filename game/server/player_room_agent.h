@@ -1,7 +1,7 @@
 // The frames that carry a move into the game: discard, action and autoplay.
 //
 // The handler decodes and shapes the frame, then hands the room the raw frame — the room still
-// re-reads it for the game-level checks of §4.5/§6.3 (whose turn, is the tile in hand, is the
+// re-reads it for the game-level checks (whose turn, is the tile in hand, is the
 // window still open). That split is deliberate: the wire shape is the player's business, the game
 // state is the room's. Like the other agents it knows nothing about wire types; its rows live in
 // player_agent.h.

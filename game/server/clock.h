@@ -1,6 +1,6 @@
 // Monotonic / wall-clock helpers.
 //
-// PROTOCOL.md §1.5: deadline_ms is epoch milliseconds (UTC) for the wire, while all
+// deadline_ms is epoch milliseconds (UTC) for the wire, while all
 // internal timeout decisions must use a monotonic clock.
 
 #pragma once

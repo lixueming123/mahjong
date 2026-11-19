@@ -1,11 +1,9 @@
-// Connection-failure policy for the MySQL pool: error classification, the circuit breaker that
-// keeps a dead MySQL from charging every request a 3s connect timeout, and the one-slot-one-thread
-// bookkeeping the pool relies on.
+// Connection-failure policy for the MySQL pool: error classification, the circuit breaker that keeps a
+// dead MySQL from charging every request a 3s connect timeout, and the one-slot-one-thread bookkeeping.
 //
-// Deliberately dependency free — no <mysql.h>, no ex_actor, no game headers — so the unit test can
-// link it on machines without libmysqlclient (the same reason account_test.cc exists). Everything
-// here is pure state or a pure function, and the clock is always passed in as |now_ms| so a test
-// can drive it without sleeping.
+// Dependency free — no <mysql.h>, no ex_actor, no game headers — so the unit test can link it without
+// libmysqlclient. Everything is pure state or a pure function, and the clock is always passed in as
+// |now_ms| so a test can drive it without sleeping.
 
 #pragma once
 
@@ -18,19 +16,16 @@
 
 namespace mahjong {
 
-// How a MySQL error should be treated. Only the first three arms feed the circuit breaker: they
-// mean "this shard cannot serve right now". kDuplicate and kQueryError are per-statement facts —
-// the connection survives and the next statement is free to succeed.
+// How a MySQL error should be treated. Only the first three arms feed the circuit breaker: they mean
+// "this shard cannot serve right now". kDuplicate and kQueryError are per-statement facts — the
+// connection survives and the next statement may succeed.
 enum class DbFailureClass {
   kNone,
-  // 2006 CR_SERVER_GONE_ERROR, 2013 CR_SERVER_LOST, 2014 CR_COMMANDS_OUT_OF_SYNC,
-  // 1927 ER_CONNECTION_KILLED, 1053 ER_SERVER_SHUTDOWN. The socket is gone or the session state
-  // is unknown, so the connection must be closed rather than reused.
+  // The socket is gone or the session state is unknown, so the connection must be closed.
   kConnectionLost,
-  // 2002/2003/2005: mysql_real_connect never produced a socket (server down, DNS, firewall).
+  // mysql_real_connect never produced a socket (server down, DNS, firewall).
   kConnectFailed,
-  // 1044/1045/1049: wrong user, password or database. Retrying cannot help; the operator has to
-  // fix the configuration, so this is logged at ERROR and still counts as unavailable.
+  // Wrong user, password or database: retrying cannot help, the operator must fix the configuration.
   kConfig,
   // 1062 ER_DUP_ENTRY: a normal answer for Register and for a replayed match result.
   kDuplicate,
@@ -62,12 +57,12 @@ inline DbFailureClass ClassifyMysqlError(unsigned int error_code) {
   }
 }
 
-// True when the lease's connection must be closed instead of recycled. A configuration error
-// leaves a perfectly good socket behind, so it does not belong here.
+// True when the lease's connection must be closed instead of recycled. A configuration error leaves a
+// perfectly good socket behind, so it does not belong here.
 inline bool BreaksConnection(DbFailureClass reason) { return reason == DbFailureClass::kConnectionLost; }
 
-// True when the failure means "accounts are unavailable" (ACCOUNT_DESIGN.md §2.3), which is also
-// the condition the circuit breaker counts.
+// True when the failure means "accounts are unavailable", which is also the
+// condition the circuit breaker counts.
 inline bool CountsAsUnavailable(DbFailureClass reason) {
   return reason == DbFailureClass::kConnectionLost || reason == DbFailureClass::kConnectFailed ||
          reason == DbFailureClass::kConfig;
@@ -94,14 +89,13 @@ inline std::string_view ToString(DbFailureClass reason) {
 struct FailureBudgetOptions {
   // Consecutive failures that open the circuit. Clamped to >= 1 by FailureBudget.
   uint32_t failure_threshold = 2;
-  // cooldown = min(max(base * 2^(failures - threshold), floor), max). No jitter: the state machine
-  // has to be deterministic to be unit-testable, and one process per shard does not need
-  // thundering-herd protection.
+  // cooldown = min(max(base * 2^(failures - threshold), floor), max). No jitter: the state machine has
+  // to be deterministic to be unit-testable, and one process per shard needs no thundering-herd
+  // protection.
   int64_t cooldown_base_ms = 500;
   int64_t cooldown_max_ms = 30000;
-  // Lower bound on the first cooldown, and the value the doubling escalates from. Zero here,
-  // because a pure state machine has no idea what one attempt costs; DbPool sets it to the connect
-  // timeout (see its constructor for why).
+  // Lower bound on the first cooldown, and the value the doubling escalates from. Zero here because a
+  // pure state machine has no idea what one attempt costs; DbPool sets it to the connect timeout.
   int64_t cooldown_floor_ms = 0;
 };
 
@@ -186,9 +180,8 @@ inline void FailureBudget::OnFailure(int64_t now_ms) {
 }
 
 inline int64_t FailureBudget::CooldownFor(uint32_t failures) const {
-  // The first open already waits one interval; every further failure doubles it. The escalation
-  // starts at the floor, not at the base: otherwise a floor of 3s would sit unchanged through the
-  // first three trips (500, 1000, 2000 all clamp up to 3000) and only then start to grow.
+  // The first open already waits one interval; every further failure doubles it. The escalation starts
+  // at the floor, not at the base, so a 3s floor does not sit unchanged through the first three trips.
   const uint32_t steps = failures > options_.failure_threshold ? failures - options_.failure_threshold : 0;
   // Cap the shift so a long outage cannot overflow the multiplication.
   const uint32_t shift = std::min<uint32_t>(steps, 20);
@@ -196,14 +189,14 @@ inline int64_t FailureBudget::CooldownFor(uint32_t failures) const {
   return std::min(start << shift, options_.cooldown_max_ms);
 }
 
-// The "one slot, one thread" invariant, as pure bookkeeping. The pool feeds it a token derived
-// from std::this_thread::get_id(); a test can feed it arbitrary numbers.
+// The "one slot, one thread" invariant, as pure bookkeeping. The pool feeds it a token derived from
+// std::this_thread::get_id(); a test can feed it arbitrary numbers.
 class SlotOwnership {
  public:
   explicit SlotOwnership(size_t slot_count) : owners_(slot_count) {}
 
-  // True when |slot_index| now belongs to |thread_token|. Re-binding the same pair is a no-op,
-  // a different token on a bound slot is refused.
+  // True when |slot_index| now belongs to |thread_token|. Re-binding the same pair is a no-op, a
+  // different token on a bound slot is refused.
   bool TryBind(size_t slot_index, uint64_t thread_token) {
     if (slot_index >= owners_.size()) {
       return false;

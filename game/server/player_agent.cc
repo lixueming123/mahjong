@@ -21,7 +21,7 @@ constexpr size_t kFrameSlots = static_cast<size_t>(protocol::kFrameTypeMax) + 1;
 
 // ---- the table ---------------------------------------------------------------------------
 //
-// One row per client frame type, in wire order (PROTOCOL §3.2) so it can be checked against that
+// One row per client frame type, in wire order, so it can be checked against that
 // table by eye. The gate is a property of the frame, not of the handler: login and register are
 // the only frames accepted before an identity, and nothing else is accepted without one.
 constexpr FrameBinding kFrameBindings[] = {

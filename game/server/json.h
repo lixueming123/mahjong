@@ -1,6 +1,6 @@
 // Minimal, dependency-free JSON value used by the mahjong TCP gateway.
 //
-// The milestone protocol (game/docs/PROTOCOL.md §1.2) transports NDJSON: every frame is a
+// The protocol transports NDJSON: every frame is a
 // single JSON object terminated by '\n'. The ex_actor checkout does not enable a JSON
 // library (reflect-cpp is configured with REFLECTCPP_JSON=OFF, and no nlohmann/json is
 // vendored), so the gateway ships its own strict RFC 8259 subset:

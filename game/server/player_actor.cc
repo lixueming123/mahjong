@@ -119,8 +119,8 @@ void PlayerActor::SetRoom(ex_actor::ActorRef<RoomEndpoint> room) {
 }
 
 void PlayerActor::SeatError(std::string frame, QuotaKind quota) {
-  // Order matters (PROTOCOL §7.2): the frame must be in the outbox before the quota can ask for
-  // a close, or the close-flush would emit nothing.
+  // Order matters: the frame must be in the outbox before the quota can ask for a close, or the
+  // close-flush would emit nothing.
   conn_->SendFrame(frame);
   if (quota == QuotaKind::kBadFrame) {
     conn_->RecordBadFrame();
@@ -147,8 +147,8 @@ void PlayerActor::IllegalOperation(protocol::ErrorCode code, std::string_view me
   conn_->RecordIllegalOp();
 }
 
-// The parser only classifies (frame_parser.h); the three §7.2 counters live here, next to the
-// Connection that owns them.
+// The parser only classifies (frame_parser.h); the three counters live here, next to the Connection
+// that owns them.
 void PlayerActor::ReplyParseError(const frame_parser::Error& error) {
   switch (error.kind) {
     case frame_parser::ErrorKind::kBadRequest:
@@ -158,8 +158,8 @@ void PlayerActor::ReplyParseError(const frame_parser::Error& error) {
       IllegalOperation(error.code, error.message);
       return;
     case frame_parser::ErrorKind::kInvalidName:
-      // §1.7 has its own counter and its own drop rule (the 4th invalid name closes), so this
-      // is deliberately not routed through BadRequest.
+      // The invalid-name counter has its own drop rule (the 4th invalid name closes), so this is
+      // deliberately not routed through BadRequest.
       SendError(error.code, error.message);
       if (conn_->AddInvalidName() > protocol::kMaxInvalidNames) {
         conn_->RequestClose("too many invalid names");
@@ -171,15 +171,15 @@ void PlayerActor::ReplyParseError(const frame_parser::Error& error) {
 bool PlayerActor::AllowFrame(FrameGate gate) {
   switch (gate) {
     case FrameGate::kAnonymousOnly:
-      // §3.1: a second login is refused as such rather than as a malformed frame — the two are
-      // charged to different §7.2 counters.
+      // A second login is refused as such rather than as a malformed frame — the two are charged to
+      // different counters.
       if (!session_.CanStartAuth()) {
         BadRequest("already logged in");
         return false;
       }
       return true;
     case FrameGate::kLoggedInOnly:
-      // §4.1: besides login and register, nothing is accepted before an identity.
+      // Besides login and register, nothing is accepted before an identity.
       if (!session_.logged_in()) {
         SendError(protocol::ErrorCode::kNotLoggedIn, "send login first");
         return false;
@@ -203,8 +203,8 @@ stdexec::task<void> PlayerActor::OnFrame(std::string line) {
     }
     const FrameBinding* binding = FindClientFrame(envelope->type);
     if (binding == nullptr) {
-      // The parse layer validated the integer range (§1.3), so reaching here means the value is
-      // either a server→client type or a client type nobody routes — both BAD_REQUEST.
+      // The parse layer validated the integer range, so reaching here means the value is either a
+      // server→client type or a client type nobody routes — both BAD_REQUEST.
       BadRequest("unknown frame type: " + std::string(protocol::NameOf(envelope->type)));
       co_return;
     }
@@ -224,24 +224,23 @@ void PlayerActor::OnClosed(std::string reason) {
   if (session_.closed()) {
     return;
   }
-  // Read everything the close path needs before the phase changes: a guest has nobody to tell
-  // the lobby about, and only a claimed account has a registry entry to hand back (§1.3).
+  // Read everything the close path needs before the phase changes: a guest has nobody to tell the
+  // lobby about, and only a claimed account has a registry entry to hand back.
   const bool was_logged_in = session_.logged_in();
   const bool held_account = session_.holds_account();
   const PlayerInfo player = session_.Info();
   const uint64_t account_id = session_.account_id();
   session_.Close();
   spdlog::info("{}: closed ({})", conn_->Describe(), reason);
-  // ACCOUNT_DESIGN.md §1.3: the account becomes available again for a new connection.
+  // The account becomes available again for a new connection.
   if (held_account) {
     sessions_->Release(account_id);
   }
   if (was_logged_in && !lobby_.IsEmpty()) {
-    // PROTOCOL.md §1.4: only this connection's state is released; rooms of other players are
-    // untouched. LobbyActor drops the room of a disconnecting owner (§8.5). The connection ref
-    // carried with the message lets the lobby ignore a close that arrives after a reconnect.
-    // The lobby owns the retire: it awaits the room's hand-off before telling this actor to go,
-    // because the room holds an endpoint ref until then.
+    // Only this connection's state is released; rooms of other players are untouched. LobbyActor drops
+    // the room of a disconnecting owner. The connection ref carried with the message lets the lobby
+    // ignore a close that arrives after a reconnect. The lobby owns the retire: it awaits the room's
+    // hand-off before telling this actor to go, because the room holds an endpoint ref until then.
     ActorSendScope().spawn(lobby_.Send<&LobbyActor::OnConnectionClosed>(player, self_ref_));
     return;
   }
@@ -252,8 +251,8 @@ void PlayerActor::OnClosed(std::string reason) {
 }
 
 void PlayerActor::OnIdleTimeout() {
-  // PROTOCOL.md §1.6: lobby -> close, in game -> entrusted (stay connected). The lobby owns
-  // that decision because only it knows whether the player joined a room.
+  // lobby -> close, in game -> entrusted (stay connected). The lobby owns that decision because only
+  // it knows whether the player joined a room.
   ActorSendScope().spawn(lobby_.Send<&LobbyActor::OnIdleTimeout>(self_ref_, Player()));
 }
 

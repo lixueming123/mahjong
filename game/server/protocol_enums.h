@@ -1,4 +1,4 @@
-// Frozen wire enum values for PROTOCOL v2.1 (game/docs/PROTOCOL.md §1.3.1).
+// Frozen wire enum values for the protocol.
 //
 // The single source of truth is game/protocol/enums.json. This header keeps a checked-in
 // typed copy; game/tests/protocol_enums_consistency_test.py verifies both the member values
@@ -21,7 +21,7 @@
 
 namespace mahjong::protocol {
 
-// ---- frame_type: C→S 1..11 plus autoplay=28, S→C 12..27, replay 29/30 (§3.2 table order) -----
+// ---- frame_type: C→S 1..11 plus autoplay=28, S→C 12..27, replay 29/30 (table order) -----
 // kClientFrameTypeMax is the count of C→S types, not their largest wire value: autoplay and
 // replay_request are appended after the S→C block so nothing already on the wire is renumbered.
 enum class FrameType : uint8_t {
@@ -76,7 +76,7 @@ inline constexpr std::array<FrameType, kClientFrameTypeMax> kClientFrameTypes = 
     FrameType::kReplayRequest,
 };
 
-// ---- action (§4.6 + 日麻 riichi) ---------------------------------------------------------
+// ---- action (+ 日麻 riichi) --------------------------------------------------------------
 enum class Action : uint8_t {
   kInvalid = 0,
   kPass = 1,
@@ -93,7 +93,7 @@ inline constexpr std::array<std::string_view, kActionMax + 1> kActionNames = {
     "INVALID", "pass", "pong", "chow", "kong", "ankan", "kakan", "win", "riichi",
 };
 
-// ---- window (§5.7 + §12.10 chankan) ----------------------------------------------------
+// ---- window (+ chankan) ----------------------------------------------------------------
 enum class Window : uint8_t {
   kInvalid = 0,
   kDiscard = 1,
@@ -108,7 +108,7 @@ inline constexpr std::array<std::string_view, kWindowMax + 1> kWindowNames = {
     "chankan",
 };
 
-// ---- mode / length (§12.1) --------------------------------------------------------------
+// ---- mode / length ----------------------------------------------------------------------
 enum class WireMode : uint8_t {
   kInvalid = 0,
   kClassic = 1,
@@ -133,7 +133,7 @@ inline constexpr std::array<std::string_view, kLengthMax + 1> kLengthNames = {
     "hanchan",
 };
 
-// ---- melds[].type (§5.9) ----------------------------------------------------------------
+// ---- melds[].type -----------------------------------------------------------------------
 // A separate domain from Action: `pong` is 2 in Action but 1 here. Do not unify.
 enum class WireMeldType : uint8_t {
   kInvalid = 0,
@@ -148,7 +148,7 @@ inline constexpr std::array<std::string_view, kMeldTypeMax + 1> kMeldTypeNames =
     "INVALID", "pong", "chow", "kong", "ankan", "kakan",
 };
 
-// ---- game_end.reason / stats.recent[].reason (§5.10) -----------------------------------
+// ---- game_end.reason / stats.recent[].reason --------------------------------------------
 enum class RoundEndReason : uint8_t {
   kInvalid = 0,
   kWinRon = 1,
@@ -163,7 +163,7 @@ inline constexpr std::array<std::string_view, kReasonMax + 1> kReasonNames = {
     "draw_exhausted",
 };
 
-// ---- error.code (§7.1, exactly 14; STALE_SEQ deliberately absent) ----------------------
+// ---- error.code (exactly 14; STALE_SEQ deliberately absent) ------------------------------
 enum class ErrorCode : uint8_t {
   kInvalid = 0,
   kInvalidName = 1,
