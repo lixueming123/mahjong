@@ -6,14 +6,13 @@ before configuring: run `git submodule update --init --recursive` once after clo
 """
 
 import argparse
-import json
 import os
 import platform
 import re
-import shlex
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -56,6 +55,13 @@ parser.add_argument(
     "--release", dest="release", action="store_true",
     help="Configure the Release build in build-release/ instead of the default build/.",
 )
+parser.add_argument(
+    "--incremental", dest="incremental", action="store_true",
+    help="Reuse the existing build directory instead of deleting it first, and keep the "
+         "configure cache. Much faster; use it after adding/removing a source file or editing a "
+         "CMakeLists.txt. It cannot pick up a changed generator or compiler — for that, run "
+         "the default (delete-and-recreate) flow.",
+)
 args, extra_cmake_args = parser.parse_known_args()
 
 
@@ -72,84 +78,15 @@ def resolve_compiler(compiler):
     return f"{family}{suffix}", f"{cxx_family}{suffix}"
 
 
-def add_header_entries(path):
-    """Give every project header its own compile_commands.json entry.
-
-    CMake only emits entries for translation units, so when an editor opens a header (clangd, and
-    any other tool that looks the file up here) there is no exact match and the command of the
-    *nearest* TU gets inferred by path. That neighbour is arbitrary: actor_scope.h picked up
-    account_test.cc, which does not link ex_actor or stdexec, so <exec/async_scope.hpp> looked
-    missing even though the real build finds it.
-
-    Headers are never compiled standalone, so reusing a TU's flags with -fsyntax-only is enough
-    for the parsers that consume this file, and it keeps the third-party include paths exactly in
-    sync with the real build (no hardcoded paths to the CPM cache, which changes per checkout).
-    """
-    with open(path, "r") as f:
-        entries = json.load(f)
-    if not entries:
-        return
-
-    # One C++ TU that links everything (the server) is the best template: its flag list already
-    # covers ex_actor, stdexec, asio, capnp and spdlog.
-    template = next(
-        (e for e in entries if e["file"].endswith("/game/server/main.cc")),
-        entries[0],
-    )
-
-    def header_entry(header):
-        command = template.get("command")
-        if command is None:
-            args = list(template["arguments"])
-        else:
-            args = shlex.split(command)
-        # Drop the parts that name the template's own source and output: -o <obj> and -c <src>.
-        # Only the exact forms are matched — a prefix test on "-c"/"-o" would also eat legitimate
-        # flags like -cxx-isystem or -objc-arc.
-        cleaned = []
-        skip_next = False
-        for arg in args:
-            if skip_next:
-                skip_next = False
-                continue
-            if arg in ("-o", "-c"):
-                skip_next = True
-                continue
-            cleaned.append(arg)
-        cleaned += ["-fsyntax-only", header]
-
-        entry = {"directory": template["directory"], "file": header}
-        if command is None:
-            entry["arguments"] = cleaned
-        else:
-            entry["command"] = shlex.join(cleaned)
-        return entry
-
-    known = {e["file"] for e in entries}
-    headers = []
-    for pattern in ("game/**/*.h", "game/**/*.hpp"):
-        headers += sorted(project_root.glob(pattern))
-    # Framework headers matter too: they are reached through -isystem, so an exact entry keeps
-    # them from inheriting some unrelated TU's flags.
-    framework_include = third_party / "include"
-    for pattern in ("**/*.h", "**/*.hpp"):
-        headers += sorted(framework_include.glob(pattern))
-
-    added = []
-    for header in headers:
-        resolved = str(header)
-        if resolved not in known and header.is_file():
-            added.append(header_entry(resolved))
-            known.add(resolved)
-
-    if added:
-        with open(path, "w") as f:
-            json.dump(entries + added, f, indent=1)
-        print(f"Added {len(added)} header entries to {path.name} for editors/clangd.", flush=True)
-
-
 project_root = Path(__file__).resolve().parent.parent
 os.chdir(project_root)
+
+# The editor database is post-processed by a shared script: the build refreshes it too, because a
+# `cmake --build` that picks up a new file re-globs and reconfigures without ever reaching this
+# file, and the root compile_commands.json used to go stale exactly then (clangd then guesses the
+# flags of a neighbouring TU and reports headers of unrelated targets as missing).
+sys.path.insert(0, str(project_root / "scripts"))
+import clangd_compile_commands  # noqa: E402 - needs the repo root on sys.path
 
 third_party = project_root / "third_party" / "ex-actor"
 if not (third_party / "CMakeLists.txt").exists():
@@ -162,13 +99,46 @@ if not (third_party / "CMakeLists.txt").exists():
 # Two build directories, kept apart because they are used for different things: build/ is the
 # day-to-day tree (also what --config-less debug runs use), build-release/ is the Release tree that
 # game/start_server.sh --release and the load tests pick up.
+#
+# --incremental skips the wipe: CMake reuses the existing cache, so dependency detection and the
+# configured toolchain are not redone (a warm configure is ~5s instead of minutes). The one thing
+# it must not clobber is the generator, which CMake refuses to change in place — the cache records
+# what created the tree, and a mismatch falls through to the clean path below.
 build_dir_name = "build-release" if args.release else "build"
 build_dir = project_root / build_dir_name
-if build_dir.exists():
-    shutil.rmtree(build_dir, onerror=force_remove_readonly)
 compile_commands = project_root / "compile_commands.json"
-compile_commands.unlink(missing_ok=True)
 
+def cached_generator(build_path):
+    """Generator recorded in an existing build tree, or None if it is not usable."""
+    cache = build_path / "CMakeCache.txt"
+    if not cache.exists():
+        return None
+    match = re.search(r"^CMAKE_GENERATOR:INTERNAL=(.+)$", cache.read_text(), re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+reuse_build_dir = False
+if args.incremental:
+    existing_generator = cached_generator(build_dir)
+    if existing_generator == args.generator:
+        reuse_build_dir = True
+    elif existing_generator is not None:
+        print(
+            f"{build_dir_name}/ was configured with '{existing_generator}', "
+            f"not '{args.generator}': recreating it.",
+            flush=True,
+        )
+
+if reuse_build_dir:
+    print(f"Reusing {build_dir_name}/ (incremental configure).", flush=True)
+    # The editor database is deliberately left in place: refresh() below replaces it atomically, and
+    # if the configure fails, clangd keeps working with the previous one instead of losing it.
+elif build_dir.exists():
+    shutil.rmtree(build_dir, onerror=force_remove_readonly)
+    compile_commands.unlink(missing_ok=True)
+
+# Set in the environment (not only -D) because third_party/ex-actor includes its own CPM.cmake,
+# which resolves the download location from $CPM_SOURCE_CACHE. A shared cache is what keeps the
+# dependency sources out of <build>/_deps and out of every reconfigure's network path.
 os.environ["CPM_SOURCE_CACHE"] = str(Path.home() / ".cache" / "CPM")
 
 cmake_args = [
@@ -202,16 +172,16 @@ cmake_args += extra_cmake_args
 print("+", " ".join(cmake_args), flush=True)
 subprocess.run(cmake_args, check=True)
 
-# Copy compile_commands.json to project root (if generated)
-src = build_dir / "compile_commands.json"
-if src.exists():
-    shutil.copy2(src, compile_commands)
-
-    # Remove args not supported by clangd
-    with open(compile_commands, "r") as f:
-        text = f.read()
-    text = re.sub(r"-fconcepts-diagnostics-depth=\d*", "", text)
-    with open(compile_commands, "w") as f:
-        f.write(text)
-
-    add_header_entries(compile_commands)
+# Generate the editor database at the project root (headers included, unparseable flags removed).
+# It is a processed copy, never a plain copy of build/compile_commands.json — see the module
+# docstring for why clangd needs the header entries.
+#
+# Only the default build/ tree owns that file, matching MAHJONG_UPDATE_CLANGD_DB in CMakeLists.txt:
+# a Release configure must not overwrite the flags the editor is using.
+if args.release:
+    print(
+        "Left the root compile_commands.json alone (it belongs to build/).",
+        flush=True,
+    )
+else:
+    clangd_compile_commands.refresh(build_dir, compile_commands)

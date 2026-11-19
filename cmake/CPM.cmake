@@ -16,9 +16,20 @@ endif()
 # Expand relative path. This is important if the provided path contains a tilde (~)
 get_filename_component(CPM_DOWNLOAD_LOCATION ${CPM_DOWNLOAD_LOCATION} ABSOLUTE)
 
+# Reuse the cached copy when it is already the file we expect, and only go to the network
+# otherwise. Configure runs many times a day (every `cmake --build` that re-globs, every IDE
+# reconfigure) and an unconditional download put a few seconds of network in each of them.
+set(CPM_DOWNLOAD_NEEDED ON)
+if(EXISTS "${CPM_DOWNLOAD_LOCATION}")
+  file(SHA256 "${CPM_DOWNLOAD_LOCATION}" CPM_CACHED_HASH)
+  if(CPM_CACHED_HASH STREQUAL CPM_HASH_SUM)
+    set(CPM_DOWNLOAD_NEEDED OFF)
+  endif()
+endif()
+
 # Try to download with curl if available
 find_program(CURL_COMMAND curl)
-if(CURL_COMMAND)
+if(CPM_DOWNLOAD_NEEDED AND CURL_COMMAND)
   execute_process(
     COMMAND ${CURL_COMMAND} -fL -o "${CPM_DOWNLOAD_LOCATION}" "https://github.com/cpm-cmake/CPM.cmake/releases/download/v${CPM_DOWNLOAD_VERSION}/CPM.cmake"
     RESULT_VARIABLE CURL_RESULT
@@ -34,7 +45,7 @@ if(CURL_COMMAND)
          ${CPM_DOWNLOAD_LOCATION} EXPECTED_HASH SHA256=${CPM_HASH_SUM}
     )
   endif()
-else()
+elseif(CPM_DOWNLOAD_NEEDED)
   # Fall back to built-in download
   file(DOWNLOAD
        https://github.com/cpm-cmake/CPM.cmake/releases/download/v${CPM_DOWNLOAD_VERSION}/CPM.cmake

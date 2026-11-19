@@ -21,16 +21,35 @@
       "cwd": "${workspaceFolder}"
     },
     {
+      // Incremental: reuses the existing cache in build/, so this is the one to use for the daily
+      // "I added a file / touched a CMakeLists" case. "clean": true would throw the cache away and
+      // pull every dependency source again — that is the separate entry below.
       "type": "cmake",
       "request": "launch",
-      "name": "CMake: Configure project",
+      "name": "CMake: Configure (incremental)",
+      "cmakeDebugType": "configure",
+      "clean": false,
+      "configureAll": false,
+      "scriptEnv": [
+        {
+          "name": "CPM_SOURCE_CACHE",
+          "value": "${userHome}/.cache/CPM"
+        }
+      ]
+    },
+    {
+      // Only when the cache itself is suspect (deleted build/, retargeted compiler, ...). Expect
+      // this one to take minutes: it re-runs dependency detection from scratch.
+      "type": "cmake",
+      "request": "launch",
+      "name": "CMake: Configure (clean)",
       "cmakeDebugType": "configure",
       "clean": true,
       "configureAll": false,
       "scriptEnv": [
         {
           "name": "CPM_SOURCE_CACHE",
-          "value": "${HOME}/.cache/CPM"
+          "value": "${userHome}/.cache/CPM"
         }
       ]
     }

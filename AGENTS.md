@@ -10,19 +10,29 @@
 
 # Don't Break clangd
 
-The root `compile_commands.json` is not plain CMake output: `regen_build_dir.py` adds a
-`-fsyntax-only` entry per header (~96) so headers don't borrow an unrelated TU's command. Lose it
-and the editor floods with bogus errors.
+The root `compile_commands.json` is not plain CMake output: it is a processed copy, written by
+`scripts/clangd_compile_commands.py`, which adds a `-fsyntax-only` entry per header (~100) so
+headers don't borrow an unrelated TU's command. Lose it and the editor floods with bogus errors.
 
-- Build/test freely: `cmake --build build [--target <t>]`, `ctest`. Neither touches the database.
-- Avoid `rm -rf build`, `git clean -xdf`, and gratuitous `regen_build_dir.py`: they delete both
-  `build/` and the root database, and the script deletes *before* configuring — a failed configure
-  (usually network, e.g. `status_code: 35` on the rapids-cmake download) leaves nothing behind.
-- Never copy `build/compile_commands.json` over the root one: 0 header entries vs ~96.
-- Reconfigure only after `cp compile_commands.json /tmp/cc.bak`; restore the backup on failure.
-  Any manual CMake call needs `-DCMAKE_EXPORT_COMPILE_COMMANDS=1`.
+- It refreshes itself: the `clangd_compile_commands` target runs on every `cmake --build build`
+  (a no-op when nothing changed). So a plain build never leaves it stale — a new source file
+  re-globs, reconfigures and repopulates the database in one step.
+- Header entries carry `-x c++-header`: without it clangd treats an isolated `.h` as C and reports
+  `<atomic>`/`<chrono>` as missing. Dependency *include roots* also get one anchor entry each, so
+  jumping into `~/.cache/CPM/...` sources resolves with the full flag set instead of borrowing an
+  unrelated TU (stdexec used to inherit spdlog's command and go all red).
+- Never copy `build/compile_commands.json` over the root one: 0 header entries vs ~110.
+- `build-release/` deliberately does not write it (two trees would overwrite each other's flags).
+- Prefer `python3 scripts/regen_build_dir.py --incremental` over the default flow: it reuses
+  `build/` (~10s) instead of deleting it. The destructive default is only for a changed generator
+  or compiler; it deletes *before* configuring, so a failed configure leaves nothing behind.
+- Don't `rm -rf build` or `git clean -xdf`; if you must re-create, back up the database first:
+  `cp compile_commands.json /tmp/cc.bak`, and restore it if the configure fails.
+- Any manual CMake call needs `-DCMAKE_EXPORT_COMPILE_COMMANDS=1`.
 - Editor errors look bogus? Confirm with `clangd --check=<file> --compile-commands-dir=. 2>&1 |
   grep "Compile command"` — `inferred from` a stranger TU means the errors are fake.
+- Dependency sources live in `~/.cache/CPM` (`CPM_SOURCE_CACHE` is set in the top-level
+  `CMakeLists.txt`), not in `build/_deps`; that is what keeps an IDE reconfigure off the network.
 
 # Editing Guidelines
 
