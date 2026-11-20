@@ -726,6 +726,14 @@ stdexec::task<void> LobbyActor::OnIdleTimeout(ex_actor::ActorRef<SeatEndpoint> c
   } else if (!state->conn.IsEmpty() && !conn.IsEmpty() && state->conn != conn) {
     // The previous connection's idle timer must not entrust the seat of a reconnect.
     co_return;
+  } else if (const auto started = room_started_.find(state->room_id);
+             started == room_started_.end() || !started->second) {
+    // A waiting room is not a match yet: there is nothing to entrust, and entrusting one anyway is
+    // worse than dropping it — the seat loses its wire while the room stays alive, so a later `ready`
+    // deals to a seat nobody can hear (the client sits on "发牌中…" forever). A pre-deal disconnect
+    // already frees the seat (or drops the owner's room) in DropPlayer, so the idle timeout takes the
+    // same route: close the socket and let the close path release it.
+    drop_connection = true;
   } else {
     room = FindRoom(state->room_id);
   }
