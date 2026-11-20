@@ -42,7 +42,7 @@
 // handler suspends, and the room is expected to start suspending (see the Deliver note in
 // room.cc), so the gate has to be taken here. The introspection getters below are deliberately
 // outside that rule — nothing but the unit tests and logging reads room state from outside.
-
+/*
 #pragma once
 
 #include <array>
@@ -512,3 +512,4 @@ class LegacyRoomActor final : public RoomEndpoint {
 };
 
 }  // namespace mahjong
+*/
