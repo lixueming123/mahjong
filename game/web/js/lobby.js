@@ -235,6 +235,10 @@ export class Lobby {
       if (stage === 'lobby' && this.el.viewResume && !this.el.viewResume.hidden) {
         this.showHall();
       }
+      // 自动重连：把等待页/大厅的状态行改成「正在重连」，别让人以为卡在「发牌中…」。
+      if (stage === 'reconnecting' && this.visible) {
+        this.notify('连接已断开，正在重连…', true);
+      }
     });
     this.app.on('error', ({ text }) => {
       this.busy = false;
@@ -244,7 +248,14 @@ export class Lobby {
     });
     this.app.on('close', () => {
       this.setConnected(false);
-      if (this.visible) this.notify('连接已断开，请重新登录');
+      // 断线前点了「开始对局」：按钮已经被自己禁用、提示停在「发牌中…」。client 会自动重连，
+      // 这里必须把这两处一起复位，否则回来后人还卡在「发牌中…」上（游客尤其明显：重连后
+      // 落到大厅，房间页早就该收了）。
+      this.busy = false;
+      this.roomReady = false;
+      this.setButtonsEnabled(true);
+      if (this.el.roomTip) this.el.roomTip.textContent = '连接已断开，正在重连…';
+      if (this.visible) this.notify('连接已断开，正在重连…');
     });
   }
 

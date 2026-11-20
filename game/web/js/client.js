@@ -35,6 +35,33 @@ const START_TIMEOUT_MS = 10000;     // 等 game_start
 const SILENCE_WARN_MS = 16000;      // 心跳连续 3 次无响应
 const SILENCE_LIMIT_MS = 20000;     // §8.4 网络无响应
 const ZERO_WINDOW_MS = 5000;        // 倒计时归零后仍无状态更新
+
+/**
+ * 自动重连的退避序列（毫秒）。断线后按它重试，用完就停在最后一档上无限重试 ——
+ * 服务端重启/断网回来时没人愿意再点一次登录。0 表示"立刻试一次"（多数断线是瞬时的）。
+ */
+const RECONNECT_DELAYS_MS = [0, 800, 1600, 3200, 5000, 8000];
+/**
+ * 回到前台时，入站静默超过这个值就干脆换一条新连接：后台标签的定时器被节流，心跳停发
+ * 超过 20 s 后服务端已经把本座位摘下线（托管），只是 socket 还挂着、`pong` 也照回 ——
+ * 光看"连没连上"发现不了这件事。主动重连走 `login{resume}` 才是拿回座位的正规路径。
+ */
+const RECONNECT_STALE_MS = 12000;
+/**
+ * 两次 `tick` 的墙钟间隔超过这个值，就认为这段时间里页面被挂起了（后台标签节流 / 机器
+ * 睡眠 / 系统休眠）：`performance.now()` 与墙钟在这种情形下都会跳跃，而 tick 周期是 200 ms。
+ */
+const SUSPENDED_TICK_MS = 15000;
+/**
+ * 对局中多久没有**实质帧**（除 `pong` 外的一切）就发一次 `sync` 探活。
+ *
+ * 不能只看入站静默：服务端把座位摘掉之后 `ping` 照样回 `pong`（那是连接层答的，不经过房间），
+ * 于是「有入站帧」成立、座位却已经是空的 —— 客户端看着连着，其实一帧游戏帧都收不到。
+ * `sync` 要求房间回一份 `state_sync`，座位没了就没人回，这才是可靠的探针。
+ */
+const GAME_SILENCE_PROBE_MS = 15000;
+/** 探针发出后等多久没有回音就判定座位已丢（房间回 sync 是同步的，1 s 都嫌多） */
+const PROBE_TIMEOUT_MS = 5000;
 const ILLEGAL_LIMIT = 10;           // §7.2 服务端第 10 次非法操作断开
 const NAME_MAX = 16;
 
@@ -149,11 +176,55 @@ export class MahjongClient {
     this.restoring = false;
     this._restoreTimer = 0;
     this.alreadyOnlineRetries = 0;
+    /** 自动重连：正在重连 / 退避计时器 / 已用档位 / 上次断线原因（只用于提示） */
+    this.reconnecting = false;
+    this._reconnectTimer = 0;
+    this._reconnectAttempt = 0;
+    this._reconnectReason = '';
+    /** 用户主动退出（logout / 返回大厅换连接）时置位：不再自动重连 */
+    this._manualClose = false;
+    /** 这一次 login 是断线后的自动恢复（而不是玩家主动登录） */
+    this._resumeAttempt = false;
+    /** 断线时是否正坐在房间里：重连拿不回座位时要落回大厅，而不是按 URL 凭据重新建房 */
+    this._hadRoom = false;
+    /** 断线时是否正在打牌（决定拿不回座位时的提示文案） */
+    this._resumeWasPlaying = false;
+    /**
+     * 对局探活：最后一次收到"实质帧"（除 pong）的时刻、探针发出时刻。
+     * 见 GAME_SILENCE_PROBE_MS —— 座位被摘之后 pong 还在，只有 sync/state_sync 能证明人在。
+     */
+    this._lastGameFrameAt = 0;
+    this._probeSentAt = 0;
+    /** 上一次 tick 的墙钟（毫秒）：用来发现页面被挂起过（checkSuspended） */
+    this._lastTickWall = 0;
 
     this.bindNet();
     this.bindButtons();
     this.bindStore();
     if (!this.offline) setInterval(() => this.tick(), 200);
+    this.bindVisibility();
+  }
+
+  /**
+   * 切回前台立刻补一次连接判断。
+   *
+   * 后台标签的定时器被节流到分钟级，`tick` 与心跳都停了，靠它们发现"连接已经没用"要等很久；
+   * 而 `visibilitychange` 是浏览器保证会送来的那次唤醒。挂起检测在 `tick` 里也有一份
+   * （机器睡眠不触发它），这里只是让恢复更及时。
+   */
+  bindVisibility() {
+    if (this.offline || typeof document === 'undefined') return;
+    // 单测里 document 是个只有 querySelector 的假货，没有这些 API；真实浏览器一定有。
+    if (typeof document.addEventListener !== 'function') return;
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) this.resumeAfterForeground();
+    });
+    // 部分浏览器（Safari）从 bfcache 恢复时只看 pagehide/pageshow：同样当作"刚回来"。
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      window.addEventListener('pageshow', (event) => {
+        if (event.persisted) this.resumeAfterForeground();
+      });
+    }
   }
 
   /**
@@ -179,6 +250,14 @@ export class MahjongClient {
         register: !!this.config.register,
       };
       if (!this.credential.name && !this.credential.user) this.credential = null;
+    }
+    // 手动登录/重登：自动重连的退避状态作废，这次握手就是新的开始。
+    this._manualClose = false;
+    this.reconnecting = false;
+    this._reconnectAttempt = 0;
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = 0;
     }
     this.connectAttempts = 0;
     return this.connectWithRetry();
@@ -225,6 +304,9 @@ export class MahjongClient {
       this.alreadyOnlineRetries = 0;
       this.resumedInRoom = false;
       this.restoring = false;
+      // 新连接：探活从这一刻重新计时（旧连接的"最后实质帧"已经不可信）
+      this._lastGameFrameAt = 0;
+      this._probeSentAt = 0;
       if (this._restoreTimer) {
         clearTimeout(this._restoreTimer);
         this._restoreTimer = 0;
@@ -257,12 +339,125 @@ export class MahjongClient {
       this.applyButtons();
       this.app.emit('session', { stage: 'closed' });
       this.app.emit('close', { reason });
-      this.hint(wasPlaying
-        ? `连接已断开（服务端将托管本局）${reason ? `：${reason}` : ''}`
-        : `连接已断开${reason ? `：${reason}` : ''}`);
+      // 断线一律自动重连：账号靠 login{resume} 拿回原座（服务端把座位托管着，倒计时内
+      // 回来仍然拥有那个窗口的决定权）；游客没有身份可恢复，只能回大厅重新开一局。
+      this._reconnectReason = reason || '';
+      this._hadRoom = !!(this.room && this.room.roomId);
+      this._resumeWasPlaying = wasPlaying;
+      if (this.canReconnect()) {
+        this.hint(wasPlaying
+          ? `连接已断开（服务端将托管本局），正在重连…${reason ? `：${reason}` : ''}`
+          : `连接已断开，正在重连…${reason ? `：${reason}` : ''}`);
+        this.scheduleReconnect();
+      } else {
+        this.hint(wasPlaying
+          ? `连接已断开（服务端将托管本局）${reason ? `：${reason}` : ''}`
+          : `连接已断开${reason ? `：${reason}` : ''}`);
+      }
     });
     this.net.on('frame', (frame) => this.handleFrame(frame));
     this.net.on('rtt', (rtt) => console.debug('rtt', rtt, 'ms'));
+  }
+
+  /** 能不能自动重连：没有凭据就没法 login，只能让玩家回大厅重新填 */
+  canReconnect() {
+    if (this.offline) return false;
+    if (this._manualClose) return false;
+    const cred = this.credential;
+    return !!(cred && (cred.user || cred.name));
+  }
+
+  /**
+   * 安排一次重连（指数退避，封顶后无限重试）。
+   *
+   * 重连走的是「新连接 + 重新 login」这条正规路径，不是修修补补旧 socket：服务端一账号一
+   * 连接，旧 socket 必须先释放，所以 ALREADY_ONLINE 的短重试（handleError）仍然有用。
+   */
+  scheduleReconnect() {
+    if (this.reconnecting || this._reconnectTimer) return;
+    if (!this.canReconnect()) return;
+    const delay = RECONNECT_DELAYS_MS[Math.min(this._reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)];
+    this._reconnectAttempt += 1;
+    this.reconnecting = true;
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = 0;
+      this.attemptReconnect();
+    }, delay);
+  }
+
+  async attemptReconnect() {
+    if (!this.canReconnect()) {
+      this.reconnecting = false;
+      return;
+    }
+    // 页面在后台时浏览器会把定时器节流到分钟级，这时候硬连只会撞上同一批失败：
+    // 记住"还想连"，等 visibilitychange 回到前台再发（见 resumeAfterForeground）。
+    if (typeof document !== 'undefined' && document.hidden) {
+      this.reconnecting = false;
+      this.stage = 'closed';
+      this.applyButtons();
+      return;
+    }
+    this.app.emit('session', { stage: 'reconnecting', attempt: this._reconnectAttempt });
+    try {
+      // 旧 socket 可能只是"半死"（服务端已摘掉座位、但 socket 还回 pong）：先关掉，
+      // 让服务端释放这个账号的连接槽，再建新的。
+      this._reconnecting = true;
+      this.net.close('自动重连');
+      this.resumeNext = true;      // 断线重连一律要回原座
+      this._manualClose = false;
+      this._resumeAttempt = true;  // 这次 login 是断线后的恢复，不是玩家主动登录
+      await this.net.connect();
+      this._reconnectAttempt = 0;
+      this.reconnecting = false;
+      this._reconnecting = false;
+      this.app.emit('session', { stage: 'reconnected' });
+    } catch (err) {
+      this._reconnecting = false;
+      this.reconnecting = false;
+      console.info('[麻将] 重连失败，稍后再试：', err.message);
+      // 还在断线状态就继续退避；已经连上（login 超时那类）交给 checkStages 管。
+      if (this.stage === 'closed' || !this.net.connected) {
+        this.stage = 'closed';
+        this.app.emit('session', { stage: 'closed' });
+        this.scheduleReconnect();
+      }
+    }
+  }
+
+  /**
+   * 回到前台。后台标签的心跳会被浏览器节流到分钟级，服务端 20 s 就认定本连接空闲并把座位
+   * 下托管 —— 但 socket 还在、`pong` 也照回，光看 `connected` 完全发现不了。所以这里看
+   * 「入站静默」而不是「连接状态」：静默超过阈值就换一条新连接重新 login{resume}，
+   * 那才是把座位拿回来的正规路径。
+   */
+  resumeAfterForeground() {
+    if (this.offline || this._manualClose) return;
+    if (this.reconnecting) {
+      // 后台时被节流卡住的重连：立刻补一次，不再等退避那一档。
+      if (this._reconnectTimer) {
+        clearTimeout(this._reconnectTimer);
+        this._reconnectTimer = 0;
+        this.attemptReconnect();
+      } else if (!this.net.connected) {
+        this.attemptReconnect();
+      }
+      return;
+    }
+    if (!this.canReconnect()) return;
+    if (!this.net.connected) {
+      this.stage = 'closed';
+      this.scheduleReconnect();
+      return;
+    }
+    const last = this.net.lastInbound;
+    const silent = last ? performance.now() - last : 0;
+    if (silent < RECONNECT_STALE_MS) return;
+    // socket 看着还在，但已经静默这么久 —— 服务端那边座位早被摘了，只能重连。
+    this.hint('已回到前台，正在重新连接…');
+    this._reconnectAttempt = 0;
+    this.reconnecting = true;
+    this.attemptReconnect();
   }
 
   /**
@@ -567,6 +762,12 @@ export class MahjongClient {
   // ---------------------------------------------------------------- 帧分发
 
   handleFrame(frame) {
+    // `pong` 只证明 socket 活着，不证明座位还在服务端（见 GAME_SILENCE_PROBE_MS）；
+    // 其余一切帧都算"实质帧"，房间还认这个座位才会发得出来。
+    if (frame.type !== FRAME_TYPE.PONG) {
+      this._lastGameFrameAt = performance.now();
+      this._probeSentAt = 0;
+    }
     switch (frame.type) {
       case FRAME_TYPE.LOGIN_OK: {
         this.playerId = frame.player_id;
@@ -575,6 +776,13 @@ export class MahjongClient {
         this.hasAccount = typeof frame.player_id === 'string' && frame.player_id.startsWith('u-');
         this.loginTimeouts = 0;
         this.alreadyOnlineRetries = 0;
+        // 重连已经成功握手：退避状态清掉，后续再断线从头计数。
+        this.reconnecting = false;
+        this._reconnectAttempt = 0;
+        if (this._reconnectTimer) {
+          clearTimeout(this._reconnectTimer);
+          this._reconnectTimer = 0;
+        }
         // 注册成功后同一个凭据再重连必须是 login，不能重放 register（否则 USERNAME_TAKEN）。
         if (this.credential && this.credential.register) this.credential.register = false;
         const inRoom = frame.in_room === true;
@@ -615,6 +823,34 @@ export class MahjongClient {
         this.resumedInRoom = false;
         this.restoring = false;
         this.resumeNext = true;
+        // 断线重连没能回到原座（游客没有身份可恢复，或原对局已被回收/打完了）：牌桌状态
+        // 已经过期，不能继续摆在冻结画面上，落回大厅重新选玩法。这里也不许再走 auto
+        // 建房那条路 —— 玩家刚才是"在局中断线"，不是"想开新局"。
+        if (this._resumeAttempt && this._hadRoom) {
+          const wasPlaying = this._resumeWasPlaying;
+          this._resumeAttempt = false;
+          this._hadRoom = false;
+          this._resumeWasPlaying = false;
+          this.lobbyDriven = true;
+          this.autoReady = false;
+          this.room = null;
+          this.window = null;
+          this.lastSeq = null;
+          this.pending = false;
+          this.state.roomId = null;
+          this.app.reset();
+          this.stage = 'lobby';
+          this.stageSince = performance.now();
+          this.hint(wasPlaying
+            ? '原来的对局已经结束，已回到大厅（游客身份不能恢复原座，重新建房即可）'
+            : '原来的房间已不存在，已回到大厅');
+          this.app.emit('session', { stage: 'lobby' });
+          this.listRooms();
+          break;
+        }
+        this._resumeAttempt = false;
+        this._hadRoom = false;
+        this._resumeWasPlaying = false;
         this.stage = 'lobby';
         this.stageSince = performance.now();
         // 大厅路径：停在 hall 等玩家选玩法；URL 一步到位：直接建房
@@ -1082,6 +1318,13 @@ export class MahjongClient {
       this._restoreTimer = 0;
     }
     this.state.roomId = null;
+    this._manualClose = true;       // 主动退出：不触发自动重连
+    this.reconnecting = false;
+    this._reconnectAttempt = 0;
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = 0;
+    }
     this._reconnecting = true;      // 主动断开：不弹「连接已断开」
     setTimeout(() => { this._reconnecting = false; }, 800);
     this.app.reset();
@@ -1094,6 +1337,13 @@ export class MahjongClient {
     if (!this.credential) return;
     this.lobbyDriven = true;
     this._reconnecting = true;
+    // 这是主动换连接（不是断线），自动重连的退避状态一并清掉，免得和这次握手打架。
+    this.reconnecting = false;
+    this._reconnectAttempt = 0;
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = 0;
+    }
     // PROTOCOL v2.2 §4.1：恢复同一账号，但明确不要回到旧房间；由服务端先把旧座位转托管。
     this.resumeNext = false;
     this.restoring = false;
@@ -1261,6 +1511,7 @@ export class MahjongClient {
 
   tick() {
     const now = performance.now();
+    this.checkSuspended(Date.now());
     this.checkStages(now);
     this.checkSilence(now);
     // 回放把牌桌借走了：`ReplayPlayer` 复用同一个 `app.state`，`seekTo()` 会 reset 它，
@@ -1271,6 +1522,7 @@ export class MahjongClient {
       this.ui?.tick?.(this);
       return;
     }
+    this.probeGameSeat(now);
     // 本地已知对不上（例如本家 discard_event 的牌不在手牌里）：补拉一次权威状态
     if (this.state.needsSync && this.requestSync()) this.state.needsSync = false;
     this.maybeSyncEmptyHand();
@@ -1306,24 +1558,54 @@ export class MahjongClient {
     }
   }
 
+  /**
+   * 对局中探活：长时间没有实质帧就发一次 `sync`，回不来就说明座位已经被摘了。
+   *
+   * 为什么必须这样探：服务端的 20 s 空闲判定摘掉的是**座位**（房间的 `endpoint` 置空），
+   * socket 与心跳都还在，`ping` 照样回 `pong`。于是客户端「连着、有入站帧」，却永远收不到
+   * 游戏帧 —— 也就是挂机回来看到的那种「发牌中…」卡死。`pong` 不经过房间，只有 `sync`
+   * 的答案（`state_sync`）能证明房间还在跟我们说话。
+   */
+  probeGameSeat(now) {
+    if (!this.net.connected || this.offline) return;
+    if (this.stage === 'closed' || this.stage === 'login') return;
+    // 只有在「坐在房间里、而且这一局已经开局」时才有座位可探：
+    //   * 大厅/登录页的静默由 checkSilence 管；
+    //   * 等待页（未开局）发 sync 会被房间回 INTERNAL（"the game has not started yet"），
+    //     那是给玩家的一个错误弹窗，而等待页的挂机由服务端直接关连接处理（PROTOCOL §1.6）。
+    if (!this.room?.roomId) return;
+    if (this.state.phase !== 'playing' && this.state.phase !== 'ended') return;
+    // 场终之后房间会被回收，不再有任何游戏帧，探活只会换来一串 ROOM_NOT_FOUND。
+    if (this.state.matchEnd) return;
+    const last = this._lastGameFrameAt || now;
+    const silent = now - last;
+    if (this._probeSentAt) {
+      if (now - this._probeSentAt < PROBE_TIMEOUT_MS) return;
+      // 探针发出去石沉大海：座位已经不在房间的名单里（服务端把它托管了，但 socket 没关）。
+      // 只有重连（login{resume}）能重新装回 endpoint，所以这里主动断开走重连。
+      this._probeSentAt = 0;
+      this.hint('与对局的连接已失效，正在重连…');
+      this.frozen = true;
+      this.net.close('对局连接已失效');
+      return;
+    }
+    if (silent < GAME_SILENCE_PROBE_MS) return;
+    if (!this.send({ type: FRAME_TYPE.SYNC })) return;
+    this._probeSentAt = now;
+  }
+
   /** 阶段超时：login_ok / room_joined / game_start（参考端 _stage_timeouts） */
   checkStages(now) {
     if (this.stage === 'login' && now - this.stageSince > LOGIN_TIMEOUT_MS) {
       this.stage = 'idle';
       this.loginTimeouts += 1;
-      if (this.loginTimeouts > 3) {
-        this.net.close('login_ok 超时');
-        this.hint('服务器无响应（login_ok 连续 3 次超时），请确认服务端已启动');
-        return;
-      }
-      this.hint(`服务器无响应（未返回 login_ok），正在重连（${this.loginTimeouts}/3）…`);
-      this.connectAttempts = 0;
-      this._reconnecting = true;
+      // 不再自己开一条重试链：关掉连接，交给 'close' 处理器按退避序列继续重连。
+      // 连续超时也不再"放弃"了 —— 自动重连存在的意义就是断网回来时自己接上，
+      // 提示照写，但退避会一直跑到连上为止。
+      this.hint(this.loginTimeouts > 3
+        ? '服务器无响应（login_ok 连续超时），正在重连…'
+        : `服务器无响应（未返回 login_ok），正在重连（${this.loginTimeouts}/3）…`);
       this.net.close('login_ok 超时');
-      this.connectWithRetry().catch((err) => {
-        this._reconnecting = false;
-        this.hint(`重连失败：${err.message}`);
-      });
       return;
     }
     if (this.stage === 'room' && now - this.stageSince > ROOM_TIMEOUT_MS) {
@@ -1362,11 +1644,28 @@ export class MahjongClient {
       this._silenceWarned = false;
     }
     if (silence > SILENCE_LIMIT_MS) {
-      this.hint('网络无响应（20 秒），已断开');
+      this.hint('网络无响应（20 秒），正在重连…');
       this.frozen = true;
+      // 重连由 'close' 处理器统一发起（net.close 会触发它），这里不重复调度。
       this.net.close('网络无响应（20 秒）');
       this.applyButtons();
     }
+  }
+
+  /**
+   * 定时器被挂起过（后台标签节流 / 机器睡眠）就补一次连接。
+   *
+   * 后台标签里 `setInterval` 会被压到一分钟一次，`ping` 随之停发；服务端 20 s 就认定空闲、
+   * 把座位摘下线托管，而 socket 还挂着 —— 回来时「已连接」是真的，但一帧也不会再来。
+   * `visibilitychange` 覆盖不了所有情况（机器睡眠时它不触发），所以这里直接看两次 tick 的
+   * 墙钟间隔：间隔远超 tick 周期就说明这段时间里什么都没跑，连接按"已失效"处理。
+   */
+  checkSuspended(nowEpoch) {
+    const last = this._lastTickWall;
+    this._lastTickWall = nowEpoch;
+    if (last === 0 || this.offline) return;
+    if (nowEpoch - last < SUSPENDED_TICK_MS) return;
+    this.resumeAfterForeground();
   }
 
   // ---------------------------------------------------------------- 其它
