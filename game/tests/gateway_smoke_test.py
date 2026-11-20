@@ -779,6 +779,47 @@ def test_idle_timeout(port: int) -> None:
         observer.close()
 
 
+def test_waiting_room_idle_drops_connection(port: int) -> None:
+    """PROTOCOL v2.8: a 20s-silent *waiting-room* connection is closed, not just entrusted.
+
+    A room that has not been dealt has nothing to entrust. Entrusting one anyway was worse
+    than useless: the seat lost its wire while the room stayed alive, so pressing "start"
+    afterwards dealt a whole hand to a seat nobody could hear — the client sat on "发牌中…"
+    forever, with a live socket and answering pongs (so nothing looked disconnected).
+    The pre-deal disconnect path already frees the seat (DropPlayer), so this now takes the
+    same route: close the connection and let the close path release it.
+    """
+    owner = Client(port, "waiting-idle")
+    try:
+        login(owner, "等待页发呆")
+        owner.send({"type": FRAME_TYPE.CREATE_ROOM})
+        owner.expect_type(FRAME_TYPE.ROOM_JOINED)
+
+        started = time.monotonic()
+        owner.sock.settimeout(5.0)
+        closed_at = None
+        while time.monotonic() - started < 30:
+            try:
+                chunk = owner.sock.recv(4096)
+            except socket.timeout:
+                chunk = None  # still open, just quiet
+            except ConnectionResetError:
+                chunk = b""
+            if chunk is not None and not chunk:
+                closed_at = time.monotonic()
+                break
+        if closed_at is None:
+            raise TestFailure("a waiting-room connection silent for 20s must be closed "
+                              "(the seat cannot be entrusted before the deal)")
+        elapsed = closed_at - started
+        if elapsed < 15:
+            raise TestFailure(f"waiting-room connection closed after only {elapsed:.1f}s "
+                              f"(expected ~20s of silence first)")
+        print(f"[gateway-slow] waiting-room connection closed after {elapsed:.1f}s of silence")
+    finally:
+        owner.close()
+
+
 TESTS = (
     ("login/ping/framing", test_login_ping_and_frame_shape),
     ("frames split across segments", test_frames_split_across_segments),
@@ -950,6 +991,7 @@ def test_slow_play_is_never_entrusted(port: int) -> None:
 
 SLOW_TESTS = (
     ("idle timeout", test_idle_timeout),
+    ("waiting-room idle drops the connection", test_waiting_room_idle_drops_connection),
     ("continuous traffic is not idle", test_continuous_traffic_is_not_idle),
     ("slow play is never entrusted", test_slow_play_is_never_entrusted),
     ("write stall is bounded", test_write_stall_is_bounded),
