@@ -348,6 +348,7 @@ def main() -> int:
     parser.add_argument("--rooms", type=int, default=10000)
     parser.add_argument("--think-ms", type=int, default=1000)
     parser.add_argument("--server-bin", type=Path, default=DEFAULT_BIN)
+    parser.add_argument("--replay-dir", default="", help="server replay dir; empty disables recording")
     args = parser.parse_args()
     if args.rooms < 1:
         print("socket_load: --rooms must be >= 1", file=sys.stderr)
@@ -373,7 +374,7 @@ def main() -> int:
             "15000",
             "--quiet",
             "--replay-dir",
-            "",
+            args.replay_dir,
         ],
         stdout=log_file,
         stderr=subprocess.STDOUT,
