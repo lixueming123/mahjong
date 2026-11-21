@@ -21,6 +21,17 @@
       "cwd": "${workspaceFolder}"
     },
     {
+      // Attach to an already running process instead of spawning one. `program` is omitted on
+      // purpose: LLDB creates the target from the picked pid, so no path has to be kept in sync
+      // with the build directory. Needs the CodeLLDB extension (vadimcn.vscode-lldb); the builtin
+      // cpp extension only does syntax highlighting, it has no debugger.
+      "name": "Attach to Process",
+      "type": "lldb",
+      "request": "attach",
+      "pid": "${command:pickProcess}",
+      "stopOnEntry": false
+    },
+    {
       // Incremental: reuses the existing cache in build/, so this is the one to use for the daily
       // "I added a file / touched a CMakeLists" case. "clean": true would throw the cache away and
       // pull every dependency source again — that is the separate entry below.
